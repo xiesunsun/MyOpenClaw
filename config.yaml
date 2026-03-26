@@ -1,0 +1,27 @@
+default_agent: Pickle
+
+default_llm:
+  provider: google/gemini
+  model: gemini-3-flash-preview
+
+providers:
+  google/gemini:
+    models:
+      gemini-3-flash-preview:
+        temperature: 1.0
+        max_output_tokens: 1048576
+        thinking_level: minimal
+        provider_options: {}
+      gemini-3.1-flash-lite-preview:
+        temperature: 1.0
+        max_output_tokens: 65536
+        thinking_level: minimal
+        provider_options: {}
+
+agents:
+  Pickle:
+    workspace_path: pickle_workspace
+    behavior_path: agents/Pickle
+    llm:
+      provider: google/gemini
+      model: gemini-3-flash-preview

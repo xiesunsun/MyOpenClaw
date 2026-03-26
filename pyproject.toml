@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myopenclaw"
+version = "0.1.0"
+description = "An AI Agent Demo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai>=1.68.0",
+    "pydantic>=2.12.5",
+    "rich>=14.1.0",
+    "pyyaml>=6.0.3",
+    "typer>=0.24.1",
+    "mcp[cli]>=1.26.0",
+]
+
+[project.scripts]
+myopenclaw = "myopenclaw.interfaces.cli.main:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
