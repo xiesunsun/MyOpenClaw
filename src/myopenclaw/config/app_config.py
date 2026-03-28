@@ -28,13 +28,17 @@ class AppConfig(BaseModel):
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":
         for agent_config in self.agents.values():
-            agent_config.workspace_path = self._resolve_path(agent_config.workspace_path)
+            agent_config.workspace_path = self._resolve_path(
+                agent_config.workspace_path
+            )
             agent_config.behavior_path = self._resolve_path(agent_config.behavior_path)
         return self
 
     @classmethod
     def load(cls, config_path: Path) -> "AppConfig":
-        config_file = config_path if config_path.is_absolute() else (Path.cwd() / config_path)
+        config_file = (
+            config_path if config_path.is_absolute() else (Path.cwd() / config_path)
+        )
         if not config_file.exists():
             raise FileNotFoundError(f"Config file not found: {config_file}")
         with config_file.open(encoding="utf-8") as handle:
@@ -62,7 +66,9 @@ class AppConfig(BaseModel):
             model_config=self.resolve_model_config(agent_config.llm),
         )
 
-    def resolve_model_config(self, selection: ModelSelection | None = None) -> ModelConfig:
+    def resolve_model_config(
+        self, selection: ModelSelection | None = None
+    ) -> ModelConfig:
         resolved_selection = selection or self.default_llm
         provider_catalog = self.providers.get(resolved_selection.provider)
         if provider_catalog is None:

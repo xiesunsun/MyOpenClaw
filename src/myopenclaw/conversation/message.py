@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from myopenclaw.conversation.metadata import MessageMetadata
+
 
 class MessageRole(StrEnum):
     USER = "user"
@@ -11,3 +13,4 @@ class MessageRole(StrEnum):
 class Message:
     role: MessageRole
     text: str
+    metadata: MessageMetadata | None = None

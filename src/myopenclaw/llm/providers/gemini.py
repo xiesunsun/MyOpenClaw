@@ -6,6 +6,7 @@ from google.genai import types
 from myopenclaw.conversation.message import MessageRole
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider, ChatRequest, ChatResult
+from myopenclaw.llm.metadata import TokenUsage
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -64,7 +65,11 @@ class GeminiProvider(BaseLLMProvider):
             contents=contents,
             config=config,
         )
-        return ChatResult(text=self._extract_text(response), raw=response)
+        return ChatResult(
+            text=self._extract_text(response),
+            usage=self._extract_usage(response),
+            raw=response,
+        )
 
     @staticmethod
     def _extract_text(response: types.GenerateContentResponse) -> str:
@@ -78,3 +83,13 @@ class GeminiProvider(BaseLLMProvider):
                 if part.text:
                     return part.text
         return ""
+
+    @staticmethod
+    def _extract_usage(response: types.GenerateContentResponse) -> TokenUsage | None:
+        usage = getattr(response, "usage_metadata", None)
+        if usage is None:
+            return None
+        return TokenUsage(
+            input_tokens=getattr(usage, "prompt_token_count", None),
+            output_tokens=getattr(usage, "candidates_token_count", None),
+        )

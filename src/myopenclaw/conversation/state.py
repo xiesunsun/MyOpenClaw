@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.message import Message, MessageRole
 
 
@@ -11,5 +12,5 @@ class SessionState:
     def add_user_message(self, text: str) -> None:
         self.messages.append(Message(role=MessageRole.USER, text=text))
 
-    def add_assistant_message(self, text: str) -> None:
-        self.messages.append(Message(role=MessageRole.ASSISTANT, text=text))
+    def add_assistant_message(self, text: str, metadata: MessageMetadata | None = None) -> None:
+        self.messages.append(Message(role=MessageRole.ASSISTANT, text=text, metadata=metadata))

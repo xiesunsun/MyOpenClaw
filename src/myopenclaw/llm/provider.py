@@ -1,23 +1,10 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from myopenclaw.conversation.message import Message
+from myopenclaw.llm.chat_types import ChatRequest, ChatResult, MessageMetadata, TokenUsage
 
 if TYPE_CHECKING:
     from myopenclaw.llm.config import ModelConfig
-
-
-@dataclass
-class ChatRequest:
-    system_instruction: str | None
-    messages: list[Message]
-
-
-@dataclass
-class ChatResult:
-    text: str
-    raw: Any | None = None
 
 
 class BaseLLMProvider(ABC):
