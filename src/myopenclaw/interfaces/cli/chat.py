@@ -3,6 +3,7 @@ from typing import Callable
 
 from myopenclaw.agent.agent import Agent
 from myopenclaw.app.bootstrap import AppBootstrap
+from myopenclaw.llm.provider import ChatResult, MessageMetadata
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -43,7 +44,7 @@ class ChatLoop:
             config_path=config_path,
         )
 
-    async def handle_user_input(self, text: str) -> str:
+    async def handle_user_input(self, text: str) -> ChatResult:
         return await self.session.send_user_message(text)
 
     def _default_input_reader(self, prompt: str) -> str:
@@ -100,6 +101,28 @@ class ChatLoop:
                 expand=True,
             )
         )
+
+    def _render_assistant_message(self, reply: ChatResult) -> None:
+        content: RenderableType = Markdown(reply.text)
+        metadata = reply.metadata
+        if metadata is not None:
+            content = Group(Markdown(reply.text), self._render_assistant_footer(metadata))
+        self._render_message("Assistant", content, style="yellow")
+
+    def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
+        footer = Text(style="dim", justify="right")
+        footer.append(f"{metadata.provider} / {metadata.model}")
+        stats = []
+        if metadata.input_tokens is not None:
+            stats.append(f"in {metadata.input_tokens}")
+        if metadata.output_tokens is not None:
+            stats.append(f"out {metadata.output_tokens}")
+        if metadata.elapsed_ms is not None:
+            stats.append(f"{metadata.elapsed_ms / 1000:.1f}s")
+        if stats:
+            footer.append("\n")
+            footer.append(" · ".join(stats))
+        return footer
 
     def _render_help(self) -> None:
         help_text = Text.from_markup(
@@ -165,4 +188,4 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            self._render_message("Assistant", Markdown(reply), style="yellow")
+            self._render_assistant_message(reply)
