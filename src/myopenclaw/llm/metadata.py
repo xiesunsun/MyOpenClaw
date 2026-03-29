@@ -1,7 +1,3 @@
-from dataclasses import dataclass
+from myopenclaw.runtime_protocols.generation import TokenUsage
 
-
-@dataclass
-class TokenUsage:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
+__all__ = ["TokenUsage"]

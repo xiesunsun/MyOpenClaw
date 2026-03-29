@@ -2,8 +2,15 @@ from pathlib import Path
 from typing import Callable
 
 from myopenclaw.agent.agent import Agent
+from myopenclaw.agent.events import RuntimeEventHandler
+from myopenclaw.agent.runtime import AgentRuntime
+from myopenclaw.agent.session_factory import SessionFactory
 from myopenclaw.app.bootstrap import AppBootstrap
-from myopenclaw.llm.provider import ChatResult, MessageMetadata
+from myopenclaw.conversation.message import MessageRole, SessionMessage
+from myopenclaw.conversation.metadata import MessageMetadata
+from myopenclaw.conversation.session import Session
+from myopenclaw.interfaces.cli.event_renderer import ChatEventRenderer
+from myopenclaw.llm import GenerateResult
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -15,14 +22,16 @@ class ChatLoop:
         self,
         agent: Agent,
         agent_id: str | None = None,
-        session=None,
+        runtime: AgentRuntime | None = None,
+        session: Session | None = None,
         config_path: Path | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str] | None = None,
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.definition.agent_id
-        self.session = session or agent.new_session()
+        self.runtime = runtime or AgentRuntime()
+        self.session = session or SessionFactory(self.agent_id).new_session()
         self.config_path = config_path
         self.console = console or Console()
         self.input_reader = input_reader or self._default_input_reader
@@ -44,16 +53,35 @@ class ChatLoop:
             config_path=config_path,
         )
 
-    async def handle_user_input(self, text: str) -> ChatResult:
-        return await self.session.send_user_message(text)
+    async def handle_user_input(
+        self,
+        text: str,
+        event_handler: RuntimeEventHandler | None = None,
+    ) -> GenerateResult:
+        return await self.runtime.run_turn(
+            agent=self.agent,
+            session=self.session,
+            user_text=text,
+            event_handler=event_handler,
+        )
+
+    def create_event_handler(self) -> RuntimeEventHandler:
+        return ChatEventRenderer(self.console).handle_event
+
+    def render_turn_output(self, reply: GenerateResult, *, start_index: int) -> None:
+        for message in self.session.messages[start_index:]:
+            if message.role == MessageRole.ASSISTANT and message.tool_calls:
+                self._render_tool_calls(message)
+                continue
+            if message.role == MessageRole.TOOL:
+                self._render_tool_result(message)
+        self._render_assistant_message(reply)
 
     def _default_input_reader(self, prompt: str) -> str:
         return self.console.input(f"[bold cyan]{prompt}[/bold cyan]")
 
     def _read_session_message_count(self) -> int:
-        state = getattr(self.session, "state", None)
-        messages = getattr(state, "messages", None)
-        return len(messages) if messages is not None else 0
+        return len(self.session.messages)
 
     def _message_count(self) -> int:
         state_count = self._read_session_message_count()
@@ -102,12 +130,32 @@ class ChatLoop:
             )
         )
 
-    def _render_assistant_message(self, reply: ChatResult) -> None:
+    def _render_assistant_message(self, reply: GenerateResult) -> None:
         content: RenderableType = Markdown(reply.text)
         metadata = reply.metadata
         if metadata is not None:
             content = Group(Markdown(reply.text), self._render_assistant_footer(metadata))
         self._render_message("Assistant", content, style="yellow")
+
+    def _render_tool_calls(self, message: SessionMessage) -> None:
+        lines: list[str] = []
+        for tool_call in message.tool_calls:
+            lines.append(f"{tool_call.name}({self._format_tool_arguments(tool_call.arguments)})")
+        self._render_message("Tool Call", Text("\n".join(lines)), style="blue")
+
+    def _render_tool_result(self, message: SessionMessage) -> None:
+        header = f"{message.tool_name} -> {'error' if message.is_error else 'ok'}"
+        body = Text(f"{header}\n{self._truncate_tool_content(message.content)}")
+        self._render_message("Tool Result", body, style="red" if message.is_error else "green")
+
+    def _format_tool_arguments(self, arguments: dict[str, object]) -> str:
+        parts = [f"{key}={value!r}" for key, value in arguments.items()]
+        return ", ".join(parts)
+
+    def _truncate_tool_content(self, content: str, limit: int = 400) -> str:
+        if len(content) <= limit:
+            return content
+        return f"{content[:limit]}..."
 
     def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
         footer = Text(style="dim", justify="right")
@@ -181,11 +229,14 @@ class ChatLoop:
             self._render_message("You", Text(user_input), style="cyan")
             self._fallback_message_count += 1
             try:
-                with self.console.status("[bold yellow]Thinking...[/bold yellow]", spinner="dots"):
-                    reply = await self.handle_user_input(user_input)
+                reply = await self.handle_user_input(
+                    user_input,
+                    event_handler=self.create_event_handler(),
+                )
             except Exception as exc:
                 self._render_error_message(f"Request failed: {exc}")
                 continue
 
             self._fallback_message_count += 1
-            self._render_assistant_message(reply)
+            if not reply.metadata and not reply.text:
+                self._render_assistant_message(reply)

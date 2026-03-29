@@ -11,3 +11,4 @@ class AgentDefinition:
     behavior_path: Path
     behavior_instruction: str
     model_config: ModelConfig
+    tool_ids: list[str]

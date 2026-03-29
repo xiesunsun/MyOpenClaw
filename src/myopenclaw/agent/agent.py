@@ -1,9 +1,7 @@
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
-from myopenclaw.conversation.session import AgentSession
-from myopenclaw.conversation.state import SessionState
 from myopenclaw.llm import BaseLLMProvider, create_llm_provider
+from myopenclaw.tools.base import BaseTool, ToolSpec
 
 if TYPE_CHECKING:
     from myopenclaw.agent.definition import AgentDefinition
@@ -14,9 +12,11 @@ class Agent:
         self,
         definition: "AgentDefinition",
         provider: BaseLLMProvider | None = None,
+        tools: list[BaseTool] | None = None,
     ) -> None:
         self.definition = definition
         self.provider = provider or create_llm_provider(definition.model_config)
+        self.tools = list(tools or [])
 
     @property
     def system_instruction(self) -> str:
@@ -26,6 +26,12 @@ class Agent:
     def workspace(self):
         return self.definition.workspace_path
 
-    def new_session(self, session_id: str | None = None) -> AgentSession:
-        state = SessionState(session_id=session_id or str(uuid4()))
-        return AgentSession(agent=self, state=state)
+    @property
+    def tool_specs(self) -> list[ToolSpec]:
+        return [tool.spec for tool in self.tools]
+
+    def get_tool(self, name: str) -> BaseTool | None:
+        for tool in self.tools:
+            if tool.spec.name == name:
+                return tool
+        return None

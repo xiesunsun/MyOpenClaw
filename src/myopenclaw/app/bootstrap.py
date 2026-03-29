@@ -2,7 +2,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from myopenclaw.agent.agent import Agent
+from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
+from myopenclaw.tools.catalog import builtin_tools
+from myopenclaw.tools.registry import ToolRegistry
 
 
 @dataclass
@@ -26,8 +29,9 @@ class AppBootstrap:
         app_config: AppConfig,
         agent_id: str | None = None,
     ) -> LoadedAgentRuntime:
-        definition = app_config.resolve_agent_definition(agent_id=agent_id)
-        agent = Agent(definition=definition)
+        definition = AppAssembly(app_config).resolve_agent_definition(agent_id=agent_id)
+        tools = ToolRegistry(tools=builtin_tools()).resolve_many(definition.tool_ids)
+        agent = Agent(definition=definition, tools=tools)
         return LoadedAgentRuntime(
             app_config=app_config,
             agent_id=definition.agent_id,

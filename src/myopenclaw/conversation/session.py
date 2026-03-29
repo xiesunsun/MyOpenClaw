@@ -1,38 +1,47 @@
-from dataclasses import dataclass
-import time
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
 
+from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
 from myopenclaw.conversation.metadata import MessageMetadata
-from myopenclaw.conversation.state import SessionState
-from myopenclaw.llm import ChatRequest
-from myopenclaw.llm.provider import ChatResult
-
-if TYPE_CHECKING:
-    from myopenclaw.agent.agent import Agent
 
 
 @dataclass
-class AgentSession:
-    agent: "Agent"
-    state: SessionState
+class Session:
+    session_id: str
+    agent_id: str
+    messages: list[SessionMessage] = field(default_factory=list)
 
-    async def send_user_message(self, text: str) -> ChatResult:
-        self.state.add_user_message(text)
-        start = time.perf_counter()
-        result = await self.agent.provider.chat(
-            ChatRequest(
-                system_instruction=self.agent.system_instruction or None,
-                messages=list(self.state.messages),
+    def append_user_message(self, content: str) -> None:
+        self.messages.append(SessionMessage(role=MessageRole.USER, content=content))
+
+    def append_assistant_message(
+        self,
+        content: str = "",
+        metadata: MessageMetadata | None = None,
+        tool_calls: list[ToolCall] | None = None,
+    ) -> None:
+        self.messages.append(
+            SessionMessage(
+                role=MessageRole.ASSISTANT,
+                content=content,
+                tool_calls=list(tool_calls or []),
+                metadata=metadata,
             )
         )
-        elapsed_ms = round((time.perf_counter() - start) * 1000)
-        metadata = result.metadata or MessageMetadata(
-            provider=self.agent.definition.model_config.provider,
-            model=self.agent.definition.model_config.model,
-            input_tokens=result.usage.input_tokens if result.usage else None,
-            output_tokens=result.usage.output_tokens if result.usage else None,
-            elapsed_ms=elapsed_ms,
+
+    def append_tool_result(
+        self,
+        content: str,
+        tool_call_id: str,
+        tool_name: str,
+        *,
+        is_error: bool = False,
+    ) -> None:
+        self.messages.append(
+            SessionMessage(
+                role=MessageRole.TOOL,
+                content=content,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                is_error=is_error,
+            )
         )
-        result.metadata = metadata
-        self.state.add_assistant_message(result.text, metadata=metadata)
-        return result

@@ -24,4 +24,7 @@ agents:
     behavior_path: agents/Pickle
     llm:
       provider: google/gemini
-      model: gemini-3-flash-preview
+      model: gemini-3.1-flash-lite-preview
+    tools:
+      - echo
+      - read

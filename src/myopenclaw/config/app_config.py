@@ -3,8 +3,6 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from myopenclaw.agent.behavior_loader import BehaviorLoader
-from myopenclaw.agent.definition import AgentDefinition
 from myopenclaw.llm.config import ModelConfig, ModelSelection, ProviderModelConfig
 
 
@@ -16,6 +14,7 @@ class AgentConfig(BaseModel):
     workspace_path: Path
     behavior_path: Path
     llm: ModelSelection | None = None
+    tools: list[str] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):
@@ -51,20 +50,11 @@ class AppConfig(BaseModel):
             return path
         return self.root / path
 
-    def resolve_agent_definition(self, agent_id: str | None = None) -> AgentDefinition:
+    def get_agent_config(self, agent_id: str | None = None) -> AgentConfig:
         resolved_agent_id = agent_id or self.default_agent
         if resolved_agent_id not in self.agents:
             raise KeyError(f"Unknown agent: {resolved_agent_id}")
-
-        agent_config = self.agents[resolved_agent_id]
-        behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
-        return AgentDefinition(
-            agent_id=resolved_agent_id,
-            workspace_path=agent_config.workspace_path,
-            behavior_path=agent_config.behavior_path,
-            behavior_instruction=behavior_instruction,
-            model_config=self.resolve_model_config(agent_config.llm),
-        )
+        return self.agents[resolved_agent_id]
 
     def resolve_model_config(
         self, selection: ModelSelection | None = None
