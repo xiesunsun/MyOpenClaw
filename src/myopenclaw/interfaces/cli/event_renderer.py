@@ -3,8 +3,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from myopenclaw.agent.events import RuntimeEvent, RuntimeEventType
 from myopenclaw.conversation.metadata import MessageMetadata
+from myopenclaw.runtime import RuntimeEvent, RuntimeEventType
 
 
 class ChatEventRenderer:

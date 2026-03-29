@@ -3,14 +3,12 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.agent.definition import AgentDefinition
-from myopenclaw.agent.events import RuntimeEvent, RuntimeEventType
 from myopenclaw.conversation.message import ToolCall
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 from myopenclaw.interfaces.cli.chat import ChatLoop
 from myopenclaw.llm.config import ModelConfig
-from myopenclaw.runtime_protocols.generation import GenerateResult
+from myopenclaw.runtime import GenerateResult, RuntimeEvent, RuntimeEventType
 
 
 class StubRuntime:
@@ -111,7 +109,7 @@ class StubToolRuntime:
 
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_user_input_delegates_to_runtime_and_updates_session_count(self) -> None:
-        definition = AgentDefinition(
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -122,7 +120,6 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
-        agent = Agent(definition=definition, provider=object(), tools=[])
         session = Session(session_id="session-1", agent_id="Pickle")
         loop = ChatLoop(
             agent=agent,
@@ -135,8 +132,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("runtime reply", result.text)
         self.assertEqual(2, loop._message_count())
 
-    async def test_chat_loop_creates_session_without_agent_session_factory_method(self) -> None:
-        definition = AgentDefinition(
+    async def test_chat_loop_creates_session_from_conversation_layer(self) -> None:
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -147,7 +144,6 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
-        agent = Agent(definition=definition, provider=object(), tools=[])
 
         loop = ChatLoop(
             agent=agent,
@@ -157,7 +153,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Pickle", loop.session.agent_id)
 
     async def test_handle_user_input_renders_tool_activity_before_final_reply(self) -> None:
-        definition = AgentDefinition(
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -168,7 +164,6 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
-        agent = Agent(definition=definition, provider=object(), tools=[])
         session = Session(session_id="session-1", agent_id="Pickle")
         console = Mock()
         loop = ChatLoop(

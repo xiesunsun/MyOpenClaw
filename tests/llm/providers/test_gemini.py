@@ -5,7 +5,7 @@ from google.genai import types
 
 from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
 from myopenclaw.llm.providers.gemini import GeminiProvider
-from myopenclaw.runtime_protocols.generation import GenerateRequest
+from myopenclaw.runtime import GenerateRequest
 from myopenclaw.tools.base import ToolSpec
 
 

@@ -1,4 +1,4 @@
-from myopenclaw.agent.definition import AgentDefinition
+from myopenclaw.agent.agent import Agent
 from myopenclaw.app.behavior_loader import BehaviorLoader
 from myopenclaw.config.app_config import AppConfig
 
@@ -7,11 +7,11 @@ class AppAssembly:
     def __init__(self, app_config: AppConfig) -> None:
         self.app_config = app_config
 
-    def resolve_agent_definition(self, agent_id: str | None = None) -> AgentDefinition:
+    def resolve_agent(self, agent_id: str | None = None) -> Agent:
         resolved_agent_id = agent_id or self.app_config.default_agent
         agent_config = self.app_config.get_agent_config(resolved_agent_id)
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
-        return AgentDefinition(
+        return Agent(
             agent_id=resolved_agent_id,
             workspace_path=agent_config.workspace_path,
             behavior_path=agent_config.behavior_path,

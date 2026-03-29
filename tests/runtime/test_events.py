@@ -2,14 +2,11 @@ import unittest
 from pathlib import Path
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.agent.definition import AgentDefinition
-from myopenclaw.agent.events import RuntimeEventType
-from myopenclaw.agent.runtime import AgentRuntime
 from myopenclaw.conversation.message import ToolCall
 from myopenclaw.conversation.session import Session
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider
-from myopenclaw.runtime_protocols.generation import FinishReason, GenerateResult
+from myopenclaw.runtime import FinishReason, GenerateResult, RuntimeEventType, TurnRunner
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 
 
@@ -44,9 +41,25 @@ class StubTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
+class StubProviderResolver:
+    def __init__(self, provider: BaseLLMProvider) -> None:
+        self.provider = provider
+
+    def resolve(self, agent: Agent) -> BaseLLMProvider:
+        return self.provider
+
+
+class StubToolResolver:
+    def __init__(self, tools: list[BaseTool]) -> None:
+        self.tools = tools
+
+    def resolve(self, agent: Agent) -> list[BaseTool]:
+        return list(self.tools)
+
+
 class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
-    async def test_runtime_emits_live_events_for_step_tool_and_final_answer(self) -> None:
-        definition = AgentDefinition(
+    async def test_runner_emits_live_events_for_step_tool_and_final_answer(self) -> None:
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -57,35 +70,37 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=["echo"],
         )
-        agent = Agent(
-            definition=definition,
-            provider=StubProvider(
-                responses=[
-                    GenerateResult(
-                        tool_calls=[
-                            ToolCall(
-                                id="call-1",
-                                name="echo",
-                                arguments={"text": "ping"},
-                            )
-                        ],
-                        finish_reason=FinishReason.TOOL_CALLS,
-                    ),
-                    GenerateResult(
-                        text="done",
-                        finish_reason=FinishReason.STOP,
-                    ),
-                ]
+        runner = TurnRunner(
+            provider_resolver=StubProviderResolver(
+                StubProvider(
+                    responses=[
+                        GenerateResult(
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-1",
+                                    name="echo",
+                                    arguments={"text": "ping"},
+                                )
+                            ],
+                            finish_reason=FinishReason.TOOL_CALLS,
+                        ),
+                        GenerateResult(
+                            text="done",
+                            finish_reason=FinishReason.STOP,
+                        ),
+                    ]
+                )
             ),
-            tools=[StubTool()],
+            tool_resolver=StubToolResolver([StubTool()]),
+            max_steps=4,
         )
-        session = Session(session_id="session-1", agent_id="Pickle")
+        session = Session.create(agent_id="Pickle", session_id="session-1")
         events = []
 
         async def capture(event) -> None:
             events.append(event)
 
-        result = await AgentRuntime(max_steps=4).run_turn(
+        result = await runner.run_turn(
             agent=agent,
             session=session,
             user_text="hello",

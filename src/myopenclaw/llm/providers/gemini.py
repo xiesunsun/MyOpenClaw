@@ -6,7 +6,7 @@ from google.genai import types
 from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider
-from myopenclaw.runtime_protocols.generation import (
+from myopenclaw.runtime.generation import (
     FinishReason,
     GenerateRequest,
     GenerateResult,

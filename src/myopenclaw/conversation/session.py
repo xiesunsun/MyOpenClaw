@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
 from myopenclaw.conversation.metadata import MessageMetadata
@@ -9,6 +10,13 @@ class Session:
     session_id: str
     agent_id: str
     messages: list[SessionMessage] = field(default_factory=list)
+
+    @classmethod
+    def create(cls, agent_id: str, session_id: str | None = None) -> "Session":
+        return cls(
+            session_id=session_id or str(uuid4()),
+            agent_id=agent_id,
+        )
 
     def append_user_message(self, content: str) -> None:
         self.messages.append(SessionMessage(role=MessageRole.USER, content=content))

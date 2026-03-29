@@ -2,15 +2,13 @@ from pathlib import Path
 from typing import Callable
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.agent.events import RuntimeEventHandler
-from myopenclaw.agent.runtime import AgentRuntime
-from myopenclaw.agent.session_factory import SessionFactory
 from myopenclaw.app.bootstrap import AppBootstrap
 from myopenclaw.conversation.message import MessageRole, SessionMessage
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 from myopenclaw.interfaces.cli.event_renderer import ChatEventRenderer
 from myopenclaw.llm import GenerateResult
+from myopenclaw.runtime import RuntimeEventHandler, TurnRunner
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -22,16 +20,16 @@ class ChatLoop:
         self,
         agent: Agent,
         agent_id: str | None = None,
-        runtime: AgentRuntime | None = None,
+        runtime: TurnRunner | None = None,
         session: Session | None = None,
         config_path: Path | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str] | None = None,
     ) -> None:
         self.agent = agent
-        self.agent_id = agent_id or agent.definition.agent_id
-        self.runtime = runtime or AgentRuntime()
-        self.session = session or SessionFactory(self.agent_id).new_session()
+        self.agent_id = agent_id or agent.agent_id
+        self.runtime = runtime or TurnRunner()
+        self.session = session or Session.create(agent_id=self.agent_id)
         self.config_path = config_path
         self.console = console or Console()
         self.input_reader = input_reader or self._default_input_reader
@@ -43,13 +41,13 @@ class ChatLoop:
         config_path: Path,
         agent_id: str | None = None,
     ) -> "ChatLoop":
-        loaded_runtime = AppBootstrap.from_config_path(
+        loaded_agent = AppBootstrap.from_config_path(
             config_path=config_path,
             agent_id=agent_id,
         )
         return cls(
-            agent=loaded_runtime.agent,
-            agent_id=loaded_runtime.agent_id,
+            agent=loaded_agent.agent,
+            agent_id=loaded_agent.agent_id,
             config_path=config_path,
         )
 

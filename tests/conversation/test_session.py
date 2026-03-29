@@ -6,6 +6,13 @@ from myopenclaw.conversation.session import Session
 
 
 class SessionTests(unittest.TestCase):
+    def test_session_create_binds_session_to_agent(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        self.assertEqual("session-1", session.session_id)
+        self.assertEqual("Pickle", session.agent_id)
+        self.assertEqual([], session.messages)
+
     def test_session_belongs_to_one_agent_and_stores_model_visible_messages(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")
 

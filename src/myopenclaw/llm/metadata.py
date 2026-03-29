@@ -1,3 +1,3 @@
-from myopenclaw.runtime_protocols.generation import TokenUsage
+from myopenclaw.runtime.generation import TokenUsage
 
 __all__ = ["TokenUsage"]

@@ -2,13 +2,11 @@ import unittest
 from pathlib import Path
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.agent.definition import AgentDefinition
-from myopenclaw.agent.runtime import AgentRuntime
 from myopenclaw.conversation.message import MessageRole, ToolCall
 from myopenclaw.conversation.session import Session
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider
-from myopenclaw.runtime_protocols.generation import FinishReason, GenerateRequest, GenerateResult
+from myopenclaw.runtime import FinishReason, GenerateRequest, GenerateResult, TurnRunner
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 
 
@@ -49,9 +47,29 @@ class StubTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
-class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_runtime_appends_messages_and_calls_provider(self) -> None:
-        definition = AgentDefinition(
+class StubProviderResolver:
+    def __init__(self, provider: BaseLLMProvider) -> None:
+        self.provider = provider
+        self.calls: list[Agent] = []
+
+    def resolve(self, agent: Agent) -> BaseLLMProvider:
+        self.calls.append(agent)
+        return self.provider
+
+
+class StubToolResolver:
+    def __init__(self, tools: list[BaseTool]) -> None:
+        self.tools = tools
+        self.calls: list[Agent] = []
+
+    def resolve(self, agent: Agent) -> list[BaseTool]:
+        self.calls.append(agent)
+        return list(self.tools)
+
+
+class TurnRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_appends_messages_and_calls_provider_from_agent_defaults(self) -> None:
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -63,10 +81,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             tool_ids=[],
         )
         provider = StubProvider()
-        agent = Agent(definition=definition, provider=provider, tools=[])
-        session = Session(session_id="session-1", agent_id="Pickle")
+        runner = TurnRunner(
+            provider_resolver=StubProviderResolver(provider),
+            tool_resolver=StubToolResolver([]),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await AgentRuntime().run_turn(
+        result = await runner.run_turn(
             agent=agent,
             session=session,
             user_text="hello",
@@ -86,8 +107,8 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("google/gemini", session.messages[1].metadata.provider)
         self.assertEqual("gemini-3-flash-preview", session.messages[1].metadata.model)
 
-    async def test_runtime_runs_multi_step_tool_loop_until_final_answer(self) -> None:
-        definition = AgentDefinition(
+    async def test_runner_resolves_tools_from_agent_tool_ids_and_loops_until_final_answer(self) -> None:
+        agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -117,10 +138,15 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         tool = StubTool()
-        agent = Agent(definition=definition, provider=provider, tools=[tool])
-        session = Session(session_id="session-1", agent_id="Pickle")
+        tool_resolver = StubToolResolver([tool])
+        runner = TurnRunner(
+            provider_resolver=StubProviderResolver(provider),
+            tool_resolver=tool_resolver,
+            max_steps=4,
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await AgentRuntime(max_steps=4).run_turn(
+        result = await runner.run_turn(
             agent=agent,
             session=session,
             user_text="hello",
@@ -129,6 +155,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("done", result.text)
         self.assertEqual(2, len(provider.requests))
         self.assertEqual(["echo"], [tool_spec.name for tool_spec in provider.requests[0].tools])
+        self.assertEqual(1, len(tool_resolver.calls))
         self.assertEqual(1, len(tool.calls))
         self.assertEqual("Pickle", tool.calls[0][1].agent_id)
         self.assertEqual(

@@ -1,40 +1,59 @@
 from dataclasses import dataclass
-import time
-from typing import TYPE_CHECKING
 import inspect
+import time
 
-from myopenclaw.agent.events import RuntimeEvent, RuntimeEventHandler, RuntimeEventType
+from myopenclaw.agent.agent import Agent
 from myopenclaw.conversation.message import ToolCall
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
-from myopenclaw.runtime_protocols.generation import FinishReason, GenerateRequest, GenerateResult
-from myopenclaw.tools.base import ToolExecutionContext, ToolExecutionResult
+from myopenclaw.llm import BaseLLMProvider, create_llm_provider
+from myopenclaw.runtime.events import RuntimeEvent, RuntimeEventHandler, RuntimeEventType
+from myopenclaw.runtime.generation import FinishReason, GenerateRequest, GenerateResult
+from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult
+from myopenclaw.tools.catalog import builtin_tools
+from myopenclaw.tools.registry import ToolRegistry
 
-if TYPE_CHECKING:
-    from myopenclaw.agent.agent import Agent
+
+class DefaultProviderResolver:
+    def resolve(self, agent: Agent) -> BaseLLMProvider:
+        return create_llm_provider(agent.model_config)
+
+
+class DefaultToolResolver:
+    def __init__(self, registry: ToolRegistry | None = None) -> None:
+        self.registry = registry or ToolRegistry(tools=builtin_tools())
+
+    def resolve(self, agent: Agent) -> list[BaseTool]:
+        return self.registry.resolve_many(agent.tool_ids)
 
 
 @dataclass
-class AgentRuntime:
+class TurnRunner:
+    provider_resolver: DefaultProviderResolver | object = DefaultProviderResolver()
+    tool_resolver: DefaultToolResolver | object = DefaultToolResolver()
     max_steps: int = 8
 
     async def run_turn(
         self,
         *,
-        agent: "Agent",
+        agent: Agent,
         session: Session,
         user_text: str,
         event_handler: RuntimeEventHandler | None = None,
     ) -> GenerateResult:
-        if session.agent_id != agent.definition.agent_id:
+        if session.agent_id != agent.agent_id:
             raise ValueError(
                 f"Session '{session.session_id}' belongs to agent '{session.agent_id}', "
-                f"not '{agent.definition.agent_id}'"
+                f"not '{agent.agent_id}'"
             )
 
+        provider = self.provider_resolver.resolve(agent)
+        tools = self.tool_resolver.resolve(agent)
         session.append_user_message(user_text)
         return await self._run_react_loop(
             agent=agent,
+            provider=provider,
+            tools=tools,
             session=session,
             event_handler=event_handler,
         )
@@ -42,7 +61,9 @@ class AgentRuntime:
     async def _run_react_loop(
         self,
         *,
-        agent: "Agent",
+        agent: Agent,
+        provider: BaseLLMProvider,
+        tools: list[BaseTool],
         session: Session,
         event_handler: RuntimeEventHandler | None = None,
     ) -> GenerateResult:
@@ -57,17 +78,17 @@ class AgentRuntime:
                 ),
             )
             start = time.perf_counter()
-            result = await agent.provider.generate(
+            result = await provider.generate(
                 GenerateRequest(
                     system_instruction=agent.system_instruction or None,
                     messages=list(session.messages),
-                    tools=agent.tool_specs,
+                    tools=[tool.spec for tool in tools],
                 )
             )
             elapsed_ms = round((time.perf_counter() - start) * 1000)
             metadata = result.metadata or MessageMetadata(
-                provider=agent.definition.model_config.provider,
-                model=agent.definition.model_config.model,
+                provider=agent.model_config.provider,
+                model=agent.model_config.model,
                 input_tokens=result.usage.input_tokens if result.usage else None,
                 output_tokens=result.usage.output_tokens if result.usage else None,
                 elapsed_ms=elapsed_ms,
@@ -92,6 +113,7 @@ class AgentRuntime:
                     )
                     tool_result = await self._execute_tool_call(
                         agent=agent,
+                        tools=tools,
                         session=session,
                         tool_call=tool_call,
                     )
@@ -144,11 +166,12 @@ class AgentRuntime:
     async def _execute_tool_call(
         self,
         *,
-        agent: "Agent",
+        agent: Agent,
+        tools: list[BaseTool],
         session: Session,
         tool_call: ToolCall,
     ) -> ToolExecutionResult:
-        tool = agent.get_tool(tool_call.name)
+        tool = next((candidate for candidate in tools if candidate.spec.name == tool_call.name), None)
         if tool is None:
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' is not available.",
@@ -156,7 +179,7 @@ class AgentRuntime:
             )
 
         context = ToolExecutionContext(
-            agent_id=agent.definition.agent_id,
+            agent_id=agent.agent_id,
             session_id=session.session_id,
             workspace_path=agent.workspace,
         )
