@@ -32,6 +32,8 @@ class ChatEventRenderer:
             status = "error" if tool_result and tool_result.is_error else "ok"
             content = tool_result.content if tool_result is not None else ""
             body = Text(f"{event.tool_call.name} -> {status}\n{self._truncate_content(content)}")
+            if tool_result is not None and tool_result.metadata:
+                body.append(f"\n{self._format_tool_metadata(tool_result.metadata)}", style="dim")
             self._render_message(
                 "Tool Result",
                 body,
@@ -83,3 +85,22 @@ class ChatEventRenderer:
         if len(content) <= limit:
             return content
         return f"{content[:limit]}..."
+
+    def _format_tool_metadata(self, metadata: dict[str, object]) -> str:
+        parts: list[str] = []
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None:
+            parts.append(f"exit {exit_code}")
+        cwd = metadata.get("cwd")
+        if cwd:
+            parts.append(f"cwd {cwd}")
+        shell_status = metadata.get("shell_status")
+        if shell_status:
+            parts.append(f"status {shell_status}")
+        timed_out = metadata.get("timed_out")
+        if timed_out:
+            parts.append("timed out")
+        truncated = metadata.get("truncated")
+        if truncated:
+            parts.append("truncated")
+        return " · ".join(parts)

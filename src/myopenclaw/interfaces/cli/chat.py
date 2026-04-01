@@ -2,13 +2,14 @@ from pathlib import Path
 from typing import Callable
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.app.bootstrap import AppBootstrap
+from myopenclaw.app.builder import AgentBuilder
+from myopenclaw.config.app_config import AppConfig
 from myopenclaw.conversation.message import MessageRole, SessionMessage
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 from myopenclaw.interfaces.cli.event_renderer import ChatEventRenderer
 from myopenclaw.llm import GenerateResult
-from myopenclaw.runtime import RuntimeEventHandler, TurnRunner
+from myopenclaw.runtime import RuntimeEventHandler, AgentCoordinator, ReActStrategy
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -20,7 +21,7 @@ class ChatLoop:
         self,
         agent: Agent,
         agent_id: str | None = None,
-        runtime: TurnRunner | None = None,
+        coordinator: AgentCoordinator | None = None,
         session: Session | None = None,
         config_path: Path | None = None,
         console: Console | None = None,
@@ -28,7 +29,7 @@ class ChatLoop:
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.agent_id
-        self.runtime = runtime or TurnRunner()
+        self.coordinator = coordinator or AgentCoordinator(strategy=ReActStrategy())
         self.session = session or Session.create(agent_id=self.agent_id)
         self.config_path = config_path
         self.console = console or Console()
@@ -41,13 +42,15 @@ class ChatLoop:
         config_path: Path,
         agent_id: str | None = None,
     ) -> "ChatLoop":
-        loaded_agent = AppBootstrap.from_config_path(
-            config_path=config_path,
+        app_config = AppConfig.load(config_path)
+        agent = AgentBuilder.build_from_app_config(
+            app_config=app_config,
             agent_id=agent_id,
         )
         return cls(
-            agent=loaded_agent.agent,
-            agent_id=loaded_agent.agent_id,
+            agent=agent,
+            agent_id=agent.agent_id,
+            coordinator=AgentCoordinator(strategy=ReActStrategy(max_steps=app_config.react_max_steps)),
             config_path=config_path,
         )
 
@@ -56,7 +59,7 @@ class ChatLoop:
         text: str,
         event_handler: RuntimeEventHandler | None = None,
     ) -> GenerateResult:
-        return await self.runtime.run_turn(
+        return await self.coordinator.run_turn(
             agent=self.agent,
             session=self.session,
             user_text=text,
@@ -144,6 +147,8 @@ class ChatLoop:
     def _render_tool_result(self, message: SessionMessage) -> None:
         header = f"{message.tool_name} -> {'error' if message.is_error else 'ok'}"
         body = Text(f"{header}\n{self._truncate_tool_content(message.content)}")
+        if message.tool_result_metadata:
+            body.append(f"\n{self._format_tool_metadata(message.tool_result_metadata)}", style="dim")
         self._render_message("Tool Result", body, style="red" if message.is_error else "green")
 
     def _format_tool_arguments(self, arguments: dict[str, object]) -> str:
@@ -154,6 +159,25 @@ class ChatLoop:
         if len(content) <= limit:
             return content
         return f"{content[:limit]}..."
+
+    def _format_tool_metadata(self, metadata: dict[str, object]) -> str:
+        parts: list[str] = []
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None:
+            parts.append(f"exit {exit_code}")
+        cwd = metadata.get("cwd")
+        if cwd:
+            parts.append(f"cwd {cwd}")
+        shell_status = metadata.get("shell_status")
+        if shell_status:
+            parts.append(f"status {shell_status}")
+        timed_out = metadata.get("timed_out")
+        if timed_out:
+            parts.append("timed out")
+        truncated = metadata.get("truncated")
+        if truncated:
+            parts.append("truncated")
+        return " · ".join(parts)
 
     def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
         footer = Text(style="dim", justify="right")

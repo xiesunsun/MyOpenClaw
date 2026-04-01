@@ -21,6 +21,7 @@ class AppConfig(BaseModel):
     root: Path = Field(default_factory=Path.cwd, exclude=True)
     default_agent: str
     default_llm: ModelSelection
+    react_max_steps: int = 8
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
 

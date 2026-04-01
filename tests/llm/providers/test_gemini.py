@@ -51,6 +51,10 @@ class GeminiProviderTests(unittest.TestCase):
                     content="pong",
                     tool_call_id="call-1",
                     tool_name="echo",
+                    tool_result_metadata={
+                        "exit_code": 0,
+                        "cwd": "/tmp/workspace",
+                    },
                 ),
             ],
         )
@@ -62,6 +66,17 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual("echo", contents[1].parts[0].function_call.name)
         self.assertEqual(b"sig-1", contents[1].parts[0].thought_signature)
         self.assertEqual("echo", contents[2].parts[0].function_response.name)
+        self.assertEqual(
+            {
+                "content": "pong",
+                "is_error": False,
+                "metadata": {
+                    "exit_code": 0,
+                    "cwd": "/tmp/workspace",
+                },
+            },
+            contents[2].parts[0].function_response.response,
+        )
 
     def test_extract_tool_calls_reads_function_calls_from_response(self) -> None:
         response = SimpleNamespace(

@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional, Union
 import inspect
+
+
+ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
+ToolFunction = Callable[[dict[str, Any], "ToolExecutionContext"], ToolFunctionResult]
 
 
 @dataclass(frozen=True)
@@ -9,6 +15,7 @@ class ToolSpec:
     name: str
     description: str
     input_schema: dict[str, Any]
+    output_schema: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -16,6 +23,8 @@ class ToolExecutionContext:
     agent_id: str
     session_id: str
     workspace_path: Path
+    path_policy: Any = None
+    shell_session_manager: Any = None
 
 
 @dataclass
@@ -43,7 +52,7 @@ class FunctionTool(BaseTool):
         name: str,
         description: str,
         input_schema: dict[str, Any],
-        func: Callable[[dict[str, Any], ToolExecutionContext], Awaitable[ToolExecutionResult] | ToolExecutionResult],
+        func: ToolFunction,
     ) -> None:
         self.spec = ToolSpec(
             name=name,
@@ -87,19 +96,14 @@ def tool(
     *,
     name: str,
     description: str,
-    input_schema: dict[str, Any] | None = None,
-    parameters: dict[str, Any] | None = None,
-) -> Callable[
-    [Callable[[dict[str, Any], ToolExecutionContext], Awaitable[ToolExecutionResult] | ToolExecutionResult]],
-    FunctionTool,
-]:
+    input_schema: Optional[dict[str, Any]] = None,
+    parameters: Optional[dict[str, Any]] = None,
+) -> Callable[[ToolFunction], FunctionTool]:
     schema = input_schema or parameters
     if schema is None:
         raise ValueError("tool() requires either input_schema or parameters")
 
-    def decorator(
-        func: Callable[[dict[str, Any], ToolExecutionContext], Awaitable[ToolExecutionResult] | ToolExecutionResult]
-    ) -> FunctionTool:
+    def decorator(func: ToolFunction) -> FunctionTool:
         return FunctionTool(
             name=name,
             description=description,

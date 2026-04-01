@@ -7,6 +7,36 @@ from myopenclaw.config.app_config import AppConfig
 
 
 class AppConfigTests(unittest.TestCase):
+    def test_load_defaults_react_max_steps_to_eight(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+
+            self.assertEqual(8, config.react_max_steps)
+
     def test_load_resolves_agent_paths_relative_to_config_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -43,6 +73,37 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(root / "workspace", agent_config.workspace_path)
             self.assertEqual(root / "agents" / "Pickle", agent_config.behavior_path)
+
+    def test_load_reads_top_level_react_max_steps(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    react_max_steps: 16
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+
+            self.assertEqual(16, config.react_max_steps)
 
     def test_resolve_model_config_merges_selected_provider_and_model(self) -> None:
         with TemporaryDirectory() as tmpdir:

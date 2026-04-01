@@ -1,4 +1,5 @@
 default_agent: Pickle
+react_max_steps: 100
 
 default_llm:
   provider: google/gemini
@@ -26,5 +27,8 @@ agents:
       provider: google/gemini
       model: gemini-3.1-flash-lite-preview
     tools:
-      - echo
       - read
+      - write
+      - shell_exec
+      - shell_restart
+      - shell_close

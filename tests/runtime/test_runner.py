@@ -44,7 +44,10 @@ class StubTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         self.calls.append((arguments, context))
-        return ToolExecutionResult(content=str(arguments["text"]))
+        return ToolExecutionResult(
+            content=str(arguments["text"]),
+            metadata={"exit_code": 0},
+        )
 
 
 class StubProviderResolver:
@@ -158,6 +161,8 @@ class TurnRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(tool_resolver.calls))
         self.assertEqual(1, len(tool.calls))
         self.assertEqual("Pickle", tool.calls[0][1].agent_id)
+        self.assertIsNotNone(tool.calls[0][1].path_policy)
+        self.assertIsNotNone(tool.calls[0][1].shell_session_manager)
         self.assertEqual(
             [
                 MessageRole.USER,
@@ -169,6 +174,7 @@ class TurnRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("echo", session.messages[1].tool_calls[0].name)
         self.assertEqual("ping", session.messages[2].content)
+        self.assertEqual({"exit_code": 0}, session.messages[2].tool_result_metadata)
 
 
 if __name__ == "__main__":

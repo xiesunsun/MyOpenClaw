@@ -131,6 +131,7 @@ class GeminiProvider(BaseLLMProvider):
                                     response={
                                         "content": message.content,
                                         "is_error": message.is_error,
+                                        "metadata": dict(message.tool_result_metadata),
                                     },
                                 )
                             )

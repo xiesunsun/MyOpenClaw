@@ -1,9 +1,9 @@
 """Application bootstrap."""
 
-from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.app.behavior_loader import BehaviorLoader
+from myopenclaw.app.builder import AgentBuilder
 
 __all__ = [
-    "AppAssembly",
+    "AgentBuilder",
     "BehaviorLoader",
 ]

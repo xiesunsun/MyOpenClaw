@@ -55,6 +55,7 @@ class SessionTests(unittest.TestCase):
             content="ping",
             tool_call_id="call-1",
             tool_name="echo",
+            metadata={"exit_code": 0},
         )
 
         self.assertEqual(MessageRole.ASSISTANT, session.messages[0].role)
@@ -62,6 +63,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(MessageRole.TOOL, session.messages[1].role)
         self.assertEqual("call-1", session.messages[1].tool_call_id)
         self.assertEqual("echo", session.messages[1].tool_name)
+        self.assertEqual({"exit_code": 0}, session.messages[1].tool_result_metadata)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
+                path_policy=None,
+                shell_session_manager=None,
             ),
         )
 
@@ -64,11 +66,25 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
+                path_policy=None,
+                shell_session_manager=None,
             ),
         )
 
         self.assertEqual("ping:Pickle", result.content)
         self.assertEqual({"seen": True}, result.metadata)
+
+    def test_tool_execution_context_exposes_runtime_dependencies(self) -> None:
+        context = ToolExecutionContext(
+            agent_id="Pickle",
+            session_id="session-1",
+            workspace_path=Path("/tmp/pickle"),
+            path_policy="policy",
+            shell_session_manager="shell-manager",
+        )
+
+        self.assertEqual("policy", context.path_policy)
+        self.assertEqual("shell-manager", context.shell_session_manager)
 
 
 if __name__ == "__main__":

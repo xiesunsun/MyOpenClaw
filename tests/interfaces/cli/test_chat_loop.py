@@ -1,5 +1,7 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+import textwrap
 from unittest.mock import Mock
 
 from myopenclaw.agent.agent import Agent
@@ -73,6 +75,11 @@ class StubToolRuntime:
             content="file content " * 80,
             tool_call_id="call-1",
             tool_name="read",
+            metadata={
+                "cwd": "/tmp/workspace",
+                "exit_code": 0,
+                "shell_status": "ready",
+            },
         )
         if event_handler is not None:
             from myopenclaw.tools.base import ToolExecutionResult
@@ -85,7 +92,14 @@ class StubToolRuntime:
                         name="read",
                         arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
                     ),
-                    tool_result=ToolExecutionResult(content="file content " * 80),
+                    tool_result=ToolExecutionResult(
+                        content="file content " * 80,
+                        metadata={
+                            "cwd": "/tmp/workspace",
+                            "exit_code": 0,
+                            "shell_status": "ready",
+                        },
+                    ),
                 )
             )
             await event_handler(
@@ -189,6 +203,43 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(tool_call_render), 180)
         self.assertIn("...", tool_result_render)
         self.assertLess(len(tool_result_render), 220)
+        self.assertIn("exit 0", tool_result_render)
+        self.assertIn("/tmp/workspace", tool_result_render)
+        self.assertIn("ready", tool_result_render)
+
+    async def test_from_config_path_uses_react_max_steps_from_app_config(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    react_max_steps: 16
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 1.0
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            loop = ChatLoop.from_config_path(config_path=config_path)
+
+            self.assertEqual(16, loop.runtime.max_steps)
 
 
 if __name__ == "__main__":

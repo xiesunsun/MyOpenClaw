@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import Any, Optional
 from uuid import uuid4
 
 from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
@@ -12,7 +15,7 @@ class Session:
     messages: list[SessionMessage] = field(default_factory=list)
 
     @classmethod
-    def create(cls, agent_id: str, session_id: str | None = None) -> "Session":
+    def create(cls, agent_id: str, session_id: Optional[str] = None) -> "Session":
         return cls(
             session_id=session_id or str(uuid4()),
             agent_id=agent_id,
@@ -24,8 +27,8 @@ class Session:
     def append_assistant_message(
         self,
         content: str = "",
-        metadata: MessageMetadata | None = None,
-        tool_calls: list[ToolCall] | None = None,
+        metadata: Optional[MessageMetadata] = None,
+        tool_calls: Optional[list[ToolCall]] = None,
     ) -> None:
         self.messages.append(
             SessionMessage(
@@ -43,6 +46,7 @@ class Session:
         tool_name: str,
         *,
         is_error: bool = False,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         self.messages.append(
             SessionMessage(
@@ -51,5 +55,6 @@ class Session:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 is_error=is_error,
+                tool_result_metadata=dict(metadata or {}),
             )
         )

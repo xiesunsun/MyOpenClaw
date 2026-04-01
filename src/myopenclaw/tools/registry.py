@@ -1,8 +1,12 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from myopenclaw.tools.base import BaseTool
 
 
 class ToolRegistry:
-    def __init__(self, tools: list[BaseTool] | None = None) -> None:
+    def __init__(self, tools: Optional[list[BaseTool]] = None) -> None:
         self._tools = {
             tool.spec.name: tool
             for tool in (tools or [])
