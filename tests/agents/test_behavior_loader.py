@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.agents.behavior_loader import BehaviorLoader
+from myopenclaw.infrastructure.agents.behavior_loader import BehaviorLoader
 
 
 class BehaviorLoaderTests(unittest.TestCase):

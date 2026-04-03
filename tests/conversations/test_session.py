@@ -1,14 +1,14 @@
 import unittest
 
-from myopenclaw.conversations.message import (
+from myopenclaw.domain.message import (
     MessageRole,
     SessionMessage,
     ToolCall,
     ToolCallBatch,
     ToolCallResult,
 )
-from myopenclaw.conversations.metadata import MessageMetadata
-from myopenclaw.conversations.session import Session
+from myopenclaw.domain.metadata import MessageMetadata
+from myopenclaw.domain.session import Session
 
 
 class SessionTests(unittest.TestCase):

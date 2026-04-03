@@ -1,7 +1,7 @@
 import unittest
 
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.registry import ToolRegistry
+from myopenclaw.infrastructure.tools.catalog import builtin_tools
+from myopenclaw.infrastructure.tools.registry import ToolRegistry
 
 
 class ToolRegistryTests(unittest.TestCase):

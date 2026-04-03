@@ -2,10 +2,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.registry import ToolRegistry
-from myopenclaw.tools.shell import (
+from myopenclaw.infrastructure.tools.base import ToolExecutionContext
+from myopenclaw.infrastructure.tools.catalog import builtin_tools
+from myopenclaw.infrastructure.tools.registry import ToolRegistry
+from myopenclaw.infrastructure.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
     ShellRestartTool,

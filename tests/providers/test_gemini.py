@@ -3,21 +3,20 @@ import unittest
 
 from google.genai import types
 
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from myopenclaw.application.contracts import GenerateRequest, ToolSpec
+from myopenclaw.application.contracts import (
+    ModelMessage as SessionMessage,
+    ModelMessageRole as MessageRole,
+    ModelToolCall as ToolCall,
+    ModelToolCallBatch as ToolCallBatch,
+    ModelToolResult as ToolCallResult,
 )
-from myopenclaw.providers.gemini import GeminiProvider
-from myopenclaw.shared.generation import GenerateRequest
-from myopenclaw.tools.base import ToolSpec
+from myopenclaw.infrastructure.providers.gemini import GeminiAdapter
 
 
 class GeminiProviderTests(unittest.TestCase):
     def test_build_tools_maps_tool_specs_to_gemini_function_declarations(self) -> None:
-        declarations = GeminiProvider._build_tools(
+        declarations = GeminiAdapter._build_tools(
             [
                 ToolSpec(
                     name="echo",
@@ -86,7 +85,7 @@ class GeminiProviderTests(unittest.TestCase):
             ],
         )
 
-        contents = GeminiProvider._build_contents(request.messages)
+        contents = GeminiAdapter._build_contents(request.messages)
 
         self.assertEqual(["user", "model", "user"], [content.role for content in contents])
         self.assertEqual("hello", contents[0].parts[0].text)
@@ -105,7 +104,7 @@ class GeminiProviderTests(unittest.TestCase):
         )
 
     def test_build_contents_maps_error_tool_batch_results_to_error_payload(self) -> None:
-        contents = GeminiProvider._build_contents(
+        contents = GeminiAdapter._build_contents(
             [
                 SessionMessage(
                     role=MessageRole.ASSISTANT,
@@ -163,7 +162,7 @@ class GeminiProviderTests(unittest.TestCase):
             ],
         )
 
-        tool_calls = GeminiProvider._extract_tool_calls(response)
+        tool_calls = GeminiAdapter._extract_tool_calls(response)
 
         self.assertEqual(
             [
@@ -202,7 +201,7 @@ class GeminiProviderTests(unittest.TestCase):
             )
         ]
 
-        text = GeminiProvider._extract_text(response)
+        text = GeminiAdapter._extract_text(response)
 
         self.assertEqual("first\nsecond", text)
 
@@ -229,7 +228,7 @@ class GeminiProviderTests(unittest.TestCase):
             )
         ]
 
-        text = GeminiProvider._extract_text(response)
+        text = GeminiAdapter._extract_text(response)
 
         self.assertEqual("", text)
 
@@ -245,10 +244,10 @@ class GeminiProviderTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual("MAX_TOKENS", GeminiProvider._extract_provider_finish_reason(response))
+        self.assertEqual("MAX_TOKENS", GeminiAdapter._extract_provider_finish_reason(response))
         self.assertEqual(
             "Token budget exhausted.",
-            GeminiProvider._extract_provider_finish_message(response),
+            GeminiAdapter._extract_provider_finish_message(response),
         )
         self.assertEqual("resp-1", response.response_id)
         self.assertEqual("gemini-3-flash-preview-001", response.model_version)
@@ -265,7 +264,7 @@ class GeminiProviderTests(unittest.TestCase):
             )
         )
 
-        usage = GeminiProvider._extract_usage(response)
+        usage = GeminiAdapter._extract_usage(response)
 
         self.assertEqual(11, usage.input_tokens)
         self.assertEqual(7, usage.output_tokens)

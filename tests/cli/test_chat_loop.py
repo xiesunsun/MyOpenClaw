@@ -4,27 +4,33 @@ from tempfile import TemporaryDirectory
 import textwrap
 from unittest.mock import Mock
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
-from myopenclaw.conversations.metadata import MessageMetadata
-from myopenclaw.conversations.session import Session
-from myopenclaw.cli.chat import ChatLoop
-from myopenclaw.runs import GenerateResult, RuntimeEvent, RuntimeEventType
-from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import ToolExecutionResult
+from myopenclaw.application.contracts import (
+    ModelToolCall as ToolCall,
+    ModelToolCallBatch as ToolCallBatch,
+    ModelToolResult as ToolCallResult,
+    TurnResult,
+)
+from myopenclaw.application.events import (
+    RuntimeEvent,
+    RuntimeEventType,
+    ToolCallView,
+    ToolResultView,
+)
+from myopenclaw.domain.agent import Agent
+from myopenclaw.domain.metadata import MessageMetadata
+from myopenclaw.domain.session import Session
+from myopenclaw.interfaces.cli.chat import ChatLoop
 
 
-class StubCoordinator:
-    async def run_turn(
-        self,
-        *,
-        agent: Agent,
-        session: Session,
-        user_text: str,
-        event_handler=None,
-    ) -> GenerateResult:
-        session.append_user_message(user_text)
-        session.append_assistant_message("runtime reply")
+class StubChatService:
+    def __init__(self, agent: Agent, session: Session | None = None, max_steps: int = 8) -> None:
+        self.agent = agent
+        self.session = session or Session(session_id="session-1", agent_id=agent.agent_id)
+        self.max_steps = max_steps
+
+    async def run_turn(self, text: str, event_handler=None) -> TurnResult:
+        self.session.append_user_message(text)
+        self.session.append_assistant_message("runtime reply")
         if event_handler is not None:
             await event_handler(
                 RuntimeEvent(
@@ -32,19 +38,12 @@ class StubCoordinator:
                     text="runtime reply",
                 )
             )
-        return GenerateResult(text="runtime reply")
+        return TurnResult(text="runtime reply", message_count=len(self.session.messages))
 
 
-class StubToolCoordinator:
-    async def run_turn(
-        self,
-        *,
-        agent: Agent,
-        session: Session,
-        user_text: str,
-        event_handler=None,
-    ) -> GenerateResult:
-        session.append_user_message(user_text)
+class StubToolChatService(StubChatService):
+    async def run_turn(self, text: str, event_handler=None) -> TurnResult:
+        self.session.append_user_message(text)
         if event_handler is not None:
             await event_handler(
                 RuntimeEvent(
@@ -74,7 +73,7 @@ class StubToolCoordinator:
                 )
             ],
         )
-        session.append_assistant_tool_batch(batch)
+        self.session.append_assistant_tool_batch(batch)
         if event_handler is not None:
             await event_handler(
                 RuntimeEvent(
@@ -83,7 +82,11 @@ class StubToolCoordinator:
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
-                    tool_call=batch.calls[0],
+                    tool_call=ToolCallView(
+                        id=batch.calls[0].id,
+                        name=batch.calls[0].name,
+                        arguments=dict(batch.calls[0].arguments),
+                    ),
                 )
             )
             await event_handler(
@@ -93,8 +96,12 @@ class StubToolCoordinator:
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
-                    tool_call=batch.calls[0],
-                    tool_result=ToolExecutionResult(
+                    tool_call=ToolCallView(
+                        id=batch.calls[0].id,
+                        name=batch.calls[0].name,
+                        arguments=dict(batch.calls[0].arguments),
+                    ),
+                    tool_result=ToolResultView(
                         content="file content " * 80,
                         metadata={
                             "cwd": "/tmp/workspace",
@@ -114,12 +121,14 @@ class StubToolCoordinator:
                     ),
                 )
             )
-        return GenerateResult(
+        return TurnResult(
             text="final reply",
             metadata=MessageMetadata(
                 provider="google/gemini",
                 model="gemini-3-flash-preview",
             ),
+            tool_batches=[batch],
+            message_count=len(self.session.messages),
         )
 
 
@@ -130,17 +139,13 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=[],
         )
         session = Session(session_id="session-1", agent_id="Pickle")
         loop = ChatLoop(
-            agent=agent,
-            coordinator=StubCoordinator(),
-            session=session,
+            chat_service=StubChatService(agent=agent, session=session),
         )
 
         result = await loop.handle_user_input("hello")
@@ -154,19 +159,16 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=[],
         )
 
         loop = ChatLoop(
-            agent=agent,
-            coordinator=StubCoordinator(),
+            chat_service=StubChatService(agent=agent),
         )
 
-        self.assertEqual("Pickle", loop.session.agent_id)
+        self.assertEqual("Pickle", loop.chat_service.session.agent_id)
 
     async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(self) -> None:
         agent = Agent(
@@ -174,18 +176,14 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=[],
         )
         session = Session(session_id="session-1", agent_id="Pickle")
         console = Mock()
         loop = ChatLoop(
-            agent=agent,
-            coordinator=StubToolCoordinator(),
-            session=session,
+            chat_service=StubToolChatService(agent=agent, session=session),
             console=console,
         )
 
@@ -214,45 +212,41 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=[],
         )
         session = Session(session_id="session-1", agent_id="Pickle")
-        session.append_assistant_tool_batch(
-            ToolCallBatch(
-                batch_id="batch-1",
-                step_index=1,
-                calls=[
-                    ToolCall(
-                        id="call-1",
-                        name="read_file",
-                        arguments={"path": "file.txt"},
-                    )
-                ],
-                results=[
-                    ToolCallResult(
-                        call_id="call-1",
-                        content="hello world",
-                        metadata={"exit_code": 0},
-                    )
-                ],
-            )
+        batch = ToolCallBatch(
+            batch_id="batch-1",
+            step_index=1,
+            calls=[
+                ToolCall(
+                    id="call-1",
+                    name="read_file",
+                    arguments={"path": "file.txt"},
+                )
+            ],
+            results=[
+                ToolCallResult(
+                    call_id="call-1",
+                    content="hello world",
+                    metadata={"exit_code": 0},
+                )
+            ],
         )
+        session.append_assistant_tool_batch(batch)
         console = Mock()
         loop = ChatLoop(
-            agent=agent,
-            coordinator=StubCoordinator(),
-            session=session,
+            chat_service=StubChatService(agent=agent, session=session),
             console=console,
         )
 
         loop.render_turn_output(
-            GenerateResult(
+            TurnResult(
                 text="final reply",
                 metadata=MessageMetadata(provider="google/gemini", model="gemini-3-flash-preview"),
+                tool_batches=[batch],
             ),
             start_index=0,
         )
@@ -295,9 +289,15 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 ).strip()
             )
 
-            loop = ChatLoop.from_config_path(config_path=config_path)
+            from myopenclaw.bootstrap.assembly import BootstrapAssembly
 
-            self.assertEqual(16, loop.coordinator.strategy.max_steps)
+            assembly = BootstrapAssembly.from_config_path(config_path)
+            loop = ChatLoop(
+                chat_service=assembly.build_chat_service(),
+                config_path=config_path,
+            )
+
+            self.assertEqual(16, loop.chat_service.max_steps)
 
 
 if __name__ == "__main__":

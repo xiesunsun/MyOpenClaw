@@ -3,9 +3,9 @@ from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.app.assembly import AppAssembly
-from myopenclaw.config.app_config import AppConfig
+from myopenclaw.bootstrap.assembly import BootstrapAssembly
+from myopenclaw.domain.agent import Agent
+from myopenclaw.infrastructure.config.app_config import AppConfig
 
 
 class AppAssemblyTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class AppAssemblyTests(unittest.TestCase):
             )
 
             config = AppConfig.load(config_path)
-            agent = AppAssembly(config).resolve_agent()
+            agent = BootstrapAssembly(config).resolve_agent()
 
             self.assertIsInstance(agent, Agent)
             self.assertEqual("Pickle", agent.agent_id)

@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-myopenclaw = "myopenclaw.cli.main:app"
+myopenclaw = "myopenclaw.bootstrap.main:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

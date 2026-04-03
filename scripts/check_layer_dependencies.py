@@ -11,16 +11,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT = PROJECT_ROOT / "src" / "myopenclaw"
 
 
-PACKAGE_RULES: dict[str, set[str]] = {
+PACKAGE_LAYERS: dict[str, str] = {
+    "shared": "shared",
+    "domain": "domain",
+    "application": "application",
+    "infrastructure": "infrastructure",
+    "interfaces": "interfaces",
+    "bootstrap": "bootstrap",
+}
+
+LAYER_RULES: dict[str, set[str]] = {
     "shared": set(),
-    "config": {"shared"},
-    "agents": {"shared"},
-    "conversations": {"shared"},
-    "tools": {"shared"},
-    "providers": {"shared", "conversations", "tools"},
-    "runs": {"shared", "agents", "conversations", "providers", "tools"},
-    "app": {"shared", "config", "agents", "conversations", "providers", "tools", "runs"},
-    "cli": {"shared", "conversations", "tools", "runs", "app"},
+    "domain": {"shared"},
+    "application": {"domain", "shared"},
+    "infrastructure": {"application", "domain", "shared"},
+    "interfaces": {"application", "shared"},
+    "bootstrap": {"interfaces", "application", "infrastructure", "domain", "shared"},
 }
 
 
@@ -102,10 +108,11 @@ def find_violations(source_root: Path = SOURCE_ROOT) -> list[Violation]:
 
     for file_path in sorted(source_root.rglob("*.py")):
         source_package = package_name_for_file(file_path, source_root)
-        if source_package is None or source_package not in PACKAGE_RULES:
+        if source_package is None or source_package not in PACKAGE_LAYERS:
             continue
 
-        allowed_targets = PACKAGE_RULES[source_package]
+        source_layer = PACKAGE_LAYERS[source_package]
+        allowed_layers = LAYER_RULES[source_layer]
         tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -117,9 +124,10 @@ def find_violations(source_root: Path = SOURCE_ROOT) -> list[Violation]:
             )
             if target_package is None or target_package == source_package:
                 continue
-            if target_package not in PACKAGE_RULES:
+            if target_package not in PACKAGE_LAYERS:
                 continue
-            if target_package not in allowed_targets:
+            target_layer = PACKAGE_LAYERS[target_package]
+            if target_layer not in allowed_layers:
                 violations.append(
                     Violation(
                         file_path=file_path,

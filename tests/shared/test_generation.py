@@ -1,6 +1,6 @@
 import unittest
 
-from myopenclaw.shared.generation import (
+from myopenclaw.application.contracts import (
     FinishReason,
     GenerateRequest,
     GenerateResult,
@@ -9,7 +9,7 @@ from myopenclaw.shared.generation import (
 
 
 class SharedGenerationTests(unittest.TestCase):
-    def test_shared_module_exports_generation_protocol_types(self) -> None:
+    def test_application_contracts_export_generation_types(self) -> None:
         request = GenerateRequest(system_instruction="sys", messages=[], tools=[])
         result = GenerateResult(
             text="done",

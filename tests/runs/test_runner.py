@@ -1,88 +1,65 @@
-import asyncio
 import unittest
 from pathlib import Path
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.conversations.message import ToolCall
-from myopenclaw.conversations.session import Session
-from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.runs import (
-    AgentCoordinator,
-    AgentRuntimeContext,
+from myopenclaw.application.contracts import (
     FinishReason,
     GenerateRequest,
     GenerateResult,
-    ReActStrategy,
+    ModelToolCall,
     TokenUsage,
+    ToolSpec,
 )
-from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
-from myopenclaw.tools.policy import FullAccessPathPolicy
+from myopenclaw.application.ports import LLMPort, ToolExecutorPort
+from myopenclaw.application.services import ChatService
+from myopenclaw.domain.agent import Agent
+from myopenclaw.domain.message import ToolCallResult
+from myopenclaw.domain.session import Session
+from myopenclaw.infrastructure.tools.executor import BuiltinToolExecutor
+from myopenclaw.infrastructure.tools.policy import FullAccessPathPolicy
 
 
-class StubProvider(BaseLLMProvider):
+class StubProvider(LLMPort):
     def __init__(self, responses: list[GenerateResult] | None = None) -> None:
         self.requests: list[GenerateRequest] = []
         self.responses = responses or [GenerateResult(text="assistant reply")]
-
-    @classmethod
-    def from_config(cls, config: ModelConfig) -> "StubProvider":
-        return cls()
 
     async def generate(self, request: GenerateRequest) -> GenerateResult:
         self.requests.append(request)
         return self.responses.pop(0)
 
 
-class DelayEchoTool(BaseTool):
-    spec = ToolSpec(
-        name="echo",
-        description="Echo text",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "delay_ms": {"type": "integer"},
-            },
-            "required": ["text"],
-        },
-    )
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[dict[str, object], ToolExecutionContext]] = []
-
-    async def execute(
+class StubToolExecutor(ToolExecutorPort):
+    def __init__(
         self,
-        arguments: dict[str, object],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        self.calls.append((arguments, context))
-        await asyncio.sleep(int(arguments.get("delay_ms", 0)) / 1000)
-        return ToolExecutionResult(
-            content=str(arguments["text"]),
-            metadata={"exit_code": 0},
-        )
+        *,
+        tool_specs: list[ToolSpec] | None = None,
+        batches: list[list[ToolCallResult]] | None = None,
+    ) -> None:
+        self.tool_specs = tool_specs or []
+        self.batches = batches or []
+        self.calls: list[tuple[list[object], str, str]] = []
+
+    def describe_tools(self, tool_ids: list[str]) -> list[ToolSpec]:
+        return [tool for tool in self.tool_specs if tool.name in tool_ids]
+
+    async def execute_calls(
+        self,
+        *,
+        tool_calls,
+        agent: Agent,
+        session_id: str,
+    ) -> list[ToolCallResult]:
+        self.calls.append((list(tool_calls), agent.agent_id, session_id))
+        if self.batches:
+            return self.batches.pop(0)
+        return []
 
 
-class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
-    def test_runtime_context_uses_full_access_policy_when_agent_requests_it(self) -> None:
-        agent = Agent(
-            agent_id="Pickle",
-            workspace_path=Path("/tmp/pickle"),
-            behavior_path=Path("/tmp/pickle/AGENT.md"),
-            behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
-            tool_ids=[],
-            file_access_mode="full",
-        )
-        provider = StubProvider()
+class ChatServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_builtin_tool_executor_uses_full_access_policy_when_agent_requests_it(self) -> None:
+        policy = BuiltinToolExecutor._policy_for_mode("full")
 
-        context = AgentRuntimeContext(agent=agent, provider=provider, tools=[])
-
-        self.assertIsInstance(context.file_access_policy, FullAccessPathPolicy)
+        self.assertIsInstance(policy, FullAccessPathPolicy)
 
     async def test_runner_appends_messages_and_calls_provider(self) -> None:
         agent = Agent(
@@ -90,10 +67,8 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=[],
         )
         provider = StubProvider(
@@ -108,17 +83,15 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(),
-            context=AgentRuntimeContext(agent=agent, provider=provider, tools=[]),
-        )
         session = Session.create(agent_id="Pickle", session_id="session-1")
-
-        result = await coordinator.run_turn(
+        service = ChatService(
             agent=agent,
             session=session,
-            user_text="hello",
+            llm=provider,
+            tool_executor=StubToolExecutor(),
         )
+
+        result = await service.run_turn("hello")
 
         self.assertEqual("assistant reply", result.text)
         self.assertEqual(1, len(provider.requests))
@@ -137,22 +110,20 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
             behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
+            model_provider="google/gemini",
+            model_name="gemini-3-flash-preview",
             tool_ids=["echo"],
         )
         provider = StubProvider(
             responses=[
                 GenerateResult(
                     tool_calls=[
-                        ToolCall(
+                        ModelToolCall(
                             id="call-slow",
                             name="echo",
                             arguments={"text": "slow", "delay_ms": 40},
                         ),
-                        ToolCall(
+                        ModelToolCall(
                             id="call-fast",
                             name="echo",
                             arguments={"text": "fast", "delay_ms": 0},
@@ -166,24 +137,37 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        tool = DelayEchoTool()
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(max_steps=4),
-            context=AgentRuntimeContext(agent=agent, provider=provider, tools=[tool]),
+        tool_executor = StubToolExecutor(
+            tool_specs=[
+                ToolSpec(
+                    name="echo",
+                    description="Echo text",
+                    input_schema={"type": "object"},
+                )
+            ],
+            batches=[
+                [
+                    ToolCallResult(call_id="call-slow", content="slow", metadata={"exit_code": 0}),
+                    ToolCallResult(call_id="call-fast", content="fast", metadata={"exit_code": 0}),
+                ]
+            ],
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
-
-        result = await coordinator.run_turn(
+        service = ChatService(
             agent=agent,
             session=session,
-            user_text="hello",
+            llm=provider,
+            tool_executor=tool_executor,
+            max_steps=4,
         )
+
+        result = await service.run_turn("hello")
 
         self.assertEqual("done", result.text)
         self.assertEqual(2, len(provider.requests))
         self.assertEqual(["echo"], [tool_spec.name for tool_spec in provider.requests[0].tools])
-        self.assertEqual(2, len(tool.calls))
-        self.assertEqual("Pickle", tool.calls[0][1].agent_id)
+        self.assertEqual(1, len(tool_executor.calls))
+        self.assertEqual("Pickle", tool_executor.calls[0][1])
         self.assertEqual(
             ["user", "assistant", "assistant"],
             [message.role.value for message in session.messages],

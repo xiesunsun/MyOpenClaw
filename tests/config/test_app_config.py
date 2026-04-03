@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 
-from myopenclaw.config.app_config import AppConfig
+from myopenclaw.infrastructure.config.app_config import AppConfig
 
 
 class AppConfigTests(unittest.TestCase):

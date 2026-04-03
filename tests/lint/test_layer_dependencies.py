@@ -38,12 +38,12 @@ class LayerDependencyTests(unittest.TestCase):
             source_root = Path(tmpdir) / "src" / "myopenclaw"
             (source_root / "shared").mkdir(parents=True)
             (source_root / "shared" / "__init__.py").write_text("")
-            (source_root / "cli").mkdir()
-            (source_root / "cli" / "__init__.py").write_text("")
+            (source_root / "interfaces").mkdir()
+            (source_root / "interfaces" / "__init__.py").write_text("")
             (source_root / "shared" / "bad.py").write_text(
                 textwrap.dedent(
                     """
-                    from myopenclaw.cli.chat import ChatLoop
+                    from myopenclaw.interfaces.cli import ChatLoop
                     """
                 ).strip()
                 + "\n",
@@ -54,7 +54,7 @@ class LayerDependencyTests(unittest.TestCase):
 
         self.assertEqual(1, len(violations))
         self.assertEqual("shared", violations[0].source_package)
-        self.assertEqual("cli", violations[0].target_package)
+        self.assertEqual("interfaces", violations[0].target_package)
 
 
 if __name__ == "__main__":

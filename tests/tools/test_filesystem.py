@@ -2,11 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.file_formatter import FileToolFormatter
-from myopenclaw.tools.file_service import WorkspaceFileService
-from myopenclaw.tools.file_tools import ReadFileTool, ReplaceTool, WriteFileTool
-from myopenclaw.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
+from myopenclaw.infrastructure.tools.base import ToolExecutionContext
+from myopenclaw.infrastructure.tools.file_formatter import FileToolFormatter
+from myopenclaw.infrastructure.tools.file_service import WorkspaceFileService
+from myopenclaw.infrastructure.tools.file_tools import ReadFileTool, ReplaceTool, WriteFileTool
+from myopenclaw.infrastructure.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
 
 
 class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
