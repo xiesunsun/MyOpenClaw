@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from myopenclaw.conversations.message import SessionMessage, ToolCall
+    from myopenclaw.conversations.metadata import MessageMetadata
+    from myopenclaw.tools.base import ToolSpec
 
 
 @dataclass
