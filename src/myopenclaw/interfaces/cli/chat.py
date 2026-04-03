@@ -4,7 +4,7 @@ from typing import Callable
 from myopenclaw.agent.agent import Agent
 from myopenclaw.app.builder import AgentBuilder
 from myopenclaw.config.app_config import AppConfig
-from myopenclaw.conversation.message import MessageRole, SessionMessage
+from myopenclaw.conversation.message import SessionMessage, ToolCallBatch
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 from myopenclaw.interfaces.cli.event_renderer import ChatEventRenderer
@@ -71,11 +71,8 @@ class ChatLoop:
 
     def render_turn_output(self, reply: GenerateResult, *, start_index: int) -> None:
         for message in self.session.messages[start_index:]:
-            if message.role == MessageRole.ASSISTANT and message.tool_calls:
-                self._render_tool_calls(message)
-                continue
-            if message.role == MessageRole.TOOL:
-                self._render_tool_result(message)
+            if message.tool_call_batch is not None:
+                self._render_tool_batch(message.tool_call_batch)
         self._render_assistant_message(reply)
 
     def _default_input_reader(self, prompt: str) -> str:
@@ -138,46 +135,9 @@ class ChatLoop:
             content = Group(Markdown(reply.text), self._render_assistant_footer(metadata))
         self._render_message("Assistant", content, style="yellow")
 
-    def _render_tool_calls(self, message: SessionMessage) -> None:
-        lines: list[str] = []
-        for tool_call in message.tool_calls:
-            lines.append(f"{tool_call.name}({self._format_tool_arguments(tool_call.arguments)})")
-        self._render_message("Tool Call", Text("\n".join(lines)), style="blue")
-
-    def _render_tool_result(self, message: SessionMessage) -> None:
-        header = f"{message.tool_name} -> {'error' if message.is_error else 'ok'}"
-        body = Text(f"{header}\n{self._truncate_tool_content(message.content)}")
-        if message.tool_result_metadata:
-            body.append(f"\n{self._format_tool_metadata(message.tool_result_metadata)}", style="dim")
-        self._render_message("Tool Result", body, style="red" if message.is_error else "green")
-
-    def _format_tool_arguments(self, arguments: dict[str, object]) -> str:
-        parts = [f"{key}={value!r}" for key, value in arguments.items()]
-        return ", ".join(parts)
-
-    def _truncate_tool_content(self, content: str, limit: int = 400) -> str:
-        if len(content) <= limit:
-            return content
-        return f"{content[:limit]}..."
-
-    def _format_tool_metadata(self, metadata: dict[str, object]) -> str:
-        parts: list[str] = []
-        exit_code = metadata.get("exit_code")
-        if exit_code is not None:
-            parts.append(f"exit {exit_code}")
-        cwd = metadata.get("cwd")
-        if cwd:
-            parts.append(f"cwd {cwd}")
-        shell_status = metadata.get("shell_status")
-        if shell_status:
-            parts.append(f"status {shell_status}")
-        timed_out = metadata.get("timed_out")
-        if timed_out:
-            parts.append("timed out")
-        truncated = metadata.get("truncated")
-        if truncated:
-            parts.append("truncated")
-        return " · ".join(parts)
+    def _render_tool_batch(self, batch: ToolCallBatch) -> None:
+        for style, renderable in ChatEventRenderer.render_tool_batch_transcript(batch):
+            self._render_message("Tool", renderable, style=style)
 
     def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
         footer = Text(style="dim", justify="right")

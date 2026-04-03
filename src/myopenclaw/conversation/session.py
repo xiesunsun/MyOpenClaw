@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 from uuid import uuid4
 
-from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
+from myopenclaw.conversation.message import (
+    MessageRole,
+    SessionMessage,
+    ToolCallBatch,
+)
 from myopenclaw.conversation.metadata import MessageMetadata
 
 
@@ -28,33 +32,26 @@ class Session:
         self,
         content: str = "",
         metadata: Optional[MessageMetadata] = None,
-        tool_calls: Optional[list[ToolCall]] = None,
+        tool_call_batch: Optional[ToolCallBatch] = None,
     ) -> None:
         self.messages.append(
             SessionMessage(
                 role=MessageRole.ASSISTANT,
                 content=content,
-                tool_calls=list(tool_calls or []),
                 metadata=metadata,
+                tool_call_batch=tool_call_batch,
             )
         )
 
-    def append_tool_result(
+    def append_assistant_tool_batch(
         self,
-        content: str,
-        tool_call_id: str,
-        tool_name: str,
+        batch: ToolCallBatch,
         *,
-        is_error: bool = False,
-        metadata: Optional[dict[str, Any]] = None,
+        content: str = "",
+        metadata: Optional[MessageMetadata] = None,
     ) -> None:
-        self.messages.append(
-            SessionMessage(
-                role=MessageRole.TOOL,
-                content=content,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                is_error=is_error,
-                tool_result_metadata=dict(metadata or {}),
-            )
+        self.append_assistant_message(
+            content=content,
+            metadata=metadata,
+            tool_call_batch=batch,
         )

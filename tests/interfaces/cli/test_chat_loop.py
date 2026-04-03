@@ -5,15 +5,16 @@ import textwrap
 from unittest.mock import Mock
 
 from myopenclaw.agent.agent import Agent
-from myopenclaw.conversation.message import ToolCall
+from myopenclaw.conversation.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 from myopenclaw.interfaces.cli.chat import ChatLoop
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.runtime import GenerateResult, RuntimeEvent, RuntimeEventType
+from myopenclaw.tools.base import ToolExecutionResult
 
 
-class StubRuntime:
+class StubCoordinator:
     async def run_turn(
         self,
         *,
@@ -34,7 +35,7 @@ class StubRuntime:
         return GenerateResult(text="runtime reply")
 
 
-class StubToolRuntime:
+class StubToolCoordinator:
     async def run_turn(
         self,
         *,
@@ -51,47 +52,48 @@ class StubToolRuntime:
                     step_index=1,
                 )
             )
-        session.append_assistant_message(
-            tool_calls=[
+        batch = ToolCallBatch(
+            batch_id="batch-1",
+            step_index=1,
+            calls=[
                 ToolCall(
                     id="call-1",
                     name="read",
                     arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
                 )
-            ]
+            ],
+            results=[
+                ToolCallResult(
+                    call_id="call-1",
+                    content="file content " * 80,
+                    metadata={
+                        "cwd": "/tmp/workspace",
+                        "exit_code": 0,
+                        "shell_status": "ready",
+                    },
+                )
+            ],
         )
+        session.append_assistant_tool_batch(batch)
         if event_handler is not None:
             await event_handler(
                 RuntimeEvent(
                     event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                    tool_call=ToolCall(
-                        id="call-1",
-                        name="read",
-                        arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
-                    ),
+                    step_index=1,
+                    batch_id="batch-1",
+                    call_index=0,
+                    total_calls=1,
+                    tool_call=batch.calls[0],
                 )
             )
-        session.append_tool_result(
-            content="file content " * 80,
-            tool_call_id="call-1",
-            tool_name="read",
-            metadata={
-                "cwd": "/tmp/workspace",
-                "exit_code": 0,
-                "shell_status": "ready",
-            },
-        )
-        if event_handler is not None:
-            from myopenclaw.tools.base import ToolExecutionResult
-
             await event_handler(
                 RuntimeEvent(
                     event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
-                    tool_call=ToolCall(
-                        id="call-1",
-                        name="read",
-                        arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
-                    ),
+                    step_index=1,
+                    batch_id="batch-1",
+                    call_index=0,
+                    total_calls=1,
+                    tool_call=batch.calls[0],
                     tool_result=ToolExecutionResult(
                         content="file content " * 80,
                         metadata={
@@ -122,7 +124,7 @@ class StubToolRuntime:
 
 
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
-    async def test_handle_user_input_delegates_to_runtime_and_updates_session_count(self) -> None:
+    async def test_handle_user_input_delegates_to_coordinator_and_updates_session_count(self) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -137,7 +139,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session = Session(session_id="session-1", agent_id="Pickle")
         loop = ChatLoop(
             agent=agent,
-            runtime=StubRuntime(),
+            coordinator=StubCoordinator(),
             session=session,
         )
 
@@ -161,12 +163,12 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         loop = ChatLoop(
             agent=agent,
-            runtime=StubRuntime(),
+            coordinator=StubCoordinator(),
         )
 
         self.assertEqual("Pickle", loop.session.agent_id)
 
-    async def test_handle_user_input_renders_tool_activity_before_final_reply(self) -> None:
+    async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(self) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -182,7 +184,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         console = Mock()
         loop = ChatLoop(
             agent=agent,
-            runtime=StubToolRuntime(),
+            coordinator=StubToolCoordinator(),
             session=session,
             console=console,
         )
@@ -193,19 +195,75 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         titles = [call.args[0].title for call in console.print.call_args_list]
-        tool_call_render = str(console.print.call_args_list[1].args[0].renderable)
-        tool_result_render = str(console.print.call_args_list[2].args[0].renderable)
+        started_render = str(console.print.call_args_list[1].args[0].renderable)
+        completed_render = str(console.print.call_args_list[2].args[0].renderable)
 
         self.assertEqual("final reply", result.text)
-        self.assertEqual(["Thinking", "Tool Call", "Tool Result", "Assistant"], titles)
-        self.assertIn("read(", tool_call_render)
-        self.assertIn("...", tool_call_render)
-        self.assertLess(len(tool_call_render), 180)
-        self.assertIn("...", tool_result_render)
-        self.assertLess(len(tool_result_render), 220)
-        self.assertIn("exit 0", tool_result_render)
-        self.assertIn("/tmp/workspace", tool_result_render)
-        self.assertIn("ready", tool_result_render)
+        self.assertEqual(["Thinking", "Tool", "Tool", "Assistant"], titles)
+        self.assertIn("read(path=", started_render)
+        self.assertIn("status: running", started_render)
+        self.assertNotIn("step:", started_render)
+        self.assertIn("read(path=", completed_render)
+        self.assertIn("status: ok", completed_render)
+        self.assertIn("result: file content", completed_render)
+        self.assertNotIn("meta:", completed_render)
+
+    async def test_render_turn_output_replays_assistant_tool_batch(self) -> None:
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+            ),
+            tool_ids=[],
+        )
+        session = Session(session_id="session-1", agent_id="Pickle")
+        session.append_assistant_tool_batch(
+            ToolCallBatch(
+                batch_id="batch-1",
+                step_index=1,
+                calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="read",
+                        arguments={"path": "file.txt"},
+                    )
+                ],
+                results=[
+                    ToolCallResult(
+                        call_id="call-1",
+                        content="hello world",
+                        metadata={"exit_code": 0},
+                    )
+                ],
+            )
+        )
+        console = Mock()
+        loop = ChatLoop(
+            agent=agent,
+            coordinator=StubCoordinator(),
+            session=session,
+            console=console,
+        )
+
+        loop.render_turn_output(
+            GenerateResult(
+                text="final reply",
+                metadata=MessageMetadata(provider="google/gemini", model="gemini-3-flash-preview"),
+            ),
+            start_index=0,
+        )
+
+        titles = [call.args[0].title for call in console.print.call_args_list]
+        self.assertEqual(["Tool", "Assistant"], titles)
+        replay_render = str(console.print.call_args_list[0].args[0].renderable)
+        self.assertIn("read(path='file.txt')", replay_render)
+        self.assertIn("status: ok", replay_render)
+        self.assertIn("result: hello world", replay_render)
+        self.assertNotIn("meta:", replay_render)
 
     async def test_from_config_path_uses_react_max_steps_from_app_config(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -239,7 +297,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
             loop = ChatLoop.from_config_path(config_path=config_path)
 
-            self.assertEqual(16, loop.runtime.max_steps)
+            self.assertEqual(16, loop.coordinator.strategy.max_steps)
 
 
 if __name__ == "__main__":

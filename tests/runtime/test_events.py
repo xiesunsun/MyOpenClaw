@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -6,7 +7,14 @@ from myopenclaw.conversation.message import ToolCall
 from myopenclaw.conversation.session import Session
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider
-from myopenclaw.runtime import FinishReason, GenerateResult, RuntimeEventType, TurnRunner
+from myopenclaw.runtime import (
+    AgentCoordinator,
+    AgentRuntimeContext,
+    FinishReason,
+    GenerateResult,
+    ReActStrategy,
+    RuntimeEventType,
+)
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 
 
@@ -22,13 +30,16 @@ class StubProvider(BaseLLMProvider):
         return self.responses.pop(0)
 
 
-class StubTool(BaseTool):
+class DelayEchoTool(BaseTool):
     spec = ToolSpec(
         name="echo",
         description="Echo text",
         input_schema={
             "type": "object",
-            "properties": {"text": {"type": "string"}},
+            "properties": {
+                "text": {"type": "string"},
+                "delay_ms": {"type": "integer"},
+            },
             "required": ["text"],
         },
     )
@@ -38,27 +49,12 @@ class StubTool(BaseTool):
         arguments: dict[str, object],
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
+        await asyncio.sleep(int(arguments.get("delay_ms", 0)) / 1000)
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
-class StubProviderResolver:
-    def __init__(self, provider: BaseLLMProvider) -> None:
-        self.provider = provider
-
-    def resolve(self, agent: Agent) -> BaseLLMProvider:
-        return self.provider
-
-
-class StubToolResolver:
-    def __init__(self, tools: list[BaseTool]) -> None:
-        self.tools = tools
-
-    def resolve(self, agent: Agent) -> list[BaseTool]:
-        return list(self.tools)
-
-
 class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
-    async def test_runner_emits_live_events_for_step_tool_and_final_answer(self) -> None:
+    async def test_runner_emits_batch_aware_events_for_started_and_completed_calls(self) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -70,17 +66,24 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=["echo"],
         )
-        runner = TurnRunner(
-            provider_resolver=StubProviderResolver(
-                StubProvider(
+        coordinator = AgentCoordinator(
+            strategy=ReActStrategy(max_steps=4),
+            context=AgentRuntimeContext(
+                agent=agent,
+                provider=StubProvider(
                     responses=[
                         GenerateResult(
                             tool_calls=[
                                 ToolCall(
-                                    id="call-1",
+                                    id="call-slow",
                                     name="echo",
-                                    arguments={"text": "ping"},
-                                )
+                                    arguments={"text": "slow", "delay_ms": 40},
+                                ),
+                                ToolCall(
+                                    id="call-fast",
+                                    name="echo",
+                                    arguments={"text": "fast", "delay_ms": 0},
+                                ),
                             ],
                             finish_reason=FinishReason.TOOL_CALLS,
                         ),
@@ -89,10 +92,9 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
                             finish_reason=FinishReason.STOP,
                         ),
                     ]
-                )
+                ),
+                tools=[DelayEchoTool()],
             ),
-            tool_resolver=StubToolResolver([StubTool()]),
-            max_steps=4,
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
         events = []
@@ -100,7 +102,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         async def capture(event) -> None:
             events.append(event)
 
-        result = await runner.run_turn(
+        result = await coordinator.run_turn(
             agent=agent,
             session=session,
             user_text="hello",
@@ -112,16 +114,79 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             [
                 RuntimeEventType.MODEL_STEP_STARTED,
                 RuntimeEventType.TOOL_CALL_STARTED,
+                RuntimeEventType.TOOL_CALL_STARTED,
+                RuntimeEventType.TOOL_CALL_COMPLETED,
                 RuntimeEventType.TOOL_CALL_COMPLETED,
                 RuntimeEventType.MODEL_STEP_STARTED,
                 RuntimeEventType.ASSISTANT_MESSAGE,
             ],
             [event.event_type for event in events],
         )
-        self.assertEqual(1, events[0].step_index)
-        self.assertEqual("echo", events[1].tool_call.name)
-        self.assertEqual("ping", events[2].tool_result.content)
-        self.assertEqual("done", events[4].text)
+        batch_id = events[1].batch_id
+        self.assertIsNotNone(batch_id)
+        self.assertEqual(batch_id, events[2].batch_id)
+        self.assertEqual(batch_id, events[3].batch_id)
+        self.assertEqual(0, events[1].call_index)
+        self.assertEqual(1, events[2].call_index)
+        self.assertEqual(2, events[1].total_calls)
+        self.assertEqual(1, events[3].call_index)
+        self.assertEqual("fast", events[3].tool_result.content)
+        self.assertEqual(0, events[4].call_index)
+        self.assertEqual("slow", events[4].tool_result.content)
+        self.assertEqual("done", events[6].text)
+
+    async def test_runner_emits_failed_event_for_erroring_tool_call(self) -> None:
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+            ),
+            tool_ids=["missing"],
+        )
+        coordinator = AgentCoordinator(
+            strategy=ReActStrategy(max_steps=2),
+            context=AgentRuntimeContext(
+                agent=agent,
+                provider=StubProvider(
+                    responses=[
+                        GenerateResult(
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-1",
+                                    name="missing",
+                                    arguments={},
+                                )
+                            ],
+                            finish_reason=FinishReason.TOOL_CALLS,
+                        ),
+                        GenerateResult(text="done"),
+                    ]
+                ),
+                tools=[],
+            ),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        events = []
+
+        async def capture(event) -> None:
+            events.append(event)
+
+        await coordinator.run_turn(
+            agent=agent,
+            session=session,
+            user_text="hello",
+            event_handler=capture,
+        )
+
+        failure_event = next(
+            event for event in events if event.event_type == RuntimeEventType.TOOL_CALL_FAILED
+        )
+        self.assertEqual("missing", failure_event.tool_call.name)
+        self.assertTrue(failure_event.tool_result.is_error)
 
 
 if __name__ == "__main__":

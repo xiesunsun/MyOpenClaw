@@ -3,7 +3,13 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
+from myopenclaw.conversation.message import (
+    MessageRole,
+    SessionMessage,
+    ToolCall,
+    ToolCallBatch,
+    ToolCallResult,
+)
 from myopenclaw.llm.config import ModelConfig
 from myopenclaw.llm.provider import BaseLLMProvider
 from myopenclaw.runtime.generation import (
@@ -69,6 +75,10 @@ class GeminiProvider(BaseLLMProvider):
             text=self._extract_text(response),
             tool_calls=self._extract_tool_calls(response),
             finish_reason=self._extract_finish_reason(response),
+            provider_finish_reason=self._extract_provider_finish_reason(response),
+            provider_finish_message=self._extract_provider_finish_message(response),
+            provider_response_id=getattr(response, "response_id", None),
+            provider_model_version=getattr(response, "model_version", None),
             usage=self._extract_usage(response),
             raw=response,
         )
@@ -78,15 +88,22 @@ class GeminiProvider(BaseLLMProvider):
         return [
             types.Tool(
                 function_declarations=[
-                    types.FunctionDeclaration(
-                        name=tool_spec.name,
-                        description=tool_spec.description,
-                        parameters_json_schema=tool_spec.input_schema,
-                    )
+                    types.FunctionDeclaration(**GeminiProvider._build_function_declaration(tool_spec))
                 ]
             )
             for tool_spec in tool_specs
         ]
+
+    @staticmethod
+    def _build_function_declaration(tool_spec: ToolSpec) -> dict[str, Any]:
+        declaration = {
+            "name": tool_spec.name,
+            "description": tool_spec.description,
+            "parameters_json_schema": tool_spec.input_schema,
+        }
+        if tool_spec.output_schema is not None:
+            declaration["response_json_schema"] = tool_spec.output_schema
+        return declaration
 
     @staticmethod
     def _build_contents(messages: list[SessionMessage]) -> list[types.Content]:
@@ -102,43 +119,74 @@ class GeminiProvider(BaseLLMProvider):
                 continue
 
             if message.role == MessageRole.ASSISTANT:
-                parts: list[types.Part] = []
-                if message.content:
-                    parts.append(types.Part.from_text(text=message.content))
-                for tool_call in message.tool_calls:
-                    parts.append(
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id=tool_call.id,
-                                name=tool_call.name,
-                                args=tool_call.arguments,
-                            ),
-                            thought_signature=tool_call.thought_signature,
-                        )
-                    )
-                contents.append(types.Content(role="model", parts=parts))
-                continue
+                if message.tool_call_batch is not None:
+                    contents.extend(GeminiProvider._build_batch_contents(message))
+                    continue
 
-            if message.role == MessageRole.TOOL:
                 contents.append(
                     types.Content(
-                        role="user",
-                        parts=[
-                            types.Part(
-                                function_response=types.FunctionResponse(
-                                    id=message.tool_call_id,
-                                    name=message.tool_name,
-                                    response={
-                                        "content": message.content,
-                                        "is_error": message.is_error,
-                                        "metadata": dict(message.tool_result_metadata),
-                                    },
-                                )
-                            )
-                        ],
+                        role="model",
+                        parts=[types.Part.from_text(text=message.content)],
                     )
                 )
         return contents
+
+    @staticmethod
+    def _build_batch_contents(message: SessionMessage) -> list[types.Content]:
+        batch = message.tool_call_batch
+        if batch is None:
+            return []
+
+        model_parts: list[types.Part] = []
+        if message.content:
+            model_parts.append(types.Part.from_text(text=message.content))
+        for tool_call in batch.calls:
+            model_parts.append(
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=tool_call.id,
+                        name=tool_call.name,
+                        args=tool_call.arguments,
+                    ),
+                    thought_signature=tool_call.thought_signature,
+                )
+            )
+
+        response_parts = [
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    response=GeminiProvider._build_function_response_payload(tool_result),
+                )
+            )
+            for tool_call, tool_result in GeminiProvider._ordered_batch_pairs(batch)
+        ]
+
+        contents = [types.Content(role="model", parts=model_parts)]
+        if response_parts:
+            contents.append(types.Content(role="user", parts=response_parts))
+        return contents
+
+    @staticmethod
+    def _ordered_batch_pairs(
+        batch: ToolCallBatch,
+    ) -> list[tuple[ToolCall, ToolCallResult]]:
+        results_by_call_id = {
+            tool_result.call_id: tool_result for tool_result in batch.results
+        }
+        return [
+            (tool_call, results_by_call_id[tool_call.id])
+            for tool_call in batch.calls
+            if tool_call.id in results_by_call_id
+        ]
+
+    @staticmethod
+    def _build_function_response_payload(tool_result: ToolCallResult) -> dict[str, Any]:
+        response = {"error": tool_result.content} if tool_result.is_error else {"output": tool_result.content}
+        if tool_result.metadata:
+            response["metadata"] = dict(tool_result.metadata)
+        return response
 
     @staticmethod
     def _extract_text(response: types.GenerateContentResponse) -> str:
@@ -195,6 +243,34 @@ class GeminiProvider(BaseLLMProvider):
         return FinishReason.STOP
 
     @staticmethod
+    def _extract_provider_finish_reason(response: types.GenerateContentResponse) -> str | None:
+        candidate = GeminiProvider._primary_candidate(response)
+        if candidate is None:
+            return None
+        finish_reason = getattr(candidate, "finish_reason", None)
+        if finish_reason is None:
+            return None
+        return (
+            getattr(finish_reason, "name", None)
+            or getattr(finish_reason, "value", None)
+            or str(finish_reason)
+        )
+
+    @staticmethod
+    def _extract_provider_finish_message(response: types.GenerateContentResponse) -> str | None:
+        candidate = GeminiProvider._primary_candidate(response)
+        if candidate is None:
+            return None
+        return getattr(candidate, "finish_message", None)
+
+    @staticmethod
+    def _primary_candidate(response: types.GenerateContentResponse) -> Any | None:
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            return None
+        return candidates[0]
+
+    @staticmethod
     def _extract_usage(response: types.GenerateContentResponse) -> TokenUsage | None:
         usage = getattr(response, "usage_metadata", None)
         if usage is None:
@@ -202,4 +278,8 @@ class GeminiProvider(BaseLLMProvider):
         return TokenUsage(
             input_tokens=getattr(usage, "prompt_token_count", None),
             output_tokens=getattr(usage, "candidates_token_count", None),
+            cached_content_tokens=getattr(usage, "cached_content_token_count", None),
+            thoughts_tokens=getattr(usage, "thoughts_token_count", None),
+            tool_use_prompt_tokens=getattr(usage, "tool_use_prompt_token_count", None),
+            total_tokens=getattr(usage, "total_token_count", None),
         )

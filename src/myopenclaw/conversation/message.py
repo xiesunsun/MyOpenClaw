@@ -22,12 +22,24 @@ class ToolCall:
 
 
 @dataclass
+class ToolCallResult:
+    call_id: str
+    content: str
+    is_error: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolCallBatch:
+    batch_id: str
+    step_index: int
+    calls: list[ToolCall] = field(default_factory=list)
+    results: list[ToolCallResult] = field(default_factory=list)
+
+
+@dataclass
 class SessionMessage:
     role: MessageRole
     content: str = ""
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_call_id: Optional[str] = None
-    tool_name: Optional[str] = None
-    is_error: bool = False
-    tool_result_metadata: dict[str, Any] = field(default_factory=dict)
     metadata: Optional[MessageMetadata] = None
+    tool_call_batch: Optional[ToolCallBatch] = None

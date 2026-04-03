@@ -1,6 +1,12 @@
 import unittest
 
-from myopenclaw.conversation.message import MessageRole, SessionMessage, ToolCall
+from myopenclaw.conversation.message import (
+    MessageRole,
+    SessionMessage,
+    ToolCall,
+    ToolCallBatch,
+    ToolCallResult,
+)
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
 
@@ -39,31 +45,33 @@ class SessionTests(unittest.TestCase):
             session.messages,
         )
 
-    def test_session_can_store_tool_calls_and_tool_results(self) -> None:
+    def test_session_can_store_assistant_tool_batch(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")
 
-        session.append_assistant_message(
-            tool_calls=[
+        batch = ToolCallBatch(
+            batch_id="batch-1",
+            step_index=1,
+            calls=[
                 ToolCall(
                     id="call-1",
                     name="echo",
                     arguments={"text": "ping"},
                 )
-            ]
+            ],
+            results=[
+                ToolCallResult(
+                    call_id="call-1",
+                    content="ping",
+                    metadata={"exit_code": 0},
+                )
+            ],
         )
-        session.append_tool_result(
-            content="ping",
-            tool_call_id="call-1",
-            tool_name="echo",
-            metadata={"exit_code": 0},
-        )
+        session.append_assistant_tool_batch(batch)
 
         self.assertEqual(MessageRole.ASSISTANT, session.messages[0].role)
-        self.assertEqual("echo", session.messages[0].tool_calls[0].name)
-        self.assertEqual(MessageRole.TOOL, session.messages[1].role)
-        self.assertEqual("call-1", session.messages[1].tool_call_id)
-        self.assertEqual("echo", session.messages[1].tool_name)
-        self.assertEqual({"exit_code": 0}, session.messages[1].tool_result_metadata)
+        self.assertEqual("echo", session.messages[0].tool_call_batch.calls[0].name)
+        self.assertEqual("call-1", session.messages[0].tool_call_batch.results[0].call_id)
+        self.assertEqual({"exit_code": 0}, session.messages[0].tool_call_batch.results[0].metadata)
 
 
 if __name__ == "__main__":

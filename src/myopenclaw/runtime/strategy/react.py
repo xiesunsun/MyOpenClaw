@@ -1,14 +1,26 @@
+import asyncio
 import inspect
 import time
+from dataclasses import dataclass
+from uuid import uuid4
 
-from myopenclaw.conversation.message import ToolCall
+from myopenclaw.conversation.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.conversation.session import Session
+from myopenclaw.runtime.context import AgentRuntimeContext
 from myopenclaw.runtime.events import RuntimeEvent, RuntimeEventType
 from myopenclaw.runtime.generation import FinishReason, GenerateRequest, GenerateResult
-from myopenclaw.runtime.context import AgentRuntimeContext
 from myopenclaw.runtime.strategy.base import ExecutionStrategy, RuntimeEventHandler
 from myopenclaw.tools.base import ToolExecutionResult
+
+
+@dataclass(frozen=True)
+class ToolCallOutcome:
+    batch_id: str
+    call_index: int
+    total_calls: int
+    tool_call: ToolCall
+    result: ToolExecutionResult
 
 
 class ReActStrategy(ExecutionStrategy):
@@ -47,47 +59,45 @@ class ReActStrategy(ExecutionStrategy):
                 model=context.agent.model_config.model,
                 input_tokens=result.usage.input_tokens if result.usage else None,
                 output_tokens=result.usage.output_tokens if result.usage else None,
+                total_tokens=result.usage.total_tokens if result.usage else None,
                 elapsed_ms=elapsed_ms,
+                provider_finish_reason=result.provider_finish_reason,
+                provider_finish_message=result.provider_finish_message,
+                provider_response_id=result.provider_response_id,
+                provider_model_version=result.provider_model_version,
             )
             result.metadata = metadata
             last_metadata = metadata
 
             if result.tool_calls:
-                session.append_assistant_message(
+                batch_id = uuid4().hex
+                outcomes = await self._execute_tool_batch(
+                    batch_id=batch_id,
+                    step_index=step_index,
+                    tool_calls=result.tool_calls,
+                    context=context,
+                    session=session,
+                    event_handler=event_handler,
+                )
+                ordered_outcomes = sorted(outcomes, key=lambda outcome: outcome.call_index)
+                session.append_assistant_tool_batch(
+                    batch=ToolCallBatch(
+                        batch_id=batch_id,
+                        step_index=step_index,
+                        calls=list(result.tool_calls),
+                        results=[
+                            ToolCallResult(
+                                call_id=outcome.tool_call.id,
+                                content=outcome.result.content,
+                                is_error=outcome.result.is_error,
+                                metadata=dict(outcome.result.metadata),
+                            )
+                            for outcome in ordered_outcomes
+                        ],
+                    ),
                     content=result.text,
                     metadata=metadata,
-                    tool_calls=result.tool_calls,
                 )
-                for tool_call in result.tool_calls:
-                    await self._emit_event(
-                        event_handler,
-                        RuntimeEvent(
-                            event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                            step_index=step_index,
-                            tool_call=tool_call,
-                        ),
-                    )
-                    tool_result = await self._execute_tool_call(
-                        context=context,
-                        session=session,
-                        tool_call=tool_call,
-                    )
-                    session.append_tool_result(
-                        content=tool_result.content,
-                        tool_call_id=tool_call.id,
-                        tool_name=tool_call.name,
-                        is_error=tool_result.is_error,
-                        metadata=tool_result.metadata,
-                    )
-                    await self._emit_event(
-                        event_handler,
-                        RuntimeEvent(
-                            event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
-                            step_index=step_index,
-                            tool_call=tool_call,
-                            tool_result=tool_result,
-                        ),
-                    )
                 continue
 
             session.append_assistant_message(result.text, metadata=metadata)
@@ -118,6 +128,94 @@ class ReActStrategy(ExecutionStrategy):
             ),
         )
         return result
+
+    async def _execute_tool_batch(
+        self,
+        *,
+        batch_id: str,
+        step_index: int,
+        tool_calls: list[ToolCall],
+        context: AgentRuntimeContext,
+        session: Session,
+        event_handler: RuntimeEventHandler | None,
+    ) -> list[ToolCallOutcome]:
+        total_calls = len(tool_calls)
+        for call_index, tool_call in enumerate(tool_calls):
+            await self._emit_event(
+                event_handler,
+                RuntimeEvent(
+                    event_type=RuntimeEventType.TOOL_CALL_STARTED,
+                    step_index=step_index,
+                    batch_id=batch_id,
+                    call_index=call_index,
+                    total_calls=total_calls,
+                    tool_call=tool_call,
+                ),
+            )
+
+        tasks = [
+            asyncio.create_task(
+                self._execute_tool_call_outcome(
+                    batch_id=batch_id,
+                    call_index=call_index,
+                    total_calls=total_calls,
+                    context=context,
+                    session=session,
+                    tool_call=tool_call,
+                )
+            )
+            for call_index, tool_call in enumerate(tool_calls)
+        ]
+        outcomes: list[ToolCallOutcome] = []
+        try:
+            for completed_task in asyncio.as_completed(tasks):
+                outcome = await completed_task
+                outcomes.append(outcome)
+                await self._emit_event(
+                    event_handler,
+                    RuntimeEvent(
+                        event_type=(
+                            RuntimeEventType.TOOL_CALL_FAILED
+                            if outcome.result.is_error
+                            else RuntimeEventType.TOOL_CALL_COMPLETED
+                        ),
+                        step_index=step_index,
+                        batch_id=outcome.batch_id,
+                        call_index=outcome.call_index,
+                        total_calls=outcome.total_calls,
+                        tool_call=outcome.tool_call,
+                        tool_result=outcome.result,
+                    ),
+                )
+        finally:
+            for task in tasks:
+                if task.done():
+                    continue
+                task.cancel()
+        return outcomes
+
+    async def _execute_tool_call_outcome(
+        self,
+        *,
+        batch_id: str,
+        call_index: int,
+        total_calls: int,
+        context: AgentRuntimeContext,
+        session: Session,
+        tool_call: ToolCall,
+    ) -> ToolCallOutcome:
+        result = await self._execute_tool_call(
+            context=context,
+            session=session,
+            tool_call=tool_call,
+        )
+        return ToolCallOutcome(
+            batch_id=batch_id,
+            call_index=call_index,
+            total_calls=total_calls,
+            tool_call=tool_call,
+            result=result,
+        )
 
     async def _execute_tool_call(
         self,

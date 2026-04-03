@@ -3,8 +3,10 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from myopenclaw.conversation.message import ToolCallBatch
 from myopenclaw.conversation.metadata import MessageMetadata
 from myopenclaw.runtime import RuntimeEvent, RuntimeEventType
+from myopenclaw.tools.base import ToolExecutionResult
 
 
 class ChatEventRenderer:
@@ -21,23 +23,26 @@ class ChatEventRenderer:
             return
 
         if event.event_type == RuntimeEventType.TOOL_CALL_STARTED and event.tool_call is not None:
-            body = Text(
-                f"{event.tool_call.name}({self._format_tool_arguments(event.tool_call.arguments)})"
+            self._render_message(
+                "Tool",
+                self._render_tool_started(event.tool_call.name, event.tool_call.arguments),
+                style="blue",
             )
-            self._render_message("Tool Call", body, style="blue")
             return
 
-        if event.event_type == RuntimeEventType.TOOL_CALL_COMPLETED and event.tool_call is not None:
-            tool_result = event.tool_result
-            status = "error" if tool_result and tool_result.is_error else "ok"
-            content = tool_result.content if tool_result is not None else ""
-            body = Text(f"{event.tool_call.name} -> {status}\n{self._truncate_content(content)}")
-            if tool_result is not None and tool_result.metadata:
-                body.append(f"\n{self._format_tool_metadata(tool_result.metadata)}", style="dim")
+        if event.event_type in {
+            RuntimeEventType.TOOL_CALL_COMPLETED,
+            RuntimeEventType.TOOL_CALL_FAILED,
+        } and event.tool_call is not None:
+            tool_result = event.tool_result or ToolExecutionResult(content="")
             self._render_message(
-                "Tool Result",
-                body,
-                style="red" if tool_result and tool_result.is_error else "green",
+                "Tool",
+                self._render_tool_finished(
+                    event.tool_call.name,
+                    event.tool_call.arguments,
+                    tool_result,
+                ),
+                style="red" if tool_result.is_error else "green",
             )
             return
 
@@ -46,6 +51,49 @@ class ChatEventRenderer:
             if event.metadata is not None:
                 content = Group(Markdown(event.text), self._render_assistant_footer(event.metadata))
             self._render_message("Assistant", content, style="yellow")
+
+    @classmethod
+    def render_tool_batch_transcript(cls, batch: ToolCallBatch) -> list[tuple[str, Text]]:
+        results_by_call_id = {result.call_id: result for result in batch.results}
+        entries: list[tuple[str, Text]] = []
+        for tool_call in batch.calls:
+            tool_result = results_by_call_id.get(tool_call.id)
+            if tool_result is None:
+                continue
+            renderable = cls._render_tool_finished(
+                tool_call.name,
+                tool_call.arguments,
+                ToolExecutionResult(
+                    content=tool_result.content,
+                    is_error=tool_result.is_error,
+                    metadata=dict(tool_result.metadata),
+                ),
+            )
+            entries.append(("red" if tool_result.is_error else "green", renderable))
+        return entries
+
+    @classmethod
+    def _render_tool_started(cls, name: str, arguments: dict[str, object]) -> Text:
+        return Text(
+            f"{cls._format_tool_label(name, arguments)}\n"
+            "status: running"
+        )
+
+    @classmethod
+    def _render_tool_finished(
+        cls,
+        name: str,
+        arguments: dict[str, object],
+        tool_result: ToolExecutionResult,
+    ) -> Text:
+        status = "failed" if tool_result.is_error else "ok"
+        lines = [
+            cls._format_tool_label(name, arguments),
+            f"status: {status}",
+        ]
+        if tool_result.content:
+            lines.append(f"result: {cls._truncate_content(tool_result.content)}")
+        return Text("\n".join(lines))
 
     def _render_message(self, title: str, content: RenderableType, *, style: str) -> None:
         self.console.print(
@@ -72,35 +120,21 @@ class ChatEventRenderer:
             footer.append(" · ".join(stats))
         return footer
 
-    def _format_tool_arguments(self, arguments: dict[str, object]) -> str:
-        formatted = []
+    @staticmethod
+    def _format_tool_label(name: str, arguments: dict[str, object]) -> str:
+        parts: list[str] = []
         for key, value in arguments.items():
             rendered = repr(value)
-            if len(rendered) > 72:
-                rendered = f"{rendered[:69]}..."
-            formatted.append(f"{key}={rendered}")
-        return ", ".join(formatted)
+            if key == "content":
+                rendered = f"<{len(str(value))} chars>"
+            elif len(rendered) > 100:
+                rendered = f"{rendered[:97]}..."
+            parts.append(f"{key}={rendered}")
+        return f"{name}({', '.join(parts)})"
 
-    def _truncate_content(self, content: str, limit: int = 120) -> str:
-        if len(content) <= limit:
-            return content
-        return f"{content[:limit]}..."
-
-    def _format_tool_metadata(self, metadata: dict[str, object]) -> str:
-        parts: list[str] = []
-        exit_code = metadata.get("exit_code")
-        if exit_code is not None:
-            parts.append(f"exit {exit_code}")
-        cwd = metadata.get("cwd")
-        if cwd:
-            parts.append(f"cwd {cwd}")
-        shell_status = metadata.get("shell_status")
-        if shell_status:
-            parts.append(f"status {shell_status}")
-        timed_out = metadata.get("timed_out")
-        if timed_out:
-            parts.append("timed out")
-        truncated = metadata.get("truncated")
-        if truncated:
-            parts.append("truncated")
-        return " · ".join(parts)
+    @staticmethod
+    def _truncate_content(content: str, limit: int = 180) -> str:
+        normalized = " ".join(content.split())
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[:limit - 3]}..."
