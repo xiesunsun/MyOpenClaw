@@ -1,10 +1,10 @@
 default_agent: Pickle
 react_max_steps: 100
-
+default_file_access_mode: full
+default_skills_path: /Users/ssunxie/code/myopenclaw/.agent/skills/
 default_llm:
   provider: google/gemini
   model: gemini-3-flash-preview
-
 providers:
   google/gemini:
     models:
@@ -23,10 +23,18 @@ agents:
   Pickle:
     workspace_path: pickle_workspace
     behavior_path: agents/Pickle
+    file_access_mode: full
     llm:
       provider: google/gemini
       model: gemini-3.1-flash-lite-preview
     tools:
+      - list_directory
+      - glob_search
+      - grep_search
+      - read_file
+      - read_many_files
+      - replace
+      - write_file
       - shell_exec
       - shell_restart
       - shell_close

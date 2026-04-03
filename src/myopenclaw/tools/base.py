@@ -23,7 +23,7 @@ class ToolExecutionContext:
     agent_id: str
     session_id: str
     workspace_path: Path
-    path_policy: Any = None
+    workspace_files: Any = None
     shell_session_manager: Any = None
 
 

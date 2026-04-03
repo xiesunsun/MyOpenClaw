@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 
-from myopenclaw.agent.agent import Agent
+from myopenclaw.agents.agent import Agent
 from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
 

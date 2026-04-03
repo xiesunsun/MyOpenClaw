@@ -138,6 +138,68 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual("gemini-3-flash-preview", model_config.model)
             self.assertEqual(0.2, model_config.temperature)
 
+    def test_file_access_mode_defaults_to_workspace(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+
+            self.assertEqual("workspace", config.resolve_file_access_mode().value)
+
+    def test_agent_file_access_mode_overrides_default(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_file_access_mode: workspace
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                        file_access_mode: full
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+
+            self.assertEqual("full", config.resolve_file_access_mode().value)
+
 
 if __name__ == "__main__":
     unittest.main()

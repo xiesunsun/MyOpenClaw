@@ -3,7 +3,12 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from myopenclaw.llm.config import ModelConfig, ModelSelection, ProviderModelConfig
+from myopenclaw.shared.file_access import FileAccessMode
+from myopenclaw.shared.model_config import (
+    ModelConfig,
+    ModelSelection,
+    ProviderModelConfig,
+)
 
 
 class ProviderCatalog(BaseModel):
@@ -15,12 +20,14 @@ class AgentConfig(BaseModel):
     behavior_path: Path
     llm: ModelSelection | None = None
     tools: list[str] = Field(default_factory=list)
+    file_access_mode: FileAccessMode | None = None
 
 
 class AppConfig(BaseModel):
     root: Path = Field(default_factory=Path.cwd, exclude=True)
     default_agent: str
     default_llm: ModelSelection
+    default_file_access_mode: FileAccessMode = FileAccessMode.WORKSPACE
     react_max_steps: int = 8
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
@@ -73,3 +80,9 @@ class AppConfig(BaseModel):
         data["provider"] = resolved_selection.provider
         data["model"] = resolved_selection.model
         return ModelConfig.model_validate(data)
+
+    def resolve_file_access_mode(
+        self, agent_id: str | None = None
+    ) -> FileAccessMode:
+        agent_config = self.get_agent_config(agent_id)
+        return agent_config.file_access_mode or self.default_file_access_mode

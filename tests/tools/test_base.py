@@ -30,7 +30,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
-                path_policy=None,
+                workspace_files=None,
                 shell_session_manager=None,
             ),
         )
@@ -66,7 +66,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
-                path_policy=None,
+                workspace_files=None,
                 shell_session_manager=None,
             ),
         )
@@ -79,11 +79,11 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
             agent_id="Pickle",
             session_id="session-1",
             workspace_path=Path("/tmp/pickle"),
-            path_policy="policy",
+            workspace_files="workspace-files",
             shell_session_manager="shell-manager",
         )
 
-        self.assertEqual("policy", context.path_policy)
+        self.assertEqual("workspace-files", context.workspace_files)
         self.assertEqual("shell-manager", context.shell_session_manager)
 
 

@@ -4,7 +4,6 @@ import unittest
 
 from myopenclaw.tools.base import ToolExecutionContext
 from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.policy import WorkspacePathAccessPolicy
 from myopenclaw.tools.registry import ToolRegistry
 from myopenclaw.tools.shell import (
     ShellCloseTool,
@@ -47,7 +46,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                path_policy=WorkspacePathAccessPolicy(),
+                workspace_files=None,
                 shell_session_manager=manager,
             )
 
@@ -73,7 +72,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                path_policy=WorkspacePathAccessPolicy(),
+                workspace_files=None,
                 shell_session_manager=manager,
             )
 
@@ -97,7 +96,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                path_policy=WorkspacePathAccessPolicy(),
+                workspace_files=None,
                 shell_session_manager=manager,
             )
 
@@ -118,7 +117,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                path_policy=WorkspacePathAccessPolicy(),
+                workspace_files=None,
                 shell_session_manager=manager,
             )
 
@@ -141,7 +140,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                path_policy=WorkspacePathAccessPolicy(),
+                workspace_files=None,
                 shell_session_manager=manager,
             )
 

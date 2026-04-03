@@ -8,9 +8,9 @@ class ToolRegistryTests(unittest.TestCase):
     def test_registry_resolves_builtin_tools_from_catalog(self) -> None:
         registry = ToolRegistry(tools=builtin_tools())
 
-        tools = registry.resolve_many(["echo", "read"])
+        tools = registry.resolve_many(["echo", "read_file"])
 
-        self.assertEqual(["echo", "read"], [tool.spec.name for tool in tools])
+        self.assertEqual(["echo", "read_file"], [tool.spec.name for tool in tools])
 
     def test_unknown_tool_id_raises_key_error(self) -> None:
         registry = ToolRegistry(tools=builtin_tools())
