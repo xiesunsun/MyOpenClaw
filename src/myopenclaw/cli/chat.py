@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from myopenclaw.app.assembly import AppAssembly
+from myopenclaw.cli.context_renderer import ContextRenderer
 from myopenclaw.conversations.message import ToolCallBatch
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
 from myopenclaw.cli.event_renderer import ChatEventRenderer
+from myopenclaw.cli.prompt_input import PromptToolkitInputReader
 from myopenclaw.shared.generation import GenerateResult
-from myopenclaw.runs import RuntimeEventHandler, AgentCoordinator, ReActStrategy
+from myopenclaw.runs import (
+    AgentCoordinator,
+    AgentRuntimeContext,
+    ReActStrategy,
+    RuntimeEventHandler,
+)
+from myopenclaw.runs.context_usage import ContextUsageService
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -25,7 +34,9 @@ class ChatLoop:
         session: Session | None = None,
         config_path: Path | None = None,
         console: Console | None = None,
-        input_reader: Callable[[str], str] | None = None,
+        input_reader: Callable[[str], str | Awaitable[str]] | None = None,
+        context_usage_service: ContextUsageService | None = None,
+        context_renderer: ContextRenderer | None = None,
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.agent_id
@@ -33,8 +44,11 @@ class ChatLoop:
         self.session = session or Session.create(agent_id=self.agent_id)
         self.config_path = config_path
         self.console = console or Console()
+        self._prompt_input_reader: PromptToolkitInputReader | None = None
         self.input_reader = input_reader or self._default_input_reader
         self._fallback_message_count = self._read_session_message_count()
+        self._context_usage_service = context_usage_service or ContextUsageService()
+        self._context_renderer = context_renderer or ContextRenderer()
 
     @classmethod
     def from_config_path(
@@ -72,8 +86,10 @@ class ChatLoop:
                 self._render_tool_batch(message.tool_call_batch)
         self._render_assistant_message(reply)
 
-    def _default_input_reader(self, prompt: str) -> str:
-        return self.console.input(f"[bold cyan]{prompt}[/bold cyan]")
+    async def _default_input_reader(self, prompt: str) -> str:
+        if self._prompt_input_reader is None:
+            self._prompt_input_reader = PromptToolkitInputReader()
+        return await self._prompt_input_reader(prompt)
 
     def _read_session_message_count(self) -> int:
         return len(self.session.messages)
@@ -91,7 +107,7 @@ class ChatLoop:
                 else "Config: default",
                 style="dim",
             ),
-            Text("/help  /clear  /session  /exit", style="yellow"),
+            Text("/help  /context  /clear  /session  /exit", style="yellow"),
         )
         self.console.print(
             Panel(
@@ -155,6 +171,7 @@ class ChatLoop:
         help_text = Text.from_markup(
             "[bold]Available commands[/bold]\n"
             "/help    Show this help message\n"
+            "/context Show current context usage summary\n"
             "/clear   Clear the screen and redraw the header\n"
             "/session Show current session details\n"
             "/exit    Exit the chat loop"
@@ -167,10 +184,13 @@ class ChatLoop:
         )
         self._render_message("System", summary, style="cyan")
 
-    def _handle_command(self, user_input: str) -> bool:
+    async def _handle_command(self, user_input: str) -> bool:
         command = user_input.lower()
         if command == "/help":
             self._render_help()
+            return True
+        if command == "/context":
+            await self._render_context_command()
             return True
         if command == "/session":
             self._render_session_summary()
@@ -186,11 +206,34 @@ class ChatLoop:
         self._render_error_message(f"Unknown command: {user_input}. Try /help.")
         return True
 
+    async def _render_context_command(self) -> None:
+        snapshot = await self._context_usage_service.build(
+            agent=self.agent,
+            context=self._ensure_runtime_context(),
+            session=self.session,
+        )
+        self._render_message(
+            "System",
+            self._context_renderer.render(snapshot),
+            style="cyan",
+        )
+
+    def _ensure_runtime_context(self) -> AgentRuntimeContext:
+        runtime_context = getattr(self.coordinator, "context", None)
+        if runtime_context is None or runtime_context.agent.agent_id != self.agent.agent_id:
+            runtime_context = AgentRuntimeContext.create(agent=self.agent)
+            if hasattr(self.coordinator, "context"):
+                self.coordinator.context = runtime_context
+        return runtime_context
+
     async def run(self) -> None:
         self._render_header()
         while True:
             try:
-                user_input = self.input_reader("You > ").strip()
+                raw_user_input = self.input_reader("You > ")
+                if inspect.isawaitable(raw_user_input):
+                    raw_user_input = await raw_user_input
+                user_input = raw_user_input.strip()
             except (EOFError, KeyboardInterrupt):
                 self._render_system_message("Session closed.")
                 break
@@ -201,21 +244,21 @@ class ChatLoop:
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                if not self._handle_command(user_input):
+                if not await self._handle_command(user_input):
                     break
                 continue
 
-            self._render_message("You", Text(user_input), style="cyan")
             self._fallback_message_count += 1
+            event_renderer = ChatEventRenderer(self.console)
             try:
                 reply = await self.handle_user_input(
                     user_input,
-                    event_handler=self.create_event_handler(),
+                    event_handler=event_renderer.handle_event,
                 )
             except Exception as exc:
                 self._render_error_message(f"Request failed: {exc}")
                 continue
 
             self._fallback_message_count += 1
-            if not reply.metadata and not reply.text:
+            if not event_renderer.rendered_assistant_message and (reply.metadata or reply.text):
                 self._render_assistant_message(reply)

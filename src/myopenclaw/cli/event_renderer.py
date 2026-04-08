@@ -12,6 +12,7 @@ from myopenclaw.tools.base import ToolExecutionResult
 class ChatEventRenderer:
     def __init__(self, console: Console) -> None:
         self.console = console
+        self.rendered_assistant_message = False
 
     async def handle_event(self, event: RuntimeEvent) -> None:
         if event.event_type == RuntimeEventType.MODEL_STEP_STARTED:
@@ -47,6 +48,7 @@ class ChatEventRenderer:
             return
 
         if event.event_type == RuntimeEventType.ASSISTANT_MESSAGE:
+            self.rendered_assistant_message = True
             content: RenderableType = Markdown(event.text)
             if event.metadata is not None:
                 content = Group(Markdown(event.text), self._render_assistant_footer(event.metadata))

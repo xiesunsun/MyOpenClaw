@@ -7,6 +7,7 @@ class BaseModelConfig(BaseModel):
     api_key: str | None = None
     api_base: str | None = None
     temperature: float = 1.0
+    max_input_tokens: int | None = None
     max_output_tokens: int = 65536
     thinking_level: str | None = None
     provider_options: dict[str, Any] = Field(default_factory=dict)

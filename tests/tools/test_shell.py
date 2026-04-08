@@ -8,6 +8,7 @@ from myopenclaw.tools.registry import ToolRegistry
 from myopenclaw.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
+    PersistentShell,
     ShellRestartTool,
     ShellSessionManager,
     ShellStatus,
@@ -34,6 +35,11 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(first, second)
         self.assertEqual(workspace.resolve(), first.workspace_path)
+
+    def test_persistent_shell_defaults_to_two_minute_timeout(self) -> None:
+        shell = PersistentShell(workspace_path=Path("/tmp/workspace"))
+
+        self.assertEqual(120000, shell.default_timeout_ms)
 
     async def test_shell_exec_reuses_same_shell_and_persists_cwd(self) -> None:
         manager = ShellSessionManager()
@@ -151,6 +157,54 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, failed.metadata["exit_code"])
         self.assertEqual("ready", failed.metadata["shell_status"])
         self.assertEqual("ok", recovered.content)
+
+    async def test_shell_exec_allows_timeout_override(self) -> None:
+        manager = ShellSessionManager()
+        exec_tool = ShellExecTool()
+
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=workspace,
+                workspace_files=None,
+                shell_session_manager=manager,
+            )
+
+            timed_out = await exec_tool.execute(
+                {"command": "sleep 1", "timeout_ms": 50},
+                context,
+            )
+
+        self.assertTrue(timed_out.is_error)
+        self.assertEqual("Shell command timed out.", timed_out.content)
+        self.assertEqual(124, timed_out.metadata["exit_code"])
+        self.assertEqual(True, timed_out.metadata["timed_out"])
+        self.assertEqual("timed_out", timed_out.metadata["shell_status"])
+
+    async def test_shell_exec_rejects_non_positive_timeout_override(self) -> None:
+        manager = ShellSessionManager()
+        exec_tool = ShellExecTool()
+
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=workspace,
+                workspace_files=None,
+                shell_session_manager=manager,
+            )
+
+            result = await exec_tool.execute(
+                {"command": "pwd", "timeout_ms": 0},
+                context,
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertEqual("timeout_ms must be a positive integer.", result.content)
+        self.assertEqual("error", result.metadata["shell_status"])
 
     def test_shell_status_string_values_are_stable(self) -> None:
         self.assertEqual("ready", ShellStatus.READY)

@@ -1,17 +1,25 @@
 import unittest
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import textwrap
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from myopenclaw.agents.agent import Agent
+from myopenclaw.cli.context_renderer import ContextRenderer
 from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
 from myopenclaw.cli.chat import ChatLoop
+from myopenclaw.runs.context_usage import (
+    ContextUsageCategory,
+    ContextUsageDetail,
+    ContextUsageSnapshot,
+)
 from myopenclaw.runs import GenerateResult, RuntimeEvent, RuntimeEventType
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import ToolExecutionResult
+from rich.console import Console
 
 
 class StubCoordinator:
@@ -32,6 +40,20 @@ class StubCoordinator:
                     text="runtime reply",
                 )
             )
+        return GenerateResult(text="runtime reply")
+
+
+class SilentCoordinator:
+    async def run_turn(
+        self,
+        *,
+        agent: Agent,
+        session: Session,
+        user_text: str,
+        event_handler=None,
+    ) -> GenerateResult:
+        session.append_user_message(user_text)
+        session.append_assistant_message("runtime reply")
         return GenerateResult(text="runtime reply")
 
 
@@ -123,9 +145,34 @@ class StubToolCoordinator:
         )
 
 
+class StubContextCoordinator:
+    def __init__(self, agent: Agent) -> None:
+        self.context = Mock(agent=agent, provider=Mock(), tools=[])
+
+    async def run_turn(
+        self,
+        *,
+        agent: Agent,
+        session: Session,
+        user_text: str,
+        event_handler=None,
+    ) -> GenerateResult:
+        raise AssertionError("run_turn should not be called")
+
+
+class StubContextUsageService:
+    def __init__(self, snapshot: ContextUsageSnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls: list[tuple[Agent, object, Session]] = []
+
+    async def build(self, *, agent: Agent, context: object, session: Session) -> ContextUsageSnapshot:
+        self.calls.append((agent, context, session))
+        return self.snapshot
+
+
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
-    async def test_handle_user_input_delegates_to_coordinator_and_updates_session_count(self) -> None:
-        agent = Agent(
+    def _build_agent(self) -> Agent:
+        return Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
             behavior_path=Path("/tmp/pickle/AGENT.md"),
@@ -136,6 +183,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
+
+    async def test_handle_user_input_delegates_to_coordinator_and_updates_session_count(self) -> None:
+        agent = self._build_agent()
         session = Session(session_id="session-1", agent_id="Pickle")
         loop = ChatLoop(
             agent=agent,
@@ -149,17 +199,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, loop._message_count())
 
     async def test_chat_loop_creates_session_from_conversation_layer(self) -> None:
-        agent = Agent(
-            agent_id="Pickle",
-            workspace_path=Path("/tmp/pickle"),
-            behavior_path=Path("/tmp/pickle/AGENT.md"),
-            behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
-            tool_ids=[],
-        )
+        agent = self._build_agent()
 
         loop = ChatLoop(
             agent=agent,
@@ -169,17 +209,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Pickle", loop.session.agent_id)
 
     async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(self) -> None:
-        agent = Agent(
-            agent_id="Pickle",
-            workspace_path=Path("/tmp/pickle"),
-            behavior_path=Path("/tmp/pickle/AGENT.md"),
-            behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
-            tool_ids=[],
-        )
+        agent = self._build_agent()
         session = Session(session_id="session-1", agent_id="Pickle")
         console = Mock()
         loop = ChatLoop(
@@ -209,17 +239,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("meta:", completed_render)
 
     async def test_render_turn_output_replays_assistant_tool_batch(self) -> None:
-        agent = Agent(
-            agent_id="Pickle",
-            workspace_path=Path("/tmp/pickle"),
-            behavior_path=Path("/tmp/pickle/AGENT.md"),
-            behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-            ),
-            tool_ids=[],
-        )
+        agent = self._build_agent()
         session = Session(session_id="session-1", agent_id="Pickle")
         session.append_assistant_tool_batch(
             ToolCallBatch(
@@ -264,6 +284,135 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("status: ok", replay_render)
         self.assertIn("result: hello world", replay_render)
         self.assertNotIn("meta:", replay_render)
+
+    @patch("myopenclaw.cli.chat.PromptToolkitInputReader")
+    async def test_chat_loop_uses_prompt_toolkit_reader_by_default(self, prompt_reader_cls: Mock) -> None:
+        prompt_reader = AsyncMock(return_value="hello")
+        prompt_reader_cls.return_value = prompt_reader
+
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=StubCoordinator(),
+        )
+
+        self.assertEqual("hello", await loop.input_reader("You > "))
+        prompt_reader_cls.assert_called_once_with()
+        prompt_reader.assert_called_once_with("You > ")
+
+    async def test_run_falls_back_to_render_final_reply_when_no_event_was_emitted(self) -> None:
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        printed = [call.args[0] for call in console.print.call_args_list]
+        titles = [getattr(renderable, "title", None) for renderable in printed]
+
+        self.assertEqual(["MyOpenClaw Chat", "Assistant", "System"], titles)
+        self.assertEqual("runtime reply", printed[1].renderable.markup)
+
+    async def test_run_does_not_duplicate_final_reply_after_assistant_event(self) -> None:
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=StubCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(1, titles.count("Assistant"))
+        self.assertNotIn("You", titles)
+
+    async def test_help_lists_context_command(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/help", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("/context", rendered)
+
+    async def test_header_lists_context_command(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("/help  /context  /clear  /session  /exit", rendered)
+
+    async def test_context_command_renders_usage_summary(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/context", "/exit"])
+        snapshot = ContextUsageSnapshot(
+            model_label="google/gemini / gemini-3-flash-preview",
+            max_input_tokens=1048576,
+            total_tokens=7000,
+            categories=[
+                ContextUsageCategory(key="system", label="System prompt", token_count=3200),
+                ContextUsageCategory(
+                    key="skills",
+                    label="Skills",
+                    token_count=900,
+                    details=[ContextUsageDetail(label="excel", token_count=450)],
+                ),
+                ContextUsageCategory(key="messages", label="Messages", token_count=2300),
+                ContextUsageCategory(key="tools", label="Tools", token_count=600),
+            ],
+            free_tokens=1041576,
+        )
+        context_usage_service = StubContextUsageService(snapshot)
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=StubContextCoordinator(self._build_agent()),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+            context_usage_service=context_usage_service,
+            context_renderer=ContextRenderer(),
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("Context Usage", rendered)
+        self.assertIn("Estimated usage by category", rendered)
+        self.assertIn("System prompt", rendered)
+        self.assertIn("Skills", rendered)
+        self.assertIn("Messages", rendered)
+        self.assertIn("Tools", rendered)
+        self.assertIn("Free space", rendered)
+        self.assertIn("Skills breakdown", rendered)
+        self.assertEqual(1, len(context_usage_service.calls))
 
     async def test_from_config_path_uses_react_max_steps_from_app_config(self) -> None:
         with TemporaryDirectory() as tmpdir:

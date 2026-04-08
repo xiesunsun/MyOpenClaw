@@ -1,5 +1,7 @@
+import asyncio
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from google.genai import types
 
@@ -273,6 +275,200 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(5, usage.thoughts_tokens)
         self.assertEqual(2, usage.tool_use_prompt_tokens)
         self.assertEqual(28, usage.total_tokens)
+
+    def test_count_request_tokens_uses_generate_content_request_shape(self) -> None:
+        provider = GeminiProvider(model="gemini-3-flash-preview")
+        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":42}'))
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=count_tokens,
+            )
+        )
+
+        total_tokens = asyncio.run(
+            provider.count_request_tokens(
+                GenerateRequest(
+                    system_instruction="You are Pickle.",
+                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+                )
+            )
+        )
+
+        self.assertEqual(42, total_tokens)
+        count_tokens.assert_awaited_once()
+        kwargs = count_tokens.await_args.kwargs
+        self.assertEqual("post", kwargs["http_method"])
+        self.assertEqual("models/gemini-3-flash-preview:countTokens", kwargs["path"])
+        self.assertEqual(
+            {
+                "generateContentRequest": {
+                    "model": "models/gemini-3-flash-preview",
+                    "contents": [
+                        {
+                            "parts": [{"text": "hello"}],
+                            "role": "user",
+                        }
+                    ],
+                    "systemInstruction": {
+                        "parts": [{"text": "You are Pickle."}],
+                    },
+                }
+            },
+            kwargs["request_dict"],
+        )
+
+    def test_count_request_tokens_serializes_tools_and_thought_signatures(self) -> None:
+        provider = GeminiProvider(model="gemini-3-flash-preview")
+        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":17}'))
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=count_tokens,
+            )
+        )
+
+        total_tokens = asyncio.run(
+            provider.count_request_tokens(
+                GenerateRequest(
+                    system_instruction=None,
+                    messages=[
+                        SessionMessage(
+                            role=MessageRole.ASSISTANT,
+                            tool_call_batch=ToolCallBatch(
+                                batch_id="batch-1",
+                                step_index=1,
+                                calls=[
+                                    ToolCall(
+                                        id="call-1",
+                                        name="echo",
+                                        arguments={"text": "ping"},
+                                        thought_signature=b"sig-1",
+                                    )
+                                ],
+                                results=[
+                                    ToolCallResult(
+                                        call_id="call-1",
+                                        content="pong",
+                                        metadata={"exit_code": 0},
+                                    )
+                                ],
+                            ),
+                        )
+                    ],
+                    tools=[
+                        ToolSpec(
+                            name="echo",
+                            description="Echo text",
+                            input_schema={
+                                "type": "object",
+                                "properties": {"text": {"type": "string"}},
+                                "required": ["text"],
+                            },
+                        )
+                    ],
+                )
+            )
+        )
+
+        self.assertEqual(17, total_tokens)
+        count_tokens.assert_awaited_once()
+        kwargs = count_tokens.await_args.kwargs
+        self.assertEqual("post", kwargs["http_method"])
+        self.assertEqual("models/gemini-3-flash-preview:countTokens", kwargs["path"])
+        self.assertEqual(
+            [
+                {
+                    "functionDeclarations": [
+                        {
+                            "description": "Echo text",
+                            "name": "echo",
+                            "parametersJsonSchema": {
+                                "type": "object",
+                                "properties": {"text": {"type": "string"}},
+                                "required": ["text"],
+                            },
+                        }
+                    ]
+                }
+            ],
+            kwargs["request_dict"]["generateContentRequest"]["tools"],
+        )
+        self.assertEqual(
+            "c2lnLTE=",
+            kwargs["request_dict"]["generateContentRequest"]["contents"][0]["parts"][0]["thoughtSignature"],
+        )
+        self.assertEqual(
+            {
+                "output": "pong",
+                "metadata": {"exit_code": 0},
+            },
+            kwargs["request_dict"]["generateContentRequest"]["contents"][1]["parts"][0]["functionResponse"]["response"],
+        )
+
+    def test_count_request_tokens_returns_zero_for_empty_request(self) -> None:
+        provider = GeminiProvider(model="gemini-3-flash-preview")
+        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":1}'))
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=count_tokens,
+            )
+        )
+
+        total_tokens = asyncio.run(
+            provider.count_request_tokens(
+                GenerateRequest(
+                    system_instruction=None,
+                    messages=[],
+                    tools=[],
+                )
+            )
+        )
+
+        self.assertEqual(1, total_tokens)
+        count_tokens.assert_awaited_once()
+        self.assertEqual(
+            [
+                {
+                    "parts": [{"text": ""}],
+                    "role": "user",
+                }
+            ],
+            count_tokens.await_args.kwargs["request_dict"]["generateContentRequest"]["contents"],
+        )
+
+    def test_count_request_tokens_retries_after_transient_failure(self) -> None:
+        provider = GeminiProvider(model="gemini-3-flash-preview")
+        count_tokens = AsyncMock(
+            side_effect=[
+                RuntimeError("temporary countTokens failure"),
+                SimpleNamespace(body='{"totalTokens":42}'),
+            ]
+        )
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=count_tokens,
+            )
+        )
+
+        with patch("myopenclaw.providers.gemini.asyncio.sleep", new=AsyncMock()) as sleep:
+            total_tokens = asyncio.run(
+                provider.count_request_tokens(
+                    GenerateRequest(
+                        system_instruction="You are Pickle.",
+                        messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+                    )
+                )
+            )
+
+        self.assertEqual(42, total_tokens)
+        self.assertEqual(2, count_tokens.await_count)
+        sleep.assert_awaited_once_with(0.2)
+
+    def test_extract_count_tokens_total_reads_http_response_body(self) -> None:
+        total_tokens = GeminiProvider._extract_count_tokens_total(
+            SimpleNamespace(body='{"totalTokens":99}')
+        )
+
+        self.assertEqual(99, total_tokens)
 
 
 if __name__ == "__main__":

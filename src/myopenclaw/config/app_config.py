@@ -21,6 +21,7 @@ class AgentConfig(BaseModel):
     llm: ModelSelection | None = None
     tools: list[str] = Field(default_factory=list)
     file_access_mode: FileAccessMode | None = None
+    skills_path: Path | None = None
 
 
 class AppConfig(BaseModel):
@@ -28,17 +29,22 @@ class AppConfig(BaseModel):
     default_agent: str
     default_llm: ModelSelection
     default_file_access_mode: FileAccessMode = FileAccessMode.WORKSPACE
+    default_skills_path: Path | None = None
     react_max_steps: int = 8
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
 
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":
+        if self.default_skills_path is not None:
+            self.default_skills_path = self._resolve_path(self.default_skills_path)
         for agent_config in self.agents.values():
             agent_config.workspace_path = self._resolve_path(
                 agent_config.workspace_path
             )
             agent_config.behavior_path = self._resolve_path(agent_config.behavior_path)
+            if agent_config.skills_path is not None:
+                agent_config.skills_path = self._resolve_path(agent_config.skills_path)
         return self
 
     @classmethod
@@ -86,3 +92,7 @@ class AppConfig(BaseModel):
     ) -> FileAccessMode:
         agent_config = self.get_agent_config(agent_id)
         return agent_config.file_access_mode or self.default_file_access_mode
+
+    def resolve_skills_path(self, agent_id: str | None = None) -> Path | None:
+        agent_config = self.get_agent_config(agent_id)
+        return agent_config.skills_path or self.default_skills_path

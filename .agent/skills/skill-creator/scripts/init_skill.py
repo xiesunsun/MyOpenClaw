@@ -21,7 +21,7 @@ ALLOWED_RESOURCES = {"scripts", "references", "assets"}
 
 SKILL_TEMPLATE = """---
 name: {skill_name}
-description: [TODO: 清晰说明此 Skill 能做什么，以及何时应该触发它。包含具体场景、文件类型、触发词等。]
+description: [TODO: Start with "Use when ..." and describe only the triggering conditions for this skill.]
 ---
 
 # {skill_title}

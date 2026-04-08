@@ -1,3 +1,5 @@
+import asyncio
+import json
 from typing import Any
 
 from google import genai
@@ -22,6 +24,9 @@ from myopenclaw.tools.base import ToolSpec
 
 
 class GeminiProvider(BaseLLMProvider):
+    COUNT_TOKENS_MAX_ATTEMPTS = 3
+    COUNT_TOKENS_RETRY_BASE_DELAY_S = 0.2
+
     def __init__(
         self,
         model: str,
@@ -51,21 +56,7 @@ class GeminiProvider(BaseLLMProvider):
         )
 
     async def generate(self, request: GenerateRequest) -> GenerateResult:
-        config = types.GenerateContentConfig(
-            system_instruction=request.system_instruction,
-            temperature=self.temperature,
-            max_output_tokens=self.max_output_tokens,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                disable=True
-            ),
-        )
-        if request.tools:
-            config.tools = self._build_tools(request.tools)
-
-        thinking_level = self.provider_options.get("thinking_level")
-        if isinstance(thinking_level, str):
-            config.thinking_config = types.ThinkingConfig(thinking_level=thinking_level)
-
+        config = self._build_generate_config(request)
         response = await self.client.aio.models.generate_content(
             model=self.model,
             contents=self._build_contents(request.messages),
@@ -82,6 +73,76 @@ class GeminiProvider(BaseLLMProvider):
             usage=self._extract_usage(response),
             raw=response,
         )
+
+    async def count_request_tokens(self, request: GenerateRequest) -> int | None:
+        request_dict = self._build_count_tokens_request(request)
+        for attempt in range(self.COUNT_TOKENS_MAX_ATTEMPTS):
+            try:
+                response = await self.client._api_client.async_request(
+                    http_method="post",
+                    path=f"models/{self.model}:countTokens",
+                    request_dict=request_dict,
+                )
+            except Exception:
+                if attempt == self.COUNT_TOKENS_MAX_ATTEMPTS - 1:
+                    return None
+            else:
+                total_tokens = self._extract_count_tokens_total(response)
+                if total_tokens is not None:
+                    return total_tokens
+                if attempt == self.COUNT_TOKENS_MAX_ATTEMPTS - 1:
+                    return None
+
+            await asyncio.sleep(self._count_tokens_retry_delay(attempt))
+        return None
+
+    @classmethod
+    def _count_tokens_retry_delay(cls, attempt: int) -> float:
+        return cls.COUNT_TOKENS_RETRY_BASE_DELAY_S * (2**attempt)
+
+    def _build_generate_config(
+        self,
+        request: GenerateRequest,
+    ) -> types.GenerateContentConfig:
+        config = types.GenerateContentConfig(
+            system_instruction=request.system_instruction,
+            temperature=self.temperature,
+            max_output_tokens=self.max_output_tokens,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+        )
+        if request.tools:
+            config.tools = self._build_tools(request.tools)
+
+        thinking_level = self.provider_options.get("thinking_level")
+        if isinstance(thinking_level, str):
+            config.thinking_config = types.ThinkingConfig(thinking_level=thinking_level)
+        return config
+
+    def _build_count_tokens_request(self, request: GenerateRequest) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "generateContentRequest": {
+                "model": f"models/{self.model}",
+            }
+        }
+        generate_content_request = payload["generateContentRequest"]
+
+        generate_content_request["contents"] = self._dump_models(
+            self._count_tokens_contents(request.messages)
+        )
+
+        if request.system_instruction:
+            generate_content_request["systemInstruction"] = self._dump_model(
+                types.Content(parts=[types.Part.from_text(text=request.system_instruction)])
+            )
+
+        if request.tools:
+            generate_content_request["tools"] = self._dump_models(
+                self._build_tools(request.tools)
+            )
+
+        return payload
 
     @staticmethod
     def _build_tools(tool_specs: list[ToolSpec]) -> list[types.Tool]:
@@ -104,6 +165,14 @@ class GeminiProvider(BaseLLMProvider):
         if tool_spec.output_schema is not None:
             declaration["response_json_schema"] = tool_spec.output_schema
         return declaration
+
+    @staticmethod
+    def _dump_model(model: Any) -> dict[str, Any]:
+        return model.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    @classmethod
+    def _dump_models(cls, models: list[Any]) -> list[dict[str, Any]]:
+        return [cls._dump_model(model) for model in models]
 
     @staticmethod
     def _build_contents(messages: list[SessionMessage]) -> list[types.Content]:
@@ -130,6 +199,23 @@ class GeminiProvider(BaseLLMProvider):
                     )
                 )
         return contents
+
+    @classmethod
+    def _count_tokens_contents(
+        cls,
+        messages: list[SessionMessage],
+    ) -> list[types.Content]:
+        contents = cls._build_contents(messages)
+        if contents:
+            return contents
+        # Gemini countTokens requires a contents field even when we only want
+        # the fixed prompt baseline with no conversation history yet.
+        return [
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text="")],
+            )
+        ]
 
     @staticmethod
     def _build_batch_contents(message: SessionMessage) -> list[types.Content]:
@@ -283,3 +369,20 @@ class GeminiProvider(BaseLLMProvider):
             tool_use_prompt_tokens=getattr(usage, "tool_use_prompt_token_count", None),
             total_tokens=getattr(usage, "total_token_count", None),
         )
+
+    @staticmethod
+    def _extract_count_tokens_total(response: Any) -> int | None:
+        total_tokens = getattr(response, "total_tokens", None)
+        if total_tokens is not None:
+            return total_tokens
+
+        body = getattr(response, "body", None)
+        if not body:
+            return None
+
+        try:
+            data = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        value = data.get("totalTokens")
+        return value if isinstance(value, int) else None

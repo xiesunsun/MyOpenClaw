@@ -153,7 +153,7 @@ class PersistentShell:
         *,
         workspace_path: Path,
         process: PtyShellProcess | None = None,
-        default_timeout_ms: int = 5000,
+        default_timeout_ms: int = 120000,
         max_output_chars: int = 4000,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
@@ -176,7 +176,7 @@ class PersistentShell:
     def terminate(self) -> None:
         self.process.terminate()
 
-    def exec(self, command: str) -> ShellExecutionResult:
+    def exec(self, command: str, timeout_ms: int | None = None) -> ShellExecutionResult:
         if self._running:
             raise RuntimeError("The shell is already executing a command")
 
@@ -195,13 +195,16 @@ class PersistentShell:
         self._running = True
         try:
             self.process.write(wrapped_command)
-            return self._read_until_marker(marker)
+            return self._read_until_marker(
+                marker,
+                timeout_ms=self.default_timeout_ms if timeout_ms is None else timeout_ms,
+            )
         finally:
             self._running = False
 
-    def _read_until_marker(self, marker: str) -> ShellExecutionResult:
+    def _read_until_marker(self, marker: str, *, timeout_ms: int) -> ShellExecutionResult:
         buffer = ""
-        deadline = time.monotonic() + (self.default_timeout_ms / 1000)
+        deadline = time.monotonic() + (timeout_ms / 1000)
 
         while True:
             if not self.is_alive():
@@ -336,6 +339,11 @@ class ShellExecTool(BaseTool):
                     "type": "string",
                     "description": "Shell command to run in the current persistent shell.",
                 },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Optional timeout override for this command in milliseconds.",
+                    "minimum": 1,
+                },
             },
             "required": ["command"],
         },
@@ -364,7 +372,25 @@ class ShellExecTool(BaseTool):
                 },
             )
 
-        result = session.shell.exec(str(arguments["command"]))
+        timeout_ms = arguments.get("timeout_ms")
+        if timeout_ms is not None and int(timeout_ms) <= 0:
+            return ToolExecutionResult(
+                content="timeout_ms must be a positive integer.",
+                is_error=True,
+                metadata={
+                    "cwd": str(session.shell.cwd),
+                    "exit_code": 1,
+                    "shell_status": ShellStatus.ERROR,
+                    "timed_out": False,
+                    "truncated": False,
+                    "created_new_shell": created_new_shell,
+                },
+            )
+
+        result = session.shell.exec(
+            str(arguments["command"]),
+            timeout_ms=int(timeout_ms) if timeout_ms is not None else None,
+        )
         content = result.stdout or result.stderr
         return ToolExecutionResult(
             content=content,

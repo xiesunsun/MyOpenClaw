@@ -1,6 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from myopenclaw.agents.skills import (
+    SkillManifest,
+    SystemInstructionParts,
+    compose_system_instruction,
+    compose_system_instruction_parts,
+)
 from myopenclaw.shared.model_config import ModelConfig
 
 
@@ -13,10 +19,18 @@ class Agent:
     model_config: ModelConfig
     tool_ids: list[str]
     file_access_mode: str = "workspace"
+    skills: list[SkillManifest] = field(default_factory=list)
 
     @property
     def system_instruction(self) -> str:
-        return self.behavior_instruction
+        return compose_system_instruction(self.behavior_instruction, self.skills)
+
+    @property
+    def instruction_parts(self) -> SystemInstructionParts:
+        return compose_system_instruction_parts(
+            self.behavior_instruction,
+            self.skills,
+        )
 
     @property
     def workspace(self):

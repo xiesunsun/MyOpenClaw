@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -16,3 +18,6 @@ class BaseLLMProvider(ABC):
     @abstractmethod
     async def generate(self, request: GenerateRequest) -> GenerateResult:
         raise NotImplementedError
+
+    async def count_request_tokens(self, request: GenerateRequest) -> int | None:
+        return None

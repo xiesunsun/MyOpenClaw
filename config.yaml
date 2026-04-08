@@ -10,13 +10,15 @@ providers:
     models:
       gemini-3-flash-preview:
         temperature: 1.0
-        max_output_tokens: 1048576
-        thinking_level: minimal
+        max_input_tokens: 1048576
+        max_output_tokens: 65536
+        thinking_level: high
         provider_options: {}
       gemini-3.1-flash-lite-preview:
         temperature: 1.0
+        max_input_tokens: 1048576
         max_output_tokens: 65536
-        thinking_level: minimal
+        thinking_level: high
         provider_options: {}
 
 agents:
@@ -26,7 +28,7 @@ agents:
     file_access_mode: full
     llm:
       provider: google/gemini
-      model: gemini-3.1-flash-lite-preview
+      model:  gemini-3.1-flash-lite-preview
     tools:
       - list_directory
       - glob_search
