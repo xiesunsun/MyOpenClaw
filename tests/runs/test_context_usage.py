@@ -248,6 +248,36 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot.category("tools").token_count)
         self.assertIsNone(snapshot.free_tokens)
 
+    async def test_snapshot_uses_effective_messages_when_provided(self) -> None:
+        agent = self._build_agent()
+        provider = StubProvider(
+            request_estimates={
+                (None, ()): 80,
+                (agent.instruction_parts.base_instruction, ()): 110,
+                (agent.system_instruction, ()): 110,
+                (agent.system_instruction, ("echo",)): 160,
+            }
+        )
+        context = AgentRuntimeContext(agent=agent, provider=provider, tools=[EchoTool()])
+        session = Session(session_id="session-1", agent_id=agent.agent_id)
+        session.append_user_message("raw user")
+        session.append_assistant_message("raw answer")
+
+        effective_messages = [session.messages[0]]
+        snapshot = await ContextUsageService().build(
+            agent=agent,
+            context=context,
+            session=session,
+            effective_messages=effective_messages,
+        )
+
+        self.assertEqual(80, snapshot.category("messages").token_count)
+        self.assertEqual(
+            ["raw user", "raw user", "raw user", "raw user"],
+            [request.messages[0].content for request in provider.requests[:4]],
+        )
+        self.assertTrue(all(len(request.messages) == 1 for request in provider.requests[:4]))
+
     async def test_snapshot_does_not_cache_failed_result(self) -> None:
         agent = self._build_agent()
         provider = StubProvider(

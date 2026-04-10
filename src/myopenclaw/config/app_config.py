@@ -31,6 +31,7 @@ class AppConfig(BaseModel):
     default_file_access_mode: FileAccessMode = FileAccessMode.WORKSPACE
     default_skills_path: Path | None = None
     react_max_steps: int = 8
+    context_cli_turn_window: int = 5
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
 

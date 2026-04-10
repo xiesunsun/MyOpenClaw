@@ -51,7 +51,7 @@ class _ContextUsageCacheEntry:
 
 class ContextUsageService:
     def __init__(self) -> None:
-        self._cached_session_hash: str | None = None
+        self._cached_messages_hash: str | None = None
         self._cached_entry: _ContextUsageCacheEntry | None = None
 
     async def build(
@@ -60,22 +60,23 @@ class ContextUsageService:
         agent: Agent,
         context: AgentRuntimeContext,
         session: Session,
+        effective_messages: list[SessionMessage] | None = None,
     ) -> ContextUsageSnapshot:
         instruction_parts = agent.instruction_parts
-        session_hash = self._session_hash(session=session)
+        messages = list(effective_messages) if effective_messages is not None else list(session.messages)
+        messages_hash = self._messages_hash(messages=messages)
         fingerprint = self._cache_fingerprint(
             agent=agent,
             context=context,
-            session_hash=session_hash,
+            messages_hash=messages_hash,
         )
         if (
-            self._cached_session_hash == session_hash
+            self._cached_messages_hash == messages_hash
             and self._cached_entry is not None
             and self._cached_entry.fingerprint == fingerprint
         ):
             return self._cached_entry.snapshot
 
-        messages = list(session.messages)
         is_empty_session = not messages
         full_system_instruction = instruction_parts.full_instruction or None
         c0_request = GenerateRequest(
@@ -148,13 +149,13 @@ class ContextUsageService:
         )
 
         if self._is_cacheable(snapshot):
-            self._cached_session_hash = session_hash
+            self._cached_messages_hash = messages_hash
             self._cached_entry = _ContextUsageCacheEntry(
                 fingerprint=fingerprint,
                 snapshot=snapshot,
             )
         else:
-            self._cached_session_hash = None
+            self._cached_messages_hash = None
             self._cached_entry = None
         return snapshot
 
@@ -231,11 +232,8 @@ class ContextUsageService:
         return "\n\n".join(section for section in sections if section)
 
     @staticmethod
-    def _session_hash(*, session: Session) -> str:
-        payload = [
-            ContextUsageService._serialize_session_message(message)
-            for message in session.messages
-        ]
+    def _messages_hash(*, messages: list[SessionMessage]) -> str:
+        payload = [ContextUsageService._serialize_session_message(message) for message in messages]
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -245,7 +243,7 @@ class ContextUsageService:
         *,
         agent: Agent,
         context: AgentRuntimeContext,
-        session_hash: str,
+        messages_hash: str,
     ) -> str:
         payload = {
             "agent_id": agent.agent_id,
@@ -253,7 +251,7 @@ class ContextUsageService:
                 "provider": agent.model_config.provider,
                 "name": agent.model_config.model,
             },
-            "session_hash": session_hash,
+            "messages_hash": messages_hash,
             "system_instruction": agent.system_instruction,
             "tools": [
                 {

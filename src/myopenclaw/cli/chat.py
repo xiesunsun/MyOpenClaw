@@ -207,10 +207,16 @@ class ChatLoop:
         return True
 
     async def _render_context_command(self) -> None:
+        runtime_context = self._ensure_runtime_context()
+        effective_context = runtime_context.conversation_context_service.build_snapshot(
+            session=self.session,
+            runtime_store=runtime_context.context_runtime_store,
+        )
         snapshot = await self._context_usage_service.build(
             agent=self.agent,
-            context=self._ensure_runtime_context(),
+            context=runtime_context,
             session=self.session,
+            effective_messages=effective_context.messages,
         )
         self._render_message(
             "System",

@@ -38,6 +38,10 @@ class ReActStrategy(ExecutionStrategy):
         last_metadata: MessageMetadata | None = None
 
         for step_index in range(1, self.max_steps + 1):
+            effective_context = context.conversation_context_service.build_snapshot(
+                session=session,
+                runtime_store=context.context_runtime_store,
+            )
             await self._emit_event(
                 event_handler,
                 RuntimeEvent(
@@ -49,7 +53,7 @@ class ReActStrategy(ExecutionStrategy):
             result = await context.provider.generate(
                 GenerateRequest(
                     system_instruction=context.agent.system_instruction or None,
-                    messages=list(session.messages),
+                    messages=effective_context.messages,
                     tools=[tool.spec for tool in context.tools],
                 )
             )

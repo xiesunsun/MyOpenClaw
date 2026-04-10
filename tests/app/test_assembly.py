@@ -6,6 +6,7 @@ import unittest
 from myopenclaw.agents.agent import Agent
 from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
+from myopenclaw.context import ConversationWindowManager
 
 
 class AppAssemblyTests(unittest.TestCase):
@@ -114,6 +115,49 @@ class AppAssemblyTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "requires file_access_mode: full"):
                 AppAssembly(config).resolve_agent()
+
+    def test_build_chat_runtime_injects_context_cli_turn_window(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    react_max_steps: 16
+                    context_cli_turn_window: 7
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 1.0
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            _, coordinator = AppAssembly.from_config_path(config_path).build_chat_runtime()
+
+            self.assertEqual(16, coordinator.strategy.max_steps)
+            self.assertIsInstance(
+                coordinator.context.conversation_context_service.window_manager,
+                ConversationWindowManager,
+            )
+            self.assertEqual(
+                7,
+                coordinator.context.conversation_context_service.window_manager.cli_turn_window,
+            )
 
 
 if __name__ == "__main__":

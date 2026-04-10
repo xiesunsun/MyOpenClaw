@@ -196,6 +196,68 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         second_request_batch = provider.requests[1].messages[1].tool_call_batch
         self.assertEqual(["call-slow", "call-fast"], [result.call_id for result in second_request_batch.results])
 
+    async def test_runner_summarizes_completed_turn_history_on_next_turn(self) -> None:
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+            ),
+            tool_ids=["echo"],
+        )
+        provider = StubProvider(
+            responses=[
+                GenerateResult(
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="echo",
+                            arguments={"text": "history"},
+                        )
+                    ],
+                    finish_reason=FinishReason.TOOL_CALLS,
+                ),
+                GenerateResult(
+                    text="first answer",
+                    finish_reason=FinishReason.STOP,
+                ),
+                GenerateResult(
+                    text="second answer",
+                    finish_reason=FinishReason.STOP,
+                ),
+            ]
+        )
+        tool = DelayEchoTool()
+        coordinator = AgentCoordinator(
+            strategy=ReActStrategy(max_steps=4),
+            context=AgentRuntimeContext(agent=agent, provider=provider, tools=[tool]),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        first_result = await coordinator.run_turn(
+            agent=agent,
+            session=session,
+            user_text="first user",
+        )
+        second_result = await coordinator.run_turn(
+            agent=agent,
+            session=session,
+            user_text="second user",
+        )
+
+        self.assertEqual("first answer", first_result.text)
+        self.assertEqual("second answer", second_result.text)
+        self.assertEqual(3, len(provider.requests))
+        history_request = provider.requests[2]
+        self.assertEqual(
+            ["first user", 'Tool step summary:\n- echo args={"text": "history"} -> result=history', "first answer", "second user"],
+            [message.content for message in history_request.messages],
+        )
+        self.assertTrue(all(message.tool_call_batch is None for message in history_request.messages[:-1]))
+
 
 if __name__ == "__main__":
     unittest.main()

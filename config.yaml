@@ -1,5 +1,6 @@
 default_agent: Pickle
 react_max_steps: 100
+context_cli_turn_window: 5
 default_file_access_mode: full
 default_skills_path: /Users/ssunxie/code/myopenclaw/.agent/skills/
 default_llm:

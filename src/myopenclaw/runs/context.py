@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from myopenclaw.agents.agent import Agent
+from myopenclaw.context import ContextRuntimeStore, ConversationContextService
 from myopenclaw.providers import BaseLLMProvider, create_llm_provider
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import ModelConfig
@@ -37,6 +38,10 @@ class AgentRuntimeContext:
     file_access_policy: FileAccessPolicy | None = None
     workspace_files: WorkspaceFileService | None = None
     shell_session_manager: ShellSessionManager = field(default_factory=ShellSessionManager)
+    conversation_context_service: ConversationContextService = field(
+        default_factory=ConversationContextService
+    )
+    context_runtime_store: ContextRuntimeStore = field(default_factory=ContextRuntimeStore)
 
     def __post_init__(self) -> None:
         if self.file_access_policy is None:
@@ -55,6 +60,7 @@ class AgentRuntimeContext:
         tool_resolver: DefaultToolResolver | None = None,
         file_access_policy: FileAccessPolicy | None = None,
         shell_session_manager: ShellSessionManager | None = None,
+        conversation_context_service: ConversationContextService | None = None,
     ) -> "AgentRuntimeContext":
         provider_resolver = provider_resolver or DefaultProviderResolver()
         tool_resolver = tool_resolver or DefaultToolResolver()
@@ -78,6 +84,8 @@ class AgentRuntimeContext:
         }
         if shell_session_manager is not None:
             kwargs["shell_session_manager"] = shell_session_manager
+        if conversation_context_service is not None:
+            kwargs["conversation_context_service"] = conversation_context_service
 
         return cls(**kwargs)
 
