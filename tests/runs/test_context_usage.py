@@ -111,7 +111,7 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await ContextUsageService().build(
             agent=agent,
             context=context,
-            session=session,
+            prompt_messages=session.messages,
         )
 
         self.assertEqual(3200, snapshot.total_tokens)
@@ -137,9 +137,17 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         session.append_user_message("hello")
         service = ContextUsageService()
 
-        first = await service.build(agent=agent, context=context, session=session)
+        first = await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
         request_count_after_first_build = len(provider.requests)
-        second = await service.build(agent=agent, context=context, session=session)
+        second = await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
 
         self.assertIs(first, second)
         self.assertEqual(request_count_after_first_build, len(provider.requests))
@@ -173,7 +181,7 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await ContextUsageService().build(
             agent=agent,
             context=context,
-            session=Session(session_id="session-1", agent_id=agent.agent_id),
+            prompt_messages=[],
         )
 
         self.assertEqual(1457, snapshot.total_tokens)
@@ -199,7 +207,11 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         session.append_user_message("hello")
         service = ContextUsageService()
 
-        await service.build(agent=agent, context=context, session=session)
+        await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
         request_count_after_first_build = len(provider.requests)
 
         session.append_assistant_tool_batch(
@@ -224,7 +236,11 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        await service.build(agent=agent, context=context, session=session)
+        await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
 
         self.assertGreater(len(provider.requests), request_count_after_first_build)
 
@@ -238,7 +254,7 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await ContextUsageService().build(
             agent=agent,
             context=context,
-            session=session,
+            prompt_messages=session.messages,
         )
 
         self.assertIsNone(snapshot.total_tokens)
@@ -248,7 +264,7 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot.category("tools").token_count)
         self.assertIsNone(snapshot.free_tokens)
 
-    async def test_snapshot_uses_effective_messages_when_provided(self) -> None:
+    async def test_snapshot_uses_prompt_messages_when_provided(self) -> None:
         agent = self._build_agent()
         provider = StubProvider(
             request_estimates={
@@ -263,12 +279,11 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         session.append_user_message("raw user")
         session.append_assistant_message("raw answer")
 
-        effective_messages = [session.messages[0]]
+        prompt_messages = [session.messages[0]]
         snapshot = await ContextUsageService().build(
             agent=agent,
             context=context,
-            session=session,
-            effective_messages=effective_messages,
+            prompt_messages=prompt_messages,
         )
 
         self.assertEqual(80, snapshot.category("messages").token_count)
@@ -293,8 +308,16 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
         session.append_user_message("hello")
         service = ContextUsageService()
 
-        first = await service.build(agent=agent, context=context, session=session)
-        second = await service.build(agent=agent, context=context, session=session)
+        first = await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
+        second = await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=session.messages,
+        )
 
         self.assertIsNone(first.total_tokens)
         self.assertEqual(190, second.total_tokens)

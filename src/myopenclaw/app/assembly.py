@@ -4,7 +4,7 @@ from myopenclaw.agents.agent import Agent
 from myopenclaw.agents.behavior_loader import BehaviorLoader
 from myopenclaw.agents.skills import SkillManifest, SkillRegistry
 from myopenclaw.config.app_config import AppConfig
-from myopenclaw.context import ConversationContextService, ConversationWindowManager
+from myopenclaw.context import ConversationContextService
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
 
@@ -68,9 +68,7 @@ class AppAssembly:
     ) -> tuple[Agent, AgentCoordinator]:
         agent = self.resolve_agent(agent_id=agent_id)
         conversation_context_service = ConversationContextService(
-            window_manager=ConversationWindowManager(
-                cli_turn_window=self.app_config.context_cli_turn_window
-            )
+            cli_turn_window=self.app_config.context_cli_turn_window
         )
         coordinator = AgentCoordinator(
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),

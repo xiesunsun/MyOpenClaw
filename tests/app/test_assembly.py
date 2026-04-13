@@ -6,7 +6,7 @@ import unittest
 from myopenclaw.agents.agent import Agent
 from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
-from myopenclaw.context import ConversationWindowManager
+from myopenclaw.context import ConversationContextService
 
 
 class AppAssemblyTests(unittest.TestCase):
@@ -151,12 +151,12 @@ class AppAssemblyTests(unittest.TestCase):
 
             self.assertEqual(16, coordinator.strategy.max_steps)
             self.assertIsInstance(
-                coordinator.context.conversation_context_service.window_manager,
-                ConversationWindowManager,
+                coordinator.context.conversation_context_service,
+                ConversationContextService,
             )
             self.assertEqual(
                 7,
-                coordinator.context.conversation_context_service.window_manager.cli_turn_window,
+                coordinator.context.conversation_context_service.cli_turn_window,
             )
 
 

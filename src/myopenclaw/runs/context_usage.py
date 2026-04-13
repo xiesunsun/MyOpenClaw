@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from myopenclaw.agents.agent import Agent
 from myopenclaw.agents.skills import SystemInstructionParts, format_skill_catalog_entry
 from myopenclaw.conversations.message import SessionMessage
-from myopenclaw.conversations.session import Session
 from myopenclaw.runs.context import AgentRuntimeContext
 from myopenclaw.shared.generation import GenerateRequest
 
@@ -51,7 +50,7 @@ class _ContextUsageCacheEntry:
 
 class ContextUsageService:
     def __init__(self) -> None:
-        self._cached_messages_hash: str | None = None
+        self._cached_prompt_messages_hash: str | None = None
         self._cached_entry: _ContextUsageCacheEntry | None = None
 
     async def build(
@@ -59,19 +58,18 @@ class ContextUsageService:
         *,
         agent: Agent,
         context: AgentRuntimeContext,
-        session: Session,
-        effective_messages: list[SessionMessage] | None = None,
+        prompt_messages: list[SessionMessage],
     ) -> ContextUsageSnapshot:
         instruction_parts = agent.instruction_parts
-        messages = list(effective_messages) if effective_messages is not None else list(session.messages)
-        messages_hash = self._messages_hash(messages=messages)
+        messages = list(prompt_messages)
+        prompt_messages_hash = self._hash_prompt_messages(messages=messages)
         fingerprint = self._cache_fingerprint(
             agent=agent,
             context=context,
-            messages_hash=messages_hash,
+            prompt_messages_hash=prompt_messages_hash,
         )
         if (
-            self._cached_messages_hash == messages_hash
+            self._cached_prompt_messages_hash == prompt_messages_hash
             and self._cached_entry is not None
             and self._cached_entry.fingerprint == fingerprint
         ):
@@ -79,94 +77,99 @@ class ContextUsageService:
 
         is_empty_session = not messages
         full_system_instruction = instruction_parts.full_instruction or None
-        c0_request = GenerateRequest(
+        messages_only_request = GenerateRequest(
             system_instruction=None,
             messages=messages,
             tools=[],
         )
-        c1_request = GenerateRequest(
+        base_system_request = GenerateRequest(
             system_instruction=instruction_parts.base_instruction or None,
             messages=messages,
             tools=[],
         )
-        c2_request = GenerateRequest(
+        full_system_request = GenerateRequest(
             system_instruction=full_system_instruction,
             messages=messages,
             tools=[],
         )
-        c3_request = GenerateRequest(
+        full_request = GenerateRequest(
             system_instruction=full_system_instruction,
             messages=messages,
             tools=[tool.spec for tool in context.tools],
         )
-        c0_tokens, c1_tokens, c2_tokens, c3_tokens = await asyncio.gather(
-            context.provider.count_request_tokens(c0_request),
-            context.provider.count_request_tokens(c1_request),
-            context.provider.count_request_tokens(c2_request),
-            context.provider.count_request_tokens(c3_request),
+        (
+            messages_only_tokens,
+            base_system_tokens,
+            full_system_tokens,
+            full_request_tokens,
+        ) = await asyncio.gather(
+            context.provider.count_request_tokens(messages_only_request),
+            context.provider.count_request_tokens(base_system_request),
+            context.provider.count_request_tokens(full_system_request),
+            context.provider.count_request_tokens(full_request),
         )
-        normalization_offset = c0_tokens if is_empty_session else 0
+        normalization_offset = messages_only_tokens if is_empty_session else 0
 
         snapshot = ContextUsageSnapshot(
             model_label=f"{agent.model_config.provider} / {agent.model_config.model}",
             max_input_tokens=agent.model_config.max_input_tokens,
-            total_tokens=self._subtract_offset(c3_tokens, normalization_offset),
+            total_tokens=self._subtract_offset(full_request_tokens, normalization_offset),
             categories=[
                 ContextUsageCategory(
                     key="system",
                     label="System prompt",
-                    token_count=self._delta(c1_tokens, c0_tokens),
+                    token_count=self._delta(base_system_tokens, messages_only_tokens),
                 ),
                 ContextUsageCategory(
                     key="skills",
                     label="Skills",
-                    token_count=self._delta(c2_tokens, c1_tokens),
-                    details=await self._build_skill_details(
+                    token_count=self._delta(full_system_tokens, base_system_tokens),
+                    details=await self._build_skill_usage_details(
                         agent=agent,
                         context=context,
                         messages=messages,
                         instruction_parts=instruction_parts,
-                        c2_tokens=c2_tokens,
+                        full_system_tokens=full_system_tokens,
                     ),
                 ),
                 ContextUsageCategory(
                     key="messages",
                     label="Messages",
-                    token_count=self._subtract_offset(c0_tokens, normalization_offset),
+                    token_count=self._subtract_offset(messages_only_tokens, normalization_offset),
                 ),
                 ContextUsageCategory(
                     key="tools",
                     label="Tools",
-                    token_count=self._delta(c3_tokens, c2_tokens),
+                    token_count=self._delta(full_request_tokens, full_system_tokens),
                 ),
             ],
             free_tokens=(
-                agent.model_config.max_input_tokens - self._subtract_offset(c3_tokens, normalization_offset)
+                agent.model_config.max_input_tokens - self._subtract_offset(full_request_tokens, normalization_offset)
                 if agent.model_config.max_input_tokens is not None
-                and self._subtract_offset(c3_tokens, normalization_offset) is not None
+                and self._subtract_offset(full_request_tokens, normalization_offset) is not None
                 else None
             ),
         )
 
         if self._is_cacheable(snapshot):
-            self._cached_messages_hash = messages_hash
+            self._cached_prompt_messages_hash = prompt_messages_hash
             self._cached_entry = _ContextUsageCacheEntry(
                 fingerprint=fingerprint,
                 snapshot=snapshot,
             )
         else:
-            self._cached_messages_hash = None
+            self._cached_prompt_messages_hash = None
             self._cached_entry = None
         return snapshot
 
     @staticmethod
-    async def _build_skill_details(
+    async def _build_skill_usage_details(
         *,
         agent: Agent,
         context: AgentRuntimeContext,
         messages: list[SessionMessage],
         instruction_parts: SystemInstructionParts,
-        c2_tokens: int | None,
+        full_system_tokens: int | None,
     ) -> list[ContextUsageDetail]:
         if not agent.skills:
             return []
@@ -213,7 +216,7 @@ class ContextUsageService:
             if intermediate_requests
             else []
         )
-        cumulative_counts.append(c2_tokens)
+        cumulative_counts.append(full_system_tokens)
 
         details: list[ContextUsageDetail] = []
         previous_count = baseline_count
@@ -232,7 +235,7 @@ class ContextUsageService:
         return "\n\n".join(section for section in sections if section)
 
     @staticmethod
-    def _messages_hash(*, messages: list[SessionMessage]) -> str:
+    def _hash_prompt_messages(*, messages: list[SessionMessage]) -> str:
         payload = [ContextUsageService._serialize_session_message(message) for message in messages]
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -243,7 +246,7 @@ class ContextUsageService:
         *,
         agent: Agent,
         context: AgentRuntimeContext,
-        messages_hash: str,
+        prompt_messages_hash: str,
     ) -> str:
         payload = {
             "agent_id": agent.agent_id,
@@ -251,7 +254,7 @@ class ContextUsageService:
                 "provider": agent.model_config.provider,
                 "name": agent.model_config.model,
             },
-            "messages_hash": messages_hash,
+            "prompt_messages_hash": prompt_messages_hash,
             "system_instruction": agent.system_instruction,
             "tools": [
                 {

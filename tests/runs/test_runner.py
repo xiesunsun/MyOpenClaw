@@ -196,7 +196,7 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         second_request_batch = provider.requests[1].messages[1].tool_call_batch
         self.assertEqual(["call-slow", "call-fast"], [result.call_id for result in second_request_batch.results])
 
-    async def test_runner_summarizes_completed_turn_history_on_next_turn(self) -> None:
+    async def test_runner_keeps_recent_turn_history_raw_on_next_turn(self) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -253,10 +253,10 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, len(provider.requests))
         history_request = provider.requests[2]
         self.assertEqual(
-            ["first user", 'Tool step summary:\n- echo args={"text": "history"} -> result=history', "first answer", "second user"],
+            ["first user", "", "first answer", "second user"],
             [message.content for message in history_request.messages],
         )
-        self.assertTrue(all(message.tool_call_batch is None for message in history_request.messages[:-1]))
+        self.assertIsNotNone(history_request.messages[1].tool_call_batch)
 
 
 if __name__ == "__main__":

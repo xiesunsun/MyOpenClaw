@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 from myopenclaw.agents.agent import Agent
-from myopenclaw.context import ContextRuntimeStore, ConversationContextService
+from myopenclaw.context import ConversationContextService
 from myopenclaw.providers import BaseLLMProvider, create_llm_provider
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import ModelConfig
@@ -41,7 +41,6 @@ class AgentRuntimeContext:
     conversation_context_service: ConversationContextService = field(
         default_factory=ConversationContextService
     )
-    context_runtime_store: ContextRuntimeStore = field(default_factory=ContextRuntimeStore)
 
     def __post_init__(self) -> None:
         if self.file_access_policy is None:

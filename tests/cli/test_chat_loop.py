@@ -3,12 +3,10 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import textwrap
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from myopenclaw.agents.agent import Agent
 from myopenclaw.cli.context_renderer import ContextRenderer
-from myopenclaw.context import ContextRuntimeStore
 from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
@@ -154,11 +152,8 @@ class StubContextCoordinator:
             provider=Mock(),
             tools=[],
             conversation_context_service=Mock(
-                build_snapshot=Mock(
-                    return_value=SimpleNamespace(messages=[])
-                )
+                build_prompt_messages_from_session=Mock(return_value=[])
             ),
-            context_runtime_store=ContextRuntimeStore(),
         )
 
     async def run_turn(
@@ -175,17 +170,16 @@ class StubContextCoordinator:
 class StubContextUsageService:
     def __init__(self, snapshot: ContextUsageSnapshot) -> None:
         self.snapshot = snapshot
-        self.calls: list[tuple[Agent, object, Session, list[object] | None]] = []
+        self.calls: list[tuple[Agent, object, list[object] | None]] = []
 
     async def build(
         self,
         *,
         agent: Agent,
         context: object,
-        session: Session,
-        effective_messages=None,
+        prompt_messages=None,
     ) -> ContextUsageSnapshot:
-        self.calls.append((agent, context, session, effective_messages))
+        self.calls.append((agent, context, prompt_messages))
         return self.snapshot
 
 

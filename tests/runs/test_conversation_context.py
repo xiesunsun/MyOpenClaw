@@ -1,17 +1,32 @@
 import unittest
-from collections import deque
 
-from myopenclaw.conversations.message import MessageRole, ToolCall, ToolCallBatch, ToolCallResult
+from myopenclaw.context import ConversationContextService, UserTurn
+from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversations.session import Session
-from myopenclaw.context import (
-    ConversationContextBuilder,
-    ConversationWindow,
-    ConversationWindowManager,
-)
 
 
 class ConversationContextTests(unittest.TestCase):
-    def test_sync_with_session_builds_completed_and_current_turns_incrementally(self) -> None:
+    def test_collect_recent_user_turns_keeps_recent_turns_in_order(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        for index in range(6):
+            session.append_user_message(f"user-{index}")
+            session.append_assistant_message(f"answer-{index}")
+
+        service = ConversationContextService(cli_turn_window=3)
+
+        turns = service.collect_recent_user_turns(session)
+
+        self.assertEqual(3, len(turns))
+        self.assertEqual(
+            ["user-3", "user-4", "user-5"],
+            [turn.user_message.content for turn in turns],
+        )
+        self.assertEqual(
+            [["answer-3"], ["answer-4"], ["answer-5"]],
+            [[message.content for message in turn.assistant_messages] for turn in turns],
+        )
+
+    def test_collect_recent_user_turns_keeps_raw_tool_batches(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1")
         session.append_user_message("first user")
         session.append_assistant_tool_batch(
@@ -57,22 +72,19 @@ class ConversationContextTests(unittest.TestCase):
             content="checking second file",
         )
 
-        window = ConversationWindow()
-        manager = ConversationWindowManager(cli_turn_window=5)
+        service = ConversationContextService(cli_turn_window=5)
 
-        manager.sync_with_session(session=session, window=window)
+        turns = service.collect_recent_user_turns(session)
 
-        self.assertEqual(4, window.last_consumed_message_index)
-        self.assertEqual(1, len(window.completed_turns))
-        self.assertEqual("first user", window.completed_turns[0].user_message.content)
-        self.assertEqual("first final", window.completed_turns[0].final_answer.content)
-        self.assertEqual(1, len(window.completed_turns[0].tool_steps))
-        self.assertIsNotNone(window.current_turn)
-        self.assertEqual("second user", window.current_turn.user_message.content)
-        self.assertEqual(1, len(window.current_turn.tool_steps))
-        self.assertIsNone(window.current_turn.final_answer)
+        self.assertEqual(2, len(turns))
+        self.assertEqual("first user", turns[0].user_message.content)
+        self.assertEqual("first final", turns[0].assistant_messages[-1].content)
+        self.assertIsNotNone(turns[0].assistant_messages[0].tool_call_batch)
+        self.assertEqual("second user", turns[1].user_message.content)
+        self.assertEqual(1, len(turns[1].assistant_messages))
+        self.assertIsNotNone(turns[1].assistant_messages[0].tool_call_batch)
 
-    def test_build_messages_summarizes_completed_turns_and_keeps_current_turn_raw(self) -> None:
+    def test_build_prompt_messages_from_session_flattens_recent_turns(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1")
         session.append_user_message("completed user")
         session.append_assistant_tool_batch(
@@ -83,7 +95,7 @@ class ConversationContextTests(unittest.TestCase):
                     ToolCall(
                         id="call-1",
                         name="grep",
-                        arguments={"pattern": "ConversationWindow", "path": "/tmp/project/alpha.py"},
+                        arguments={"pattern": "UserTurn", "path": "/tmp/project/alpha.py"},
                     )
                 ],
                 results=[
@@ -118,38 +130,23 @@ class ConversationContextTests(unittest.TestCase):
             content="checking current file",
         )
 
-        window = ConversationWindow()
-        manager = ConversationWindowManager(cli_turn_window=5)
-        builder = ConversationContextBuilder()
+        service = ConversationContextService(cli_turn_window=5)
 
-        manager.sync_with_session(session=session, window=window)
-        messages = builder.build_messages(window=window)
+        messages = service.build_prompt_messages_from_session(session)
 
         self.assertEqual(
-            ["completed user", "Tool step summary:\n- grep args={\"path\": \"/tmp/project/alpha.py\", \"pattern\": \"ConversationWindow\"} -> result=matched line 1 matched line 2", "completed final", "current user", "checking current file"],
+            ["completed user", "checked code", "completed final", "current user", "checking current file"],
             [message.content for message in messages],
         )
-        self.assertIsNone(messages[1].tool_call_batch)
+        self.assertIsNotNone(messages[1].tool_call_batch)
         self.assertIsNotNone(messages[-1].tool_call_batch)
 
-    def test_sync_with_session_trims_completed_turns_to_cli_window(self) -> None:
+    def test_user_turn_rejects_non_user_first_message(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        for index in range(6):
-            session.append_user_message(f"user-{index}")
-            session.append_assistant_message(f"answer-{index}")
+        session.append_assistant_message("assistant only")
 
-        window = ConversationWindow()
-        manager = ConversationWindowManager(cli_turn_window=5)
-
-        manager.sync_with_session(session=session, window=window)
-
-        self.assertEqual(5, len(window.completed_turns))
-        self.assertEqual(
-            deque([1, 2, 3, 4, 5]),
-            deque(turn.turn_index for turn in window.completed_turns),
-        )
-        self.assertEqual("user-1", window.completed_turns[0].user_message.content)
-        self.assertEqual("answer-5", window.completed_turns[-1].final_answer.content)
+        with self.assertRaisesRegex(ValueError, "role 'user'"):
+            UserTurn(user_message=session.messages[0])
 
 
 if __name__ == "__main__":
