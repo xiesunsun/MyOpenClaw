@@ -136,6 +136,27 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(False, result.metadata["truncated"])
         self.assertEqual("ready", result.metadata["shell_status"])
 
+    async def test_shell_exec_does_not_truncate_long_output(self) -> None:
+        manager = ShellSessionManager()
+        exec_tool = ShellExecTool()
+
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=workspace,
+                workspace_files=None,
+                shell_session_manager=manager,
+            )
+
+            result = await exec_tool.execute({"command": "python -c \"print('a' * 5000, end='')\""}, context)
+
+        self.assertFalse(result.is_error)
+        self.assertEqual("a" * 5000, result.content)
+        self.assertEqual(False, result.metadata["truncated"])
+        self.assertEqual("ready", result.metadata["shell_status"])
+
     async def test_shell_exec_reports_non_zero_exit_without_killing_shell(self) -> None:
         manager = ShellSessionManager()
         exec_tool = ShellExecTool()

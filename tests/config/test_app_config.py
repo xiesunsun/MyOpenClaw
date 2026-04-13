@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from myopenclaw.config.app_config import AppConfig
 
@@ -230,6 +231,81 @@ class AppConfigTests(unittest.TestCase):
             model_config = config.resolve_model_config()
 
             self.assertEqual(1048576, model_config.max_input_tokens)
+
+    def test_load_expands_environment_variables_in_model_config(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            api_key: ${TEST_GEMINI_API_KEY}
+                            api_base: ${TEST_GEMINI_API_BASE}
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "TEST_GEMINI_API_KEY": "secret-key",
+                    "TEST_GEMINI_API_BASE": "https://example.com",
+                },
+                clear=False,
+            ):
+                config = AppConfig.load(config_path)
+
+            model_config = config.resolve_model_config()
+            self.assertEqual("secret-key", model_config.api_key)
+            self.assertEqual("https://example.com", model_config.api_base)
+
+    def test_load_raises_for_missing_environment_variable(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            api_key: ${MISSING_API_KEY}
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaisesRegex(
+                    ValueError, "Environment variable 'MISSING_API_KEY' is not set"
+                ):
+                    AppConfig.load(config_path)
 
     def test_file_access_mode_defaults_to_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:

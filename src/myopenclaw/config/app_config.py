@@ -1,4 +1,7 @@
+import os
+import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -56,9 +59,30 @@ class AppConfig(BaseModel):
         if not config_file.exists():
             raise FileNotFoundError(f"Config file not found: {config_file}")
         with config_file.open(encoding="utf-8") as handle:
-            config_data = yaml.safe_load(handle) or {}
+            config_data = cls._expand_env_vars(yaml.safe_load(handle) or {})
         config_data["root"] = config_file.parent
         return cls.model_validate(config_data)
+
+    @classmethod
+    def _expand_env_vars(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: cls._expand_env_vars(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._expand_env_vars(item) for item in value]
+        if isinstance(value, str):
+            return _ENV_VAR_PATTERN.sub(cls._replace_env_var, value)
+        return value
+
+    @staticmethod
+    def _replace_env_var(match: re.Match[str]) -> str:
+        env_name = match.group(1)
+        env_value = os.environ.get(env_name)
+        if env_value is None:
+            raise ValueError(f"Environment variable '{env_name}' is not set")
+        return env_value
 
     def _resolve_path(self, path: Path) -> Path:
         if path.is_absolute():
@@ -97,3 +121,6 @@ class AppConfig(BaseModel):
     def resolve_skills_path(self, agent_id: str | None = None) -> Path | None:
         agent_config = self.get_agent_config(agent_id)
         return agent_config.skills_path or self.default_skills_path
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

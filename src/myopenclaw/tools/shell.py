@@ -154,12 +154,10 @@ class PersistentShell:
         workspace_path: Path,
         process: PtyShellProcess | None = None,
         default_timeout_ms: int = 120000,
-        max_output_chars: int = 4000,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
         self.process = process or PtyShellProcess()
         self.default_timeout_ms = default_timeout_ms
-        self.max_output_chars = max_output_chars
         self._last_cwd = self.workspace_path
         self._running = False
 
@@ -208,20 +206,17 @@ class PersistentShell:
 
         while True:
             if not self.is_alive():
-                output, truncated = _truncate_output(_normalize_output(buffer), self.max_output_chars)
                 return ShellExecutionResult(
-                    stdout=output,
+                    stdout=_normalize_output(buffer),
                     stderr="Shell terminated unexpectedly.",
                     exit_code=1,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TERMINATED,
-                    truncated=truncated,
                 )
 
             marker_match = _find_marker(buffer, marker)
             if marker_match is not None:
                 output = _normalize_output(buffer[:marker_match.start()])
-                output, truncated = _truncate_output(output, self.max_output_chars)
                 exit_code = int(marker_match.group("exit_code"))
                 cwd = Path(marker_match.group("cwd"))
                 self._last_cwd = cwd
@@ -231,22 +226,19 @@ class PersistentShell:
                     exit_code=exit_code,
                     cwd=cwd,
                     shell_status=ShellStatus.READY,
-                    truncated=truncated,
                 )
 
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
                 self.process.interrupt()
-                output, truncated = _truncate_output(_normalize_output(buffer), self.max_output_chars)
                 self.terminate()
                 return ShellExecutionResult(
-                    stdout=output,
+                    stdout=_normalize_output(buffer),
                     stderr="Shell command timed out.",
                     exit_code=124,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TIMED_OUT,
                     timed_out=True,
-                    truncated=truncated,
                 )
 
             chunk = self.process.read_chunk(timeout_ms=min(remaining_ms, 100))
@@ -476,9 +468,3 @@ def _find_marker(buffer: str, marker: str) -> re.Match[str] | None:
 def _normalize_output(output: str) -> str:
     normalized = output.replace("\r", "")
     return normalized.rstrip("\n")
-
-
-def _truncate_output(output: str, max_output_chars: int) -> tuple[str, bool]:
-    if len(output) <= max_output_chars:
-        return output, False
-    return output[:max_output_chars], True
