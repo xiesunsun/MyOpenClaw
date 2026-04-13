@@ -6,6 +6,8 @@ from typing import Awaitable, Callable
 
 from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.cli.context_renderer import ContextRenderer
+from myopenclaw.conversations.service import SessionService
+from myopenclaw.conversations.session_storage_mapper import build_session_preview
 from myopenclaw.conversations.message import ToolCallBatch
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
@@ -37,6 +39,7 @@ class ChatLoop:
         input_reader: Callable[[str], str | Awaitable[str]] | None = None,
         context_usage_service: ContextUsageService | None = None,
         context_renderer: ContextRenderer | None = None,
+        session_service: SessionService | None = None,
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.agent_id
@@ -49,20 +52,31 @@ class ChatLoop:
         self._fallback_message_count = self._read_session_message_count()
         self._context_usage_service = context_usage_service or ContextUsageService()
         self._context_renderer = context_renderer or ContextRenderer()
+        self._session_service = session_service
+        self._session_closed = False
 
     @classmethod
     def from_config_path(
         cls,
         config_path: Path,
         agent_id: str | None = None,
+        session_id: str | None = None,
     ) -> "ChatLoop":
         assembly = AppAssembly.from_config_path(config_path)
-        agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
+        session_service = assembly.build_session_service()
+        if session_id is not None:
+            session = session_service.resume(session_id=session_id)
+            agent, coordinator = assembly.build_chat_runtime(agent_id=session.agent_id)
+        else:
+            agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
+            session = session_service.start(agent_id=agent.agent_id)
         return cls(
             agent=agent,
             agent_id=agent.agent_id,
             coordinator=coordinator,
+            session=session,
             config_path=config_path,
+            session_service=session_service,
         )
 
     async def handle_user_input(
@@ -179,10 +193,31 @@ class ChatLoop:
         self._render_message("System", help_text, style="cyan")
 
     def _render_session_summary(self) -> None:
+        preview = (
+            self._session_service.build_preview(session=self.session)
+            if self._session_service is not None
+            else build_session_preview(session=self.session)
+        )
         summary = Text(
-            f"Agent: {self.agent_id}\nMessages: {self._message_count()}",
+            "\n".join(
+                [
+                    f"Session ID: {preview.session_id}",
+                    f"Agent: {preview.agent_id}",
+                    f"Status: {preview.status}",
+                    f"Messages: {preview.message_count}",
+                    f"Updated: {preview.updated_at.isoformat()}",
+                    f"Last message: {preview.last_message or '-'}",
+                ]
+            ),
         )
         self._render_message("System", summary, style="cyan")
+
+    def _close_session(self) -> None:
+        if self._session_closed:
+            return
+        if self._session_service is not None:
+            self._session_service.close(session=self.session)
+        self._session_closed = True
 
     async def _handle_command(self, user_input: str) -> bool:
         command = user_input.lower()
@@ -200,6 +235,7 @@ class ChatLoop:
             self._render_header()
             return True
         if command == "/exit":
+            self._close_session()
             self._render_system_message("Session closed.")
             return False
 
@@ -239,10 +275,12 @@ class ChatLoop:
                     raw_user_input = await raw_user_input
                 user_input = raw_user_input.strip()
             except (EOFError, KeyboardInterrupt):
+                self._close_session()
                 self._render_system_message("Session closed.")
                 break
 
             if user_input.lower() in {"quit", "exit"}:
+                self._close_session()
                 self._render_system_message("Session closed.")
                 break
             if not user_input:
@@ -254,11 +292,17 @@ class ChatLoop:
 
             self._fallback_message_count += 1
             event_renderer = ChatEventRenderer(self.console)
+            start_index = len(self.session.messages)
             try:
                 reply = await self.handle_user_input(
                     user_input,
                     event_handler=event_renderer.handle_event,
                 )
+                if self._session_service is not None:
+                    self._session_service.flush_new_messages(
+                        session=self.session,
+                        start_index=start_index,
+                    )
             except Exception as exc:
                 self._render_error_message(f"Request failed: {exc}")
                 continue

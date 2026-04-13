@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
@@ -17,13 +18,30 @@ class Session:
     session_id: str
     agent_id: str
     messages: list[SessionMessage] = field(default_factory=list)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = "active"
+    remote_session_id: str | None = None
+    last_synced_message_index: int | None = None
+    last_committed_at: datetime | None = None
 
     @classmethod
-    def create(cls, agent_id: str, session_id: Optional[str] = None) -> "Session":
+    def create(
+        cls,
+        agent_id: str,
+        session_id: Optional[str] = None,
+        created_at: datetime | None = None,
+    ) -> "Session":
+        now = created_at or datetime.now(timezone.utc)
         return cls(
             session_id=session_id or str(uuid4()),
             agent_id=agent_id,
+            created_at=now,
+            updated_at=now,
         )
+
+    def touch(self, *, at: datetime | None = None) -> None:
+        self.updated_at = at or datetime.now(timezone.utc)
 
     def append_user_message(self, content: str) -> None:
         self.messages.append(SessionMessage(role=MessageRole.USER, content=content))

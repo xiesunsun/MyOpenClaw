@@ -3,8 +3,11 @@ from pathlib import Path
 from myopenclaw.agents.agent import Agent
 from myopenclaw.agents.behavior_loader import BehaviorLoader
 from myopenclaw.agents.skills import SkillManifest, SkillRegistry
+from myopenclaw.conversations.service import SessionService
 from myopenclaw.config.app_config import AppConfig
 from myopenclaw.context import ConversationContextService
+from myopenclaw.integrations.openviking.session_sync import NoopSessionSync
+from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
 
@@ -78,3 +81,9 @@ class AppAssembly:
             ),
         )
         return agent, coordinator
+
+    def build_session_service(self) -> SessionService:
+        db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
+        repository = SQLiteSessionRepository(db_path)
+        session_sync = NoopSessionSync()
+        return SessionService(repository, session_sync)

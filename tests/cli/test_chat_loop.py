@@ -10,6 +10,7 @@ from myopenclaw.cli.context_renderer import ContextRenderer
 from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
+from myopenclaw.conversations.session_preview import SessionPreview
 from myopenclaw.cli.chat import ChatLoop
 from myopenclaw.runs.context_usage import (
     ContextUsageCategory,
@@ -183,6 +184,29 @@ class StubContextUsageService:
         return self.snapshot
 
 
+class FakeSessionService:
+    def __init__(self) -> None:
+        self.flush_calls: list[tuple[int, int]] = []
+        self.closed = False
+
+    def build_preview(self, *, session: Session) -> SessionPreview:
+        return SessionPreview(
+            session_id=session.session_id,
+            agent_id=session.agent_id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            status=session.status,
+            message_count=len(session.messages),
+            last_message="runtime reply",
+        )
+
+    def flush_new_messages(self, *, session: Session, start_index: int) -> None:
+        self.flush_calls.append((start_index, len(session.messages)))
+
+    def close(self, *, session: Session) -> None:
+        self.closed = True
+
+
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     def _build_agent(self) -> Agent:
         return Agent(
@@ -348,6 +372,40 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, titles.count("Assistant"))
         self.assertNotIn("You", titles)
 
+    async def test_run_flushes_new_messages_after_turn(self) -> None:
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        session_service = FakeSessionService()
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+            session_service=session_service,
+        )
+
+        await loop.run()
+
+        self.assertEqual([(0, 2)], session_service.flush_calls)
+
+    async def test_run_closes_session_on_exit(self) -> None:
+        console = Mock()
+        submitted_inputs = iter(["/exit"])
+        session_service = FakeSessionService()
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+            session_service=session_service,
+        )
+
+        await loop.run()
+
+        self.assertTrue(session_service.closed)
+
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
@@ -426,6 +484,26 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Free space", rendered)
         self.assertIn("Skills breakdown", rendered)
         self.assertEqual(1, len(context_usage_service.calls))
+
+    async def test_session_command_renders_preview(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/session", "/exit"])
+        session_service = FakeSessionService()
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=Session(session_id="session-1", agent_id="Pickle"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+            session_service=session_service,
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("session-1", rendered)
+        self.assertIn("runtime reply", rendered)
 
     async def test_from_config_path_uses_react_max_steps_from_app_config(self) -> None:
         with TemporaryDirectory() as tmpdir:

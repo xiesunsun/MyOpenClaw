@@ -1,4 +1,5 @@
 import unittest
+from datetime import timezone
 
 from myopenclaw.conversations.message import (
     MessageRole,
@@ -18,6 +19,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual("session-1", session.session_id)
         self.assertEqual("Pickle", session.agent_id)
         self.assertEqual([], session.messages)
+
+    def test_session_create_populates_persistence_metadata(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        self.assertEqual("active", session.status)
+        self.assertIsNotNone(session.created_at)
+        self.assertIsNotNone(session.updated_at)
+        self.assertEqual(timezone.utc, session.created_at.tzinfo)
+        self.assertEqual(session.created_at, session.updated_at)
+        self.assertIsNone(session.remote_session_id)
+        self.assertIsNone(session.last_synced_message_index)
+        self.assertIsNone(session.last_committed_at)
 
     def test_session_belongs_to_one_agent_and_stores_model_visible_messages(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")
@@ -72,6 +85,14 @@ class SessionTests(unittest.TestCase):
         self.assertEqual("echo", session.messages[0].tool_call_batch.calls[0].name)
         self.assertEqual("call-1", session.messages[0].tool_call_batch.results[0].call_id)
         self.assertEqual({"exit_code": 0}, session.messages[0].tool_call_batch.results[0].metadata)
+
+    def test_touch_updates_updated_at(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        touched_at = session.updated_at.replace(microsecond=session.updated_at.microsecond + 1)
+
+        session.touch(at=touched_at)
+
+        self.assertEqual(touched_at, session.updated_at)
 
 
 if __name__ == "__main__":
