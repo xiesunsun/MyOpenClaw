@@ -215,4 +215,4 @@ uv run pytest
 
 ## License
 
-No license file has been added yet.
+Licensed under Apache-2.0. See `LICENSE`.
