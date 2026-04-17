@@ -2,7 +2,7 @@
 
 MyOpenClaw is a local-first, extensible agent runtime built for coding and workspace automation scenarios. It focuses on the core execution loop of an agent system: model invocation, tool calling, multi-turn session management, context construction, persistence, and controlled workspace operations.
 
-This repository is the engineering project behind the `MyOpenClaw` item in my resume. The implementation is intentionally kept concrete and inspectable rather than being a prompt-only demo.
+The implementation is intentionally kept concrete and inspectable rather than being a prompt-only demo.
 
 ## What It Does
 
@@ -205,16 +205,6 @@ Run tests with:
 ```bash
 uv run pytest
 ```
-
-## Resume Mapping
-
-If you are reading this from my GitHub profile because of my resume, this repository corresponds to the following engineering themes I wanted to demonstrate in code:
-
-- agent runtime design instead of prompt-only demos
-- tool orchestration and bounded file-system access
-- multi-turn session persistence and recovery
-- context window management for long conversations
-- modular Python architecture with tests around core runtime behavior
 
 ## Roadmap
 
