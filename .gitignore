@@ -88,6 +88,7 @@ Thumbs.db
 # ------------------------------
 # Project-local generated folders
 # ------------------------------
+.myopenclaw/
 pickle_workspace/
 
 # Keep committed agent spec/docs

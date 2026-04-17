@@ -1,27 +1,59 @@
 default_agent: Pickle
-
+react_max_steps: 100
+context_cli_turn_window: 5
+default_file_access_mode: full
+default_skills_path: /Users/ssunxie/code/myopenclaw/.agent/skills/
 default_llm:
   provider: google/gemini
   model: gemini-3-flash-preview
-
 providers:
   google/gemini:
     models:
       gemini-3-flash-preview:
         temperature: 1.0
-        max_output_tokens: 1048576
-        thinking_level: minimal
+        max_input_tokens: 1048576
+        max_output_tokens: 65536
+        thinking_level: low
         provider_options: {}
       gemini-3.1-flash-lite-preview:
         temperature: 1.0
+        max_input_tokens: 1048576
         max_output_tokens: 65536
-        thinking_level: minimal
+        thinking_level: high
         provider_options: {}
 
 agents:
   Pickle:
     workspace_path: pickle_workspace
     behavior_path: agents/Pickle
+    remote_agent_id: ${OPENVIKING_AGENT_ID}
+    file_access_mode: full
     llm:
       provider: google/gemini
       model: gemini-3-flash-preview
+    tools:
+      - list_directory
+      - glob_search
+      - grep_search
+      - read_file
+      - read_many_files
+      - replace
+      - write_file
+      - shell_exec
+      - shell_restart
+      - shell_close
+openviking:
+  enabled: false
+  base_url: ${OPENVIKING_BASE_URL}
+  account_id: ${OPENVIKING_ACCOUNT_ID}
+  user_id: ${OPENVIKING_USER_ID}
+  user_key: ${OPENVIKING_USER_KEY}
+  timeout_seconds: 30
+  commit_after_minutes: 30
+  commit_after_turns: 8
+  tool_output_max_chars: 4000
+  session_recall:
+    enabled: false
+    max_chars: 6000
+    limit: 5
+    min_score: null
