@@ -1,7 +1,12 @@
 from dataclasses import dataclass, field
 
 from myopenclaw.agents.agent import Agent
-from myopenclaw.context import ConversationContextService
+from myopenclaw.context import (
+    ConversationContextService,
+    NoopSessionRecallProvider,
+    SessionRecallProvider,
+)
+from myopenclaw.conversations.message import SessionMessage
 from myopenclaw.providers import BaseLLMProvider, create_llm_provider
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import ModelConfig
@@ -41,6 +46,11 @@ class AgentRuntimeContext:
     conversation_context_service: ConversationContextService = field(
         default_factory=ConversationContextService
     )
+    session_recall_provider: SessionRecallProvider = field(
+        default_factory=NoopSessionRecallProvider
+    )
+    session_recall_max_chars: int | None = None
+    last_session_recall_message: SessionMessage | None = None
 
     def __post_init__(self) -> None:
         if self.file_access_policy is None:
@@ -60,6 +70,8 @@ class AgentRuntimeContext:
         file_access_policy: FileAccessPolicy | None = None,
         shell_session_manager: ShellSessionManager | None = None,
         conversation_context_service: ConversationContextService | None = None,
+        session_recall_provider: SessionRecallProvider | None = None,
+        session_recall_max_chars: int | None = None,
     ) -> "AgentRuntimeContext":
         provider_resolver = provider_resolver or DefaultProviderResolver()
         tool_resolver = tool_resolver or DefaultToolResolver()
@@ -85,6 +97,10 @@ class AgentRuntimeContext:
             kwargs["shell_session_manager"] = shell_session_manager
         if conversation_context_service is not None:
             kwargs["conversation_context_service"] = conversation_context_service
+        if session_recall_provider is not None:
+            kwargs["session_recall_provider"] = session_recall_provider
+        if session_recall_max_chars is not None:
+            kwargs["session_recall_max_chars"] = session_recall_max_chars
 
         return cls(**kwargs)
 

@@ -4,7 +4,12 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
-from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
+from myopenclaw.conversations.message import (
+    SessionMessage,
+    ToolCall,
+    ToolCallBatch,
+    ToolCallResult,
+)
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
 from myopenclaw.runs.context import AgentRuntimeContext
@@ -33,13 +38,15 @@ class ReActStrategy(ExecutionStrategy):
         self,
         context: AgentRuntimeContext,
         session: Session,
+        session_recall_message: SessionMessage | None = None,
         event_handler: RuntimeEventHandler | None = None,
     ) -> GenerateResult:
         last_metadata: MessageMetadata | None = None
 
         for step_index in range(1, self.max_steps + 1):
             prompt_messages = context.conversation_context_service.build_prompt_messages_from_session(
-                session
+                session,
+                session_recall_message=session_recall_message,
             )
             await self._emit_event(
                 event_handler,

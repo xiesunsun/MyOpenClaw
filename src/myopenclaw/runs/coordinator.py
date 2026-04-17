@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from myopenclaw.agents.agent import Agent
+from myopenclaw.context import build_session_recall_message
 from myopenclaw.conversations.session import Session
 from myopenclaw.runs.context import AgentRuntimeContext
 from myopenclaw.shared.generation import GenerateResult
@@ -34,9 +35,19 @@ class AgentCoordinator:
             self.context = AgentRuntimeContext.create(agent=agent)
 
         session.append_user_message(user_text)
+        session_recall_result = await self.context.session_recall_provider.recall(
+            session=session,
+            current_user_text=user_text,
+        )
+        session_recall_message = build_session_recall_message(
+            session_recall_result,
+            max_chars=self.context.session_recall_max_chars,
+        )
+        self.context.last_session_recall_message = session_recall_message
 
         return await self.strategy.execute(
             context=self.context,
             session=session,
+            session_recall_message=session_recall_message,
             event_handler=event_handler,
         )

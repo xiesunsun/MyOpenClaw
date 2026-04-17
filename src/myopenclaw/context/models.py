@@ -6,6 +6,22 @@ from myopenclaw.conversations.message import MessageRole, SessionMessage
 
 
 @dataclass(frozen=True)
+class SessionRecallSnippet:
+    text: str
+    source_uri: str | None = None
+    score: float | None = None
+
+
+@dataclass(frozen=True)
+class SessionRecallResult:
+    snippets: list[SessionRecallSnippet] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.snippets
+
+
+@dataclass(frozen=True)
 class UserTurn:
     user_message: SessionMessage
     assistant_messages: list[SessionMessage] = field(default_factory=list)

@@ -24,6 +24,7 @@ class ContextUsageCategory:
     key: str
     label: str
     token_count: int | None
+    char_count: int | None = None
     details: list[ContextUsageDetail] = field(default_factory=list)
 
 
@@ -136,6 +137,16 @@ class ContextUsageService:
                     key="messages",
                     label="Messages",
                     token_count=self._subtract_offset(messages_only_tokens, normalization_offset),
+                ),
+                ContextUsageCategory(
+                    key="session_recall",
+                    label="Session recall message",
+                    token_count=None,
+                    char_count=(
+                        len(context.last_session_recall_message.content)
+                        if context.last_session_recall_message is not None
+                        else 0
+                    ),
                 ),
                 ContextUsageCategory(
                     key="tools",
@@ -327,7 +338,7 @@ class ContextUsageService:
         if snapshot.total_tokens is None or snapshot.free_tokens is None:
             return False
         for category in snapshot.categories:
-            if category.token_count is None:
+            if category.token_count is None and category.char_count is None:
                 return False
             if any(detail.token_count is None for detail in category.details):
                 return False

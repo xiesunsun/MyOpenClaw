@@ -37,16 +37,23 @@ class ConversationContextService:
     def build_prompt_messages_from_session(
         self,
         session: Session,
+        *,
+        session_recall_message: SessionMessage | None = None,
     ) -> list[SessionMessage]:
         return self.build_prompt_messages_from_turns(
-            self.collect_recent_user_turns(session)
+            self.collect_recent_user_turns(session),
+            session_recall_message=session_recall_message,
         )
 
     @staticmethod
     def build_prompt_messages_from_turns(
         turns: list[UserTurn],
+        *,
+        session_recall_message: SessionMessage | None = None,
     ) -> list[SessionMessage]:
         messages: list[SessionMessage] = []
+        if session_recall_message is not None:
+            messages.append(session_recall_message)
         for turn in turns:
             messages.append(turn.user_message)
             messages.extend(turn.assistant_messages)

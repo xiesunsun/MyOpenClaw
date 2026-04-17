@@ -68,6 +68,47 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(5, config.context_cli_turn_window)
 
+    def test_load_defaults_openviking_session_recall(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 0.2
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                        remote_agent_id: remote-pickle
+                    openviking:
+                      enabled: true
+                      base_url: https://openviking.example
+                      account_id: account
+                      user_id: user
+                      user_key: secret
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+
+            self.assertIsNotNone(config.openviking)
+            assert config.openviking is not None
+            self.assertTrue(config.openviking.session_recall.enabled)
+            self.assertEqual(6000, config.openviking.session_recall.max_chars)
+            self.assertEqual(5, config.openviking.session_recall.limit)
+
     def test_load_resolves_agent_paths_relative_to_config_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

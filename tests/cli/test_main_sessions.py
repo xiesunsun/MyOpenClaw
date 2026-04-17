@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from typer.testing import CliRunner
 
 from myopenclaw.cli.main import app
+from myopenclaw.conversations.service import SessionNotFoundError
+from myopenclaw.conversations.session import Session
 from myopenclaw.conversations.session_preview import SessionPreview
 
 
@@ -80,6 +82,48 @@ class MainSessionsCliTests(unittest.TestCase):
             agent_id=None,
             session_id="session-1",
         )
+
+    def test_sessions_delete_deletes_remote_then_local_for_session_agent(self) -> None:
+        lookup_service = Mock()
+        lookup_service.resume.return_value = Session(
+            session_id="session-1",
+            agent_id="Pickle",
+        )
+        delete_service = Mock()
+        fake_assembly = Mock()
+        fake_assembly.build_session_service.side_effect = [
+            lookup_service,
+            delete_service,
+        ]
+
+        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+            result = self.runner.invoke(
+                app,
+                ["sessions", "delete", "session-1", "--config", "config.yaml"],
+            )
+
+        self.assertEqual(0, result.exit_code)
+        self.assertIn("Deleted session session-1", result.stdout)
+        fake_assembly.build_session_service.assert_any_call()
+        fake_assembly.build_session_service.assert_any_call(agent_id="Pickle")
+        delete_service.delete.assert_called_once_with(session_id="session-1")
+
+    def test_sessions_delete_reports_missing_session(self) -> None:
+        lookup_service = Mock()
+        lookup_service.resume.side_effect = SessionNotFoundError(
+            "Session not found: missing"
+        )
+        fake_assembly = Mock()
+        fake_assembly.build_session_service.return_value = lookup_service
+
+        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+            result = self.runner.invoke(
+                app,
+                ["sessions", "delete", "missing", "--config", "config.yaml"],
+            )
+
+        self.assertNotEqual(0, result.exit_code)
+        self.assertIn("Session not found: missing", result.stderr)
 
 
 if __name__ == "__main__":

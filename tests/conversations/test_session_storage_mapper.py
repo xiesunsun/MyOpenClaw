@@ -81,7 +81,11 @@ class SessionStorageMapperTests(unittest.TestCase):
             status="active",
             remote_session_id="remote-1",
             last_synced_message_index=0,
+            last_committed_message_index=0,
             last_committed_at=updated_at,
+            openviking_account_id="myopenclaw",
+            openviking_user_id="ssunxie",
+            openviking_agent_id="remote-pickle",
         )
 
         restored = session_from_storage(
@@ -100,7 +104,11 @@ class SessionStorageMapperTests(unittest.TestCase):
         self.assertEqual("hello", restored.messages[0].content)
         self.assertEqual("remote-1", restored.remote_session_id)
         self.assertEqual(0, restored.last_synced_message_index)
+        self.assertEqual(0, restored.last_committed_message_index)
         self.assertEqual(updated_at, restored.last_committed_at)
+        self.assertEqual("myopenclaw", restored.openviking_account_id)
+        self.assertEqual("ssunxie", restored.openviking_user_id)
+        self.assertEqual("remote-pickle", restored.openviking_agent_id)
 
     def test_session_preview_last_message_prefers_tool_names_when_content_is_empty(self) -> None:
         session = Session(

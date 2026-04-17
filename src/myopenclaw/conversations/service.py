@@ -62,11 +62,8 @@ class SessionService:
                 messages=new_messages,
                 updated_at=updated_at,
             )
+        self._session_sync.sync_pending_messages(session=session)
         self._repository.update_metadata(session)
-        self._session_sync.sync_new_messages(
-            session=session,
-            start_index=start_index,
-        )
 
     def close(self, *, session: Session) -> None:
         updated_at = self._now()
@@ -76,4 +73,13 @@ class SessionService:
             session_id=session.session_id,
             updated_at=updated_at,
         )
-        self._session_sync.commit(session=session)
+        self._session_sync.sync_pending_messages(session=session)
+        self._session_sync.commit_pending_messages(session=session, force=True)
+        self._repository.update_metadata(session)
+
+    def delete(self, *, session_id: str) -> None:
+        session = self._repository.load(session_id)
+        if session is None:
+            raise SessionNotFoundError(f"Session not found: {session_id}")
+        self._session_sync.delete_session(session=session)
+        self._repository.delete(session_id=session_id)

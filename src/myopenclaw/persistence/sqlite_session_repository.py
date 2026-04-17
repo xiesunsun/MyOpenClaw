@@ -38,8 +38,12 @@ class SQLiteSessionRepository(SessionRepository):
                     status,
                     remote_session_id,
                     last_synced_message_index,
-                    last_committed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    last_committed_message_index,
+                    last_committed_at,
+                    openviking_account_id,
+                    openviking_user_id,
+                    openviking_agent_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["session_id"],
@@ -49,7 +53,11 @@ class SQLiteSessionRepository(SessionRepository):
                     record["status"],
                     record["remote_session_id"],
                     record["last_synced_message_index"],
+                    record["last_committed_message_index"],
                     record["last_committed_at"],
+                    record["openviking_account_id"],
+                    record["openviking_user_id"],
+                    record["openviking_agent_id"],
                 ),
             )
 
@@ -66,7 +74,11 @@ class SQLiteSessionRepository(SessionRepository):
                     status,
                     remote_session_id,
                     last_synced_message_index,
-                    last_committed_at
+                    last_committed_message_index,
+                    last_committed_at,
+                    openviking_account_id,
+                    openviking_user_id,
+                    openviking_agent_id
                 FROM sessions
                 WHERE session_id = ?
                 """,
@@ -105,7 +117,11 @@ class SQLiteSessionRepository(SessionRepository):
                     s.status,
                     s.remote_session_id,
                     s.last_synced_message_index,
+                    s.last_committed_message_index,
                     s.last_committed_at,
+                    s.openviking_account_id,
+                    s.openviking_user_id,
+                    s.openviking_agent_id,
                     (
                         SELECT COUNT(*)
                         FROM session_messages sm
@@ -179,7 +195,11 @@ class SQLiteSessionRepository(SessionRepository):
                     status = ?,
                     remote_session_id = ?,
                     last_synced_message_index = ?,
-                    last_committed_at = ?
+                    last_committed_message_index = ?,
+                    last_committed_at = ?,
+                    openviking_account_id = ?,
+                    openviking_user_id = ?,
+                    openviking_agent_id = ?
                 WHERE session_id = ?
                 """,
                 (
@@ -187,7 +207,11 @@ class SQLiteSessionRepository(SessionRepository):
                     record["status"],
                     record["remote_session_id"],
                     record["last_synced_message_index"],
+                    record["last_committed_message_index"],
                     record["last_committed_at"],
+                    record["openviking_account_id"],
+                    record["openviking_user_id"],
+                    record["openviking_agent_id"],
                     record["session_id"],
                 ),
             )
@@ -206,8 +230,20 @@ class SQLiteSessionRepository(SessionRepository):
                 ("closed", updated_at.isoformat(), session_id),
             )
 
+    def delete(self, *, session_id: str) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM session_messages WHERE session_id = ?",
+                (session_id,),
+            )
+            connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+
     def _ensure_schema(self) -> None:
-        if self._schema_initialized:
+        if self._schema_initialized and self._db_path.exists():
             return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -221,7 +257,11 @@ class SQLiteSessionRepository(SessionRepository):
                     status TEXT NOT NULL,
                     remote_session_id TEXT,
                     last_synced_message_index INTEGER,
-                    last_committed_at TEXT
+                    last_committed_message_index INTEGER,
+                    last_committed_at TEXT,
+                    openviking_account_id TEXT,
+                    openviking_user_id TEXT,
+                    openviking_agent_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS session_messages (
@@ -239,9 +279,28 @@ class SQLiteSessionRepository(SessionRepository):
                 ON session_messages(session_id);
                 """
             )
+            self._migrate_session_columns(connection)
         self._schema_initialized = True
 
+    def _migrate_session_columns(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        required_columns = {
+            "last_committed_message_index": "INTEGER",
+            "openviking_account_id": "TEXT",
+            "openviking_user_id": "TEXT",
+            "openviking_agent_id": "TEXT",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {column_name} {column_type}"
+                )
+
     def _connect(self) -> sqlite3.Connection:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._db_path)
         connection.row_factory = sqlite3.Row
         return connection

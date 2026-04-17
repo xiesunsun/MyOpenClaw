@@ -38,7 +38,7 @@ class ContextRenderer:
         for category in snapshot.categories:
             table.add_row(
                 Text(category.label),
-                Text(self._format_token_count(category.token_count)),
+                Text(self._format_category_usage(category)),
             )
         table.add_row(
             Text("Free space"),
@@ -68,3 +68,8 @@ class ContextRenderer:
         if value is None:
             return "unknown"
         return f"{value:,} tokens"
+
+    def _format_category_usage(self, category: ContextUsageCategory) -> str:
+        if category.char_count is not None and category.token_count is None:
+            return f"{category.char_count:,} chars"
+        return self._format_token_count(category.token_count)

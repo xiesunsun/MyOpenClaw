@@ -63,12 +63,14 @@ class ChatLoop:
         session_id: str | None = None,
     ) -> "ChatLoop":
         assembly = AppAssembly.from_config_path(config_path)
-        session_service = assembly.build_session_service()
         if session_id is not None:
+            session_service = assembly.build_session_service()
             session = session_service.resume(session_id=session_id)
             agent, coordinator = assembly.build_chat_runtime(agent_id=session.agent_id)
+            session_service = assembly.build_session_service(agent_id=session.agent_id)
         else:
             agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
+            session_service = assembly.build_session_service(agent_id=agent.agent_id)
             session = session_service.start(agent_id=agent.agent_id)
         return cls(
             agent=agent,
@@ -245,7 +247,8 @@ class ChatLoop:
     async def _render_context_command(self) -> None:
         runtime_context = self._ensure_runtime_context()
         prompt_messages = runtime_context.conversation_context_service.build_prompt_messages_from_session(
-            self.session
+            self.session,
+            session_recall_message=runtime_context.last_session_recall_message,
         )
         snapshot = await self._context_usage_service.build(
             agent=self.agent,

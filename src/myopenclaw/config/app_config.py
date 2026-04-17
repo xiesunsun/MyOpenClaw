@@ -6,6 +6,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from myopenclaw.integrations.openviking.config import OpenVikingConfig
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import (
     ModelConfig,
@@ -25,6 +26,7 @@ class AgentConfig(BaseModel):
     tools: list[str] = Field(default_factory=list)
     file_access_mode: FileAccessMode | None = None
     skills_path: Path | None = None
+    remote_agent_id: str | None = None
 
 
 class AppConfig(BaseModel):
@@ -37,6 +39,7 @@ class AppConfig(BaseModel):
     context_cli_turn_window: int = 5
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
+    openviking: OpenVikingConfig | None = None
 
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":

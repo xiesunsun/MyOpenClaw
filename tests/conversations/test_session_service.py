@@ -16,6 +16,7 @@ class FakeSessionRepository:
         self.append_calls: list[tuple[str, int, int]] = []
         self.updated_metadata: list[Session] = []
         self.closed_calls: list[tuple[str, datetime]] = []
+        self.deleted_session_ids: list[str] = []
         self.previews: list[SessionPreview] = []
 
     def create(self, session: Session) -> None:
@@ -45,17 +46,34 @@ class FakeSessionRepository:
     def mark_closed(self, *, session_id: str, updated_at: datetime) -> None:
         self.closed_calls.append((session_id, updated_at))
 
+    def delete(self, *, session_id: str) -> None:
+        self.deleted_session_ids.append(session_id)
+        self.loaded.pop(session_id, None)
+
 
 class FakeSessionSync:
     def __init__(self) -> None:
-        self.synced_start_indexes: list[int] = []
-        self.committed = False
+        self.synced_sessions: list[str] = []
+        self.commit_calls: list[bool] = []
+        self.deleted_sessions: list[str] = []
 
-    def sync_new_messages(self, *, session: Session, start_index: int) -> None:
-        self.synced_start_indexes.append(start_index)
+    def sync_pending_messages(self, *, session: Session) -> None:
+        self.synced_sessions.append(session.session_id)
+        session.remote_session_id = session.session_id
+        if session.messages:
+            session.last_synced_message_index = len(session.messages) - 1
 
-    def commit(self, *, session: Session) -> None:
-        self.committed = True
+    def commit_pending_messages(
+        self,
+        *,
+        session: Session,
+        force: bool = False,
+    ) -> None:
+        self.commit_calls.append(force)
+        session.last_committed_message_index = session.last_synced_message_index
+
+    def delete_session(self, *, session: Session) -> None:
+        self.deleted_sessions.append(session.session_id)
 
 
 class SessionServiceTests(unittest.TestCase):
@@ -129,7 +147,7 @@ class SessionServiceTests(unittest.TestCase):
 
         self.assertEqual("[tools] read_file", preview.last_message)
 
-    def test_flush_new_messages_calls_session_sync(self) -> None:
+    def test_flush_new_messages_syncs_then_persists_sync_metadata(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1", created_at=self.now)
         session.append_user_message("hello")
         self.fake_repo.loaded[session.session_id] = session
@@ -137,17 +155,35 @@ class SessionServiceTests(unittest.TestCase):
         self.service.flush_new_messages(session=session, start_index=0)
 
         self.assertEqual([("session-1", 0, 1)], self.fake_repo.append_calls)
-        self.assertEqual([0], self.fake_sync.synced_start_indexes)
+        self.assertEqual(["session-1"], self.fake_sync.synced_sessions)
         self.assertEqual(session, self.fake_repo.updated_metadata[0])
+        self.assertEqual("session-1", self.fake_repo.updated_metadata[0].remote_session_id)
+        self.assertEqual(0, self.fake_repo.updated_metadata[0].last_synced_message_index)
 
-    def test_close_calls_commit(self) -> None:
+    def test_close_syncs_and_force_commits_then_persists_metadata(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1", created_at=self.now)
+        session.append_user_message("hello")
 
         self.service.close(session=session)
 
         self.assertEqual("closed", session.status)
-        self.assertTrue(self.fake_sync.committed)
+        self.assertEqual(["session-1"], self.fake_sync.synced_sessions)
+        self.assertEqual([True], self.fake_sync.commit_calls)
         self.assertEqual([("session-1", self.now)], self.fake_repo.closed_calls)
+        self.assertEqual(0, self.fake_repo.updated_metadata[-1].last_committed_message_index)
+
+    def test_delete_removes_remote_before_local_session(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1", created_at=self.now)
+        self.fake_repo.loaded[session.session_id] = session
+
+        self.service.delete(session_id="session-1")
+
+        self.assertEqual(["session-1"], self.fake_sync.deleted_sessions)
+        self.assertEqual(["session-1"], self.fake_repo.deleted_session_ids)
+
+    def test_delete_raises_when_session_does_not_exist(self) -> None:
+        with self.assertRaises(SessionNotFoundError):
+            self.service.delete(session_id="missing")
 
 
 if __name__ == "__main__":

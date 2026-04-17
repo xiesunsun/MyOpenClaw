@@ -188,6 +188,5 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("missing", failure_event.tool_call.name)
         self.assertTrue(failure_event.tool_result.is_error)
 
-
 if __name__ == "__main__":
     unittest.main()

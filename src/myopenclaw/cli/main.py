@@ -10,6 +10,7 @@ from myopenclaw.cli.chat import ChatLoop
 from myopenclaw.conversations.service import SessionNotFoundError
 
 app = typer.Typer(invoke_without_command=True)
+sessions_app = typer.Typer(invoke_without_command=True)
 
 
 def _run_chat(
@@ -61,10 +62,13 @@ def chat(
     _run_chat(config=config, agent=agent, session_id=session_id)
 
 
-@app.command("sessions")
-def list_sessions(
+@sessions_app.callback()
+def sessions(
+    ctx: typer.Context,
     config: Path = typer.Option(Path("config.yaml"), "--config"),
 ) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
     previews = AppAssembly.from_config_path(config).build_session_service().list_sessions()
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
@@ -83,6 +87,26 @@ def list_sessions(
             preview.last_message,
         )
     Console().print(table)
+
+
+@sessions_app.command("delete")
+def delete_session(
+    session_id: str = typer.Argument(...),
+    config: Path = typer.Option(Path("config.yaml"), "--config"),
+) -> None:
+    assembly = AppAssembly.from_config_path(config)
+    lookup_service = assembly.build_session_service()
+    try:
+        session = lookup_service.resume(session_id=session_id)
+        delete_service = assembly.build_session_service(agent_id=session.agent_id)
+        delete_service.delete(session_id=session_id)
+    except SessionNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Deleted session {session_id}")
+
+
+app.add_typer(sessions_app, name="sessions")
 
 
 if __name__ == "__main__":

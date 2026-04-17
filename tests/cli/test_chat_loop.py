@@ -152,6 +152,7 @@ class StubContextCoordinator:
             agent=agent,
             provider=Mock(),
             tools=[],
+            last_session_recall_message=None,
             conversation_context_service=Mock(
                 build_prompt_messages_from_session=Mock(return_value=[])
             ),
@@ -188,6 +189,7 @@ class FakeSessionService:
     def __init__(self) -> None:
         self.flush_calls: list[tuple[int, int]] = []
         self.closed = False
+        self.closed_sessions: list[Session] = []
 
     def build_preview(self, *, session: Session) -> SessionPreview:
         return SessionPreview(
@@ -205,6 +207,7 @@ class FakeSessionService:
 
     def close(self, *, session: Session) -> None:
         self.closed = True
+        self.closed_sessions.append(session)
 
 
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -389,6 +392,26 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([(0, 2)], session_service.flush_calls)
 
+    async def test_run_uses_existing_message_count_as_local_flush_start_index(self) -> None:
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        session_service = FakeSessionService()
+        session = Session(session_id="session-1", agent_id="Pickle")
+        session.append_user_message("previous")
+        session.append_assistant_message("old reply")
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            coordinator=SilentCoordinator(),
+            session=session,
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+            session_service=session_service,
+        )
+
+        await loop.run()
+
+        self.assertEqual([(2, 4)], session_service.flush_calls)
+
     async def test_run_closes_session_on_exit(self) -> None:
         console = Mock()
         submitted_inputs = iter(["/exit"])
@@ -405,6 +428,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         self.assertTrue(session_service.closed)
+        self.assertEqual("session-1", session_service.closed_sessions[0].session_id)
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()
@@ -457,6 +481,12 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                     details=[ContextUsageDetail(label="excel", token_count=450)],
                 ),
                 ContextUsageCategory(key="messages", label="Messages", token_count=2300),
+                ContextUsageCategory(
+                    key="session_recall",
+                    label="Session recall message",
+                    token_count=None,
+                    char_count=1842,
+                ),
                 ContextUsageCategory(key="tools", label="Tools", token_count=600),
             ],
             free_tokens=1041576,
@@ -480,6 +510,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("System prompt", rendered)
         self.assertIn("Skills", rendered)
         self.assertIn("Messages", rendered)
+        self.assertIn("Session recall message", rendered)
+        self.assertIn("1,842 chars", rendered)
         self.assertIn("Tools", rendered)
         self.assertIn("Free space", rendered)
         self.assertIn("Skills breakdown", rendered)

@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 from myopenclaw.agents.agent import Agent
@@ -5,8 +6,21 @@ from myopenclaw.agents.behavior_loader import BehaviorLoader
 from myopenclaw.agents.skills import SkillManifest, SkillRegistry
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.config.app_config import AppConfig
-from myopenclaw.context import ConversationContextService
-from myopenclaw.integrations.openviking.session_sync import NoopSessionSync
+from myopenclaw.context import (
+    ConversationContextService,
+    NoopSessionRecallProvider,
+    SessionRecallProvider,
+)
+from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
+from myopenclaw.integrations.openviking.context_client import SyncHTTPOpenVikingContextClient
+from myopenclaw.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
+from myopenclaw.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
+from myopenclaw.integrations.openviking.session_message_mapper import SessionMessageMapper
+from myopenclaw.integrations.openviking.session_sync import (
+    NoopSessionSync,
+    OpenVikingSessionSync,
+    SessionSync,
+)
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
@@ -73,17 +87,96 @@ class AppAssembly:
         conversation_context_service = ConversationContextService(
             cli_turn_window=self.app_config.context_cli_turn_window
         )
+        session_recall_provider = self._build_session_recall_provider(
+            agent_id=agent.agent_id
+        )
+        session_recall_max_chars = (
+            self.app_config.openviking.session_recall.max_chars
+            if self.app_config.openviking is not None
+            else None
+        )
         coordinator = AgentCoordinator(
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
             context=AgentRuntimeContext.create(
                 agent=agent,
                 conversation_context_service=conversation_context_service,
+                session_recall_provider=session_recall_provider,
+                session_recall_max_chars=session_recall_max_chars,
             ),
         )
         return agent, coordinator
 
-    def build_session_service(self) -> SessionService:
+    def build_session_service(self, agent_id: str | None = None) -> SessionService:
         db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
         repository = SQLiteSessionRepository(db_path)
-        session_sync = NoopSessionSync()
+        session_sync = self._build_session_sync(agent_id=agent_id)
         return SessionService(repository, session_sync)
+
+    def _build_session_sync(self, agent_id: str | None = None) -> SessionSync:
+        openviking_config = self.app_config.openviking
+        if openviking_config is None or not openviking_config.enabled:
+            return NoopSessionSync()
+        remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
+        if remote_agent_id is None:
+            return NoopSessionSync()
+        return OpenVikingSessionSync(
+            config=openviking_config,
+            remote_agent_id=remote_agent_id,
+            client=SyncHTTPOpenVikingSessionClient(
+                openviking_config,
+                remote_agent_id=remote_agent_id,
+            ),
+            message_mapper=SessionMessageMapper(
+                tool_output_max_chars=openviking_config.tool_output_max_chars
+            ),
+            commit_policy=ThresholdCommitPolicy(
+                commit_after=timedelta(minutes=openviking_config.commit_after_minutes),
+                commit_after_turns=openviking_config.commit_after_turns,
+            ),
+        )
+
+    def _build_session_recall_provider(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> SessionRecallProvider:
+        openviking_config = self.app_config.openviking
+        if (
+            openviking_config is None
+            or not openviking_config.enabled
+            or not openviking_config.session_recall.enabled
+        ):
+            return NoopSessionRecallProvider()
+        remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
+        if remote_agent_id is None:
+            return NoopSessionRecallProvider()
+        return OpenVikingSessionRecallProvider(
+            config=openviking_config,
+            client=SyncHTTPOpenVikingContextClient(
+                openviking_config,
+                remote_agent_id=remote_agent_id,
+            ),
+        )
+
+    def _resolve_openviking_remote_agent_id(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> str | None:
+        openviking_config = self.app_config.openviking
+        if openviking_config is None:
+            return None
+        resolved_agent_id = agent_id or self.app_config.default_agent
+        remote_agent_config = openviking_config.agents.get(resolved_agent_id)
+        if remote_agent_config is not None:
+            if not remote_agent_config.enabled:
+                return None
+            return remote_agent_config.remote_agent_id
+        remote_agent_id = self.app_config.get_agent_config(
+            resolved_agent_id
+        ).remote_agent_id
+        if remote_agent_id is None:
+            raise ValueError(
+                f"OpenViking is enabled but no remote_agent_id is configured for agent '{resolved_agent_id}'"
+            )
+        return remote_agent_id

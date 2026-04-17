@@ -1,5 +1,5 @@
 import unittest
-from datetime import timezone
+from datetime import datetime, timezone
 
 from myopenclaw.conversations.message import (
     MessageRole,
@@ -30,7 +30,11 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(session.created_at, session.updated_at)
         self.assertIsNone(session.remote_session_id)
         self.assertIsNone(session.last_synced_message_index)
+        self.assertIsNone(session.last_committed_message_index)
         self.assertIsNone(session.last_committed_at)
+        self.assertIsNone(session.openviking_account_id)
+        self.assertIsNone(session.openviking_user_id)
+        self.assertIsNone(session.openviking_agent_id)
 
     def test_session_belongs_to_one_agent_and_stores_model_visible_messages(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")
@@ -93,6 +97,61 @@ class SessionTests(unittest.TestCase):
         session.touch(at=touched_at)
 
         self.assertEqual(touched_at, session.updated_at)
+
+    def test_bind_openviking_records_remote_identity(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        session.bind_openviking(
+            account_id="myopenclaw",
+            user_id="ssunxie",
+            agent_id="remote-pickle",
+        )
+
+        self.assertEqual("myopenclaw", session.openviking_account_id)
+        self.assertEqual("ssunxie", session.openviking_user_id)
+        self.assertEqual("remote-pickle", session.openviking_agent_id)
+
+    def test_pending_sync_messages_use_sync_watermark(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        session.messages = [
+            SessionMessage(role=MessageRole.USER, content="one"),
+            SessionMessage(role=MessageRole.ASSISTANT, content="two"),
+            SessionMessage(role=MessageRole.USER, content="three"),
+        ]
+
+        self.assertEqual(0, session.pending_sync_start_index())
+        self.assertEqual(["one", "two", "three"], [m.content for m in session.pending_sync_messages()])
+
+        session.mark_messages_synced(remote_session_id="session-1", last_message_index=1)
+
+        self.assertEqual(2, session.pending_sync_start_index())
+        self.assertEqual(["three"], [m.content for m in session.pending_sync_messages()])
+
+    def test_commit_watermark_tracks_pending_remote_commit(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        self.assertFalse(session.has_pending_remote_commit())
+
+        session.mark_messages_synced(remote_session_id="session-1", last_message_index=2)
+
+        self.assertTrue(session.has_pending_remote_commit())
+
+        committed_at = datetime(2026, 4, 13, tzinfo=timezone.utc)
+        session.mark_messages_committed(last_message_index=2, committed_at=committed_at)
+
+        self.assertFalse(session.has_pending_remote_commit())
+        self.assertEqual(2, session.last_committed_message_index)
+        self.assertEqual(committed_at, session.last_committed_at)
+
+    def test_commit_watermark_cannot_exceed_sync_watermark(self) -> None:
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        session.mark_messages_synced(remote_session_id="session-1", last_message_index=1)
+
+        with self.assertRaises(ValueError):
+            session.mark_messages_committed(
+                last_message_index=2,
+                committed_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
+            )
 
 
 if __name__ == "__main__":

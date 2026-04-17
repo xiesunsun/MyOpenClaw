@@ -27,7 +27,11 @@ def session_to_metadata_record(session: Session) -> dict[str, Any]:
         "status": session.status,
         "remote_session_id": session.remote_session_id,
         "last_synced_message_index": session.last_synced_message_index,
+        "last_committed_message_index": session.last_committed_message_index,
         "last_committed_at": _datetime_to_storage(session.last_committed_at),
+        "openviking_account_id": session.openviking_account_id,
+        "openviking_user_id": session.openviking_user_id,
+        "openviking_agent_id": session.openviking_agent_id,
     }
 
 
@@ -67,8 +71,20 @@ def session_from_storage(
         last_synced_message_index=_optional_int(
             session_record["last_synced_message_index"]
         ),
+        last_committed_message_index=_optional_int(
+            _mapping_get(session_record, "last_committed_message_index")
+        ),
         last_committed_at=_datetime_from_storage(
             session_record["last_committed_at"]
+        ),
+        openviking_account_id=_optional_str(
+            _mapping_get(session_record, "openviking_account_id")
+        ),
+        openviking_user_id=_optional_str(
+            _mapping_get(session_record, "openviking_user_id")
+        ),
+        openviking_agent_id=_optional_str(
+            _mapping_get(session_record, "openviking_agent_id")
         ),
     )
 
@@ -258,3 +274,10 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _mapping_get(record: Mapping[str, Any], key: str) -> Any:
+    try:
+        return record[key]
+    except (KeyError, IndexError):
+        return None

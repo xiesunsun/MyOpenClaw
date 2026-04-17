@@ -8,6 +8,13 @@ from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.context import ConversationContextService
+from myopenclaw.integrations.openviking.session_sync import (
+    NoopSessionSync,
+    OpenVikingSessionSync,
+)
+from myopenclaw.integrations.openviking.session_recall import (
+    OpenVikingSessionRecallProvider,
+)
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
@@ -161,6 +168,54 @@ class AppAssemblyTests(unittest.TestCase):
                 coordinator.context.conversation_context_service.cli_turn_window,
             )
 
+    def test_build_chat_runtime_wires_openviking_session_recall_when_enabled(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 1.0
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                        remote_agent_id: remote-pickle
+                    openviking:
+                      enabled: true
+                      base_url: https://openviking.example
+                      account_id: myopenclaw
+                      user_id: ssunxie
+                      user_key: secret
+                      session_recall:
+                        max_chars: 1234
+                    """
+                ).strip()
+            )
+
+            _, coordinator = AppAssembly.from_config_path(config_path).build_chat_runtime(
+                agent_id="Pickle"
+            )
+
+            self.assertIsInstance(
+                coordinator.context.session_recall_provider,
+                OpenVikingSessionRecallProvider,
+            )
+            self.assertEqual(1234, coordinator.context.session_recall_max_chars)
+
     def test_build_session_service_returns_session_service_with_sqlite_repo(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -198,6 +253,52 @@ class AppAssemblyTests(unittest.TestCase):
                 root / ".myopenclaw" / "sessions.db",
                 service._repository.db_path,
             )
+            self.assertIsInstance(service._session_sync, NoopSessionSync)
+
+    def test_build_session_service_wires_openviking_sync_when_enabled(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 1.0
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                        remote_agent_id: remote-pickle
+                    openviking:
+                      enabled: true
+                      base_url: https://openviking.example
+                      account_id: myopenclaw
+                      user_id: ssunxie
+                      user_key: secret
+                      commit_after_minutes: 15
+                      commit_after_turns: 4
+                      tool_output_max_chars: 1000
+                    """
+                ).strip()
+            )
+
+            service = AppAssembly.from_config_path(config_path).build_session_service(
+                agent_id="Pickle"
+            )
+
+            self.assertIsInstance(service._session_sync, OpenVikingSessionSync)
 
 
 if __name__ == "__main__":
