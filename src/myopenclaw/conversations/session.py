@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from myopenclaw.conversations.message import (
@@ -107,6 +107,7 @@ class Session:
         content: str = "",
         metadata: Optional[MessageMetadata] = None,
         tool_call_batch: Optional[ToolCallBatch] = None,
+        provider_thinking_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         self.messages.append(
             SessionMessage(
@@ -114,6 +115,7 @@ class Session:
                 content=content,
                 metadata=metadata,
                 tool_call_batch=tool_call_batch,
+                provider_thinking_blocks=provider_thinking_blocks,
             )
         )
 
@@ -123,9 +125,11 @@ class Session:
         *,
         content: str = "",
         metadata: Optional[MessageMetadata] = None,
+        provider_thinking_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         self.append_assistant_message(
             content=content,
             metadata=metadata,
             tool_call_batch=batch,
+            provider_thinking_blocks=provider_thinking_blocks,
         )

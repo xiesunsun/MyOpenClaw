@@ -43,3 +43,4 @@ class SessionMessage:
     content: str = ""
     metadata: Optional[MessageMetadata] = None
     tool_call_batch: Optional[ToolCallBatch] = None
+    provider_thinking_blocks: list[dict[str, Any]] | None = None

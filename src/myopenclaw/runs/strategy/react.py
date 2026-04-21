@@ -107,10 +107,15 @@ class ReActStrategy(ExecutionStrategy):
                     ),
                     content=result.text,
                     metadata=metadata,
+                    provider_thinking_blocks=result.provider_thinking_blocks,
                 )
                 continue
 
-            session.append_assistant_message(result.text, metadata=metadata)
+            session.append_assistant_message(
+                result.text,
+                metadata=metadata,
+                provider_thinking_blocks=result.provider_thinking_blocks,
+            )
             await self._emit_event(
                 event_handler,
                 RuntimeEvent(

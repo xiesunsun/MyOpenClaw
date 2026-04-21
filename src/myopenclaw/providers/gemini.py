@@ -32,14 +32,14 @@ class GeminiProvider(BaseLLMProvider):
         model: str,
         api_key: str | None = None,
         api_base: str | None = None,
-        temperature: float = 1.0,
+        temperature: float | None = None,
         max_output_tokens: int = 65536,
         provider_options: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
-        self.temperature = temperature
+        self.temperature = 1.0 if temperature is None else temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
         self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
@@ -115,7 +115,7 @@ class GeminiProvider(BaseLLMProvider):
         if request.tools:
             config.tools = self._build_tools(request.tools)
 
-        thinking_level = self.provider_options.get("thinking_level")
+        thinking_level = self.provider_options.get("thinking")
         if isinstance(thinking_level, str):
             config.thinking_config = types.ThinkingConfig(thinking_level=thinking_level)
         return config

@@ -18,6 +18,20 @@ from myopenclaw.tools.base import ToolSpec
 
 
 class GeminiProviderTests(unittest.TestCase):
+    def test_from_config_defaults_temperature_to_one_when_unset(self) -> None:
+        provider = GeminiProvider.from_config(
+            config=SimpleNamespace(
+                model="gemini-3-flash-preview",
+                api_key=None,
+                api_base=None,
+                temperature=None,
+                max_output_tokens=1024,
+                provider_options={},
+            )
+        )
+
+        self.assertEqual(1.0, provider.temperature)
+
     def test_build_tools_maps_tool_specs_to_gemini_function_declarations(self) -> None:
         declarations = GeminiProvider._build_tools(
             [
@@ -469,6 +483,22 @@ class GeminiProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(99, total_tokens)
+
+    def test_build_generate_config_reads_provider_options_thinking(self) -> None:
+        provider = GeminiProvider(
+            model="gemini-3-flash-preview",
+            provider_options={"thinking": "low"},
+        )
+
+        config = provider._build_generate_config(
+            GenerateRequest(
+                system_instruction="You are Pickle.",
+                messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+            )
+        )
+
+        self.assertIsNotNone(config.thinking_config)
+        self.assertEqual("LOW", config.thinking_config.thinking_level.value)
 
 
 if __name__ == "__main__":

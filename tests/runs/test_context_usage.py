@@ -5,7 +5,13 @@ from pathlib import Path
 
 from myopenclaw.agents.agent import Agent
 from myopenclaw.agents.skills import SkillManifest
-from myopenclaw.conversations.message import ToolCall, ToolCallBatch, ToolCallResult
+from myopenclaw.conversations.message import (
+    MessageRole,
+    SessionMessage,
+    ToolCall,
+    ToolCallBatch,
+    ToolCallResult,
+)
 from myopenclaw.conversations.session import Session
 from myopenclaw.providers.base import BaseLLMProvider
 from myopenclaw.runs.context import AgentRuntimeContext
@@ -240,6 +246,42 @@ class ContextUsageServiceTests(unittest.IsolatedAsyncioTestCase):
             agent=agent,
             context=context,
             prompt_messages=session.messages,
+        )
+
+        self.assertGreater(len(provider.requests), request_count_after_first_build)
+
+    async def test_snapshot_recomputes_when_provider_thinking_blocks_change(self) -> None:
+        agent = self._build_agent()
+        provider = StubProvider(
+            request_estimates={
+                (None, ()): 100,
+                (agent.instruction_parts.base_instruction, ()): 140,
+                (agent.system_instruction, ()): 140,
+                (agent.system_instruction, ("echo",)): 190,
+            }
+        )
+        context = AgentRuntimeContext(agent=agent, provider=provider, tools=[EchoTool()])
+        service = ContextUsageService()
+        prompt_messages = [
+            SessionMessage(role=MessageRole.USER, content="hello"),
+            SessionMessage(role=MessageRole.ASSISTANT, content="working"),
+        ]
+
+        await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=prompt_messages,
+        )
+        request_count_after_first_build = len(provider.requests)
+
+        prompt_messages[1].provider_thinking_blocks = [
+            {"type": "thinking", "thinking": "hidden", "signature": "sig-1"}
+        ]
+
+        await service.build(
+            agent=agent,
+            context=context,
+            prompt_messages=prompt_messages,
         )
 
         self.assertGreater(len(provider.requests), request_count_after_first_build)

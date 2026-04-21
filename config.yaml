@@ -13,14 +13,24 @@ providers:
         temperature: 1.0
         max_input_tokens: 1048576
         max_output_tokens: 65536
-        thinking_level: low
-        provider_options: {}
+        provider_options:
+          thinking: low
       gemini-3.1-flash-lite-preview:
         temperature: 1.0
         max_input_tokens: 1048576
         max_output_tokens: 65536
-        thinking_level: high
-        provider_options: {}
+        provider_options:
+          thinking: high
+  anthropic:
+    models:
+      claude-jupiter-v1-p:
+        api_base: https://api.anthropic.com
+        max_input_tokens: 1000000
+        max_output_tokens: 64000
+        provider_options:
+          timeout_seconds: 600
+          max_retries: 2
+          thinking: xhigh
 
 agents:
   Pickle:
@@ -29,8 +39,8 @@ agents:
     remote_agent_id: ${OPENVIKING_AGENT_ID}
     file_access_mode: full
     llm:
-      provider: google/gemini
-      model: gemini-3-flash-preview
+      provider: anthropic
+      model: claude-jupiter-v1-p
     tools:
       - list_directory
       - glob_search

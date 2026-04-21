@@ -48,6 +48,13 @@ class SessionStorageMapperTests(unittest.TestCase):
                     )
                 ],
             ),
+            provider_thinking_blocks=[
+                {
+                    "type": "thinking",
+                    "thinking": "draft reasoning",
+                    "signature": "sig-think",
+                }
+            ],
         )
 
         record = session_message_to_record(
@@ -68,6 +75,10 @@ class SessionStorageMapperTests(unittest.TestCase):
             restored.tool_call_batch.calls[0].thought_signature,
         )
         self.assertEqual(message.metadata.provider, restored.metadata.provider)
+        self.assertEqual(
+            message.provider_thinking_blocks,
+            restored.provider_thinking_blocks,
+        )
 
     def test_session_round_trips_through_storage_records(self) -> None:
         created_at = datetime(2026, 4, 13, tzinfo=timezone.utc)

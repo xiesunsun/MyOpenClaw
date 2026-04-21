@@ -150,6 +150,49 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("STOP", session.messages[1].metadata.provider_finish_reason)
         self.assertEqual("resp-1", session.messages[1].metadata.provider_response_id)
 
+    async def test_runner_persists_provider_thinking_blocks_on_assistant_messages(self) -> None:
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-7",
+            ),
+            tool_ids=[],
+        )
+        provider = StubProvider(
+            responses=[
+                GenerateResult(
+                    text="assistant reply",
+                    provider_thinking_blocks=[
+                        {
+                            "type": "thinking",
+                            "thinking": "internal",
+                            "signature": "sig-1",
+                        }
+                    ],
+                )
+            ]
+        )
+        coordinator = AgentCoordinator(
+            strategy=ReActStrategy(),
+            context=AgentRuntimeContext(agent=agent, provider=provider, tools=[]),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        await coordinator.run_turn(
+            agent=agent,
+            session=session,
+            user_text="hello",
+        )
+
+        self.assertEqual(
+            [{"type": "thinking", "thinking": "internal", "signature": "sig-1"}],
+            session.messages[1].provider_thinking_blocks,
+        )
+
     async def test_runner_persists_tool_batch_results_in_call_order(self) -> None:
         agent = Agent(
             agent_id="Pickle",
@@ -178,6 +221,13 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ],
                     finish_reason=FinishReason.TOOL_CALLS,
+                    provider_thinking_blocks=[
+                        {
+                            "type": "thinking",
+                            "thinking": "first",
+                            "signature": "sig-1",
+                        }
+                    ],
                 ),
                 GenerateResult(
                     text="done",
@@ -212,6 +262,10 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["call-slow", "call-fast"], [call.id for call in batch.calls])
         self.assertEqual(["call-slow", "call-fast"], [result.call_id for result in batch.results])
         self.assertEqual(["slow", "fast"], [result.content for result in batch.results])
+        self.assertEqual(
+            [{"type": "thinking", "thinking": "first", "signature": "sig-1"}],
+            session.messages[1].provider_thinking_blocks,
+        )
         second_request_batch = provider.requests[1].messages[1].tool_call_batch
         self.assertEqual(["call-slow", "call-fast"], [result.call_id for result in second_request_batch.results])
 

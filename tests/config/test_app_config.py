@@ -273,6 +273,67 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(1048576, model_config.max_input_tokens)
 
+    def test_resolve_model_config_defaults_temperature_to_none_when_omitted(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: anthropic
+                      model: claude-opus-4-7
+                    providers:
+                      anthropic:
+                        models:
+                          claude-opus-4-7:
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+            model_config = config.resolve_model_config()
+
+            self.assertIsNone(model_config.temperature)
+
+    def test_resolve_model_config_reads_provider_options_thinking(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: anthropic
+                      model: claude-opus-4-7
+                    providers:
+                      anthropic:
+                        models:
+                          claude-opus-4-7:
+                            max_output_tokens: 1024
+                            provider_options:
+                              thinking: xhigh
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            config = AppConfig.load(config_path)
+            model_config = config.resolve_model_config()
+
+            self.assertEqual("xhigh", model_config.provider_options["thinking"])
+
     def test_load_expands_environment_variables_in_model_config(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

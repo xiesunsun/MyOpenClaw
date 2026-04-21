@@ -9,6 +9,7 @@ description = "An AI Agent Demo"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.96.0",
     "google-genai>=1.68.0",
     "pydantic>=2.12.5",
     "prompt-toolkit>=3.0.0",

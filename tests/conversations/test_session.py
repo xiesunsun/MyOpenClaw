@@ -90,6 +90,21 @@ class SessionTests(unittest.TestCase):
         self.assertEqual("call-1", session.messages[0].tool_call_batch.results[0].call_id)
         self.assertEqual({"exit_code": 0}, session.messages[0].tool_call_batch.results[0].metadata)
 
+    def test_session_can_store_provider_thinking_blocks(self) -> None:
+        session = Session(session_id="session-1", agent_id="Pickle")
+
+        session.append_assistant_message(
+            "hi there",
+            provider_thinking_blocks=[
+                {"type": "thinking", "thinking": "intermediate", "signature": "sig-1"}
+            ],
+        )
+
+        self.assertEqual(
+            [{"type": "thinking", "thinking": "intermediate", "signature": "sig-1"}],
+            session.messages[0].provider_thinking_blocks,
+        )
+
     def test_touch_updates_updated_at(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="session-1")
         touched_at = session.updated_at.replace(microsecond=session.updated_at.microsecond + 1)

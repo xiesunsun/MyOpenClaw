@@ -7,7 +7,7 @@ The implementation is intentionally kept concrete and inspectable rather than be
 ## What It Does
 
 - Runs an interactive CLI agent loop for local coding and automation tasks.
-- Supports a provider abstraction with a working Google Gemini integration.
+- Supports a provider abstraction with working Google Gemini and Anthropic integrations.
 - Exposes 10+ built-in tools for directory listing, search, file reads/writes, exact replace, and persistent shell execution.
 - Persists sessions in SQLite and supports listing, resuming, and deleting prior sessions.
 - Builds prompt context from recent conversation turns and reports context usage in the CLI.
@@ -35,7 +35,7 @@ The codebase is organized around a few narrow modules:
 - `context`: recent-turn windowing and optional session recall injection.
 - `conversations`: message/session models and session service orchestration.
 - `persistence`: SQLite-backed session repository.
-- `providers`: model provider abstraction and Gemini implementation.
+- `providers`: model provider abstraction plus Gemini and Anthropic implementations.
 - `runs`: turn coordinator, runtime context, ReAct strategy, and usage accounting.
 - `tools`: built-in file tools, persistent shell tools, policies, and registry.
 - `integrations/openviking`: optional remote session sync and session recall adapters.
@@ -97,7 +97,7 @@ These capabilities are configuration-driven and can be disabled for fully local 
 
 This project is under active development. The current implementation already covers the runtime backbone needed for a practical local agent CLI, while a few areas are still intentionally evolving:
 
-- broader provider support beyond Gemini
+- broader provider support beyond the current Gemini and Anthropic backends
 - richer skill/runtime packaging
 - more advanced memory and retrieval strategies
 - additional ergonomics for agent configuration and tool composition
@@ -107,7 +107,7 @@ This project is under active development. The current implementation already cov
 ### Requirements
 
 - Python 3.12+
-- a Gemini API key if you want to run the default provider
+- a Gemini or Anthropic API key if you want to run those providers
 
 ### Install
 
@@ -136,6 +136,11 @@ For Gemini credentials, either:
 - use the environment variable convention supported by `google-genai`
 - or set `api_key` on the selected provider model config in `config.yaml`
 
+For Anthropic credentials, either:
+
+- export `ANTHROPIC_API_KEY`
+- or set `api_key` on the selected `anthropic` model config in `config.yaml`
+
 The default config already shows the expected structure for:
 
 - default model selection
@@ -144,6 +149,22 @@ The default config already shows the expected structure for:
 - tool allowlist
 - file access mode
 - OpenViking toggles
+
+Anthropic example:
+
+```yaml
+providers:
+  anthropic:
+    models:
+      claude-opus-4-7:
+        api_base: https://api.anthropic.com
+        max_input_tokens: 1000000
+        max_output_tokens: 64000
+        provider_options:
+          timeout_seconds: 600
+          max_retries: 2
+          thinking: xhigh
+```
 
 ### Run
 

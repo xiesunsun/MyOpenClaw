@@ -140,6 +140,9 @@ def _message_to_payload(message: SessionMessage) -> dict[str, Any]:
         "content": message.content,
         "metadata": _metadata_to_payload(message.metadata),
         "tool_call_batch": _tool_batch_to_payload(message.tool_call_batch),
+        "provider_thinking_blocks": _thinking_blocks_to_payload(
+            message.provider_thinking_blocks
+        ),
     }
 
 
@@ -149,6 +152,9 @@ def _message_from_payload(payload: Mapping[str, Any]) -> SessionMessage:
         content=str(payload.get("content", "")),
         metadata=_metadata_from_payload(payload.get("metadata")),
         tool_call_batch=_tool_batch_from_payload(payload.get("tool_call_batch")),
+        provider_thinking_blocks=_thinking_blocks_from_payload(
+            payload.get("provider_thinking_blocks")
+        ),
     )
 
 
@@ -238,6 +244,20 @@ def _tool_batch_from_payload(payload: Any) -> ToolCallBatch | None:
             for result in payload.get("results", [])
         ],
     )
+
+
+def _thinking_blocks_to_payload(
+    blocks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    if blocks is None:
+        return None
+    return [dict(block) for block in blocks]
+
+
+def _thinking_blocks_from_payload(payload: Any) -> list[dict[str, Any]] | None:
+    if payload is None:
+        return None
+    return [dict(block) for block in payload]
 
 
 def _encode_bytes(value: bytes | None) -> str | None:

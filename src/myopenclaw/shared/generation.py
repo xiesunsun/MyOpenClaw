@@ -44,4 +44,5 @@ class GenerateResult:
     provider_model_version: str | None = None
     usage: TokenUsage | None = None
     metadata: "MessageMetadata" | None = None
+    provider_thinking_blocks: list[dict[str, Any]] | None = None
     raw: Any | None = None

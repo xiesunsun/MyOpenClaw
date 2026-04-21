@@ -287,6 +287,10 @@ class ContextUsageService:
             "role": message.role.value,
             "content": message.content,
         }
+        if message.provider_thinking_blocks is not None:
+            payload["provider_thinking_blocks"] = [
+                dict(block) for block in message.provider_thinking_blocks
+            ]
         batch = message.tool_call_batch
         if batch is None:
             return payload
