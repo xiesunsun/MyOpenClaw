@@ -8,6 +8,8 @@ from myopenclaw.agents.agent import Agent
 from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
 from myopenclaw.conversations.content_blocks import TextContent
 from myopenclaw.conversations.session import Session
+from myopenclaw.context.hook_feedback import HookFeedback
+from myopenclaw.hooks.events import UserPromptSubmitEvent
 from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
 
@@ -41,6 +43,19 @@ class AgentCoordinator:
             # 允许外部传入与 agent 一致的 deps
             raise ValueError("RunDependencies.agent 与参数 agent 不一致")
 
+        # UserPromptSubmit：block 则不写 user entry
+        decision = await run_deps.lifecycle_hooks.user_prompt_submit(
+            UserPromptSubmitEvent(
+                session_id=session.session_id,
+                prompt=user_text,
+            )
+        )
+        if decision.action == "block":
+            # 返回空 assistant 表示被拦截
+            return AssistantMessage(
+                content=[TextContent(text=decision.reason or "请求被 Hook 阻止")]
+            )
+
         user_entry = session.append_user(
             UserMessage(content=[TextContent(text=user_text)])
         )
@@ -54,4 +69,9 @@ class AgentCoordinator:
             deps=run_deps,
             session=session,
             event_handler=event_handler,
+            initial_hook_feedback=(
+                [HookFeedback(source_event="UserPromptSubmit", text=decision.feedback_text)]
+                if decision.feedback_text
+                else None
+            ),
         )

@@ -8,7 +8,14 @@ import time
 from numbers import Real
 from uuid import uuid4
 
+from myopenclaw.context.hook_feedback import HookFeedback
 from myopenclaw.context.model_context import SystemContent, ToolDefinition
+from myopenclaw.hooks.events import (
+    PostToolBatchEvent,
+    PostToolUseEvent,
+    PreToolUseEvent,
+    TurnEndEvent,
+)
 from myopenclaw.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -38,8 +45,12 @@ class ReActStrategy(ExecutionStrategy):
         deps: RunDependencies,
         session: Session,
         event_handler: RuntimeEventHandler | None = None,
+        initial_hook_feedback: list[HookFeedback] | None = None,
     ) -> AssistantMessage:
         turn = TurnState()
+        if initial_hook_feedback:
+            turn.step_hook_feedback.extend(initial_hook_feedback)
+            turn.hook_feedback.extend(initial_hook_feedback)
         last_assistant: AssistantMessage | None = None
 
         system = SystemContent.from_text(deps.agent.system_instruction or "")
@@ -102,31 +113,132 @@ class ReActStrategy(ExecutionStrategy):
                 )
                 turn.final_assistant_entry_id = entry.entry_id
                 turn.status = "completed"
+                await deps.lifecycle_hooks.turn_end(
+                    TurnEndEvent(
+                        session_id=session.session_id,
+                        turn_id=turn.turn_id,
+                        reason="completed",
+                    )
+                )
                 return assistant
 
             step.pending_tool_call_ids = [call.id for call in tool_calls]
             batch_id = uuid4().hex
-            outcomes = await self._execute_tool_batch(
-                batch_id=batch_id,
-                step_index=step_index,
-                tool_calls=tool_calls,
-                deps=deps,
-                session=session,
-                event_handler=event_handler,
-            )
-            # 按调用顺序串行提交 tool result
-            ordered = sorted(outcomes, key=lambda item: item.call_index)
-            for outcome in ordered:
+            batch_outcomes: list[dict] = []
+            # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
+            for call_index, tool_call in enumerate(tool_calls):
+                runtime_call = ToolCall(
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                await self._emit_event(
+                    event_handler,
+                    RuntimeEvent(
+                        event_type=RuntimeEventType.TOOL_CALL_STARTED,
+                        step_index=step_index,
+                        batch_id=batch_id,
+                        call_index=call_index,
+                        total_calls=len(tool_calls),
+                        tool_call=runtime_call,
+                    ),
+                )
+                pre = await deps.lifecycle_hooks.pre_tool_use(
+                    PreToolUseEvent(
+                        session_id=session.session_id,
+                        turn_id=turn.turn_id,
+                        step_index=step_index,
+                        tool_name=tool_call.name,
+                        tool_call_id=tool_call.id,
+                        arguments=dict(tool_call.arguments),
+                    )
+                )
+                if pre.action == "deny":
+                    reason = pre.reason or "工具调用被 Hook 拒绝"
+                    result = ToolExecutionResult(content=reason, is_error=True)
+                else:
+                    args = (
+                        dict(pre.updated_arguments)
+                        if pre.updated_arguments is not None
+                        else dict(tool_call.arguments)
+                    )
+                    # 用可能更新后的参数执行
+                    exec_call = ToolCallContent(
+                        id=tool_call.id,
+                        name=tool_call.name,
+                        arguments=args,
+                        thought_signature=tool_call.thought_signature,
+                    )
+                    result = await self._execute_tool_call(
+                        deps=deps, session=session, tool_call=exec_call
+                    )
                 result_entry = session.append_tool_result(
                     ToolResultMessage(
-                        tool_call_id=outcome.tool_call_id,
-                        tool_name=outcome.tool_name,
-                        content=[TextContent(text=outcome.result.content)],
-                        is_error=outcome.result.is_error,
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        content=[TextContent(text=result.content)],
+                        is_error=result.is_error,
                     )
                 )
                 self._flush_entry(deps, session, result_entry)
-                step.completed_tool_call_ids.append(outcome.tool_call_id)
+                step.completed_tool_call_ids.append(tool_call.id)
+                batch_outcomes.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "tool_name": tool_call.name,
+                        "is_error": result.is_error,
+                        "content": result.content,
+                    }
+                )
+                await self._emit_event(
+                    event_handler,
+                    RuntimeEvent(
+                        event_type=(
+                            RuntimeEventType.TOOL_CALL_FAILED
+                            if result.is_error
+                            else RuntimeEventType.TOOL_CALL_COMPLETED
+                        ),
+                        step_index=step_index,
+                        batch_id=batch_id,
+                        call_index=call_index,
+                        total_calls=len(tool_calls),
+                        tool_call=runtime_call,
+                        tool_result=result,
+                    ),
+                )
+                post = await deps.lifecycle_hooks.post_tool_use(
+                    PostToolUseEvent(
+                        session_id=session.session_id,
+                        turn_id=turn.turn_id,
+                        step_index=step_index,
+                        tool_name=tool_call.name,
+                        tool_call_id=tool_call.id,
+                        arguments=dict(tool_call.arguments),
+                        result_content=result.content,
+                        is_error=result.is_error,
+                    )
+                )
+                if post.feedback_text:
+                    fb = HookFeedback(
+                        source_event="PostToolUse", text=post.feedback_text
+                    )
+                    turn.step_hook_feedback.append(fb)
+                    turn.hook_feedback.append(fb)
+
+            batch_decision = await deps.lifecycle_hooks.post_tool_batch(
+                PostToolBatchEvent(
+                    session_id=session.session_id,
+                    turn_id=turn.turn_id,
+                    step_index=step_index,
+                    outcomes=batch_outcomes,
+                )
+            )
+            if batch_decision.feedback_text:
+                fb = HookFeedback(
+                    source_event="PostToolBatch", text=batch_decision.feedback_text
+                )
+                turn.step_hook_feedback.append(fb)
+                turn.hook_feedback.append(fb)
 
         # max steps
         max_msg = AssistantMessage(

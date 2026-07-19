@@ -1,0 +1,193 @@
+import asyncio
+import unittest
+
+from myopenclaw.hooks.decisions import (
+    PreToolUseDecision,
+    UserPromptSubmitDecision,
+    merge_pre_tool_decisions,
+    merge_user_prompt_decisions,
+)
+from myopenclaw.hooks.events import PreToolUseEvent, UserPromptSubmitEvent
+from myopenclaw.hooks.lifecycle import LifecycleHooks
+
+
+class MergeRulesTests(unittest.TestCase):
+    def test_user_prompt_any_block_wins(self) -> None:
+        d = merge_user_prompt_decisions(
+            [
+                UserPromptSubmitDecision(action="continue"),
+                UserPromptSubmitDecision(action="block", reason="nope"),
+            ]
+        )
+        self.assertEqual("block", d.action)
+        self.assertEqual("nope", d.reason)
+
+    def test_pre_tool_deny_over_allow(self) -> None:
+        d = merge_pre_tool_decisions(
+            [
+                PreToolUseDecision(action="allow"),
+                PreToolUseDecision(action="deny", reason="blocked"),
+            ]
+        )
+        self.assertEqual("deny", d.action)
+
+    def test_ask_treated_as_deny(self) -> None:
+        d = merge_pre_tool_decisions([PreToolUseDecision(action="ask")])
+        self.assertEqual("deny", d.action)
+        self.assertIn("确认", d.reason or "")
+
+    def test_updated_arguments_last_wins(self) -> None:
+        d = merge_pre_tool_decisions(
+            [
+                PreToolUseDecision(action="allow", updated_arguments={"a": 1}),
+                PreToolUseDecision(action="allow", updated_arguments={"a": 2, "b": 3}),
+            ]
+        )
+        self.assertEqual({"a": 2, "b": 3}, d.updated_arguments)
+
+
+class Handler:
+    def __init__(self, **responses):
+        self.responses = responses
+        self.calls = []
+
+    async def user_prompt_submit(self, event):
+        self.calls.append(("user_prompt_submit", event.prompt))
+        return self.responses.get("user_prompt_submit")
+
+    async def pre_tool_use(self, event):
+        self.calls.append(("pre_tool_use", event.tool_name))
+        return self.responses.get("pre_tool_use")
+
+    async def post_tool_use(self, event):
+        self.calls.append(("post_tool_use", event.tool_call_id))
+        return self.responses.get("post_tool_use")
+
+    async def post_tool_batch(self, event):
+        self.calls.append(("post_tool_batch", len(event.outcomes)))
+        return self.responses.get("post_tool_batch")
+
+    async def turn_end(self, event):
+        self.calls.append(("turn_end", event.reason))
+        return self.responses.get("turn_end")
+
+
+class BoomHandler:
+    async def user_prompt_submit(self, event):
+        raise RuntimeError("boom")
+
+
+class LifecycleHooksTests(unittest.TestCase):
+    def test_no_hooks_preserves_behavior(self) -> None:
+        hooks = LifecycleHooks()
+        d = asyncio.run(
+            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
+        )
+        self.assertEqual("continue", d.action)
+        p = asyncio.run(
+            hooks.pre_tool_use(
+                PreToolUseEvent(tool_name="echo", tool_call_id="c1", arguments={})
+            )
+        )
+        self.assertEqual("allow", p.action)
+
+    def test_observer_failure_is_best_effort(self) -> None:
+        hooks = LifecycleHooks(handlers=[BoomHandler()])
+        d = asyncio.run(
+            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
+        )
+        self.assertEqual("continue", d.action)
+
+    def test_handler_block(self) -> None:
+        hooks = LifecycleHooks(
+            handlers=[
+                Handler(
+                    user_prompt_submit=UserPromptSubmitDecision(
+                        action="block", reason="x"
+                    )
+                )
+            ]
+        )
+        d = asyncio.run(
+            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
+        )
+        self.assertEqual("block", d.action)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class DenyAllTools:
+    async def pre_tool_use(self, event):
+        from myopenclaw.hooks.decisions import PreToolUseDecision
+        return PreToolUseDecision(action="deny", reason="denied-by-test")
+
+
+class ReactHookIntegrationTests(unittest.TestCase):
+    def test_pre_tool_deny_appends_synthetic_tool_result(self) -> None:
+        from pathlib import Path
+
+        from myopenclaw.agents.agent import Agent
+        from myopenclaw.context.assembler import ContextAssembler
+        from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
+        from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
+        from myopenclaw.conversations.session import Session
+        from myopenclaw.hooks.lifecycle import LifecycleHooks
+        from myopenclaw.runs.dependencies import RunDependencies
+        from myopenclaw.runs.strategy.react import ReActStrategy
+        from myopenclaw.shared.model_config import ModelConfig
+        from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, context):
+                self.calls += 1
+                if self.calls == 1:
+                    return AssistantMessage(
+                        content=[
+                            ToolCallContent(id="c1", name="echo", arguments={"text": "x"})
+                        ]
+                    )
+                return AssistantMessage(content=[TextContent(text="after-deny")])
+
+        class EchoTool(BaseTool):
+            def __init__(self):
+                self.spec = ToolSpec(
+                    name="echo",
+                    description="echo",
+                    input_schema={"type": "object"},
+                )
+                self.executed = 0
+
+            async def execute(self, arguments, context: ToolExecutionContext) -> ToolExecutionResult:
+                self.executed += 1
+                return ToolExecutionResult(content="should-not-run")
+
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("."),
+            behavior_path=Path("."),
+            behavior_instruction="x",
+            model_config=ModelConfig(provider="fake", model="fake"),
+            tool_ids=["echo"],
+        )
+        tool = EchoTool()
+        session = Session.create(agent_id="Pickle")
+        session.append_user(UserMessage(content=[TextContent(text="hi")]))
+        deps = RunDependencies(
+            agent=agent,
+            provider=FakeProvider(),  # type: ignore[arg-type]
+            tools=[tool],
+            context_assembler=ContextAssembler(),
+            lifecycle_hooks=LifecycleHooks(handlers=[DenyAllTools()]),
+        )
+        final = asyncio.run(ReActStrategy(max_steps=3).execute(deps=deps, session=session))
+        self.assertEqual(0, tool.executed)
+        roles = [e.payload.get("role") for e in session.active_path()]
+        self.assertIn("tool", roles)
+        tool_entry = next(e for e in session.active_path() if e.payload.get("role") == "tool")
+        self.assertTrue(tool_entry.payload.get("is_error"))
+        self.assertEqual("after-deny", final.content[0].text)
