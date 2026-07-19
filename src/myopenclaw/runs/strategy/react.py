@@ -1,38 +1,32 @@
-# TODO(Task 8): ReAct 主循环改为 Session entry / AgentMessage + ContextAssembler；
-# 当前 append SessionMessage + ToolCallBatch 仅为迁移 shim，禁止落盘。
+"""ReAct：ModelContext + 分 checkpoint 落盘。"""
+
+from __future__ import annotations
+
 import asyncio
 import inspect
 import time
-from dataclasses import dataclass
 from numbers import Real
 from uuid import uuid4
 
-from myopenclaw.conversations.message import (
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from myopenclaw.context.model_context import SystemContent, ToolDefinition
+from myopenclaw.conversations.agent_message import (
+    AssistantMessage,
+    ModelResponseMetadata,
+    ToolResultMessage,
 )
+from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
+from myopenclaw.conversations.message import ToolCall
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
-from myopenclaw.runs.context import AgentRuntimeContext
+from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.runs.events import RuntimeEvent, RuntimeEventType
-from myopenclaw.shared.generation import FinishReason, GenerateRequest, GenerateResult
 from myopenclaw.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
+from myopenclaw.runs.turn_state import ToolExecutionOutcome, TurnState
 from myopenclaw.tools.base import ToolExecutionResult
 
 
-@dataclass(frozen=True)
-class ToolCallOutcome:
-    batch_id: str
-    call_index: int
-    total_calls: int
-    tool_call: ToolCall
-    result: ToolExecutionResult
-
-
 class ReActStrategy(ExecutionStrategy):
-    """Reason+Act (ReAct) execution strategy."""
+    """Reason+Act：工具副作用前先落盘 assistant intent。"""
 
     DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
 
@@ -41,18 +35,25 @@ class ReActStrategy(ExecutionStrategy):
 
     async def execute(
         self,
-        context: AgentRuntimeContext,
+        deps: RunDependencies,
         session: Session,
-        session_recall_message: SessionMessage | None = None,
         event_handler: RuntimeEventHandler | None = None,
-    ) -> GenerateResult:
-        last_metadata: MessageMetadata | None = None
+    ) -> AssistantMessage:
+        turn = TurnState()
+        last_assistant: AssistantMessage | None = None
+
+        system = SystemContent.from_text(deps.agent.system_instruction or "")
+        tools = [
+            ToolDefinition(
+                name=tool.spec.name,
+                description=tool.spec.description,
+                input_schema=tool.spec.input_schema,
+            )
+            for tool in deps.tools
+        ]
 
         for step_index in range(1, self.max_steps + 1):
-            prompt_messages = context.conversation_context_service.build_prompt_messages_from_session(
-                session,
-                session_recall_message=session_recall_message,
-            )
+            step = turn.begin_step(step_index)
             await self._emit_event(
                 event_handler,
                 RuntimeEvent(
@@ -60,113 +61,110 @@ class ReActStrategy(ExecutionStrategy):
                     step_index=step_index,
                 ),
             )
+
+            model_context = deps.context_assembler.assemble(
+                entries=session.active_path(),
+                system=system,
+                tools=tools,
+                hook_feedback=turn.hook_feedback_for_current_step(),
+                unit_window=deps.unit_window,
+            )
+
             start = time.perf_counter()
-            result = await self._generate_with_optional_timeout(
-                context=context,
-                request=GenerateRequest(
-                    system_instruction=context.agent.system_instruction or None,
-                    messages=prompt_messages,
-                    tools=[tool.spec for tool in context.tools],
-                ),
+            assistant = await self._generate_with_optional_timeout(
+                deps=deps,
+                context=model_context,
             )
             elapsed_ms = round((time.perf_counter() - start) * 1000)
-            metadata = result.metadata or MessageMetadata(
-                provider=context.agent.model_config.provider,
-                model=context.agent.model_config.model,
-                input_tokens=result.usage.input_tokens if result.usage else None,
-                output_tokens=result.usage.output_tokens if result.usage else None,
-                total_tokens=result.usage.total_tokens if result.usage else None,
-                elapsed_ms=elapsed_ms,
-                provider_finish_reason=result.provider_finish_reason,
-                provider_finish_message=result.provider_finish_message,
-                provider_response_id=result.provider_response_id,
-                provider_model_version=result.provider_model_version,
-            )
-            result.metadata = metadata
-            last_metadata = metadata
+            assistant = self._ensure_metadata(deps, assistant, elapsed_ms)
+            last_assistant = assistant
 
-            if result.tool_calls:
-                batch_id = uuid4().hex
-                outcomes = await self._execute_tool_batch(
-                    batch_id=batch_id,
-                    step_index=step_index,
-                    tool_calls=result.tool_calls,
-                    context=context,
-                    session=session,
-                    event_handler=event_handler,
-                )
-                ordered_outcomes = sorted(outcomes, key=lambda outcome: outcome.call_index)
-                session.append_assistant_tool_batch(
-                    batch=ToolCallBatch(
-                        batch_id=batch_id,
+            # checkpoint BEFORE tools
+            entry = session.append_assistant(assistant)
+            step.assistant_entry_id = entry.entry_id
+            self._flush_entry(deps, session, entry)
+
+            tool_calls = [
+                block
+                for block in assistant.content
+                if isinstance(block, ToolCallContent)
+            ]
+            if not tool_calls:
+                text = self._assistant_text(assistant)
+                await self._emit_event(
+                    event_handler,
+                    RuntimeEvent(
+                        event_type=RuntimeEventType.ASSISTANT_MESSAGE,
                         step_index=step_index,
-                        calls=list(result.tool_calls),
-                        results=[
-                            ToolCallResult(
-                                call_id=outcome.tool_call.id,
-                                content=outcome.result.content,
-                                is_error=outcome.result.is_error,
-                                metadata=dict(outcome.result.metadata),
-                            )
-                            for outcome in ordered_outcomes
-                        ],
+                        text=text,
+                        metadata=self._to_message_metadata(assistant),
                     ),
-                    content=result.text,
-                    metadata=metadata,
-                    provider_thinking_blocks=result.provider_thinking_blocks,
                 )
-                continue
+                turn.final_assistant_entry_id = entry.entry_id
+                turn.status = "completed"
+                return assistant
 
-            session.append_assistant_message(
-                result.text,
-                metadata=metadata,
-                provider_thinking_blocks=result.provider_thinking_blocks,
+            step.pending_tool_call_ids = [call.id for call in tool_calls]
+            batch_id = uuid4().hex
+            outcomes = await self._execute_tool_batch(
+                batch_id=batch_id,
+                step_index=step_index,
+                tool_calls=tool_calls,
+                deps=deps,
+                session=session,
+                event_handler=event_handler,
             )
-            await self._emit_event(
-                event_handler,
-                RuntimeEvent(
-                    event_type=RuntimeEventType.ASSISTANT_MESSAGE,
-                    step_index=step_index,
-                    text=result.text,
-                    metadata=metadata,
-                ),
-            )
-            return result
+            # 按调用顺序串行提交 tool result
+            ordered = sorted(outcomes, key=lambda item: item.call_index)
+            for outcome in ordered:
+                result_entry = session.append_tool_result(
+                    ToolResultMessage(
+                        tool_call_id=outcome.tool_call_id,
+                        tool_name=outcome.tool_name,
+                        content=[TextContent(text=outcome.result.content)],
+                        is_error=outcome.result.is_error,
+                    )
+                )
+                self._flush_entry(deps, session, result_entry)
+                step.completed_tool_call_ids.append(outcome.tool_call_id)
 
-        result = GenerateResult(
-            text="Reached the maximum number of reasoning steps.",
-            finish_reason=FinishReason.MAX_STEPS,
-            metadata=last_metadata,
+        # max steps
+        max_msg = AssistantMessage(
+            content=[
+                TextContent(text="Reached the maximum number of reasoning steps.")
+            ],
+            metadata=last_assistant.metadata if last_assistant else None,
         )
-        session.append_assistant_message(result.text, metadata=last_metadata)
+        entry = session.append_assistant(max_msg)
+        self._flush_entry(deps, session, entry)
         await self._emit_event(
             event_handler,
             RuntimeEvent(
                 event_type=RuntimeEventType.ASSISTANT_MESSAGE,
                 step_index=self.max_steps,
-                text=result.text,
-                metadata=last_metadata,
+                text="Reached the maximum number of reasoning steps.",
+                metadata=self._to_message_metadata(max_msg),
             ),
         )
-        return result
+        return max_msg
 
-    async def _generate_with_optional_timeout(
-        self,
-        *,
-        context: AgentRuntimeContext,
-        request: GenerateRequest,
-    ) -> GenerateResult:
-        timeout_seconds = self._provider_timeout_seconds(context)
+    def _flush_entry(self, deps: RunDependencies, session: Session, entry) -> None:
+        if deps.session_service is None:
+            return
+        deps.session_service.flush_new_entries(session=session, entries=[entry])
+
+    async def _generate_with_optional_timeout(self, *, deps: RunDependencies, context):
+        timeout_seconds = self._provider_timeout_seconds(deps)
         if timeout_seconds is None:
-            return await context.provider.generate(request)
+            return await deps.provider.generate(context)
         return await asyncio.wait_for(
-            context.provider.generate(request),
+            deps.provider.generate(context),
             timeout=timeout_seconds,
         )
 
     @staticmethod
-    def _provider_timeout_seconds(context: AgentRuntimeContext) -> float | None:
-        timeout_seconds = context.agent.model_config.provider_options.get(
+    def _provider_timeout_seconds(deps: RunDependencies) -> float | None:
+        timeout_seconds = deps.agent.model_config.provider_options.get(
             "timeout_seconds"
         )
         if timeout_seconds is None:
@@ -183,13 +181,21 @@ class ReActStrategy(ExecutionStrategy):
         *,
         batch_id: str,
         step_index: int,
-        tool_calls: list[ToolCall],
-        context: AgentRuntimeContext,
+        tool_calls: list[ToolCallContent],
+        deps: RunDependencies,
         session: Session,
         event_handler: RuntimeEventHandler | None,
-    ) -> list[ToolCallOutcome]:
+    ) -> list[ToolExecutionOutcome]:
         total_calls = len(tool_calls)
-        for call_index, tool_call in enumerate(tool_calls):
+        runtime_calls = [
+            ToolCall(
+                id=call.id,
+                name=call.name,
+                arguments=call.arguments,
+            )
+            for call in tool_calls
+        ]
+        for call_index, tool_call in enumerate(runtime_calls):
             await self._emit_event(
                 event_handler,
                 RuntimeEvent(
@@ -204,22 +210,25 @@ class ReActStrategy(ExecutionStrategy):
 
         tasks = [
             asyncio.create_task(
-                self._execute_tool_call_outcome(
-                    batch_id=batch_id,
+                self._execute_one(
                     call_index=call_index,
-                    total_calls=total_calls,
-                    context=context,
-                    session=session,
                     tool_call=tool_call,
+                    deps=deps,
+                    session=session,
                 )
             )
             for call_index, tool_call in enumerate(tool_calls)
         ]
-        outcomes: list[ToolCallOutcome] = []
+        outcomes: list[ToolExecutionOutcome] = []
         try:
-            for completed_task in asyncio.as_completed(tasks):
-                outcome = await completed_task
+            for completed in asyncio.as_completed(tasks):
+                outcome = await completed
                 outcomes.append(outcome)
+                runtime_call = ToolCall(
+                    id=outcome.tool_call_id,
+                    name=outcome.tool_name,
+                    arguments=outcome.arguments,
+                )
                 await self._emit_event(
                     event_handler,
                     RuntimeEvent(
@@ -229,52 +238,45 @@ class ReActStrategy(ExecutionStrategy):
                             else RuntimeEventType.TOOL_CALL_COMPLETED
                         ),
                         step_index=step_index,
-                        batch_id=outcome.batch_id,
+                        batch_id=batch_id,
                         call_index=outcome.call_index,
-                        total_calls=outcome.total_calls,
-                        tool_call=outcome.tool_call,
+                        total_calls=total_calls,
+                        tool_call=runtime_call,
                         tool_result=outcome.result,
                     ),
                 )
         finally:
             for task in tasks:
-                if task.done():
-                    continue
-                task.cancel()
+                if not task.done():
+                    task.cancel()
         return outcomes
 
-    async def _execute_tool_call_outcome(
+    async def _execute_one(
         self,
         *,
-        batch_id: str,
         call_index: int,
-        total_calls: int,
-        context: AgentRuntimeContext,
+        tool_call: ToolCallContent,
+        deps: RunDependencies,
         session: Session,
-        tool_call: ToolCall,
-    ) -> ToolCallOutcome:
-        result = await self._execute_tool_call(
-            context=context,
-            session=session,
-            tool_call=tool_call,
-        )
-        return ToolCallOutcome(
-            batch_id=batch_id,
-            call_index=call_index,
-            total_calls=total_calls,
-            tool_call=tool_call,
+    ) -> ToolExecutionOutcome:
+        result = await self._execute_tool_call(deps=deps, session=session, tool_call=tool_call)
+        return ToolExecutionOutcome(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            arguments=dict(tool_call.arguments),
             result=result,
+            call_index=call_index,
         )
 
     async def _execute_tool_call(
         self,
         *,
-        context: AgentRuntimeContext,
+        deps: RunDependencies,
         session: Session,
-        tool_call: ToolCall,
+        tool_call: ToolCallContent,
     ) -> ToolExecutionResult:
         tool = next(
-            (candidate for candidate in context.tools if candidate.spec.name == tool_call.name),
+            (candidate for candidate in deps.tools if candidate.spec.name == tool_call.name),
             None,
         )
         if tool is None:
@@ -282,15 +284,73 @@ class ReActStrategy(ExecutionStrategy):
                 content=f"Tool '{tool_call.name}' is not available.",
                 is_error=True,
             )
-
-        exec_context = context.get_tool_execution_context(session.session_id)
+        exec_context = deps.get_tool_execution_context(session.session_id)
         try:
             return await tool.execute(tool_call.arguments, exec_context)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — 工具失败转错误结果
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' failed: {exc}",
                 is_error=True,
             )
+
+    @staticmethod
+    def _assistant_text(assistant: AssistantMessage) -> str:
+        parts = [
+            block.text
+            for block in assistant.content
+            if isinstance(block, TextContent) and block.text
+        ]
+        return "\n".join(parts)
+
+    @staticmethod
+    def _ensure_metadata(
+        deps: RunDependencies,
+        assistant: AssistantMessage,
+        elapsed_ms: int,
+    ) -> AssistantMessage:
+        if assistant.metadata is not None:
+            # frozen dataclass: rebuild if elapsed missing
+            meta = assistant.metadata
+            if meta.elapsed_ms is None:
+                meta = ModelResponseMetadata(
+                    provider=meta.provider,
+                    model=meta.model,
+                    provider_model_version=meta.provider_model_version,
+                    provider_response_id=meta.provider_response_id,
+                    finish_reason=meta.finish_reason,
+                    finish_message=meta.finish_message,
+                    elapsed_ms=elapsed_ms,
+                    usage=meta.usage,
+                )
+                return AssistantMessage(content=list(assistant.content), metadata=meta)
+            return assistant
+        return AssistantMessage(
+            content=list(assistant.content),
+            metadata=ModelResponseMetadata(
+                provider=deps.agent.model_config.provider,
+                model=deps.agent.model_config.model,
+                elapsed_ms=elapsed_ms,
+            ),
+        )
+
+    @staticmethod
+    def _to_message_metadata(assistant: AssistantMessage) -> MessageMetadata | None:
+        meta = assistant.metadata
+        if meta is None:
+            return None
+        usage = meta.usage
+        return MessageMetadata(
+            provider=meta.provider,
+            model=meta.model,
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+            total_tokens=usage.total_tokens if usage else None,
+            elapsed_ms=meta.elapsed_ms,
+            provider_finish_reason=meta.finish_reason,
+            provider_finish_message=meta.finish_message,
+            provider_response_id=meta.provider_response_id,
+            provider_model_version=meta.provider_model_version,
+        )
 
     async def _emit_event(
         self,

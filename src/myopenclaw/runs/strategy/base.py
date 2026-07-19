@@ -1,27 +1,24 @@
 from abc import ABC, abstractmethod
 from typing import Callable
 
-# TODO(Task 8): session_recall_message 与 SessionMessage 签名迁出；统一 AgentMessage。
-from myopenclaw.conversations.message import SessionMessage
+from myopenclaw.conversations.agent_message import AssistantMessage
 from myopenclaw.conversations.session import Session
+from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.runs.events import RuntimeEvent
-from myopenclaw.shared.generation import GenerateResult
-from myopenclaw.runs.context import AgentRuntimeContext
 
 
 RuntimeEventHandler = Callable[[RuntimeEvent], None | object]
 
 
 class ExecutionStrategy(ABC):
-    """Base interface for agent execution strategies."""
+    """Agent 执行策略基类。"""
 
     @abstractmethod
     async def execute(
         self,
-        context: AgentRuntimeContext,
+        deps: RunDependencies,
         session: Session,
-        session_recall_message: SessionMessage | None = None,
         event_handler: RuntimeEventHandler | None = None,
-    ) -> GenerateResult:
-        """Executes the strategy flow to produce a generation result."""
-        pass
+    ) -> AssistantMessage:
+        """推进 turn 内 step 循环，返回最终 AssistantMessage。"""
+        raise NotImplementedError

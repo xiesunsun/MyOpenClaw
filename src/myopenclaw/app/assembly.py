@@ -7,10 +7,10 @@ from myopenclaw.agents.skills import SkillManifest, SkillRegistry
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.config.app_config import AppConfig
 from myopenclaw.context import (
-    ConversationContextService,
     NoopSessionRecallProvider,
     SessionRecallProvider,
 )
+from myopenclaw.context.assembler import ContextAssembler
 from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
 from myopenclaw.integrations.openviking.context_client import SyncHTTPOpenVikingContextClient
 from myopenclaw.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
@@ -24,6 +24,7 @@ from myopenclaw.integrations.openviking.session_sync import (
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
+from myopenclaw.runs.dependencies import RunDependencies
 
 
 class AppAssembly:
@@ -82,29 +83,21 @@ class AppAssembly:
     def build_chat_runtime(
         self,
         agent_id: str | None = None,
+        session_service: SessionService | None = None,
     ) -> tuple[Agent, AgentCoordinator]:
         agent = self.resolve_agent(agent_id=agent_id)
-        conversation_context_service = ConversationContextService(
-            cli_turn_window=self.app_config.context_cli_turn_window
+        runtime = AgentRuntimeContext.create(
+            agent=agent,
+            context_assembler=ContextAssembler(),
+            unit_window=self.app_config.context_cli_turn_window,
         )
-        session_recall_provider = self._build_session_recall_provider(
-            agent_id=agent.agent_id
-        )
-        session_recall_max_chars = (
-            self.app_config.openviking.session_recall.max_chars
-            if self.app_config.openviking is not None
-            else None
-        )
+        deps = runtime.to_run_dependencies(session_service=session_service)
         coordinator = AgentCoordinator(
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
-            context=AgentRuntimeContext.create(
-                agent=agent,
-                conversation_context_service=conversation_context_service,
-                session_recall_provider=session_recall_provider,
-                session_recall_max_chars=session_recall_max_chars,
-            ),
+            deps=deps,
         )
         return agent, coordinator
+
 
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         db_path = self.app_config.root / ".myopenclaw" / "sessions.db"

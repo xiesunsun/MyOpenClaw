@@ -1,19 +1,23 @@
+"""AgentCoordinator：turn 边界 + user checkpoint。"""
+
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from myopenclaw.agents.agent import Agent
-from myopenclaw.context import build_session_recall_message
+from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
+from myopenclaw.conversations.content_blocks import TextContent
 from myopenclaw.conversations.session import Session
-from myopenclaw.runs.context import AgentRuntimeContext
-from myopenclaw.shared.generation import GenerateResult
+from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
 
 
 @dataclass
 class AgentCoordinator:
-    """Coordinates agent execution using a given strategy."""
+    """协调一次用户 query 的执行。"""
 
     strategy: ExecutionStrategy
-    context: AgentRuntimeContext | None = None
+    deps: RunDependencies | None = None
 
     async def run_turn(
         self,
@@ -22,32 +26,32 @@ class AgentCoordinator:
         session: Session,
         user_text: str,
         event_handler: RuntimeEventHandler | None = None,
-    ) -> GenerateResult:
-        """Runs a single conversation turn."""
+        deps: RunDependencies | None = None,
+    ) -> AssistantMessage:
         if session.agent_id != agent.agent_id:
             raise ValueError(
                 f"Session '{session.session_id}' belongs to agent '{session.agent_id}', "
                 f"not '{agent.agent_id}'"
             )
 
-        # Initialize context once if not already done, caching the heavy resolvers
-        if self.context is None or self.context.agent.agent_id != agent.agent_id:
-            self.context = AgentRuntimeContext.create(agent=agent)
+        run_deps = deps or self.deps
+        if run_deps is None:
+            raise ValueError("RunDependencies 未提供")
+        if run_deps.agent.agent_id != agent.agent_id:
+            # 允许外部传入与 agent 一致的 deps
+            raise ValueError("RunDependencies.agent 与参数 agent 不一致")
 
-        session.append_user_message(user_text)
-        session_recall_result = await self.context.session_recall_provider.recall(
-            session=session,
-            current_user_text=user_text,
+        user_entry = session.append_user(
+            UserMessage(content=[TextContent(text=user_text)])
         )
-        session_recall_message = build_session_recall_message(
-            session_recall_result,
-            max_chars=self.context.session_recall_max_chars,
-        )
-        self.context.last_session_recall_message = session_recall_message
+        if run_deps.session_service is not None:
+            run_deps.session_service.flush_new_entries(
+                session=session,
+                entries=[user_entry],
+            )
 
         return await self.strategy.execute(
-            context=self.context,
+            deps=run_deps,
             session=session,
-            session_recall_message=session_recall_message,
             event_handler=event_handler,
         )

@@ -9,16 +9,14 @@ from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.cli.context_renderer import ContextRenderer
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.conversations.session_storage_mapper import build_session_preview
-# TODO(Task 8): ChatLoop 改为 entry 树 / AgentMessage 展示；batch 仅为临时回放。
-from myopenclaw.conversations.message import ToolCallBatch
+from myopenclaw.conversations.agent_message import AssistantMessage
+from myopenclaw.conversations.content_blocks import TextContent
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
 from myopenclaw.cli.event_renderer import ChatEventRenderer
 from myopenclaw.cli.prompt_input import PromptToolkitInputReader
-from myopenclaw.shared.generation import GenerateResult
 from myopenclaw.runs import (
     AgentCoordinator,
-    AgentRuntimeContext,
     ReActStrategy,
     RuntimeEventHandler,
 )
@@ -74,6 +72,8 @@ class ChatLoop:
             agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
             session_service = assembly.build_session_service(agent_id=agent.agent_id)
             session = session_service.start(agent_id=agent.agent_id)
+        if coordinator.deps is not None and coordinator.deps.session_service is None:
+            coordinator.deps.session_service = session_service
         return cls(
             agent=agent,
             agent_id=agent.agent_id,
@@ -87,7 +87,7 @@ class ChatLoop:
         self,
         text: str,
         event_handler: RuntimeEventHandler | None = None,
-    ) -> GenerateResult:
+    ) -> AssistantMessage:
         return await self.coordinator.run_turn(
             agent=self.agent,
             session=self.session,
@@ -98,10 +98,16 @@ class ChatLoop:
     def create_event_handler(self) -> RuntimeEventHandler:
         return ChatEventRenderer(self.console).handle_event
 
-    def render_turn_output(self, reply: GenerateResult, *, start_index: int) -> None:
-        for message in self.session.messages[start_index:]:
-            if message.tool_call_batch is not None:
-                self._render_tool_batch(message.tool_call_batch)
+    def render_turn_output(self, reply: AssistantMessage, *, start_index: int) -> None:
+        for entry in self.session.entries[start_index:]:
+            payload = entry.payload if isinstance(entry.payload, dict) else {}
+            if payload.get("role") == "tool":
+                tool_text = ""
+                for block in payload.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        tool_text = block.get("text") or tool_text
+                name = payload.get("tool_name") or "tool"
+                self.console.print(Text(f"[{name}] {tool_text[:200]}", style="dim"))
         self._render_assistant_message(reply)
 
     async def _default_input_reader(self, prompt: str) -> str:
@@ -110,7 +116,7 @@ class ChatLoop:
         return await self._prompt_input_reader(prompt)
 
     def _read_session_message_count(self) -> int:
-        return len(self.session.messages)
+        return len(self.session.entries)
 
     def _message_count(self) -> int:
         state_count = self._read_session_message_count()
@@ -159,16 +165,36 @@ class ChatLoop:
             )
         )
 
-    def _render_assistant_message(self, reply: GenerateResult) -> None:
-        content: RenderableType = Markdown(reply.text)
-        metadata = reply.metadata
+    def _render_assistant_message(self, reply: AssistantMessage) -> None:
+        text_parts = [
+            block.text
+            for block in reply.content
+            if isinstance(block, TextContent) and block.text
+        ]
+        body_text = chr(10).join(text_parts)
+        metadata = None
+        if reply.metadata is not None:
+            usage = reply.metadata.usage
+            metadata = MessageMetadata(
+                provider=reply.metadata.provider,
+                model=reply.metadata.model,
+                input_tokens=usage.input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
+                elapsed_ms=reply.metadata.elapsed_ms,
+                provider_finish_reason=reply.metadata.finish_reason,
+                provider_finish_message=reply.metadata.finish_message,
+                provider_response_id=reply.metadata.provider_response_id,
+                provider_model_version=reply.metadata.provider_model_version,
+            )
+        content: RenderableType = Markdown(body_text)
         if metadata is not None:
-            content = Group(Markdown(reply.text), self._render_assistant_footer(metadata))
+            content = Group(Markdown(body_text), self._render_assistant_footer(metadata))
         self._render_message("Assistant", content, style="yellow")
 
-    def _render_tool_batch(self, batch: ToolCallBatch) -> None:
-        for style, renderable in ChatEventRenderer.render_tool_batch_transcript(batch):
-            self._render_message("Tool", renderable, style=style)
+    def _render_tool_batch(self, batch) -> None:
+        return
+
 
     def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
         footer = Text(style="dim", justify="right")
@@ -247,29 +273,15 @@ class ChatLoop:
         return True
 
     async def _render_context_command(self) -> None:
-        runtime_context = self._ensure_runtime_context()
-        prompt_messages = runtime_context.conversation_context_service.build_prompt_messages_from_session(
-            self.session,
-            session_recall_message=runtime_context.last_session_recall_message,
-        )
-        snapshot = await self._context_usage_service.build(
-            agent=self.agent,
-            context=runtime_context,
-            prompt_messages=prompt_messages,
-        )
+        deps = getattr(self.coordinator, "deps", None)
+        entry_count = len(self.session.entries)
+        leaf = self.session.leaf_id or "-"
+        flag = "yes" if deps is not None else "no"
         self._render_message(
             "System",
-            self._context_renderer.render(snapshot),
+            Text(f"/context (predicted) entries={entry_count} leaf={leaf} deps={flag}"),
             style="cyan",
         )
-
-    def _ensure_runtime_context(self) -> AgentRuntimeContext:
-        runtime_context = getattr(self.coordinator, "context", None)
-        if runtime_context is None or runtime_context.agent.agent_id != self.agent.agent_id:
-            runtime_context = AgentRuntimeContext.create(agent=self.agent)
-            if hasattr(self.coordinator, "context"):
-                self.coordinator.context = runtime_context
-        return runtime_context
 
     async def run(self) -> None:
         self._render_header()
@@ -297,21 +309,21 @@ class ChatLoop:
 
             self._fallback_message_count += 1
             event_renderer = ChatEventRenderer(self.console)
-            start_index = len(self.session.messages)
+            start_index = len(self.session.entries)
             try:
                 reply = await self.handle_user_input(
                     user_input,
                     event_handler=event_renderer.handle_event,
                 )
                 if self._session_service is not None:
-                    self._session_service.flush_new_messages(
+                    self._session_service.flush_new_entries(
                         session=self.session,
-                        start_index=start_index,
+                        entries=[],
                     )
             except Exception as exc:
                 self._render_error_message(traceback.format_exc().rstrip())
                 continue
 
             self._fallback_message_count += 1
-            if not event_renderer.rendered_assistant_message and (reply.metadata or reply.text):
+            if not event_renderer.rendered_assistant_message:
                 self._render_assistant_message(reply)
