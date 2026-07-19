@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from myopenclaw.conversations.message import SessionMessage
 from myopenclaw.conversations.session import Session
+from myopenclaw.conversations.session_entry import SessionEntry
 from myopenclaw.conversations.session_preview import SessionPreview
 
 
@@ -15,12 +15,12 @@ class SessionRepository(Protocol):
 
     def list(self, *, limit: int = 20) -> list[SessionPreview]: ...
 
-    def append_messages(
+    def append_entries(
         self,
         *,
         session_id: str,
-        start_index: int,
-        messages: list[SessionMessage],
+        entries: list[SessionEntry],
+        leaf_id: str | None,
         updated_at: datetime,
     ) -> None: ...
 

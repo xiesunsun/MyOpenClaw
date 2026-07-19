@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from myopenclaw.conversations.repository import SessionRepository
 from myopenclaw.conversations.session import Session
+from myopenclaw.conversations.session_entry import SessionEntry
 from myopenclaw.conversations.session_preview import SessionPreview
 from myopenclaw.conversations.session_storage_mapper import build_session_preview
 from myopenclaw.integrations.openviking.session_sync import SessionSync
@@ -16,6 +17,12 @@ class SessionNotFoundError(LookupError):
 
 
 class SessionService:
+    """会话生命周期服务。
+
+    OpenViking 同步依赖已从 Session 字段移除；SessionSync 调用点保留，
+    第一版由 NoopSessionSync / 空实现承接，完整恢复见 Task 12。
+    """
+
     def __init__(
         self,
         repository: SessionRepository,
@@ -51,23 +58,29 @@ class SessionService:
     def build_preview(self, *, session: Session) -> SessionPreview:
         return build_session_preview(session=session)
 
-    def flush_new_messages(self, *, session: Session, start_index: int) -> None:
+    def flush_new_entries(
+        self,
+        *,
+        session: Session,
+        entries: list[SessionEntry],
+    ) -> None:
+        """将自上次 flush 以来新增的 entries 原子落库，并刷新封面元数据。"""
         updated_at = self._now()
         session.touch(at=updated_at)
-        new_messages = session.messages[start_index:]
-        if new_messages:
-            self._repository.append_messages(
+        if entries:
+            self._repository.append_entries(
                 session_id=session.session_id,
-                start_index=start_index,
-                messages=new_messages,
+                entries=entries,
+                leaf_id=session.leaf_id,
                 updated_at=updated_at,
             )
+        # Task 12：OpenViking 游标不再挂在 Session 上；此处保留调用点，默认 noop。
         self._session_sync.sync_pending_messages(session=session)
         self._repository.update_metadata(session)
 
     def close(self, *, session: Session) -> None:
         updated_at = self._now()
-        session.status = "closed"
+        session.status = "archived"
         session.touch(at=updated_at)
         self._repository.mark_closed(
             session_id=session.session_id,
