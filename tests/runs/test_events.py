@@ -118,12 +118,13 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual("done", _assistant_text(result))
+        # Task 9: tools run serially for PreToolUse control points
         self.assertEqual(
             [
                 RuntimeEventType.MODEL_STEP_STARTED,
                 RuntimeEventType.TOOL_CALL_STARTED,
-                RuntimeEventType.TOOL_CALL_STARTED,
                 RuntimeEventType.TOOL_CALL_COMPLETED,
+                RuntimeEventType.TOOL_CALL_STARTED,
                 RuntimeEventType.TOOL_CALL_COMPLETED,
                 RuntimeEventType.MODEL_STEP_STARTED,
                 RuntimeEventType.ASSISTANT_MESSAGE,
@@ -135,12 +136,11 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(batch_id, events[2].batch_id)
         self.assertEqual(batch_id, events[3].batch_id)
         self.assertEqual(0, events[1].call_index)
-        self.assertEqual(1, events[2].call_index)
-        self.assertEqual(2, events[1].total_calls)
+        self.assertEqual(0, events[2].call_index)
+        self.assertEqual("slow", events[2].tool_result.content)
         self.assertEqual(1, events[3].call_index)
-        self.assertEqual("fast", events[3].tool_result.content)
-        self.assertEqual(0, events[4].call_index)
-        self.assertEqual("slow", events[4].tool_result.content)
+        self.assertEqual(1, events[4].call_index)
+        self.assertEqual("fast", events[4].tool_result.content)
         self.assertEqual("done", events[6].text)
 
     async def test_runner_emits_failed_event_for_erroring_tool_call(self) -> None:
