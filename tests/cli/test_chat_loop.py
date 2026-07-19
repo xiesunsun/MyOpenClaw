@@ -536,10 +536,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         rendered = console.export_text()
-        # Task 8: /context is a predicted stub (full usage snapshot deferred).
-        self.assertIn("/context (predicted)", rendered)
-        self.assertIn("entries=0", rendered)
-        self.assertIn("deps=yes", rendered)
+        # Task 10: /context 展示 ModelContext 观测（不触发旧 usage service）
+        self.assertIn("ModelContext", rendered)
+        self.assertIn("predicted=true", rendered)
         self.assertEqual(0, len(context_usage_service.calls))
 
     async def test_session_command_renders_preview(self) -> None:

@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from myopenclaw.app.assembly import AppAssembly
-from myopenclaw.cli.context_renderer import ContextRenderer
+from myopenclaw.cli.context_renderer import ContextRenderer, ModelContextRenderer
+from myopenclaw.context.model_context import SystemContent, ToolDefinition
+from myopenclaw.context.observation import ContextObservation
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.conversations.session_storage_mapper import build_session_preview
 from myopenclaw.conversations.agent_message import AssistantMessage
@@ -274,14 +276,53 @@ class ChatLoop:
 
     async def _render_context_command(self) -> None:
         deps = getattr(self.coordinator, "deps", None)
-        entry_count = len(self.session.entries)
-        leaf = self.session.leaf_id or "-"
-        flag = "yes" if deps is not None else "no"
-        self._render_message(
-            "System",
-            Text(f"/context (predicted) entries={entry_count} leaf={leaf} deps={flag}"),
-            style="cyan",
-        )
+        last_meta = getattr(self, "_last_assistant_metadata", None)
+        if deps is None:
+            observation = ContextObservation(
+                model_context=None,
+                predicted=True,
+                note="尚无 RunDependencies",
+            )
+        else:
+            system = SystemContent.from_text(self.agent.system_instruction or "")
+            tools = []
+            for tool in getattr(deps, "tools", []) or []:
+                spec = getattr(tool, "spec", None)
+                if spec is None:
+                    continue
+                tools.append(
+                    ToolDefinition(
+                        name=spec.name,
+                        description=getattr(spec, "description", "") or "",
+                        input_schema=getattr(spec, "input_schema", {}) or {},
+                    )
+                )
+            # 不触发 Hook：hook_feedback 传空
+            try:
+                ctx = deps.context_assembler.assemble(
+                    entries=self.session.active_path(),
+                    system=system,
+                    tools=tools,
+                    hook_feedback=[],
+                    unit_window=deps.unit_window,
+                )
+            except Exception as exc:  # 测试 mock / 不完整 deps
+                observation = ContextObservation(
+                    model_context=None,
+                    predicted=True,
+                    assistant_metadata=last_meta,
+                    note=f"组装失败: {exc}",
+                )
+            else:
+                predicted = last_meta is None
+                observation = ContextObservation(
+                    model_context=ctx,
+                    predicted=predicted,
+                    assistant_metadata=last_meta,
+                    note=None if not predicted else "尚无实际模型调用；展示预测组装",
+                )
+        renderable = ModelContextRenderer().render_observation(observation)
+        self._render_message("System", renderable, style="cyan")
 
     async def run(self) -> None:
         self._render_header()

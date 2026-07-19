@@ -73,3 +73,37 @@ class ContextRenderer:
         if category.char_count is not None and category.token_count is None:
             return f"{category.char_count:,} chars"
         return self._format_token_count(category.token_count)
+
+
+class ModelContextRenderer:
+    """展示 final/predicted ModelContext 与 cache usage。"""
+
+    def render_observation(self, observation) -> RenderableType:
+        from myopenclaw.context.observation import ContextObservation
+
+        lines: list[RenderableType] = [Text("ModelContext", style="bold")]
+        if observation.predicted:
+            lines.append(Text("predicted=true（尚无实际 ModelContext 或仅预测）", style="yellow"))
+        if observation.note:
+            lines.append(Text(observation.note))
+        ctx = observation.model_context
+        if ctx is None:
+            lines.append(Text("无 ModelContext"))
+            return Group(*lines)
+        try:
+            lines.append(Text(f"system_sections={len(ctx.system.sections)}"))
+            lines.append(Text(f"messages={len(ctx.messages)}"))
+            lines.append(Text(f"tools={len(ctx.tools)}"))
+        except Exception:
+            lines.append(Text("model_context present"))
+        meta = observation.assistant_metadata
+        if meta and meta.usage:
+            u = meta.usage
+            lines.append(
+                Text(
+                    "usage: "
+                    f"in={u.input_tokens} out={u.output_tokens} "
+                    f"cache_read={u.cache_read_tokens} cache_write={u.cache_write_tokens}"
+                )
+            )
+        return Group(*lines)
