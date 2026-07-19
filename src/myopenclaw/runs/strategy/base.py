@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Callable
 
+# TODO(Task 8): session_recall_message 与 SessionMessage 签名迁出；统一 AgentMessage。
 from myopenclaw.conversations.message import SessionMessage
 from myopenclaw.conversations.session import Session
 from myopenclaw.runs.events import RuntimeEvent

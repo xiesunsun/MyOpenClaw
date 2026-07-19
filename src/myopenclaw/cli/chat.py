@@ -9,6 +9,7 @@ from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.cli.context_renderer import ContextRenderer
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.conversations.session_storage_mapper import build_session_preview
+# TODO(Task 8): ChatLoop 改为 entry 树 / AgentMessage 展示；batch 仅为临时回放。
 from myopenclaw.conversations.message import ToolCallBatch
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session

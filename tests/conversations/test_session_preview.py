@@ -1,7 +1,17 @@
 import unittest
 from datetime import datetime, timezone
 
-from myopenclaw.conversations.session_preview import SessionPreview
+from myopenclaw.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+    agent_message_to_dict,
+)
+from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
+from myopenclaw.conversations.session_preview import (
+    SessionPreview,
+    preview_text_from_message_payload,
+)
 
 
 class SessionPreviewTests(unittest.TestCase):
@@ -43,6 +53,47 @@ class SessionPreviewTests(unittest.TestCase):
         )
 
         self.assertEqual("[tools] read_file, grep_search", preview.last_message)
+
+    def test_preview_from_assistant_tool_calls_payload(self) -> None:
+        payload = agent_message_to_dict(
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="c1", name="read_file", arguments={}),
+                    ToolCallContent(id="c2", name="grep_search", arguments={}),
+                ]
+            )
+        )
+        self.assertEqual(
+            "[tools] read_file, grep_search",
+            preview_text_from_message_payload(payload),
+        )
+
+    def test_preview_from_tool_result_uses_text(self) -> None:
+        payload = agent_message_to_dict(
+            ToolResultMessage(
+                tool_call_id="c1",
+                tool_name="read_file",
+                content=[TextContent(text="  file body\nline2  ")],
+            )
+        )
+        self.assertEqual("file body line2", preview_text_from_message_payload(payload))
+
+    def test_preview_prefers_text_over_tool_names(self) -> None:
+        payload = agent_message_to_dict(
+            AssistantMessage(
+                content=[
+                    TextContent(text="working"),
+                    ToolCallContent(id="c1", name="read_file", arguments={}),
+                ]
+            )
+        )
+        self.assertEqual("working", preview_text_from_message_payload(payload))
+
+    def test_preview_from_user_text(self) -> None:
+        payload = agent_message_to_dict(
+            UserMessage(content=[TextContent(text="hello")])
+        )
+        self.assertEqual("hello", preview_text_from_message_payload(payload))
 
 
 if __name__ == "__main__":

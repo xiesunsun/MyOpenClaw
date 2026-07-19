@@ -1,3 +1,5 @@
+# TODO(Task 8): ReAct 主循环改为 Session entry / AgentMessage + ContextAssembler；
+# 当前 append SessionMessage + ToolCallBatch 仅为迁移 shim，禁止落盘。
 import asyncio
 import inspect
 import time

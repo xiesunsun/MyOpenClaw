@@ -3,6 +3,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+# ToolCallBatch 仅为运行时/回放展示 shim；落盘已统一为 AgentMessage（Task 5）。
+# Task 8 后改为基于 AssistantMessage/ToolResultMessage 渲染。
 from myopenclaw.conversations.message import ToolCallBatch
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.runs import RuntimeEvent, RuntimeEventType
@@ -56,6 +58,7 @@ class ChatEventRenderer:
 
     @classmethod
     def render_tool_batch_transcript(cls, batch: ToolCallBatch) -> list[tuple[str, Text]]:
+        """渲染运行时 ToolCallBatch 回放；非持久消息合同。"""
         results_by_call_id = {result.call_id: result for result in batch.results}
         entries: list[tuple[str, Text]] = []
         for tool_call in batch.calls:

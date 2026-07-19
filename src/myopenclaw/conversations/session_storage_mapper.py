@@ -12,7 +12,10 @@ from typing import Any
 
 from myopenclaw.conversations.session import Session
 from myopenclaw.conversations.session_entry import ENTRY_TYPE_MESSAGE, SessionEntry
-from myopenclaw.conversations.session_preview import SessionPreview
+from myopenclaw.conversations.session_preview import (
+    SessionPreview,
+    preview_text_from_message_payload,
+)
 
 
 def session_to_metadata_record(session: Session) -> dict[str, Any]:
@@ -74,7 +77,7 @@ def build_session_preview(*, session: Session) -> SessionPreview:
     message_entries = [entry for entry in path if entry.entry_type == ENTRY_TYPE_MESSAGE]
     last_message = ""
     if message_entries:
-        last_message = _preview_text_from_message_payload(message_entries[-1].payload)
+        last_message = preview_text_from_message_payload(message_entries[-1].payload)
     return SessionPreview(
         session_id=session.session_id,
         agent_id=session.agent_id,
@@ -93,7 +96,7 @@ def session_preview_from_storage_record(record: Mapping[str, Any]) -> SessionPre
     if last_payload_json is not None:
         payload = json.loads(str(last_payload_json))
         if isinstance(payload, dict):
-            last_message = _preview_text_from_message_payload(payload)
+            last_message = preview_text_from_message_payload(payload)
     return SessionPreview(
         session_id=str(record["session_id"]),
         agent_id=str(record["agent_id"]),
@@ -103,34 +106,6 @@ def session_preview_from_storage_record(record: Mapping[str, Any]) -> SessionPre
         message_count=int(record["message_count"]),
         last_message=last_message,
     )
-
-
-def _preview_text_from_message_payload(payload: Mapping[str, Any]) -> str:
-    content = payload.get("content") or []
-    if not isinstance(content, list):
-        return ""
-
-    texts: list[str] = []
-    tool_names: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        block_type = block.get("type")
-        if block_type == "text":
-            text = block.get("text")
-            if text:
-                texts.append(str(text))
-        elif block_type == "tool_call":
-            name = block.get("name")
-            if name:
-                tool_names.append(str(name))
-
-    joined = " ".join(" ".join(texts).split())
-    if joined:
-        return joined
-    if tool_names:
-        return f"[tools] {', '.join(tool_names)}"
-    return ""
 
 
 def _datetime_to_storage(value: datetime | None) -> str | None:

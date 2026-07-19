@@ -9,6 +9,7 @@ from myopenclaw.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
+    ToolResultMessage,
     UserMessage,
     agent_message_from_dict,
     agent_message_to_dict,
@@ -117,6 +118,23 @@ class SessionStorageMapperTests(unittest.TestCase):
 
         self.assertEqual("[tools] read_file", preview.last_message)
         self.assertEqual(1, preview.message_count)
+
+    def test_session_preview_tool_result_uses_truncated_text(self) -> None:
+        session = Session(session_id="session-1", agent_id="Pickle")
+        long_body = "result " * 20
+        session.append_tool_result(
+            ToolResultMessage(
+                tool_call_id="call-1",
+                tool_name="read_file",
+                content=[TextContent(text=long_body)],
+            )
+        )
+
+        preview = build_session_preview(session=session)
+
+        self.assertTrue(preview.last_message.endswith("..."))
+        self.assertLessEqual(len(preview.last_message), 53)
+        self.assertTrue(preview.last_message.startswith("result"))
 
     def test_session_preview_message_count_is_active_path_messages_only(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")

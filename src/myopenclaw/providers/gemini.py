@@ -1,3 +1,5 @@
+# TODO(Task 7): generate 主路径改为 ModelContext / AgentMessage；
+# 当前 SessionMessage + ToolCallBatch 仅为迁移 shim，禁止落盘。
 import asyncio
 import json
 from typing import Any

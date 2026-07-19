@@ -8,6 +8,7 @@ from myopenclaw.conversations.agent_message import (
     agent_message_to_dict,
 )
 from myopenclaw.conversations.content_blocks import (
+    ImageContent,
     TextContent,
     ThinkingContent,
     ToolCallContent,
@@ -17,6 +18,24 @@ from myopenclaw.conversations.content_blocks import (
 def test_user_message_round_trip():
     msg = UserMessage(content=[TextContent(text="hello")])
     restored = agent_message_from_dict(agent_message_to_dict(msg))
+    assert restored == msg
+
+
+def test_user_message_with_image_round_trip():
+    msg = UserMessage(
+        content=[
+            TextContent(text="see image"),
+            ImageContent(
+                media_type="image/png",
+                data_base64="aGVsbG8=",
+                url=None,
+            ),
+        ]
+    )
+    payload = agent_message_to_dict(msg)
+    assert payload["payload_version"] == 1
+    assert payload["content"][1]["type"] == "image"
+    restored = agent_message_from_dict(payload)
     assert restored == msg
 
 
