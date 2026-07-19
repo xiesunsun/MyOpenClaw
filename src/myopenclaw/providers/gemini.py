@@ -1,28 +1,31 @@
-# TODO(Task 7): generate 主路径改为 ModelContext / AgentMessage；
-# 当前 SessionMessage + ToolCallBatch 仅为迁移 shim，禁止落盘。
+"""Gemini Provider：ModelContext → wire → AssistantMessage。"""
+
+from __future__ import annotations
+
 import asyncio
+import base64
 import json
 from typing import Any
 
 from google import genai
 from google.genai import types
 
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from myopenclaw.context.model_context import ModelContext, ToolDefinition
+from myopenclaw.conversations.agent_message import (
+    AgentMessage,
+    AssistantMessage,
+    ModelResponseMetadata,
+    ModelUsage,
+    ToolResultMessage,
+    UserMessage,
+)
+from myopenclaw.conversations.content_blocks import (
+    TextContent,
+    ThinkingContent,
+    ToolCallContent,
 )
 from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.shared.generation import (
-    FinishReason,
-    GenerateRequest,
-    GenerateResult,
-    TokenUsage,
-)
 from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import ToolSpec
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -57,27 +60,17 @@ class GeminiProvider(BaseLLMProvider):
             provider_options=dict(config.provider_options),
         )
 
-    async def generate(self, request: GenerateRequest) -> GenerateResult:
-        config = self._build_generate_config(request)
+    async def generate(self, context: ModelContext) -> AssistantMessage:
+        config = self._build_generate_config(context)
         response = await self.client.aio.models.generate_content(
             model=self.model,
-            contents=self._build_contents(request.messages),
+            contents=self._build_contents(context.messages),
             config=config,
         )
-        return GenerateResult(
-            text=self._extract_text(response),
-            tool_calls=self._extract_tool_calls(response),
-            finish_reason=self._extract_finish_reason(response),
-            provider_finish_reason=self._extract_provider_finish_reason(response),
-            provider_finish_message=self._extract_provider_finish_message(response),
-            provider_response_id=getattr(response, "response_id", None),
-            provider_model_version=getattr(response, "model_version", None),
-            usage=self._extract_usage(response),
-            raw=response,
-        )
+        return self._response_to_assistant_message(response)
 
-    async def count_request_tokens(self, request: GenerateRequest) -> int | None:
-        request_dict = self._build_count_tokens_request(request)
+    async def count_context_tokens(self, context: ModelContext) -> int | None:
+        request_dict = self._build_count_tokens_request(context)
         for attempt in range(self.COUNT_TOKENS_MAX_ATTEMPTS):
             try:
                 response = await self.client._api_client.async_request(
@@ -104,25 +97,26 @@ class GeminiProvider(BaseLLMProvider):
 
     def _build_generate_config(
         self,
-        request: GenerateRequest,
+        context: ModelContext,
     ) -> types.GenerateContentConfig:
+        system_text = context.system.as_text() or None
         config = types.GenerateContentConfig(
-            system_instruction=request.system_instruction,
+            system_instruction=system_text,
             temperature=self.temperature,
             max_output_tokens=self.max_output_tokens,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(
                 disable=True
             ),
         )
-        if request.tools:
-            config.tools = self._build_tools(request.tools)
+        if context.tools:
+            config.tools = self._build_tools(context.tools)
 
         thinking_level = self.provider_options.get("thinking")
         if isinstance(thinking_level, str):
             config.thinking_config = types.ThinkingConfig(thinking_level=thinking_level)
         return config
 
-    def _build_count_tokens_request(self, request: GenerateRequest) -> dict[str, Any]:
+    def _build_count_tokens_request(self, context: ModelContext) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "generateContentRequest": {
                 "model": f"models/{self.model}",
@@ -131,42 +125,42 @@ class GeminiProvider(BaseLLMProvider):
         generate_content_request = payload["generateContentRequest"]
 
         generate_content_request["contents"] = self._dump_models(
-            self._count_tokens_contents(request.messages)
+            self._count_tokens_contents(context.messages)
         )
 
-        if request.system_instruction:
+        system_text = context.system.as_text()
+        if system_text:
             generate_content_request["systemInstruction"] = self._dump_model(
-                types.Content(parts=[types.Part.from_text(text=request.system_instruction)])
+                types.Content(parts=[types.Part.from_text(text=system_text)])
             )
 
-        if request.tools:
+        if context.tools:
             generate_content_request["tools"] = self._dump_models(
-                self._build_tools(request.tools)
+                self._build_tools(context.tools)
             )
 
         return payload
 
     @staticmethod
-    def _build_tools(tool_specs: list[ToolSpec]) -> list[types.Tool]:
+    def _build_tools(tools: list[ToolDefinition]) -> list[types.Tool]:
         return [
             types.Tool(
                 function_declarations=[
-                    types.FunctionDeclaration(**GeminiProvider._build_function_declaration(tool_spec))
+                    types.FunctionDeclaration(
+                        **GeminiProvider._build_function_declaration(tool)
+                    )
                 ]
             )
-            for tool_spec in tool_specs
+            for tool in tools
         ]
 
     @staticmethod
-    def _build_function_declaration(tool_spec: ToolSpec) -> dict[str, Any]:
-        declaration = {
-            "name": tool_spec.name,
-            "description": tool_spec.description,
-            "parameters_json_schema": tool_spec.input_schema,
+    def _build_function_declaration(tool: ToolDefinition) -> dict[str, Any]:
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters_json_schema": tool.input_schema,
         }
-        if tool_spec.output_schema is not None:
-            declaration["response_json_schema"] = tool_spec.output_schema
-        return declaration
 
     @staticmethod
     def _dump_model(model: Any) -> dict[str, Any]:
@@ -177,41 +171,85 @@ class GeminiProvider(BaseLLMProvider):
         return [cls._dump_model(model) for model in models]
 
     @staticmethod
-    def _build_contents(messages: list[SessionMessage]) -> list[types.Content]:
+    def _build_contents(messages: list[AgentMessage]) -> list[types.Content]:
+        """AgentMessage → Gemini Content 列表。
+
+        Assistant 含 tool_call 后，连续 ToolResult 合成一条 user function_response。
+        """
         contents: list[types.Content] = []
-        for message in messages:
-            if message.role == MessageRole.USER:
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if isinstance(message, UserMessage):
+                text = GeminiProvider._text_from_blocks(message.content)
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[types.Part.from_text(text=message.content)],
+                        parts=[types.Part.from_text(text=text)],
                     )
                 )
+                index += 1
                 continue
 
-            if message.role == MessageRole.ASSISTANT:
-                if message.tool_call_batch is not None:
-                    contents.extend(GeminiProvider._build_batch_contents(message))
-                    continue
+            if isinstance(message, AssistantMessage):
+                model_parts = GeminiProvider._assistant_parts(message)
+                if model_parts:
+                    contents.append(types.Content(role="model", parts=model_parts))
+                index += 1
+                response_parts: list[types.Part] = []
+                while index < len(messages) and isinstance(
+                    messages[index], ToolResultMessage
+                ):
+                    tool_msg = messages[index]
+                    assert isinstance(tool_msg, ToolResultMessage)
+                    response_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=tool_msg.tool_call_id,
+                                name=tool_msg.tool_name,
+                                response=GeminiProvider._function_response_payload(
+                                    tool_msg
+                                ),
+                            )
+                        )
+                    )
+                    index += 1
+                if response_parts:
+                    contents.append(types.Content(role="user", parts=response_parts))
+                continue
 
+            if isinstance(message, ToolResultMessage):
                 contents.append(
                     types.Content(
-                        role="model",
-                        parts=[types.Part.from_text(text=message.content)],
+                        role="user",
+                        parts=[
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    id=message.tool_call_id,
+                                    name=message.tool_name,
+                                    response=GeminiProvider._function_response_payload(
+                                        message
+                                    ),
+                                )
+                            )
+                        ],
                     )
                 )
+                index += 1
+                continue
+
+            index += 1
         return contents
 
     @classmethod
     def _count_tokens_contents(
         cls,
-        messages: list[SessionMessage],
+        messages: list[AgentMessage],
     ) -> list[types.Content]:
         contents = cls._build_contents(messages)
         if contents:
             return contents
-        # Gemini countTokens requires a contents field even when we only want
-        # the fixed prompt baseline with no conversation history yet.
+        # Gemini countTokens 需要 contents 字段
         return [
             types.Content(
                 role="user",
@@ -220,61 +258,72 @@ class GeminiProvider(BaseLLMProvider):
         ]
 
     @staticmethod
-    def _build_batch_contents(message: SessionMessage) -> list[types.Content]:
-        batch = message.tool_call_batch
-        if batch is None:
-            return []
-
-        model_parts: list[types.Part] = []
-        if message.content:
-            model_parts.append(types.Part.from_text(text=message.content))
-        for tool_call in batch.calls:
-            model_parts.append(
-                types.Part(
-                    function_call=types.FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.name,
-                        args=tool_call.arguments,
-                    ),
-                    thought_signature=tool_call.thought_signature,
+    def _assistant_parts(message: AssistantMessage) -> list[types.Part]:
+        parts: list[types.Part] = []
+        for block in message.content:
+            if isinstance(block, ThinkingContent):
+                if block.text:
+                    parts.append(types.Part.from_text(text=block.text))
+            elif isinstance(block, TextContent):
+                if block.text:
+                    parts.append(types.Part.from_text(text=block.text))
+            elif isinstance(block, ToolCallContent):
+                thought_signature = None
+                if block.thought_signature:
+                    try:
+                        thought_signature = base64.b64decode(block.thought_signature)
+                    except Exception:
+                        thought_signature = block.thought_signature.encode("utf-8")
+                parts.append(
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id=block.id,
+                            name=block.name,
+                            args=block.arguments,
+                        ),
+                        thought_signature=thought_signature,
+                    )
                 )
-            )
-
-        response_parts = [
-            types.Part(
-                function_response=types.FunctionResponse(
-                    id=tool_call.id,
-                    name=tool_call.name,
-                    response=GeminiProvider._build_function_response_payload(tool_result),
-                )
-            )
-            for tool_call, tool_result in GeminiProvider._ordered_batch_pairs(batch)
-        ]
-
-        contents = [types.Content(role="model", parts=model_parts)]
-        if response_parts:
-            contents.append(types.Content(role="user", parts=response_parts))
-        return contents
+        return parts
 
     @staticmethod
-    def _ordered_batch_pairs(
-        batch: ToolCallBatch,
-    ) -> list[tuple[ToolCall, ToolCallResult]]:
-        results_by_call_id = {
-            tool_result.call_id: tool_result for tool_result in batch.results
-        }
-        return [
-            (tool_call, results_by_call_id[tool_call.id])
-            for tool_call in batch.calls
-            if tool_call.id in results_by_call_id
+    def _text_from_blocks(blocks: list[Any]) -> str:
+        parts = [
+            block.text for block in blocks if isinstance(block, TextContent) and block.text
         ]
+        return "\n".join(parts)
 
     @staticmethod
-    def _build_function_response_payload(tool_result: ToolCallResult) -> dict[str, Any]:
-        response = {"error": tool_result.content} if tool_result.is_error else {"output": tool_result.content}
-        if tool_result.metadata:
-            response["metadata"] = dict(tool_result.metadata)
-        return response
+    def _function_response_payload(message: ToolResultMessage) -> dict[str, Any]:
+        text = GeminiProvider._text_from_blocks(list(message.content))
+        if message.is_error:
+            return {"error": text}
+        return {"output": text}
+
+    def _response_to_assistant_message(
+        self, response: types.GenerateContentResponse
+    ) -> AssistantMessage:
+        content: list[Any] = []
+        text = self._extract_text(response)
+        if text:
+            content.append(TextContent(text=text))
+
+        for tool_call in self._extract_tool_call_contents(response):
+            content.append(tool_call)
+
+        has_tool_calls = any(isinstance(block, ToolCallContent) for block in content)
+        return AssistantMessage(
+            content=content,
+            metadata=ModelResponseMetadata(
+                provider="google/gemini",
+                model=self.model,
+                provider_model_version=getattr(response, "model_version", None),
+                provider_response_id=getattr(response, "response_id", None),
+                finish_reason="tool_calls" if has_tool_calls else "stop",
+                finish_message=self._extract_provider_finish_message(response),
+                usage=self._extract_usage(response),
+            ),
+        )
 
     @staticmethod
     def _extract_text(response: types.GenerateContentResponse) -> str:
@@ -292,20 +341,31 @@ class GeminiProvider(BaseLLMProvider):
         return ""
 
     @staticmethod
-    def _extract_tool_calls(response: types.GenerateContentResponse) -> list[ToolCall]:
+    def _extract_tool_call_contents(
+        response: types.GenerateContentResponse,
+    ) -> list[ToolCallContent]:
         candidates = getattr(response, "candidates", None) or []
-        tool_calls: list[ToolCall] = []
+        tool_calls: list[ToolCallContent] = []
         if candidates and candidates[0].content:
             for part in candidates[0].content.parts:
                 function_call = getattr(part, "function_call", None)
                 if function_call is None:
                     continue
+                thought_sig = getattr(part, "thought_signature", None)
+                thought_signature_str = None
+                if thought_sig is not None:
+                    if isinstance(thought_sig, bytes):
+                        thought_signature_str = base64.b64encode(thought_sig).decode(
+                            "ascii"
+                        )
+                    else:
+                        thought_signature_str = str(thought_sig)
                 tool_calls.append(
-                    ToolCall(
+                    ToolCallContent(
                         id=function_call.id or function_call.name,
                         name=function_call.name,
                         arguments=dict(function_call.args or {}),
-                        thought_signature=getattr(part, "thought_signature", None),
+                        thought_signature=thought_signature_str,
                     )
                 )
         if tool_calls:
@@ -314,38 +374,19 @@ class GeminiProvider(BaseLLMProvider):
         function_calls = getattr(response, "function_calls", None)
         if function_calls:
             return [
-                ToolCall(
+                ToolCallContent(
                     id=function_call.id or function_call.name,
                     name=function_call.name,
                     arguments=dict(function_call.args or {}),
                 )
                 for function_call in function_calls
             ]
-
         return []
 
-    @classmethod
-    def _extract_finish_reason(cls, response: types.GenerateContentResponse) -> FinishReason:
-        if cls._extract_tool_calls(response):
-            return FinishReason.TOOL_CALLS
-        return FinishReason.STOP
-
     @staticmethod
-    def _extract_provider_finish_reason(response: types.GenerateContentResponse) -> str | None:
-        candidate = GeminiProvider._primary_candidate(response)
-        if candidate is None:
-            return None
-        finish_reason = getattr(candidate, "finish_reason", None)
-        if finish_reason is None:
-            return None
-        return (
-            getattr(finish_reason, "name", None)
-            or getattr(finish_reason, "value", None)
-            or str(finish_reason)
-        )
-
-    @staticmethod
-    def _extract_provider_finish_message(response: types.GenerateContentResponse) -> str | None:
+    def _extract_provider_finish_message(
+        response: types.GenerateContentResponse,
+    ) -> str | None:
         candidate = GeminiProvider._primary_candidate(response)
         if candidate is None:
             return None
@@ -359,16 +400,15 @@ class GeminiProvider(BaseLLMProvider):
         return candidates[0]
 
     @staticmethod
-    def _extract_usage(response: types.GenerateContentResponse) -> TokenUsage | None:
+    def _extract_usage(response: types.GenerateContentResponse) -> ModelUsage | None:
         usage = getattr(response, "usage_metadata", None)
         if usage is None:
             return None
-        return TokenUsage(
+        return ModelUsage(
             input_tokens=getattr(usage, "prompt_token_count", None),
             output_tokens=getattr(usage, "candidates_token_count", None),
-            cached_content_tokens=getattr(usage, "cached_content_token_count", None),
-            thoughts_tokens=getattr(usage, "thoughts_token_count", None),
-            tool_use_prompt_tokens=getattr(usage, "tool_use_prompt_token_count", None),
+            cache_read_tokens=getattr(usage, "cached_content_token_count", None),
+            reasoning_tokens=getattr(usage, "thoughts_token_count", None),
             total_tokens=getattr(usage, "total_token_count", None),
         )
 

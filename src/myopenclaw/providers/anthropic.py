@@ -1,28 +1,28 @@
+"""Anthropic Provider：ModelContext → wire → AssistantMessage。"""
+
 from __future__ import annotations
 
-# TODO(Task 7): generate 主路径改为 ModelContext / AgentMessage；
-# 当前 SessionMessage + ToolCallBatch 仅为迁移 shim，禁止落盘。
 from collections.abc import Mapping
 from typing import Any
 
 from anthropic import AsyncAnthropic
 
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from myopenclaw.context.model_context import ModelContext, ToolDefinition
+from myopenclaw.conversations.agent_message import (
+    AgentMessage,
+    AssistantMessage,
+    ModelResponseMetadata,
+    ModelUsage,
+    ToolResultMessage,
+    UserMessage,
+)
+from myopenclaw.conversations.content_blocks import (
+    TextContent,
+    ThinkingContent,
+    ToolCallContent,
 )
 from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.shared.generation import (
-    FinishReason,
-    GenerateRequest,
-    GenerateResult,
-    TokenUsage,
-)
 from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import ToolSpec
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -54,59 +54,46 @@ class AnthropicProvider(BaseLLMProvider):
             provider_options=dict(config.provider_options),
         )
 
-    async def generate(self, request: GenerateRequest) -> GenerateResult:
-        response = await self._create_streaming_message(request)
-        tool_calls = self._extract_tool_calls(response)
-        return GenerateResult(
-            text=self._extract_text(response),
-            tool_calls=tool_calls,
-            finish_reason=(
-                FinishReason.TOOL_CALLS if tool_calls else FinishReason.STOP
-            ),
-            provider_finish_reason=getattr(response, "stop_reason", None),
-            provider_finish_message=None,
-            provider_response_id=getattr(response, "id", None),
-            provider_model_version=getattr(response, "model", None),
-            usage=self._extract_usage(response),
-            provider_thinking_blocks=self._extract_thinking_blocks(response),
-            raw=response,
-        )
+    async def generate(self, context: ModelContext) -> AssistantMessage:
+        response = await self._create_streaming_message(context)
+        return self._response_to_assistant_message(response)
 
-    async def _create_streaming_message(self, request: GenerateRequest) -> Any:
+    async def _create_streaming_message(self, context: ModelContext) -> Any:
         async with self.client.messages.stream(
-            **self._build_create_params(request)
+            **self._build_create_params(context)
         ) as stream:
             return await stream.get_final_message()
 
-    async def count_request_tokens(self, request: GenerateRequest) -> int | None:
+    async def count_context_tokens(self, context: ModelContext) -> int | None:
         try:
             response = await self.client.messages.count_tokens(
-                **self._build_count_tokens_params(request)
+                **self._build_count_tokens_params(context)
             )
         except Exception:
             return None
         input_tokens = getattr(response, "input_tokens", None)
         return int(input_tokens) if input_tokens is not None else None
 
-    def _build_create_params(self, request: GenerateRequest) -> dict[str, Any]:
-        params = self._build_request_params(request)
+    def _build_create_params(self, context: ModelContext) -> dict[str, Any]:
+        params = self._build_request_params(context)
         params["max_tokens"] = self.max_output_tokens
         if self._should_send_temperature():
             params["temperature"] = self.temperature
         return params
 
-    def _build_count_tokens_params(self, request: GenerateRequest) -> dict[str, Any]:
-        return self._build_request_params(request)
+    def _build_count_tokens_params(self, context: ModelContext) -> dict[str, Any]:
+        return self._build_request_params(context)
 
-    def _build_request_params(self, request: GenerateRequest) -> dict[str, Any]:
+    def _build_request_params(self, context: ModelContext) -> dict[str, Any]:
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": self._build_messages(request.messages),
+            "messages": self._build_messages(context.messages),
         }
-        if request.system_instruction:
-            params["system"] = request.system_instruction
-        if request.tools:
-            params["tools"] = self._build_tools(request.tools)
+        system_text = context.system.as_text()
+        if system_text:
+            params["system"] = system_text
+        if context.tools:
+            params["tools"] = self._build_tools(context.tools)
         thinking, output_config = self._build_thinking_config()
         if thinking is not None:
             params["thinking"] = thinking
@@ -115,102 +102,117 @@ class AnthropicProvider(BaseLLMProvider):
         return params
 
     @staticmethod
-    def _build_messages(messages: list[SessionMessage]) -> list[dict[str, Any]]:
+    def _build_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+        """将 AgentMessage 列表编码为 Anthropic messages。
+
+        连续 ToolResultMessage 合成一条 user（多个 tool_result blocks）。
+        """
         payload: list[dict[str, Any]] = []
-        for message in messages:
-            if message.role == MessageRole.USER:
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if isinstance(message, UserMessage):
                 payload.append(
                     {
                         "role": "user",
-                        "content": [{"type": "text", "text": message.content}],
+                        "content": AnthropicProvider._user_content_blocks(message),
                     }
                 )
+                index += 1
                 continue
 
-            if message.role != MessageRole.ASSISTANT:
+            if isinstance(message, AssistantMessage):
+                assistant_blocks = AnthropicProvider._assistant_content_blocks(message)
+                if assistant_blocks:
+                    payload.append({"role": "assistant", "content": assistant_blocks})
+                index += 1
+                tool_result_blocks: list[dict[str, Any]] = []
+                while index < len(messages) and isinstance(
+                    messages[index], ToolResultMessage
+                ):
+                    tool_result_blocks.append(
+                        AnthropicProvider._tool_result_block(
+                            messages[index]  # type: ignore[arg-type]
+                        )
+                    )
+                    index += 1
+                if tool_result_blocks:
+                    payload.append({"role": "user", "content": tool_result_blocks})
                 continue
 
-            assistant_blocks = AnthropicProvider._build_assistant_message_blocks(
-                message
-            )
-            if assistant_blocks:
-                payload.append({"role": "assistant", "content": assistant_blocks})
+            if isinstance(message, ToolResultMessage):
+                # 孤立 tool result：仍编码为 user tool_result
+                payload.append(
+                    {
+                        "role": "user",
+                        "content": [AnthropicProvider._tool_result_block(message)],
+                    }
+                )
+                index += 1
+                continue
 
-            tool_result_blocks = AnthropicProvider._build_tool_result_blocks(
-                message.tool_call_batch
-            )
-            if tool_result_blocks:
-                payload.append({"role": "user", "content": tool_result_blocks})
+            index += 1
         return payload
 
     @staticmethod
-    def _build_tools(tool_specs: list[ToolSpec]) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": tool_spec.name,
-                "description": tool_spec.description,
-                "input_schema": tool_spec.input_schema,
-            }
-            for tool_spec in tool_specs
-        ]
+    def _user_content_blocks(message: UserMessage) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, TextContent):
+                blocks.append({"type": "text", "text": block.text})
+        if not blocks:
+            blocks.append({"type": "text", "text": ""})
+        return blocks
 
     @staticmethod
-    def _build_assistant_message_blocks(message: SessionMessage) -> list[dict[str, Any]]:
+    def _assistant_content_blocks(message: AssistantMessage) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
-        if message.provider_thinking_blocks:
-            blocks.extend(dict(block) for block in message.provider_thinking_blocks)
-        if message.content:
-            blocks.append({"type": "text", "text": message.content})
-        if message.tool_call_batch is not None:
-            for tool_call in message.tool_call_batch.calls:
+        for block in message.content:
+            if isinstance(block, ThinkingContent):
+                thinking_block: dict[str, Any] = {
+                    "type": "thinking",
+                    "thinking": block.text,
+                }
+                if block.signature is not None:
+                    thinking_block["signature"] = block.signature
+                blocks.append(thinking_block)
+            elif isinstance(block, TextContent):
+                if block.text:
+                    blocks.append({"type": "text", "text": block.text})
+            elif isinstance(block, ToolCallContent):
                 blocks.append(
                     {
                         "type": "tool_use",
-                        "id": tool_call.id,
-                        "name": tool_call.name,
-                        "input": tool_call.arguments,
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.arguments,
                     }
                 )
         return blocks
 
-    @classmethod
-    def _build_tool_result_blocks(
-        cls,
-        batch: ToolCallBatch | None,
-    ) -> list[dict[str, Any]]:
-        if batch is None:
-            return []
-        return [
-            cls._build_tool_result_block(tool_call=tool_call, tool_result=tool_result)
-            for tool_call, tool_result in cls._ordered_batch_pairs(batch)
-        ]
-
     @staticmethod
-    def _build_tool_result_block(
-        *,
-        tool_call: ToolCall,
-        tool_result: ToolCallResult,
-    ) -> dict[str, Any]:
+    def _tool_result_block(message: ToolResultMessage) -> dict[str, Any]:
+        text_parts = [
+            block.text for block in message.content if isinstance(block, TextContent)
+        ]
         block: dict[str, Any] = {
             "type": "tool_result",
-            "tool_use_id": tool_call.id,
-            "content": tool_result.content,
+            "tool_use_id": message.tool_call_id,
+            "content": "\n".join(text_parts),
         }
-        if tool_result.is_error:
+        if message.is_error:
             block["is_error"] = True
         return block
 
     @staticmethod
-    def _ordered_batch_pairs(
-        batch: ToolCallBatch,
-    ) -> list[tuple[ToolCall, ToolCallResult]]:
-        results_by_call_id = {
-            tool_result.call_id: tool_result for tool_result in batch.results
-        }
+    def _build_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         return [
-            (tool_call, results_by_call_id[tool_call.id])
-            for tool_call in batch.calls
-            if tool_call.id in results_by_call_id
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            }
+            for tool in tools
         ]
 
     def _build_thinking_config(
@@ -244,65 +246,73 @@ class AnthropicProvider(BaseLLMProvider):
     def _should_send_temperature(self) -> bool:
         return self.temperature is not None and self.model != "claude-opus-4-7"
 
-    @classmethod
-    def _extract_text(cls, response: Any) -> str:
-        texts = [
-            str(text)
-            for block in getattr(response, "content", [])
-            if cls._block_type(block) == "text"
-            for text in [cls._block_field(block, "text")]
-            if text
-        ]
-        return "\n".join(texts)
-
-    @classmethod
-    def _extract_tool_calls(cls, response: Any) -> list[ToolCall]:
-        tool_calls: list[ToolCall] = []
-        for block in getattr(response, "content", []):
-            if cls._block_type(block) != "tool_use":
-                continue
-            tool_calls.append(
-                ToolCall(
-                    id=str(cls._block_field(block, "id") or cls._block_field(block, "name")),
-                    name=str(cls._block_field(block, "name")),
-                    arguments=cls._dict_value(cls._block_field(block, "input")),
+    def _response_to_assistant_message(self, response: Any) -> AssistantMessage:
+        content: list[Any] = []
+        for block in getattr(response, "content", []) or []:
+            block_type = self._block_type(block)
+            if block_type == "thinking":
+                thinking_text = self._block_field(block, "thinking")
+                content.append(
+                    ThinkingContent(
+                        text=str(thinking_text or ""),
+                        signature=(
+                            str(self._block_field(block, "signature"))
+                            if self._block_field(block, "signature") is not None
+                            else None
+                        ),
+                    )
                 )
-            )
-        return tool_calls
+            elif block_type == "text":
+                text = self._block_field(block, "text")
+                if text:
+                    content.append(TextContent(text=str(text)))
+            elif block_type == "tool_use":
+                content.append(
+                    ToolCallContent(
+                        id=str(
+                            self._block_field(block, "id")
+                            or self._block_field(block, "name")
+                        ),
+                        name=str(self._block_field(block, "name")),
+                        arguments=self._dict_value(self._block_field(block, "input")),
+                    )
+                )
 
-    @classmethod
-    def _extract_thinking_blocks(cls, response: Any) -> list[dict[str, Any]] | None:
-        blocks = [
-            cls._json_dict(block)
-            for block in getattr(response, "content", [])
-            if cls._block_type(block) == "thinking"
-        ]
-        return blocks or None
+        has_tool_calls = any(isinstance(block, ToolCallContent) for block in content)
+        finish_reason = "tool_calls" if has_tool_calls else "stop"
+        return AssistantMessage(
+            content=content,
+            metadata=ModelResponseMetadata(
+                provider="anthropic",
+                model=self.model,
+                provider_model_version=getattr(response, "model", None),
+                provider_response_id=getattr(response, "id", None),
+                finish_reason=finish_reason,
+                finish_message=None,
+                usage=self._extract_usage(response),
+            ),
+        )
 
     @staticmethod
-    def _extract_usage(response: Any) -> TokenUsage | None:
+    def _extract_usage(response: Any) -> ModelUsage | None:
         usage = getattr(response, "usage", None)
         if usage is None:
             return None
 
         input_tokens = getattr(usage, "input_tokens", None)
         output_tokens = getattr(usage, "output_tokens", None)
-        cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", None)
+        cache_write_tokens = getattr(usage, "cache_creation_input_tokens", None)
         cache_read_tokens = getattr(usage, "cache_read_input_tokens", None)
-        cached_content_tokens = None
-        if cache_creation_tokens is not None or cache_read_tokens is not None:
-            cached_content_tokens = (cache_creation_tokens or 0) + (
-                cache_read_tokens or 0
-            )
 
         total_tokens = None
         if input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
 
-        return TokenUsage(
+        return ModelUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            cached_content_tokens=cached_content_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
             total_tokens=total_tokens,
         )
 
@@ -318,7 +328,7 @@ class AnthropicProvider(BaseLLMProvider):
         return getattr(block, name, None)
 
     @staticmethod
-    def _dict_value(value: Any) -> dict[str, object]:
+    def _dict_value(value: Any) -> dict[str, Any]:
         if value is None:
             return {}
         if isinstance(value, dict):
@@ -326,18 +336,3 @@ class AnthropicProvider(BaseLLMProvider):
         if isinstance(value, Mapping):
             return dict(value)
         return dict(value)
-
-    @staticmethod
-    def _json_dict(value: Any) -> dict[str, Any]:
-        if isinstance(value, dict):
-            return dict(value)
-        if isinstance(value, Mapping):
-            return dict(value)
-        model_dump = getattr(value, "model_dump", None)
-        if callable(model_dump):
-            return dict(model_dump(mode="json", by_alias=True, exclude_none=True))
-        return {
-            key: field
-            for key, field in vars(value).items()
-            if not key.startswith("_") and field is not None
-        }
