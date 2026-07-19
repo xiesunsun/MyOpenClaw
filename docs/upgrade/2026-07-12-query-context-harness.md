@@ -1,13 +1,15 @@
 # Query → Context → Chat Completion 升级设计
 
 **初稿日期**：2026-07-12  
-**更新日期**：2026-07-13  
-**状态**：设计稿，供复盘与审阅；未进入实现  
-**关联文档**：[`2026-07-12-db-entities.md`](./2026-07-12-db-entities.md)
+**更新日期**：2026-07-19  
+**状态**：设计合同（与实现计划对齐）；未进入实现  
+**关联文档**：[`2026-07-12-db-entities.md`](./2026-07-12-db-entities.md)、[`../superpowers/plans/2026-07-19-query-context-harness-implementation.md`](../superpowers/plans/2026-07-19-query-context-harness-implementation.md)
 
-本文整理当前项目从用户 query 到模型调用、工具执行和结果落盘的整体升级方案。重点是统一实体、消除重复消息形状、明确持久化边界、建立唯一的 `ModelContext` 形成路径，并用细粒度生命周期 Hook 扩展 Harness。
+本文整理当前项目从用户 query 到模型调用、工具执行和结果落盘的整体升级方案。重点是统一实体、消除重复消息形状、明确持久化边界、建立唯一的 `ModelContext` 形成路径，并用细粒度生命周期 Hook 扩展核心状态机。
 
-数据库实体文档仍是持久层设计的基础，但其中 `openviking` entry、`message.content: string` 等内容需要在本方案确认后同步修订。本文不直接定义任何具体插件或 OpenViking 的最终行为。
+数据库实体文档仍是持久层设计的基础；其中过时的 `message.content: string` 等以**本文与实现计划**为准。本文不直接定义任何具体插件或 OpenViking 的最终行为。
+
+编码原则（实现与审阅均须遵守）：Unix 一事一物、KISS、命名直接通俗、跨层解耦可演进。**升级是用更窄的实体替换过胖实体，不是堆叠同义新类型。**
 
 ---
 
@@ -16,33 +18,66 @@
 | 标识 | 含义 |
 |------|------|
 | **已确定** | 可以作为后续实现合同 |
-| **待拍板** | 已识别问题，但尚不能进入稳定合同 |
+| **已决议（v1）** | 原待拍板项已钉死，避免实现期摇摆；仅大改版可重开 |
 | **后置** | 当前升级不设计，等出现具体需求再讨论 |
 
 ### 1.1 已确定
 
-- 持久事实由 `Session` 与 `SessionEntry` 承载。
+**持久与消息**
+
+- 持久事实由 `Session` 与 `SessionEntry` 承载；Session 核心**不含** OpenViking 字段。
 - Session 以 `leaf_id + parent_id` 表达当前活动路径和分支。
-- message entry 使用统一的 `AgentMessage`，不再保存 `ToolCallBatch`。
+- message entry 使用统一的 `AgentMessage`，**不再落盘** `ToolCallBatch`。
 - message content 使用 role-specific content blocks，不限定为 `string`。
+- 一条 assistant 含多个 tool call 时：`AssistantMessage` + **N 条**独立 `ToolResultMessage` entry。
+- `status` 仅 `active` \| `archived`（`close` 写 `archived`，不用 `closed`）。
+- `SessionPreview.message_count` = **active_path 上 `entry_type=message` 的条数**（不含 compaction 等）。
+
+**模型输入与组装**
+
 - `ModelContext` 是最终、唯一、Provider-neutral 的模型输入值对象。
-- `ContextAssembler` 是无状态组装服务，不是实体，不查数据库、不调用 Hook、不调用 Provider。
-- user、assistant tool call、tool result、最终 assistant 分 checkpoint 落盘。
-- Hook 位于状态机的固定迁移点，使用事件专用输入和专用决策，不接收整个 `ModelContext` 任意改写。
-- `/context` 用于观测最终 ModelContext 和用量，不重新触发有副作用的 Hook。
-- `input/output/cache read/cache write` 是调用结果用量，进入 assistant metadata。
+- `ContextAssembler` 是无状态组装服务：不查库、不调 Hook、不调 Provider、不读 Agent。
+- ReAct 与 `/context` **必须共用** Assembler；禁止第二套拼装路径。
+- `ToolDefinition`（模型可见）与 `ToolSpec`/`BaseTool`（可执行）**类型分离**，禁止合成一类。
+- 共享领域对象中删除 `GenerateRequest` / `GenerateResult`；Provider 返回 `AssistantMessage`。
 
-### 1.2 待拍板
+**运行与扩展**
 
-- `model_change` 是否作为第一版正式 entry type。
-- `SystemContent` 第一版的 content block 形状。
-- User message 第一版是否立即支持 document，还是先支持 text/image。
-- Thinking block 的统一字段与 Provider opaque data 边界。
-- Hook 产生的模型可见反馈如何映射成 AgentMessage/content block。
-- `PostToolUse` 是否允许替换工具结果。
-- compaction summary 最终投影成哪种模型消息。
-- `/context` 在首次模型调用前展示预测值，还是提示尚无实际 ModelContext。
-- 并行 tool results 按调用顺序还是完成顺序落盘；第一版倾向由单一提交器按调用顺序串行推进 leaf。
+- user、assistant tool intent、每个 tool result、最终 assistant **分 checkpoint** 落盘；工具副作用前 intent 已落盘。
+- 工具可并行执行；**单一提交器**按 **调用顺序** 串行 `append_tool_result` 推进 leaf。
+- 依赖容器命名为 `RunDependencies`（替代名实不符的 `AgentRuntimeContext`）。
+- Hook 只在状态机固定迁移点：事件专用输入/决策；**禁止** `Hook(ModelContext) -> ModelContext`；禁止 Hook 直接改 Session 内部字段或任意重排历史。
+- `/context` 观测 final ModelContext 与 usage，**不**触发有副作用 Hook、**不**远程 recall。
+- `input/output/cache_read/cache_write` 等为调用结果用量，进入 assistant `ModelResponseMetadata.usage`。
+
+**原则红线（禁止项）**
+
+1. 禁止 tool results 再塞回 assistant 同一条持久消息。  
+2. 禁止 Session 封面再挂同步游标 / openviking 账号字段。  
+3. 禁止长期双路径拼装 ModelContext。  
+4. 禁止把 `ToolDefinition` 与 `ToolSpec` 糊成继承或同一类型。  
+5. 禁止 `TurnState`/`StepState` 膨胀成「第二个 Session」（禁止拷贝全量 messages / 随意 dict bag）。  
+6. 禁止迁移窗口结束后仍保留 `SessionMessage` / 落盘 `ToolCallBatch` 作为领域合同。  
+7. `Harness` 仅作文档用语，**不**作为代码包名或上帝对象。
+
+### 1.2 已决议（v1）
+
+| 议题 | 决议 |
+|------|------|
+| `model_change` entry | **不实现写入**；出现则投影跳过 |
+| `SystemContent` | `SystemContent(sections: list[SystemSection])`，`SystemSection(name, text)`；提供 `from_text` / `as_text`；第一版 section **克制**，勿为观测过度拆段 |
+| User document | **不做**；仅 `TextContent` + `ImageContent` |
+| Thinking | `ThinkingContent(text, signature=None)`；**第一版不设 `opaque`**；Provider 专有块能放进 `signature`/text 则放入，否则 adapter 内消化 |
+| 持久侧 tool call 主名 | **`ToolCallContent`**；不与运行时再长期并列一套独立 `ToolCall` 领域类型（迁移窗口可 re-export，结束后删除） |
+| Hook 模型可见反馈 | 类型名 **`HookFeedback`**（`context/hook_feedback.py`）；字段 `TurnState.hook_feedback`；Assembler 仅注入**本 step 新增**项，作为 ModelContext **尾部合成 user 文本**（**不落库**）；`source_event` 仅观测 |
+| `PostToolUse` 替换结果 | **不允许**；仅观察 + 下一步 `HookFeedback` |
+| PreToolUse deny / ask | deny 或 ask（v1 无 UI 时 ask **按 deny**）→ **必须**写合成 `ToolResultMessage(is_error=True)`，保证 call/result 配对 |
+| compaction 投影 | 路径上**最后一条** compaction：`summary` → 带前缀 `[compaction]` 的 `UserMessage`，丢弃 `first_kept` 之前展开 |
+| `/context` 首次调用前 | 提示尚无实际 ModelContext；若展示预测组装则 `predicted=true`，且不触发 Hook |
+| 并行 tool 落盘顺序 | 执行可并行；落盘按**调用顺序**串行 |
+| SessionStart / SessionEnd Hook | **第一版不做**；需要时再加 |
+| BeforeCompact / AfterCompact | **随 P8**，不进 P6 |
+| OpenViking | P1 从核心 Session **删除**字段；P9 旁路表或旁路 entry（推荐旁路表，避免污染 leaf） |
 
 ### 1.3 后置
 
@@ -52,6 +87,8 @@
 - 进程外 command/http/MCP Hook。
 - settings 热加载和插件市场。
 - 旧 SQLite schema 自动迁移。
+- Thinking `opaque`、User `DocumentContent`、按事件语义位置插入 Hook 反馈（非尾部合成）。
+- 会话极大时 entry 懒加载 / 内存仅保留 active path。
 
 ---
 
@@ -106,7 +143,7 @@
 | Hook | Harness 状态机固定迁移点上的扩展协议 |
 | RuntimeEvent | 给 CLI/trace 的运行时通知，不参与 Hook 决策 |
 
-`Runtime` 在行业中没有唯一边界。本文避免用它同时表示 Harness、sandbox 和依赖容器，代码命名优先使用 `RunDependencies`、`TurnState`、`StepState`、`ExecutionEnvironment`。
+`Runtime` 在行业中没有唯一边界。本文避免用它同时表示状态机、sandbox 和依赖容器。代码命名优先：`RunDependencies`、`TurnState`、`StepState`；工具执行环境用**具体字段**（如 `workspace_files`、`shell_session_manager`、`file_access_policy`）挂在 `RunDependencies` 上，**不**引入空壳 `ExecutionEnvironment` 类型。
 
 ---
 
@@ -122,9 +159,10 @@
 | 模型调用值对象 | `ModelContext` | 最终模型输入 | 否 |
 | 模型调用值对象 | `ToolDefinition` | Provider-neutral 工具定义 | 否 |
 | 配置对象 | `Agent` | behavior、skills、model、tools、workspace | 配置来源 |
-| 运行时状态 | `TurnState` | 一次 query 的执行状态 | 否 |
-| 运行时状态 | `StepState` | 一次模型调用的执行状态 | 否 |
-| 运行时值对象 | `ToolExecutionOutcome` | 工具本次执行结果 | 否 |
+| 运行时状态 | `TurnState` | 一次 query 的瘦执行状态（含 `hook_feedback`） | 否 |
+| 运行时状态 | `StepState` | 一次模型调用的瘦执行状态 | 否 |
+| 运行时值对象 | `ToolExecutionOutcome` | 工具本次执行结果（统一旧 `ToolCallOutcome` 名） | 否 |
+| 模型调用值对象 | `HookFeedback` | Hook 产生的、已生效的模型可见反馈（不落库） | 否 |
 | Hook DTO | Hook Event / Decision | 生命周期输入与控制结果 | 否 |
 | 服务 | `ContextAssembler` | 从确定输入形成 ModelContext | 否 |
 | 服务 | `LifecycleHooks` | Hook 匹配、执行、合并、错误处理 | 否 |
@@ -193,13 +231,13 @@ message
 compaction
 ```
 
-待拍板类型：
+v1 不写入的类型（出现则投影跳过）：
 
 ```text
 model_change
 ```
 
-当前不定义 `openviking`、`extension`、`custom`。数据库列继续使用 TEXT，不加封闭枚举 CHECK；应用当前版本只解释已知类型，未知类型保留并在投影中跳过。
+当前不定义 `openviking`、`extension`、`custom` 为核心类型（OpenViking 状态 P9 优先旁路表）。数据库列继续使用 TEXT，不加封闭枚举 CHECK；应用当前版本只解释已知类型，未知类型保留并在投影中跳过。
 
 ### 5.3 关系
 
@@ -234,7 +272,7 @@ erDiagram
 5. parent 和 leaf 必须存在且属于同一 Session，由 Repository 校验。
 6. assistant tool call 必须在执行工具前落盘。
 7. tool 可以并行执行，但 entry append 与 leaf 更新必须串行，禁止多个任务并发更新 leaf。
-8. 每个 tool result 独立形成 entry；具体提交顺序仍待拍板。
+8. 每个 tool result 独立形成 entry；**提交顺序 = 调用顺序**（单一提交器）。
 9. entry payload 带独立版本号。
 
 ---
@@ -260,14 +298,14 @@ UserMessage
   content: list[UserContent]
 ```
 
-第一版至少需要：
+第一版：
 
 ```text
 TextContent
 ImageContent
 ```
 
-`DocumentContent` 是否第一版提供，待拍板。
+`DocumentContent` **后置**，第一版不做。
 
 ### 6.3 AssistantMessage
 
@@ -287,11 +325,15 @@ ToolCallContent
 ```
 
 ```text
+ThinkingContent
+  text
+  signature   # 可选；第一版无 opaque 字段
+
 ToolCallContent
   id
   name
   arguments
-  thought_signature
+  thought_signature   # 可选；如 Gemini
 ```
 
 content block 保持模型响应顺序。例如：
@@ -299,6 +341,8 @@ content block 保持模型响应顺序。例如：
 ```text
 thinking → text → tool_call(c1) → tool_call(c2)
 ```
+
+持久与模型侧 tool call **主名是 `ToolCallContent`**。迁移期可从旧 `ToolCall` re-export，窗口结束后删除并列类型，避免 `ToolCall` / `ToolCallContent` / `ToolCallOutcome` 三名长期并存（运行时结果统一 `ToolExecutionOutcome`）。
 
 ### 6.4 ToolResultMessage
 
@@ -505,20 +549,21 @@ Hook 不由 Assembler 执行。Hook 状态机先产生结果，核心解释其�
 
 ### 9.1 RunDependencies
 
-当前 `AgentRuntimeContext` 实际是依赖容器，目标改为：
+当前 `AgentRuntimeContext` 名实不符（依赖容器 + 部分运行缓存）。目标：
 
 ```text
 RunDependencies
   agent
   provider
-  tools
+  tools                 # list[BaseTool]
   context_assembler
   lifecycle_hooks
   session_service
-  tool_execution_environment
+  workspace_files / file_access_policy / shell_session_manager
+  # 仅具体执行环境字段；不设空壳 ExecutionEnvironment 类型
 ```
 
-移除：
+移除核心字段：
 
 ```text
 last_session_recall_message
@@ -526,44 +571,56 @@ session_recall_provider
 conversation_context_service
 ```
 
-### 9.2 TurnState
+### 9.2 TurnState（保持瘦）
 
 ```text
 TurnState
   turn_id
   status
   current_user_entry_id
-  current_step
-  effective_hook_results
+  current_step          # StepState | None
+  hook_feedback         # list[HookFeedback]  仅本 turn 已生效、待注入模型的反馈
   final_assistant_entry_id
 ```
 
-只在一次 query 执行期间存在，不落库。
+只在一次 query 执行期间存在，不落库。**禁止**在此存放全量 messages 拷贝或开放 dict bag。
 
-### 9.3 StepState
+### 9.3 StepState（保持瘦）
 
 ```text
 StepState
   step_index
   status
   assistant_entry_id
-  pending_tool_calls
-  completed_tool_results
+  pending_tool_call_ids
+  completed_tool_call_ids
 ```
 
 ### 9.4 ToolExecutionOutcome
 
 ```text
 ToolExecutionOutcome
-  tool_call
-  result
+  tool_call_id
+  tool_name
+  arguments
+  result                # ToolExecutionResult 或等价
   started_at
   completed_at
 ```
 
-它是运行时结果，完成后转换为 `ToolResultMessage` 落库。
+运行时结果；完成后转换为 `ToolResultMessage` 落库。代码中**只保留本名称**，删除长期并存的 `ToolCallOutcome`。
 
-### 9.5 RuntimeEvent
+### 9.5 HookFeedback
+
+```text
+HookFeedback
+  source_event          # 如 UserPromptSubmit / PostToolBatch；仅观测
+  text
+```
+
+定义在 `context/hook_feedback.py`，供 Assembler 消费；**不依赖** hooks/runs 包。Assembler 只注入调用方传入的列表（约定为**当前 step 新增**项），合成为 ModelContext 尾部 user 文本，**不写 SessionEntry**。
+
+### 9.6 RuntimeEvent
 
 继续用于：
 
@@ -606,7 +663,7 @@ Hook 是 Agent 状态机固定迁移点上的扩展协议，不是对 `ModelCont
 | `BeforeCompact` | compaction 前 | preparation、reason | continue / cancel / replace |
 | `AfterCompact` | compaction 落盘后 | CompactionEntry | 观察、副作用 |
 
-`BeforeCompact/AfterCompact` 随 compaction 阶段实现；其余事件也应按真实需求逐步启用，不要求一次性全部完成。
+`BeforeCompact/AfterCompact` 随 compaction 阶段（P8）实现。`SessionStart`/`SessionEnd` **第一版不做**。不要求一次性实现上表全部事件。
 
 ### 10.3 不保留的旧概念
 
@@ -619,17 +676,19 @@ on_before_model 任意追加
 Hook(ModelContext) -> ModelContext
 ```
 
-Hook 产生的模型可见反馈，由核心根据事件发生位置纳入下一次 Context：
+### 10.3.1 v1 反馈映射（已决议）
 
-| 事件 | 语义位置 |
-|------|----------|
-| SessionStart | 会话级上下文区域 |
-| UserPromptSubmit | 当前 query 附近 |
-| Pre/PostToolUse | 对应 tool call/result 附近 |
-| PostToolBatch | 当前工具批次之后、下一模型 step 之前 |
-| Stop（后置） | 当前 turn 末端，用于要求继续 |
+Hook 产生的模型可见反馈 → **`HookFeedback`**，经核心写入 `TurnState.hook_feedback`，由 Assembler 注入 **ModelContext 尾部合成 user 文本**（不落库）。
 
-具体映射成哪种 AgentMessage/content block 仍待拍板。
+| 事件 | v1 行为 |
+|------|---------|
+| UserPromptSubmit | block → 不写 user entry；continue 可附带 feedback 进下一组装 |
+| PreToolUse | allow / deny / ask(按 deny)；deny 合成 tool result |
+| PostToolUse | 不可替换结果；可选 feedback → 本 step 新增列表 |
+| PostToolBatch | 可选 feedback → 本 step 新增列表后进入下一 model step |
+| TurnEnd | 仅观察 |
+
+按事件语义位置精细插入（非尾部合成）**后置**；v1 不做 placement 体系，避免半吊子扩展协议。
 
 ### 10.4 通用 Event Envelope
 
@@ -905,8 +964,8 @@ flowchart LR
 - 不重新触发 `UserPromptSubmit`、`PreToolUse` 等生命周期 Hook。
 - 不重新调用远程 recall。
 - 优先读取最近一次真实的 final ModelContext 和 usage。
-- 首次模型调用前的行为待拍板。
-- token 统计复用 Provider 的 request counter，但不能另写一套消息拼装逻辑。
+- 首次模型调用前：提示尚无实际 ModelContext；若展示 Assembler 预测结果，标注 `predicted=true`。
+- token 统计可复用 Provider counter，但 **消息拼装必须走 ContextAssembler**，禁止另写一套。
 
 ---
 
@@ -914,24 +973,25 @@ flowchart LR
 
 | 当前对象 | 目标处理 |
 |----------|----------|
-| `Session` | 重构为 entry tree aggregate |
-| `Session.messages` | 删除为唯一事实 |
-| `SessionMessage` | 替换为 `AgentMessage` union |
-| `ToolCall` | 保留，进入 assistant content blocks |
-| `ToolCallBatch` | 删除持久化角色；必要时只做运行时视图 |
+| `Session` | 重构为 entry tree aggregate；去掉 OV 字段 |
+| `Session.messages` | 不再作为唯一事实；改为 `entries` + `leaf_id` |
+| `SessionMessage` | 替换为 `AgentMessage` union；迁移窗口后删除 |
+| `ToolCall` | 迁移为 `ToolCallContent`；结束后不并列长期类型 |
+| `ToolCallBatch` | **删除持久化**；运行时 batch 视图可选、不落库 |
 | `ToolCallResult` | 替换为 `ToolResultMessage` |
-| `MessageMetadata` | 与 `TokenUsage` 收敛为 metadata + usage |
-| `ConversationContextService` | 被纯投影函数 + ContextAssembler 替代 |
-| `UserTurn` | 降为窗口算法内部派生分组，不作为核心实体 |
-| `SessionRecallProvider` | 从核心移除；未来扩展行为另行设计 |
+| `MessageMetadata` + `TokenUsage` | 收敛为 `ModelResponseMetadata` + `ModelUsage` |
+| `ConversationContextService` | 被 projection + window + `ContextAssembler` 替代 |
+| `UserTurn` | 降为窗口算法内部概念，不作为核心实体 |
+| `SessionRecallProvider` | 从核心移除；P9 旁路 |
 | `AgentRuntimeContext` | 改为 `RunDependencies` |
-| `GenerateRequest` | 与 `ModelContext` 合并 |
-| `GenerateResult` | 收敛为 Provider 返回的 `AssistantMessage` |
-| `ToolCallOutcome` | 保留为运行时 `ToolExecutionOutcome` |
+| `GenerateRequest` | 删除共享角色；由 `ModelContext` 替代 |
+| `GenerateResult` | 删除共享角色；Provider 返回 `AssistantMessage` |
+| `ToolCallOutcome` | **改名为** `ToolExecutionOutcome`（只留一名） |
 | `RuntimeEvent` | 保留为 UI/trace 事件 |
-| `ContextUsageSnapshot` | 保留为 CLI View DTO |
+| `ContextUsageSnapshot` | 可演进为 `ContextObservation`（含 predicted） |
 | `ContextAssembler` | 新增，无状态组装服务 |
-| `LifecycleHooks` | 新增，状态机生命周期分发器 |
+| `LifecycleHooks` | 新增；包名 `hooks/` |
+| `HookFeedback` | 新增；`context/hook_feedback.py` |
 
 ---
 
@@ -942,34 +1002,34 @@ conversations/
   Session
   SessionEntry
   AgentMessage
-  content blocks
+  content blocks（含 ToolCallContent）
   SessionRepository protocol
 
 context/
   ModelContext
+  SystemContent / SystemSection
+  ToolDefinition          # 模型可见定义（非 tools 包执行类型）
+  HookFeedback
   ContextAssembler
-  projection
-  compaction projection
-  window policy
+  projection / window / compaction projection
 
 runs/
   AgentCoordinator
   ReActStrategy
   RunDependencies
   TurnState / StepState
+  ToolExecutionOutcome
   RuntimeEvent
 
-hooks/（名称待定）
+hooks/
   LifecycleHooks
   event DTOs
   decision DTOs
-  matcher / merge / failure policy
+  merge / failure policy
 
 tools/
-  ToolDefinition
-  ToolRegistry
-  ToolExecutor
-  ExecutionEnvironment
+  ToolSpec / BaseTool / ToolRegistry
+  # 执行侧；Assembler 侧用 context.ToolDefinition 映射
 
 providers/
   ModelContext → Provider wire
@@ -979,7 +1039,7 @@ persistence/
   SQLiteSessionRepository
 
 cli/
-  输入、渲染、/context
+  输入、渲染、/context（entry 游标，非 message index）
 
 app/
   AppAssembly composition root
@@ -989,14 +1049,15 @@ app/
 
 ```text
 runs → context / conversations / hooks / tools / provider protocols
-context → conversations message types
+context → conversations message types（可含 HookFeedback；不依赖 hooks 包）
 persistence → conversations repository protocol and entities
 providers → ModelContext and AgentMessage
-integrations → hooks/protocols（后置）
+integrations → 旁路协议（后置）；不得写回 Session 核心字段
 
 conversations 不依赖 runs/context/providers/integrations
-context 不依赖 runs/providers/integrations
+context 不依赖 runs/providers/integrations/hooks
 runs 不 import 具体 OpenViking
+禁止第二套 ModelContext 拼装
 ```
 
 ---
@@ -1018,7 +1079,7 @@ flowchart LR
 
 ### P0：统一合同
 
-确定 AgentMessage、content blocks、metadata/usage、ModelContext、entry payload version 及待定项处理。
+落实 AgentMessage、content blocks、metadata/usage、ModelContext、entry payload version，以及 §1.2 全部 v1 决议（无「待拍板」阻塞项）。
 
 ### P1：持久事实
 
@@ -1086,4 +1147,4 @@ user、assistant tool intent、每个 tool result、最终 assistant 分别落�
 
 ## 21. 一句话总结
 
-> SQLite 只保存 Session 和版本化 Entry 事实；message entry 使用统一 AgentMessage；ContextAssembler 通过确定性投影形成唯一 ModelContext；ReAct 状态机负责 checkpoint、Provider 和工具循环；Hook 只在固定生命周期点通过专用事件和决策影响状态，具体插件行为最后设计。
+> SQLite 只保存 Session 和版本化 Entry 事实；message entry 使用统一 AgentMessage（tool result 独立）；ContextAssembler 形成唯一 ModelContext；ReAct 按 checkpoint 落盘并用瘦 Turn/Step 状态推进；Hook 只在固定点用专用事件/决策与 `HookFeedback` 影响下一步上下文；插件与 OpenViking 最后旁路接入。用更窄的实体替换过胖对象，禁止同义双路径与跨层污染。

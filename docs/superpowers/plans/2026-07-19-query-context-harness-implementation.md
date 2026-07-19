@@ -14,24 +14,41 @@
 
 ---
 
-## 实现期默认决议（钉死待拍板，避免阻塞）
+## 实现期默认决议（与设计 §1.2 同步；禁止实现期再发明同义类型）
 
 | 议题 | 第一版决议 |
 |------|------------|
 | `model_change` entry | **不实现写入**；类型字符串若出现则投影跳过 |
-| `SystemContent` | `SystemContent(sections: list[SystemSection])`，`SystemSection(name: str, text: str)`；兼容单一 `text` 工厂 |
+| `SystemContent` | `SystemContent(sections: list[SystemSection])`，`SystemSection(name: str, text: str)`；`from_text` / `as_text`；section **克制** |
 | User document | **不做**；仅 `TextContent` + `ImageContent` |
-| Thinking | `ThinkingContent(text: str, signature: str \| None = None, opaque: dict \| None = None)` |
-| Hook 反馈 → 消息 | 暂存为 `TurnState.effective_hook_results: list[HookModelFeedback]`；Assembler 把它们作为 **尾部 user 旁路文本块** 注入（`role=user` 的合成段落仅存在于 ModelContext，不落库），字段 `source_event` 仅观测用 |
-| `PostToolUse` 替换结果 | **不允许**；仅观察 + 下一步反馈 |
-| compaction 投影 | 活动路径上 **最后一条** compaction：`summary` 投影为一条 `UserMessage`（文本前缀 `[compaction]`），并丢弃 `first_kept` 之前的 message 展开 |
-| `/context` 首次调用前 | 提示「尚无实际 ModelContext」，展示预测组装结果时标注 `predicted=true`，且 **不触发 Hook** |
+| Thinking | `ThinkingContent(text: str, signature: str \| None = None)`；**无 `opaque` 字段** |
+| 持久 tool call 主名 | **`ToolCallContent`**；迁移窗口可 re-export 旧 `ToolCall`，Task 8 前删除并列领域类型 |
+| Hook 反馈 | 类型名 **`HookFeedback`**（非 HookModelFeedback）；`TurnState.hook_feedback: list[HookFeedback]`；Assembler **只注入本 step 新增**项，作 ModelContext **尾部合成 user 文本**（不落库）；`source_event` 仅观测 |
+| `PostToolUse` 替换结果 | **不允许**；仅观察 + 下一步 `HookFeedback` |
+| compaction 投影 | 活动路径上 **最后一条** compaction：`summary` → `UserMessage`（前缀 `[compaction]`），丢弃 `first_kept` 之前展开 |
+| `/context` 首次调用前 | 提示「尚无实际 ModelContext」；预测组装标 `predicted=true`；**不触发 Hook** |
 | 并行 tool 落盘 | 工具可并行执行；**单一提交器**按 **调用顺序** 串行 `append_tool_result` |
-| OpenViking Session 字段 | P1 从核心 Session **删除**；相关测试改为 noop 或标记 skip，P9 再接旁路状态 |
-| Session `status` | 落库仅 `active` \| `archived`；`SessionService.close` → 写 `archived`（不用 `closed`） |
-| PreToolUse deny/ask | **必须**写入合成 `ToolResultMessage`（`is_error=True`，说明 deny/ask 原因），保证 tool_call 与 result 配对 |
-| BeforeCompact/AfterCompact | **P8 再接**；P6 事件表不含二者 |
-| HookModelFeedback 类型位置 | 定义在 `context/hook_feedback.py`（Task 6），`TurnState` 只引用 |
+| OpenViking Session 字段 | P1 从核心 Session **删除**；相关测试 noop/skip；P9 旁路表（推荐）或旁路 entry |
+| Session `status` | 仅 `active` \| `archived`；`close` → `archived` |
+| `message_count` | **active_path 上 message entry 数**（不含 compaction） |
+| PreToolUse deny/ask | 合成 `ToolResultMessage(is_error=True)`；ask 无 UI 时按 deny |
+| BeforeCompact/AfterCompact | **P8**；P6 不含 |
+| SessionStart/SessionEnd | **第一版不做** |
+| `HookFeedback` 位置 | `context/hook_feedback.py`；`TurnState` 只引用 |
+| 运行时工具结果名 | **仅** `ToolExecutionOutcome`（删除长期 `ToolCallOutcome`） |
+| 依赖容器 | **仅** `RunDependencies`；工具环境用具体字段，**不**建 `ExecutionEnvironment` 空壳类 |
+| Turn/Step | **瘦字段**；禁止拷贝全量 messages / 开放 dict bag |
+| Generate 共享 DTO | 领域层删除 `GenerateRequest`/`GenerateResult`；Provider 边界 `ModelContext`→`AssistantMessage`；usage 差分若暂需 thin wire DTO 仅限 Provider/内部，不得回流 conversations |
+
+### 原则红线（执行时违反即回退）
+
+1. 禁止第二套 ModelContext 拼装（ReAct 与 `/context` 共用 Assembler）。  
+2. 禁止 tool result 与 assistant tool call 再落成同一条持久消息。  
+3. 禁止 Session 核心挂 OV/sync 游标字段。  
+4. 禁止 `ToolDefinition` 与 `ToolSpec` 合成一类。  
+5. 禁止 Hook 直接改 Session 内部或 `Hook(ModelContext)->ModelContext`。  
+6. 禁止迁移窗口外保留 `SessionMessage` / 落盘 `ToolCallBatch` 作为合同。  
+7. 注释/错误中文；类型名与路径英文；`Harness` 不作代码包名。
 
 ---
 
@@ -41,16 +58,16 @@
 
 | 路径 | 职责 |
 |------|------|
-| `src/myopenclaw/conversations/agent_message.py` | `AgentMessage` 联合类型、role content blocks、`ModelResponseMetadata`/`ModelUsage` |
+| `src/myopenclaw/conversations/agent_message.py` | `AgentMessage` 联合类型、`ModelResponseMetadata`/`ModelUsage` |
 | `src/myopenclaw/conversations/session_entry.py` | `SessionEntry`、entry_type 常量、payload 版本、序列化 |
-| `src/myopenclaw/conversations/content_blocks.py` | 各 role 的 content block 数据类与 JSON codec |
-| `src/myopenclaw/context/model_context.py` | `ModelContext`、`SystemContent`、`ToolDefinition` |
-| `src/myopenclaw/context/hook_feedback.py` | `HookModelFeedback`（Assembler 可消费的最小 DTO，不依赖 hooks/runs） |
+| `src/myopenclaw/conversations/content_blocks.py` | `TextContent`/`ImageContent`/`ThinkingContent`/`ToolCallContent` 与 JSON codec |
+| `src/myopenclaw/context/model_context.py` | `ModelContext`、`SystemContent`、`SystemSection`、`ToolDefinition` |
+| `src/myopenclaw/context/hook_feedback.py` | **`HookFeedback`**（Assembler 可消费；不依赖 hooks/runs） |
 | `src/myopenclaw/context/assembler.py` | `ContextAssembler`：投影 / compaction / window / 组装 |
 | `src/myopenclaw/context/projection.py` | active path → `list[AgentMessage]`（含 compaction 规则） |
 | `src/myopenclaw/context/window.py` | 不可拆分单元分组 + 窗口裁剪 |
-| `src/myopenclaw/runs/dependencies.py` | `RunDependencies`（替代 `AgentRuntimeContext` 的语义） |
-| `src/myopenclaw/runs/turn_state.py` | `TurnState` / `StepState` / `ToolExecutionOutcome`；`effective_hook_results` **引用** `context.hook_feedback.HookModelFeedback`（不重复定义） |
+| `src/myopenclaw/runs/dependencies.py` | `RunDependencies`（替代 `AgentRuntimeContext`） |
+| `src/myopenclaw/runs/turn_state.py` | 瘦 `TurnState` / `StepState` / `ToolExecutionOutcome`；`hook_feedback` 引用 `HookFeedback` |
 | `src/myopenclaw/hooks/__init__.py` | 包导出 |
 | `src/myopenclaw/hooks/events.py` | Hook 事件 DTO |
 | `src/myopenclaw/hooks/decisions.py` | Hook 决策 DTO 与合并规则 |
@@ -63,7 +80,7 @@
 | `tests/context/test_window.py` | tool 原子组不拆分 |
 | `tests/hooks/test_lifecycle_hooks.py` | 合并与失败策略 |
 | `tests/runs/test_react_checkpoint.py` | 工具前 intent 落盘 |
-| `tests/providers/test_model_context_generate.py` | Provider 消费 ModelContext（可 mock wire） |
+| `tests/providers/test_model_context_generate.py` | Provider 消费 ModelContext（含多轮 tool history） |
 
 ### 重写 / 大改
 
@@ -87,10 +104,11 @@
 | `src/myopenclaw/app/assembly.py` | 装配 Assembler / Hooks / 新 SessionService |
 | OpenViking 相关文件 | P1–P8 **停用核心耦合**；P9 旁路重接 |
 
-### 保留暂不删除（迁移窗口）
+### 保留暂不删除（迁移窗口，Task 8 结束前必须收口）
 
-- `src/myopenclaw/conversations/message.py` 中的 `ToolCall` 可迁移到 `content_blocks` 后删除 `SessionMessage`/`ToolCallBatch`
-- 旧测试逐步改写，禁止长期双路径拼装 ModelContext
+- `conversations/message.py`：`ToolCall` 可 re-export → `ToolCallContent`；`SessionMessage`/`ToolCallBatch` **不得**再作为落盘合同
+- Task 5–8 允许临时 shim，但 **禁止** ReAct 与 `/context` 长期双路径拼装 ModelContext
+- CLI 渲染游标：从 `message index` 迁到 **entry_id / 已持久 entry 集合**；每个 checkpoint 后 flush
 
 ---
 
@@ -173,7 +191,7 @@ Expected: FAIL import / not found
 # content_blocks.py — frozen dataclass
 # TextContent(type="text", text: str)
 # ImageContent(type="image", media_type: str, data_base64: str | None = None, url: str | None = None)
-# ThinkingContent(type="thinking", text: str, signature: str | None = None, opaque: dict | None = None)
+# ThinkingContent(type="thinking", text: str, signature: str | None = None)  # 无 opaque
 # ToolCallContent(type="tool_call", id: str, name: str, arguments: dict, thought_signature: str | None = None)
 # 二进制 thought_signature 若来自 bytes：codec 层 base64
 
@@ -596,13 +614,13 @@ git commit -m "feat(p2): 持久与展示层统一 AgentMessage，移除 batch �
 - Create: `tests/context/test_assembler.py`
 - Modify: `src/myopenclaw/context/service.py`（标记 deprecated 或改为委托 Assembler）
 
-- [ ] **Step 0: 先定义 HookModelFeedback（供 Assembler 依赖，不依赖 hooks/runs）**
+- [ ] **Step 0: 先定义 HookFeedback（供 Assembler 依赖，不依赖 hooks/runs）**
 
 ```python
 # src/myopenclaw/context/hook_feedback.py
 @dataclass(frozen=True)
-class HookModelFeedback:
-    source_event: str  # 如 "UserPromptSubmit" / "PostToolBatch"
+class HookFeedback:
+    source_event: str  # 如 "UserPromptSubmit" / "PostToolBatch"；仅观测
     text: str
 ```
 
@@ -642,18 +660,19 @@ class ContextAssembler:
         entries: list[SessionEntry],  # active path
         system: SystemContent,
         tools: list[ToolDefinition],
-        hook_feedback: list[HookModelFeedback] | None = None,
+        hook_feedback: list[HookFeedback] | None = None,
         unit_window: int = 5,
     ) -> ModelContext:
         messages = project_messages(entries)
         messages = apply_window(messages, unit_window=unit_window)
+        # 调用方只传「本 step 新增」的 hook_feedback，避免多 step 累积重复注入
         messages = append_hook_feedback(messages, hook_feedback or [])
         return ModelContext(system=system, messages=messages, tools=list(tools))
 ```
 
 **禁止依赖：** Repository、Provider、LifecycleHooks、OpenViking、CLI、AgentCoordinator。
 
-system/tools **由调用方构造后传入**（Task 8：`SystemContent.from_text(agent.system_instruction)` + 从 `ToolSpec` 映射 `ToolDefinition`）。Assembler 内不读取 Agent。
+system/tools **由调用方构造后传入**（Task 8：`SystemContent.from_text(...)` + `ToolSpec`→`ToolDefinition` 映射）。Assembler 内不读取 Agent。`ToolDefinition` 与 `ToolSpec` 不得合并为同一类型。
 
 - [ ] **Step 4: 测试通过 + Commit**
 
@@ -698,7 +717,10 @@ class BaseLLMProvider(ABC):
 
 返回：解码为 `AssistantMessage`（含 `ToolCallContent`、`ThinkingContent`、`ModelResponseMetadata.usage` 含 cache 字段若 Provider 提供）。
 
-- [ ] **Step 3: 用现有 mock/fixture 改测试；补一条「同一 ModelContext 两种 provider 都接受」的结构测试（可不打真网）**
+- [ ] **Step 3: 用现有 mock/fixture 改测试；补结构测试 + 多轮 tool history 黄金用例**
+
+1. 同一 `ModelContext` 两种 provider 均接受（可不打真网）。  
+2. **多轮 tool history**：`user → assistant(tool_calls) → tool_result×N → assistant(final)` 编解码往返（Anthropic：连续 tool_result 合成一条 user content；Gemini：function 响应 + thought_signature）。  
 
 - [ ] **Step 4: Commit**
 
@@ -744,25 +766,26 @@ context = assembler.assemble(
     entries=session.active_path(),
     system=system,
     tools=tools,
-    hook_feedback=turn_state.effective_hook_results,
+    hook_feedback=turn_state.hook_feedback_for_current_step(),  # 仅本 step 新增
     unit_window=...,
 )
 assistant = await provider.generate(context)
 session.append_assistant(assistant)   # checkpoint BEFORE tools
-session_service.flush(...)            # 或 coordinator 统一 flush 策略
+session_service.flush(...)
 
 if has tool calls:
   run tools (parallel ok)
   for call in call_order:             # 串行提交
     session.append_tool_result(...)
+    session_service.flush(...)
   continue next step
 else:
   return assistant
 ```
 
-崩溃边界：**工具副作用前 assistant intent 已在 Session（并尽量 flush 到 SQLite）**。CLI 每 step 或每 turn flush 策略：第一版 **每个 checkpoint 后 flush**（简单、可测）。
+崩溃边界：**工具副作用前 assistant intent 已在 Session 并 flush**。第一版 **每个 checkpoint 后 flush**。CLI 增量渲染用 entry 游标，避免 batch 双渲染。
 
-- [ ] **Step 3: RunDependencies**
+- [ ] **Step 3: RunDependencies + 瘦 Turn/Step**
 
 ```python
 @dataclass
@@ -771,12 +794,20 @@ class RunDependencies:
     provider: BaseLLMProvider
     tools: list[BaseTool]
     context_assembler: ContextAssembler
-    lifecycle_hooks: LifecycleHooks  # Task 9 可先 NoopLifecycleHooks
+    lifecycle_hooks: LifecycleHooks  # Task 9 可先空 handlers
     session_service: SessionService
-    # tool execution env fields from old AgentRuntimeContext
+    # 具体字段：workspace_files / file_access_policy / shell_session_manager
+    # 禁止空壳 ExecutionEnvironment 类型
 ```
 
-`TurnState.effective_hook_results: list[HookModelFeedback]` 引用 `context.hook_feedback`，**不要**在 runs 里再定义一份。
+```python
+# TurnState 仅：
+# turn_id, status, current_user_entry_id, current_step, hook_feedback, final_assistant_entry_id
+# StepState 仅：
+# step_index, status, assistant_entry_id, pending_tool_call_ids, completed_tool_call_ids
+```
+
+`TurnState.hook_feedback: list[HookFeedback]` **引用** `context.hook_feedback.HookFeedback`，runs 内不重复定义。运行时工具结果类型名 **仅** `ToolExecutionOutcome`。
 
 删除 `conversation_context_service` / `session_recall_provider` 核心字段（recall 后置）。
 
@@ -855,7 +886,7 @@ class LifecycleHooks:
 4. 对每个 tool call：`PreToolUse`  
    - **allow**（可带 updated_arguments，需再校验 schema）→ 执行工具 → `append_tool_result` 真实结果 → `PostToolUse`  
    - **deny / ask(按 deny)** → **不执行工具** → `append_tool_result` 合成错误结果（文本含 reason，`is_error=True`，`tool_call_id`/`tool_name` 对齐）→ `PostToolUse`  
-5. 全部 call 处理完 → `PostToolBatch` → 反馈写入 `TurnState.effective_hook_results` → 下一 model step。  
+5. 全部 call 处理完 → `PostToolBatch` → **本 step 新增** `HookFeedback` 写入 `TurnState.hook_feedback` → 下一 model step（Assembler 只吃本 step 列表）。  
 6. 最终 assistant → `TurnEnd`。
 
 - [ ] **Step 5: Commit**
@@ -977,11 +1008,13 @@ git commit -m "feat(p9): OpenViking 旁路状态与主 Session 解耦"
 2. **小步提交：** 每 Task 至少 1 个 commit；中文 commit message。  
 3. **不做旧库迁移。**  
 4. **禁止** 第二套 ModelContext 拼装路径（ReAct 与 `/context` 必须共用 Assembler）。  
-5. **禁止** Hook 直接改 Session 内部字段或任意重排历史。  
-6. 注释与错误信息用中文；类型名/路径保持英文。  
-7. 实现前重读：  
-   - `docs/upgrade/2026-07-12-query-context-harness.md`  
-   - 本计划对应 Task 的 Files 列表  
+5. **禁止** Hook 直接改 Session 内部字段或任意重排历史；禁止 `Hook(ModelContext)->ModelContext`。  
+6. **禁止** 再引入与合同同义的新类型名（如第二套 Feedback/Outcome/Request）。  
+7. **禁止** 把 `TurnState`/`StepState` 做成第二个 Session。  
+8. 注释与错误信息用中文；类型名/路径保持英文。  
+9. 实现前重读：  
+   - `docs/upgrade/2026-07-12-query-context-harness.md`（尤其 §1 已确定/已决议/红线）  
+   - 本计划对应 Task 的 Files 列表与默认决议表  
 
 ---
 
@@ -992,4 +1025,4 @@ git commit -m "feat(p9): OpenViking 旁路状态与主 Session 解耦"
 1. **Subagent-Driven Development**（每 Task 新子代理 + 双阶段审查）  
 2. 或 **Inline executing-plans**（本会话分批，每 2–3 Task 停顿验收）
 
-P0–P5 为最小可演示主路径；P6–P7 为可观测扩展；P8–P9 可按优先级后移但不要在 P5 前插入。
+P0–P5 为最小可演示主路径；P6–P7 为可观测扩展；P8–P9 可按优先级后移但**不要在 P5 前插入**。Task 5–8 中间态用 shim 缩短双形状窗口，避免主分支长期不可用。
