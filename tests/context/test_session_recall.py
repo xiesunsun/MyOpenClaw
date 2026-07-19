@@ -3,11 +3,11 @@ import unittest
 from myopenclaw.context import (
     SessionRecallResult,
     SessionRecallSnippet,
+    UserTurn,
     build_session_recall_message,
     render_session_recall,
 )
 from myopenclaw.context.service import ConversationContextService
-from myopenclaw.conversations.session import Session
 
 
 class SessionRecallTests(unittest.TestCase):
@@ -45,18 +45,27 @@ class SessionRecallTests(unittest.TestCase):
         self.assertIsNone(render_session_recall(SessionRecallResult()))
 
     def test_build_prompt_messages_prepends_session_recall_without_session_mutation(self) -> None:
-        session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_user_message("current request")
+        # ConversationContextService 已 deprecated；Session 无线性 messages。
+        # 仅验证 from_turns 仍可将 recall 前置于 prompt（不依赖 entry 树）。
+        from myopenclaw.conversations.message import MessageRole, SessionMessage
+
+        turns = [
+            UserTurn(
+                user_message=SessionMessage(
+                    role=MessageRole.USER,
+                    content="current request",
+                )
+            )
+        ]
         recall_message = build_session_recall_message(
             SessionRecallResult(snippets=[SessionRecallSnippet(text="prior context")])
         )
 
-        messages = ConversationContextService().build_prompt_messages_from_session(
-            session,
+        messages = ConversationContextService().build_prompt_messages_from_turns(
+            turns,
             session_recall_message=recall_message,
         )
 
-        self.assertEqual(1, len(session.messages))
         self.assertEqual(2, len(messages))
         self.assertIn("<Session_Retrieved_Context>", messages[0].content)
         self.assertEqual("current request", messages[1].content)
