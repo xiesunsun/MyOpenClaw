@@ -118,3 +118,31 @@ def test_last_compaction_wins_when_multiple():
 
     assert messages[0].content[0].text == "[compaction]\nnew summary"
     assert [m.content[0].text for m in messages[1:]] == ["u3", "a3"]
+
+
+def test_later_invalid_compaction_falls_back_to_earlier_valid():
+    """路径尾部无效 compaction 不掩盖更早的有效 compaction。"""
+    session = Session.create(agent_id="Pickle")
+    session.append_user(UserMessage(content=[TextContent(text="u1")]))
+    session.append_assistant(AssistantMessage(content=[TextContent(text="a1")]))
+    u2 = session.append_user(UserMessage(content=[TextContent(text="u2")]))
+    session.append_assistant(AssistantMessage(content=[TextContent(text="a2")]))
+    session.append_compaction(
+        {
+            "summary": "valid earlier",
+            "first_kept_entry_id": u2.entry_id,
+        }
+    )
+    session.append_user(UserMessage(content=[TextContent(text="u3")]))
+    session.append_assistant(AssistantMessage(content=[TextContent(text="a3")]))
+    session.append_compaction(
+        {
+            "summary": "invalid later",
+            "first_kept_entry_id": "does-not-exist",
+        }
+    )
+
+    messages = project_messages(session.active_path())
+
+    assert messages[0].content[0].text == "[compaction]\nvalid earlier"
+    assert [m.content[0].text for m in messages[1:]] == ["u2", "a2", "u3", "a3"]
