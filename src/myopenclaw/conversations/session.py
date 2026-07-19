@@ -1,33 +1,39 @@
+"""Session：内存中的 entry 树 + leaf_id 活动指针。
+
+不再使用线性 messages，也不再携带 OpenViking 同步字段（见 Query-Context-Harness 设计）。
+"""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCallBatch,
+from myopenclaw.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+    agent_message_to_dict,
 )
-from myopenclaw.conversations.metadata import MessageMetadata
+from myopenclaw.conversations.session_entry import (
+    COMPACTION_PAYLOAD_VERSION,
+    ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
+    SessionEntry,
+)
 
 
 @dataclass
 class Session:
     session_id: str
     agent_id: str
-    messages: list[SessionMessage] = field(default_factory=list)
+    leaf_id: str | None = None
+    entries: list[SessionEntry] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "active"
-    remote_session_id: str | None = None
-    last_synced_message_index: int | None = None
-    last_committed_message_index: int | None = None
-    last_committed_at: datetime | None = None
-    openviking_account_id: str | None = None
-    openviking_user_id: str | None = None
-    openviking_agent_id: str | None = None
+    title: str | None = None
 
     @classmethod
     def create(
@@ -47,89 +53,75 @@ class Session:
     def touch(self, *, at: datetime | None = None) -> None:
         self.updated_at = at or datetime.now(timezone.utc)
 
-    def bind_openviking(self, account_id: str, user_id: str, agent_id: str) -> None:
-        self.openviking_account_id = account_id
-        self.openviking_user_id = user_id
-        self.openviking_agent_id = agent_id
+    def _entry_map(self) -> dict[str, SessionEntry]:
+        return {entry.entry_id: entry for entry in self.entries}
 
-    def pending_sync_start_index(self) -> int:
-        if self.last_synced_message_index is None:
-            return 0
-        return self.last_synced_message_index + 1
+    def active_path(self) -> list[SessionEntry]:
+        """从 leaf 沿 parent_id 回溯，返回根 → leaf 的路径。"""
+        if self.leaf_id is None:
+            return []
 
-    def pending_sync_messages(self) -> list[SessionMessage]:
-        return self.messages[self.pending_sync_start_index() :]
+        by_id = self._entry_map()
+        path: list[SessionEntry] = []
+        current_id: str | None = self.leaf_id
+        seen: set[str] = set()
 
-    def has_pending_remote_commit(self) -> bool:
-        if self.last_synced_message_index is None:
-            return False
-        if self.last_committed_message_index is None:
-            return True
-        return self.last_committed_message_index < self.last_synced_message_index
+        while current_id is not None:
+            if current_id in seen:
+                raise ValueError("active_path 检测到 parent 环")
+            seen.add(current_id)
+            entry = by_id.get(current_id)
+            if entry is None:
+                raise ValueError(f"leaf/parent 指向不存在的 entry: {current_id}")
+            if entry.session_id != self.session_id:
+                raise ValueError(f"entry 不属于本 session: {current_id}")
+            path.append(entry)
+            current_id = entry.parent_id
 
-    def mark_messages_synced(
+        path.reverse()
+        return path
+
+    def append_user(self, message: UserMessage) -> SessionEntry:
+        return self._append_message(message)
+
+    def append_assistant(self, message: AssistantMessage) -> SessionEntry:
+        return self._append_message(message)
+
+    def append_tool_result(self, message: ToolResultMessage) -> SessionEntry:
+        return self._append_message(message)
+
+    def append_compaction(self, payload: dict[str, Any]) -> SessionEntry:
+        """追加 compaction entry；payload 需为 JSON-ready dict。"""
+        if not isinstance(payload, dict):
+            raise TypeError("compaction payload 必须是 dict")
+        stored = dict(payload)
+        stored.setdefault("payload_version", COMPACTION_PAYLOAD_VERSION)
+        return self._append_entry(ENTRY_TYPE_COMPACTION, stored)
+
+    def move_leaf(self, entry_id: str) -> None:
+        """将活动指针移到本 session 已有 entry（切分支，不写新 entry）。"""
+        if entry_id not in self._entry_map():
+            raise ValueError(f"move_leaf 目标 entry 不存在: {entry_id}")
+        self.leaf_id = entry_id
+        self.touch()
+
+    def _append_message(
         self,
-        *,
-        remote_session_id: str,
-        last_message_index: int,
-    ) -> None:
-        self.remote_session_id = remote_session_id
-        self.last_synced_message_index = last_message_index
-        if (
-            self.last_committed_message_index is not None
-            and self.last_committed_message_index > last_message_index
-        ):
-            raise ValueError(
-                "last_committed_message_index cannot exceed last_synced_message_index"
-            )
+        message: UserMessage | AssistantMessage | ToolResultMessage,
+    ) -> SessionEntry:
+        return self._append_entry(ENTRY_TYPE_MESSAGE, agent_message_to_dict(message))
 
-    def mark_messages_committed(
-        self,
-        *,
-        last_message_index: int,
-        committed_at: datetime,
-    ) -> None:
-        if (
-            self.last_synced_message_index is not None
-            and last_message_index > self.last_synced_message_index
-        ):
-            raise ValueError(
-                "last_committed_message_index cannot exceed last_synced_message_index"
-            )
-        self.last_committed_message_index = last_message_index
-        self.last_committed_at = committed_at
-
-    def append_user_message(self, content: str) -> None:
-        self.messages.append(SessionMessage(role=MessageRole.USER, content=content))
-
-    def append_assistant_message(
-        self,
-        content: str = "",
-        metadata: Optional[MessageMetadata] = None,
-        tool_call_batch: Optional[ToolCallBatch] = None,
-        provider_thinking_blocks: list[dict[str, Any]] | None = None,
-    ) -> None:
-        self.messages.append(
-            SessionMessage(
-                role=MessageRole.ASSISTANT,
-                content=content,
-                metadata=metadata,
-                tool_call_batch=tool_call_batch,
-                provider_thinking_blocks=provider_thinking_blocks,
-            )
+    def _append_entry(self, entry_type: str, payload: dict[str, Any]) -> SessionEntry:
+        now = datetime.now(timezone.utc)
+        entry = SessionEntry(
+            entry_id=str(uuid4()),
+            session_id=self.session_id,
+            parent_id=self.leaf_id,
+            entry_type=entry_type,
+            payload=payload,
+            created_at=now,
         )
-
-    def append_assistant_tool_batch(
-        self,
-        batch: ToolCallBatch,
-        *,
-        content: str = "",
-        metadata: Optional[MessageMetadata] = None,
-        provider_thinking_blocks: list[dict[str, Any]] | None = None,
-    ) -> None:
-        self.append_assistant_message(
-            content=content,
-            metadata=metadata,
-            tool_call_batch=batch,
-            provider_thinking_blocks=provider_thinking_blocks,
-        )
+        self.entries.append(entry)
+        self.leaf_id = entry.entry_id
+        self.touch(at=now)
+        return entry
