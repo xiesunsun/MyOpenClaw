@@ -7,13 +7,10 @@ from myopenclaw.agents.agent import Agent
 from myopenclaw.app.assembly import AppAssembly
 from myopenclaw.config.app_config import AppConfig
 from myopenclaw.conversations.service import SessionService
-from myopenclaw.context import ConversationContextService
+from myopenclaw.context.assembler import ContextAssembler
 from myopenclaw.integrations.openviking.session_sync import (
     NoopSessionSync,
     OpenVikingSessionSync,
-)
-from myopenclaw.integrations.openviking.session_recall import (
-    OpenVikingSessionRecallProvider,
 )
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 
@@ -159,16 +156,12 @@ class AppAssemblyTests(unittest.TestCase):
             _, coordinator = AppAssembly.from_config_path(config_path).build_chat_runtime()
 
             self.assertEqual(16, coordinator.strategy.max_steps)
-            self.assertIsInstance(
-                coordinator.context.conversation_context_service,
-                ConversationContextService,
-            )
-            self.assertEqual(
-                7,
-                coordinator.context.conversation_context_service.cli_turn_window,
-            )
+            self.assertIsNotNone(coordinator.deps)
+            self.assertIsInstance(coordinator.deps.context_assembler, ContextAssembler)
+            self.assertEqual(7, coordinator.deps.unit_window)
 
     def test_build_chat_runtime_wires_openviking_session_recall_when_enabled(self) -> None:
+        """OV session recall is not on RunDependencies (Task 12); keep wiring smoke for runtime."""
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -210,11 +203,9 @@ class AppAssemblyTests(unittest.TestCase):
                 agent_id="Pickle"
             )
 
-            self.assertIsInstance(
-                coordinator.context.session_recall_provider,
-                OpenVikingSessionRecallProvider,
-            )
-            self.assertEqual(1234, coordinator.context.session_recall_max_chars)
+            self.assertIsNotNone(coordinator.deps)
+            self.assertIsInstance(coordinator.deps.context_assembler, ContextAssembler)
+            self.assertFalse(hasattr(coordinator.deps, "session_recall_provider"))
 
     def test_build_session_service_returns_session_service_with_sqlite_repo(self) -> None:
         with TemporaryDirectory() as tmpdir:

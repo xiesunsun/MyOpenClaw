@@ -3,30 +3,33 @@ import unittest
 from pathlib import Path
 
 from myopenclaw.agents.agent import Agent
-from myopenclaw.conversations.message import ToolCall
+from myopenclaw.context.assembler import ContextAssembler
+from myopenclaw.context.model_context import ModelContext
+from myopenclaw.conversations.agent_message import AssistantMessage
+from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
 from myopenclaw.conversations.session import Session
 from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.runs import (
-    AgentCoordinator,
-    AgentRuntimeContext,
-    FinishReason,
-    GenerateResult,
-    ReActStrategy,
-    RuntimeEventType,
-)
+from myopenclaw.runs import AgentCoordinator, ReActStrategy, RuntimeEventType
+from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 
 
+def _assistant_text(message: AssistantMessage) -> str:
+    return "\n".join(
+        block.text for block in message.content if isinstance(block, TextContent) and block.text
+    )
+
+
 class StubProvider(BaseLLMProvider):
-    def __init__(self, responses: list[GenerateResult]) -> None:
+    def __init__(self, responses: list[AssistantMessage]) -> None:
         self.responses = list(responses)
 
     @classmethod
     def from_config(cls, config: ModelConfig) -> "StubProvider":
         raise NotImplementedError
 
-    async def generate(self, request):
+    async def generate(self, context: ModelContext) -> AssistantMessage:
         return self.responses.pop(0)
 
 
@@ -53,6 +56,15 @@ class DelayEchoTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
+def _deps(*, agent: Agent, provider: BaseLLMProvider, tools: list[BaseTool]) -> RunDependencies:
+    return RunDependencies(
+        agent=agent,
+        provider=provider,
+        tools=tools,
+        context_assembler=ContextAssembler(),
+    )
+
+
 class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_runner_emits_batch_aware_events_for_started_and_completed_calls(self) -> None:
         agent = Agent(
@@ -68,29 +80,25 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
         coordinator = AgentCoordinator(
             strategy=ReActStrategy(max_steps=4),
-            context=AgentRuntimeContext(
+            deps=_deps(
                 agent=agent,
                 provider=StubProvider(
                     responses=[
-                        GenerateResult(
-                            tool_calls=[
-                                ToolCall(
+                        AssistantMessage(
+                            content=[
+                                ToolCallContent(
                                     id="call-slow",
                                     name="echo",
                                     arguments={"text": "slow", "delay_ms": 40},
                                 ),
-                                ToolCall(
+                                ToolCallContent(
                                     id="call-fast",
                                     name="echo",
                                     arguments={"text": "fast", "delay_ms": 0},
                                 ),
-                            ],
-                            finish_reason=FinishReason.TOOL_CALLS,
+                            ]
                         ),
-                        GenerateResult(
-                            text="done",
-                            finish_reason=FinishReason.STOP,
-                        ),
+                        AssistantMessage(content=[TextContent(text="done")]),
                     ]
                 ),
                 tools=[DelayEchoTool()],
@@ -109,7 +117,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             event_handler=capture,
         )
 
-        self.assertEqual("done", result.text)
+        self.assertEqual("done", _assistant_text(result))
         self.assertEqual(
             [
                 RuntimeEventType.MODEL_STEP_STARTED,
@@ -149,21 +157,20 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
         coordinator = AgentCoordinator(
             strategy=ReActStrategy(max_steps=2),
-            context=AgentRuntimeContext(
+            deps=_deps(
                 agent=agent,
                 provider=StubProvider(
                     responses=[
-                        GenerateResult(
-                            tool_calls=[
-                                ToolCall(
+                        AssistantMessage(
+                            content=[
+                                ToolCallContent(
                                     id="call-1",
                                     name="missing",
                                     arguments={},
                                 )
-                            ],
-                            finish_reason=FinishReason.TOOL_CALLS,
+                            ]
                         ),
-                        GenerateResult(text="done"),
+                        AssistantMessage(content=[TextContent(text="done")]),
                     ]
                 ),
                 tools=[],
@@ -187,6 +194,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("missing", failure_event.tool_call.name)
         self.assertTrue(failure_event.tool_result.is_error)
+
 
 if __name__ == "__main__":
     unittest.main()
