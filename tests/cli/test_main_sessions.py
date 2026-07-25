@@ -32,10 +32,10 @@ class MainSessionsCliTests(unittest.TestCase):
                 last_message="hello",
             )
         ]
-        fake_assembly = Mock()
-        fake_assembly.build_session_service.return_value = fake_service
+        fake_boot = Mock()
+        fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(app, ["sessions", "--config", "config.yaml"])
 
         self.assertEqual(0, result.exit_code)
@@ -46,10 +46,10 @@ class MainSessionsCliTests(unittest.TestCase):
     def test_sessions_command_all_flag_passes_all_sessions_true(self) -> None:
         fake_service = Mock()
         fake_service.list_sessions.return_value = []
-        fake_assembly = Mock()
-        fake_assembly.build_session_service.return_value = fake_service
+        fake_boot = Mock()
+        fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app, ["sessions", "--all", "--config", "config.yaml"]
             )
@@ -71,10 +71,10 @@ class MainSessionsCliTests(unittest.TestCase):
                 last_message="hello " * 20,
             )
         ]
-        fake_assembly = Mock()
-        fake_assembly.build_session_service.return_value = fake_service
+        fake_boot = Mock()
+        fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "--config", "config.yaml"],
@@ -180,13 +180,13 @@ class MainSessionsCliTests(unittest.TestCase):
             agent_id="Pickle",
         )
         delete_service = Mock()
-        fake_assembly = Mock()
-        fake_assembly.build_session_service.side_effect = [
+        fake_boot = Mock()
+        fake_boot.build_session_service.side_effect = [
             lookup_service,
             delete_service,
         ]
 
-        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "delete", "session-1", "--config", "config.yaml"],
@@ -194,8 +194,8 @@ class MainSessionsCliTests(unittest.TestCase):
 
         self.assertEqual(0, result.exit_code)
         self.assertIn("Deleted session session-1", result.stdout)
-        fake_assembly.build_session_service.assert_any_call()
-        fake_assembly.build_session_service.assert_any_call(agent_id="Pickle")
+        fake_boot.build_session_service.assert_any_call()
+        fake_boot.build_session_service.assert_any_call(agent_id="Pickle")
         delete_service.delete.assert_called_once_with(session_id="session-1")
 
     def test_sessions_delete_reports_missing_session(self) -> None:
@@ -203,10 +203,10 @@ class MainSessionsCliTests(unittest.TestCase):
         lookup_service.resume.side_effect = SessionNotFoundError(
             "Session not found: missing"
         )
-        fake_assembly = Mock()
-        fake_assembly.build_session_service.return_value = lookup_service
+        fake_boot = Mock()
+        fake_boot.build_session_service.return_value = lookup_service
 
-        with patch("myopenclaw.cli.main.AppAssembly.from_config_path", return_value=fake_assembly):
+        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "delete", "missing", "--config", "config.yaml"],

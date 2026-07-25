@@ -13,10 +13,12 @@ from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
 from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
 from myopenclaw.conversations.session import Session
 from myopenclaw.conversations.session_entry import SessionEntry
-from myopenclaw.runs.dependencies import RunDependencies
+from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
+from myopenclaw.runs.run import Run
 from myopenclaw.runs.strategy.react import ReActStrategy
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from myopenclaw.tools.shell import ShellSessionManager
 
 
 class FakeProvider:
@@ -63,7 +65,7 @@ class ReactCheckpointTests(unittest.TestCase):
 
     def test_checkpoint_order_user_assistant_tools_final(self) -> None:
         session = Session.create(agent_id="Pickle")
-        # user already appended by coordinator in real path; simulate here
+        # user already appended by Run.turn in real path; simulate here
         session.append_user(UserMessage(content=[TextContent(text="hi")]))
 
         provider = FakeProvider(
@@ -80,15 +82,20 @@ class ReactCheckpointTests(unittest.TestCase):
             ]
         )
         spy = SpySessionService()
-        deps = RunDependencies(
+        run = Run(
             agent=self._agent(),
             provider=provider,  # type: ignore[arg-type]
             tools=[EchoTool()],
             context_assembler=ContextAssembler(),
+            lifecycle_hooks=NoopLifecycleHooks(),
             session_service=spy,  # type: ignore[arg-type]
+            file_access_policy=None,
+            workspace_files=None,
+            shell_session_manager=ShellSessionManager(),
             unit_window=5,
+            strategy=ReActStrategy(max_steps=4),
         )
-        final = asyncio.run(ReActStrategy(max_steps=4).execute(deps=deps, session=session))
+        final = asyncio.run(ReActStrategy(max_steps=4).execute(run=run, session=session))
         self.assertEqual("done", final.content[0].text)
 
         roles = []

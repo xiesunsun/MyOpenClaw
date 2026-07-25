@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from myopenclaw.context.hook_feedback import HookFeedback
 from myopenclaw.conversations.agent_message import AssistantMessage
 from myopenclaw.conversations.session import Session
-from myopenclaw.runs.dependencies import RunDependencies
 from myopenclaw.runs.events import RuntimeEvent
+
+if TYPE_CHECKING:
+    from myopenclaw.runs.run import Run
 
 
 RuntimeEventHandler = Callable[[RuntimeEvent], None | object]
@@ -17,7 +21,7 @@ class ExecutionStrategy(ABC):
     @abstractmethod
     async def execute(
         self,
-        deps: RunDependencies,
+        run: Run,
         session: Session,
         event_handler: RuntimeEventHandler | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,

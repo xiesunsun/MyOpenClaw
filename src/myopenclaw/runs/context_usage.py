@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from myopenclaw.agents.agent import Agent
 from myopenclaw.agents.skills import SystemInstructionParts, format_skill_catalog_entry
 from myopenclaw.conversations.message import SessionMessage
-from myopenclaw.runs.context import AgentRuntimeContext
+from myopenclaw.runs.run import Run
 from myopenclaw.shared.generation import GenerateRequest
 
 
@@ -58,7 +58,7 @@ class ContextUsageService:
         self,
         *,
         agent: Agent,
-        context: AgentRuntimeContext,
+        context: Run,
         prompt_messages: list[SessionMessage],
     ) -> ContextUsageSnapshot:
         instruction_parts = agent.instruction_parts
@@ -143,8 +143,9 @@ class ContextUsageService:
                     label="Session recall message",
                     token_count=None,
                     char_count=(
-                        len(context.last_session_recall_message.content)
-                        if context.last_session_recall_message is not None
+                        len(recall.content)
+                        if (recall := getattr(context, "last_session_recall_message", None))
+                        is not None
                         else 0
                     ),
                 ),
@@ -177,7 +178,7 @@ class ContextUsageService:
     async def _build_skill_usage_details(
         *,
         agent: Agent,
-        context: AgentRuntimeContext,
+        context: Run,
         messages: list[SessionMessage],
         instruction_parts: SystemInstructionParts,
         full_system_tokens: int | None,
@@ -256,7 +257,7 @@ class ContextUsageService:
     def _cache_fingerprint(
         *,
         agent: Agent,
-        context: AgentRuntimeContext,
+        context: Run,
         prompt_messages_hash: str,
     ) -> str:
         payload = {

@@ -25,19 +25,23 @@ from myopenclaw.integrations.openviking.session_sync import (
 )
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 from myopenclaw.shared.file_access import FileAccessMode
-from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
-from myopenclaw.runs.dependencies import RunDependencies
+from myopenclaw.runs import ReActStrategy
+from myopenclaw.runs.run import Run
 
 
-class AppAssembly:
-    """Composition root for application objects."""
+class Boot:
+    """Composition root：读配置，解析 Agent，构造 Run / SessionService。"""
 
     def __init__(self, app_config: AppConfig) -> None:
         self.app_config = app_config
 
     @classmethod
-    def from_config_path(cls, config_path: Path) -> "AppAssembly":
+    def from_config_path(cls, config_path: Path) -> "Boot":
         return cls(AppConfig.load(config_path))
+
+    @classmethod
+    def from_config(cls, app_config: AppConfig) -> "Boot":
+        return cls(app_config)
 
     def resolve_agent(self, agent_id: str | None = None) -> Agent:
         resolved_agent_id = agent_id or self.app_config.default_agent
@@ -82,24 +86,20 @@ class AppAssembly:
             return False
         return True
 
-    def build_chat_runtime(
+    def build_run(
         self,
         agent_id: str | None = None,
         session_service: SessionService | None = None,
-    ) -> tuple[Agent, AgentCoordinator]:
+    ) -> tuple[Agent, Run]:
         agent = self.resolve_agent(agent_id=agent_id)
-        runtime = AgentRuntimeContext.create(
+        run = Run.open(
             agent=agent,
+            strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
+            session_service=session_service,
             context_assembler=ContextAssembler(),
             unit_window=self.app_config.context_cli_turn_window,
         )
-        deps = runtime.to_run_dependencies(session_service=session_service)
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
-            deps=deps,
-        )
-        return agent, coordinator
-
+        return agent, run
 
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）

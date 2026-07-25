@@ -25,7 +25,7 @@ from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
 from myopenclaw.conversations.message import ToolCall
 from myopenclaw.conversations.metadata import MessageMetadata
 from myopenclaw.conversations.session import Session
-from myopenclaw.runs.dependencies import RunDependencies
+from myopenclaw.runs.run import Run
 from myopenclaw.runs.events import RuntimeEvent, RuntimeEventType
 from myopenclaw.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
 from myopenclaw.runs.turn_state import ToolExecutionOutcome, TurnState
@@ -42,7 +42,7 @@ class ReActStrategy(ExecutionStrategy):
 
     async def execute(
         self,
-        deps: RunDependencies,
+        run: Run,
         session: Session,
         event_handler: RuntimeEventHandler | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
@@ -53,14 +53,14 @@ class ReActStrategy(ExecutionStrategy):
             turn.hook_feedback.extend(initial_hook_feedback)
         last_assistant: AssistantMessage | None = None
 
-        system = SystemContent.from_text(deps.agent.system_instruction or "")
+        system = SystemContent.from_text(run.agent.system_instruction or "")
         tools = [
             ToolDefinition(
                 name=tool.spec.name,
                 description=tool.spec.description,
                 input_schema=tool.spec.input_schema,
             )
-            for tool in deps.tools
+            for tool in run.tools
         ]
 
         for step_index in range(1, self.max_steps + 1):
@@ -73,27 +73,27 @@ class ReActStrategy(ExecutionStrategy):
                 ),
             )
 
-            model_context = deps.context_assembler.assemble(
+            model_context = run.context_assembler.assemble(
                 entries=session.active_path(),
                 system=system,
                 tools=tools,
                 hook_feedback=turn.hook_feedback_for_current_step(),
-                unit_window=deps.unit_window,
+                unit_window=run.unit_window,
             )
 
             start = time.perf_counter()
             assistant = await self._generate_with_optional_timeout(
-                deps=deps,
+                run=run,
                 context=model_context,
             )
             elapsed_ms = round((time.perf_counter() - start) * 1000)
-            assistant = self._ensure_metadata(deps, assistant, elapsed_ms)
+            assistant = self._ensure_metadata(run, assistant, elapsed_ms)
             last_assistant = assistant
 
             # checkpoint BEFORE tools
             entry = session.append_assistant(assistant)
             step.assistant_entry_id = entry.entry_id
-            self._flush_entry(deps, session, entry)
+            self._flush_entry(run, session, entry)
 
             tool_calls = [
                 block
@@ -113,7 +113,7 @@ class ReActStrategy(ExecutionStrategy):
                 )
                 turn.final_assistant_entry_id = entry.entry_id
                 turn.status = "completed"
-                await deps.lifecycle_hooks.turn_end(
+                await run.lifecycle_hooks.turn_end(
                     TurnEndEvent(
                         session_id=session.session_id,
                         turn_id=turn.turn_id,
@@ -143,7 +143,7 @@ class ReActStrategy(ExecutionStrategy):
                         tool_call=runtime_call,
                     ),
                 )
-                pre = await deps.lifecycle_hooks.pre_tool_use(
+                pre = await run.lifecycle_hooks.pre_tool_use(
                     PreToolUseEvent(
                         session_id=session.session_id,
                         turn_id=turn.turn_id,
@@ -170,7 +170,7 @@ class ReActStrategy(ExecutionStrategy):
                         thought_signature=tool_call.thought_signature,
                     )
                     result = await self._execute_tool_call(
-                        deps=deps, session=session, tool_call=exec_call
+                        run=run, session=session, tool_call=exec_call
                     )
                 result_entry = session.append_tool_result(
                     ToolResultMessage(
@@ -180,7 +180,7 @@ class ReActStrategy(ExecutionStrategy):
                         is_error=result.is_error,
                     )
                 )
-                self._flush_entry(deps, session, result_entry)
+                self._flush_entry(run, session, result_entry)
                 step.completed_tool_call_ids.append(tool_call.id)
                 batch_outcomes.append(
                     {
@@ -206,7 +206,7 @@ class ReActStrategy(ExecutionStrategy):
                         tool_result=result,
                     ),
                 )
-                post = await deps.lifecycle_hooks.post_tool_use(
+                post = await run.lifecycle_hooks.post_tool_use(
                     PostToolUseEvent(
                         session_id=session.session_id,
                         turn_id=turn.turn_id,
@@ -225,7 +225,7 @@ class ReActStrategy(ExecutionStrategy):
                     turn.step_hook_feedback.append(fb)
                     turn.hook_feedback.append(fb)
 
-            batch_decision = await deps.lifecycle_hooks.post_tool_batch(
+            batch_decision = await run.lifecycle_hooks.post_tool_batch(
                 PostToolBatchEvent(
                     session_id=session.session_id,
                     turn_id=turn.turn_id,
@@ -248,7 +248,7 @@ class ReActStrategy(ExecutionStrategy):
             metadata=last_assistant.metadata if last_assistant else None,
         )
         entry = session.append_assistant(max_msg)
-        self._flush_entry(deps, session, entry)
+        self._flush_entry(run, session, entry)
         await self._emit_event(
             event_handler,
             RuntimeEvent(
@@ -260,23 +260,23 @@ class ReActStrategy(ExecutionStrategy):
         )
         return max_msg
 
-    def _flush_entry(self, deps: RunDependencies, session: Session, entry) -> None:
-        if deps.session_service is None:
+    def _flush_entry(self, run: Run, session: Session, entry) -> None:
+        if run.session_service is None:
             return
-        deps.session_service.flush_new_entries(session=session, entries=[entry])
+        run.session_service.flush_new_entries(session=session, entries=[entry])
 
-    async def _generate_with_optional_timeout(self, *, deps: RunDependencies, context):
-        timeout_seconds = self._provider_timeout_seconds(deps)
+    async def _generate_with_optional_timeout(self, *, run: Run, context):
+        timeout_seconds = self._provider_timeout_seconds(run)
         if timeout_seconds is None:
-            return await deps.provider.generate(context)
+            return await run.provider.generate(context)
         return await asyncio.wait_for(
-            deps.provider.generate(context),
+            run.provider.generate(context),
             timeout=timeout_seconds,
         )
 
     @staticmethod
-    def _provider_timeout_seconds(deps: RunDependencies) -> float | None:
-        timeout_seconds = deps.agent.model_config.provider_options.get(
+    def _provider_timeout_seconds(run: Run) -> float | None:
+        timeout_seconds = run.agent.model_config.provider_options.get(
             "timeout_seconds"
         )
         if timeout_seconds is None:
@@ -294,7 +294,7 @@ class ReActStrategy(ExecutionStrategy):
         batch_id: str,
         step_index: int,
         tool_calls: list[ToolCallContent],
-        deps: RunDependencies,
+        run: Run,
         session: Session,
         event_handler: RuntimeEventHandler | None,
     ) -> list[ToolExecutionOutcome]:
@@ -325,7 +325,7 @@ class ReActStrategy(ExecutionStrategy):
                 self._execute_one(
                     call_index=call_index,
                     tool_call=tool_call,
-                    deps=deps,
+                    run=run,
                     session=session,
                 )
             )
@@ -368,10 +368,10 @@ class ReActStrategy(ExecutionStrategy):
         *,
         call_index: int,
         tool_call: ToolCallContent,
-        deps: RunDependencies,
+        run: Run,
         session: Session,
     ) -> ToolExecutionOutcome:
-        result = await self._execute_tool_call(deps=deps, session=session, tool_call=tool_call)
+        result = await self._execute_tool_call(run=run, session=session, tool_call=tool_call)
         return ToolExecutionOutcome(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -383,12 +383,12 @@ class ReActStrategy(ExecutionStrategy):
     async def _execute_tool_call(
         self,
         *,
-        deps: RunDependencies,
+        run: Run,
         session: Session,
         tool_call: ToolCallContent,
     ) -> ToolExecutionResult:
         tool = next(
-            (candidate for candidate in deps.tools if candidate.spec.name == tool_call.name),
+            (candidate for candidate in run.tools if candidate.spec.name == tool_call.name),
             None,
         )
         if tool is None:
@@ -396,7 +396,7 @@ class ReActStrategy(ExecutionStrategy):
                 content=f"Tool '{tool_call.name}' is not available.",
                 is_error=True,
             )
-        exec_context = deps.get_tool_execution_context(session.session_id)
+        exec_context = run.get_tool_execution_context(session.session_id)
         try:
             return await tool.execute(tool_call.arguments, exec_context)
         except Exception as exc:  # noqa: BLE001 — 工具失败转错误结果
@@ -416,7 +416,7 @@ class ReActStrategy(ExecutionStrategy):
 
     @staticmethod
     def _ensure_metadata(
-        deps: RunDependencies,
+        run: Run,
         assistant: AssistantMessage,
         elapsed_ms: int,
     ) -> AssistantMessage:
@@ -439,8 +439,8 @@ class ReActStrategy(ExecutionStrategy):
         return AssistantMessage(
             content=list(assistant.content),
             metadata=ModelResponseMetadata(
-                provider=deps.agent.model_config.provider,
-                model=deps.agent.model_config.model,
+                provider=run.agent.model_config.provider,
+                model=run.agent.model_config.model,
                 elapsed_ms=elapsed_ms,
             ),
         )

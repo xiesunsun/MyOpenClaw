@@ -5,7 +5,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from myopenclaw.app.assembly import AppAssembly
+from myopenclaw.app.boot import Boot
 from myopenclaw.cli.chat import ChatLoop
 from myopenclaw.conversations.service import SessionNotFoundError
 
@@ -76,7 +76,7 @@ def sessions(
         return
     # 默认只显示当前 cwd 下的会话
     previews = (
-        AppAssembly.from_config_path(config)
+        Boot.from_config_path(config)
         .build_session_service()
         .list_sessions(all_sessions=all_sessions)
     )
@@ -104,11 +104,11 @@ def delete_session(
     session_id: str = typer.Argument(...),
     config: Path = typer.Option(Path("config.yaml"), "--config"),
 ) -> None:
-    assembly = AppAssembly.from_config_path(config)
-    lookup_service = assembly.build_session_service()
+    boot = Boot.from_config_path(config)
+    lookup_service = boot.build_session_service()
     try:
         session = lookup_service.resume(session_id=session_id)
-        delete_service = assembly.build_session_service(agent_id=session.agent_id)
+        delete_service = boot.build_session_service(agent_id=session.agent_id)
         delete_service.delete(session_id=session_id)
     except SessionNotFoundError as exc:
         typer.echo(str(exc), err=True)

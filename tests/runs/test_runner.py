@@ -12,12 +12,13 @@ from myopenclaw.conversations.agent_message import (
 )
 from myopenclaw.conversations.content_blocks import TextContent, ThinkingContent, ToolCallContent
 from myopenclaw.conversations.session import Session
+from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
 from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.runs import AgentCoordinator, AgentRuntimeContext, ReActStrategy
-from myopenclaw.runs.dependencies import RunDependencies
+from myopenclaw.runs import ReActStrategy, Run
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 from myopenclaw.tools.policy import FullAccessPathPolicy
+from myopenclaw.tools.shell import ShellSessionManager
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -84,24 +85,31 @@ class DelayEchoTool(BaseTool):
         )
 
 
-def _deps(
+def _run(
     *,
     agent: Agent,
     provider: BaseLLMProvider,
     tools: list[BaseTool] | None = None,
     unit_window: int = 5,
-) -> RunDependencies:
-    return RunDependencies(
+    strategy: ReActStrategy | None = None,
+) -> Run:
+    return Run(
         agent=agent,
         provider=provider,
         tools=tools or [],
         context_assembler=ContextAssembler(),
+        lifecycle_hooks=NoopLifecycleHooks(),
+        session_service=None,
+        file_access_policy=None,
+        workspace_files=None,
+        shell_session_manager=ShellSessionManager(),
         unit_window=unit_window,
+        strategy=strategy or ReActStrategy(),
     )
 
 
 class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
-    def test_runtime_context_uses_full_access_policy_when_agent_requests_it(self) -> None:
+    def test_run_open_uses_full_access_policy_when_agent_requests_it(self) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -116,9 +124,9 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         )
         provider = StubProvider()
 
-        context = AgentRuntimeContext(agent=agent, provider=provider, tools=[])
+        run = Run.open(agent=agent, provider=provider, tools=[])
 
-        self.assertIsInstance(context.file_access_policy, FullAccessPathPolicy)
+        self.assertIsInstance(run.file_access_policy, FullAccessPathPolicy)
 
     async def test_runner_appends_messages_and_calls_provider(self) -> None:
         agent = Agent(
@@ -148,14 +156,10 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(),
-            deps=_deps(agent=agent, provider=provider),
-        )
+        run = _run(agent=agent, provider=provider)
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await coordinator.run_turn(
-            agent=agent,
+        result = await run.turn(
             session=session,
             user_text="hello",
         )
@@ -199,14 +203,10 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(),
-            deps=_deps(agent=agent, provider=provider),
-        )
+        run = _run(agent=agent, provider=provider)
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        await coordinator.run_turn(
-            agent=agent,
+        await run.turn(
             session=session,
             user_text="hello",
         )
@@ -251,14 +251,15 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         tool = DelayEchoTool()
-        coordinator = AgentCoordinator(
+        run = _run(
+            agent=agent,
+            provider=provider,
+            tools=[tool],
             strategy=ReActStrategy(max_steps=4),
-            deps=_deps(agent=agent, provider=provider, tools=[tool]),
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await coordinator.run_turn(
-            agent=agent,
+        result = await run.turn(
             session=session,
             user_text="hello",
         )
@@ -338,19 +339,20 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         tool = DelayEchoTool()
-        coordinator = AgentCoordinator(
+        run = _run(
+            agent=agent,
+            provider=provider,
+            tools=[tool],
+            unit_window=10,
             strategy=ReActStrategy(max_steps=4),
-            deps=_deps(agent=agent, provider=provider, tools=[tool], unit_window=10),
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        first_result = await coordinator.run_turn(
-            agent=agent,
+        first_result = await run.turn(
             session=session,
             user_text="first user",
         )
-        second_result = await coordinator.run_turn(
-            agent=agent,
+        second_result = await run.turn(
             session=session,
             user_text="second user",
         )
@@ -394,15 +396,11 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(),
-            deps=_deps(agent=agent, provider=HangingProvider()),
-        )
+        run = _run(agent=agent, provider=HangingProvider())
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
         with self.assertRaises(TimeoutError):
-            await coordinator.run_turn(
-                agent=agent,
+            await run.turn(
                 session=session,
                 user_text="hello",
             )
@@ -422,11 +420,11 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=[],
         )
-        deps = _deps(agent=agent, provider=StubProvider())
+        run = _run(agent=agent, provider=StubProvider())
 
         self.assertEqual(
             600.0,
-            ReActStrategy._provider_timeout_seconds(deps),
+            ReActStrategy._provider_timeout_seconds(run),
         )
 
 

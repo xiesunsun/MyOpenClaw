@@ -1,7 +1,7 @@
 """Application bootstrap."""
 
-from myopenclaw.app.assembly import AppAssembly
+from myopenclaw.app.boot import Boot
 
 __all__ = [
-    "AppAssembly",
+    "Boot",
 ]

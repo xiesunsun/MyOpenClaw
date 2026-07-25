@@ -50,11 +50,10 @@ def _text_assistant(text: str, *, metadata: MessageMetadata | None = None) -> As
     return AssistantMessage(content=[TextContent(text=text)], metadata=model_meta)
 
 
-class StubCoordinator:
-    async def run_turn(
+class StubRun:
+    async def turn(
         self,
         *,
-        agent: Agent,
         session: Session,
         user_text: str,
         event_handler=None,
@@ -72,11 +71,10 @@ class StubCoordinator:
         return reply
 
 
-class SilentCoordinator:
-    async def run_turn(
+class SilentRun:
+    async def turn(
         self,
         *,
-        agent: Agent,
         session: Session,
         user_text: str,
         event_handler=None,
@@ -87,11 +85,10 @@ class SilentCoordinator:
         return reply
 
 
-class ErrorCoordinator:
-    async def run_turn(
+class ErrorRun:
+    async def turn(
         self,
         *,
-        agent: Agent,
         session: Session,
         user_text: str,
         event_handler=None,
@@ -100,11 +97,10 @@ class ErrorCoordinator:
         raise ValueError("boom")
 
 
-class StubToolCoordinator:
-    async def run_turn(
+class StubToolRun:
+    async def turn(
         self,
         *,
-        agent: Agent,
         session: Session,
         user_text: str,
         event_handler=None,
@@ -170,25 +166,23 @@ class StubToolCoordinator:
         )
 
 
-class StubContextCoordinator:
+class StubContextRun:
     def __init__(self, agent: Agent) -> None:
-        self.deps = Mock(
-            agent=agent,
-            provider=Mock(),
-            tools=[],
-            unit_window=5,
-            context_assembler=Mock(),
-        )
+        self.agent = agent
+        self.provider = Mock()
+        self.tools = []
+        self.unit_window = 5
+        self.context_assembler = Mock()
+        self.strategy = Mock()
 
-    async def run_turn(
+    async def turn(
         self,
         *,
-        agent: Agent,
         session: Session,
         user_text: str,
         event_handler=None,
     ) -> AssistantMessage:
-        raise AssertionError("run_turn should not be called")
+        raise AssertionError("turn should not be called")
 
 
 class StubContextUsageService:
@@ -251,7 +245,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session = Session.create(agent_id="Pickle", session_id="session-1")
         loop = ChatLoop(
             agent=agent,
-            coordinator=StubCoordinator(),
+            run=StubRun(),
             session=session,
         )
 
@@ -265,7 +259,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         loop = ChatLoop(
             agent=agent,
-            coordinator=StubCoordinator(),
+            run=StubRun(),
         )
 
         self.assertEqual("Pickle", loop.session.agent_id)
@@ -276,7 +270,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         console = Mock()
         loop = ChatLoop(
             agent=agent,
-            coordinator=StubToolCoordinator(),
+            run=StubToolRun(),
             session=session,
             console=console,
         )
@@ -315,7 +309,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         console = Mock()
         loop = ChatLoop(
             agent=agent,
-            coordinator=StubCoordinator(),
+            run=StubRun(),
             session=session,
             console=console,
         )
@@ -343,7 +337,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=StubCoordinator(),
+            run=StubRun(),
         )
 
         self.assertEqual("hello", await loop.input_reader("You > "))
@@ -355,7 +349,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         submitted_inputs = iter(["hello", "/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -374,7 +368,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         submitted_inputs = iter(["hello", "/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=StubCoordinator(),
+            run=StubRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -392,7 +386,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         submitted_inputs = iter(["hello", "/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=ErrorCoordinator(),
+            run=ErrorRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -410,7 +404,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session_service = FakeSessionService()
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -419,7 +413,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await loop.run()
 
-        # ChatLoop post-turn flush is empty (coordinator already checkpoint-flushed via deps).
+        # ChatLoop post-turn flush is empty (run already checkpoint-flushed via session_service).
         self.assertEqual([[]], session_service.flush_calls)
 
     async def test_run_uses_existing_message_count_as_local_flush_start_index(self) -> None:
@@ -431,7 +425,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session.append_assistant(_text_assistant("old reply"))
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=session,
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -449,7 +443,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session_service = FakeSessionService()
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -467,7 +461,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         submitted_inputs = iter(["/help", "/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -484,7 +478,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         submitted_inputs = iter(["/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -525,7 +519,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         context_usage_service = StubContextUsageService(snapshot)
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=StubContextCoordinator(self._build_agent()),
+            run=StubContextRun(self._build_agent()),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -548,7 +542,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session_service = FakeSessionService()
         loop = ChatLoop(
             agent=self._build_agent(),
-            coordinator=SilentCoordinator(),
+            run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
             console=console,
             input_reader=lambda _: next(submitted_inputs),
@@ -593,7 +587,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
             loop = ChatLoop.from_config_path(config_path=config_path)
 
-            self.assertEqual(16, loop.coordinator.strategy.max_steps)
+            self.assertEqual(16, loop._run.strategy.max_steps)
 
 
 if __name__ == "__main__":

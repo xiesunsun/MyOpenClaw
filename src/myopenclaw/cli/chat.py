@@ -5,7 +5,7 @@ import traceback
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from myopenclaw.app.assembly import AppAssembly
+from myopenclaw.app.boot import Boot
 from myopenclaw.cli.context_renderer import ContextRenderer, ModelContextRenderer
 from myopenclaw.context.model_context import SystemContent, ToolDefinition
 from myopenclaw.context.observation import ContextObservation
@@ -18,11 +18,10 @@ from myopenclaw.conversations.session import Session
 from myopenclaw.cli.event_renderer import ChatEventRenderer
 from myopenclaw.cli.prompt_input import PromptToolkitInputReader
 from myopenclaw.runs import (
-    AgentCoordinator,
-    ReActStrategy,
     RuntimeEventHandler,
 )
 from myopenclaw.runs.context_usage import ContextUsageService
+from myopenclaw.runs.run import Run
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -34,7 +33,7 @@ class ChatLoop:
         self,
         agent: "Agent",
         agent_id: str | None = None,
-        coordinator: AgentCoordinator | None = None,
+        run: Run | None = None,
         session: Session | None = None,
         config_path: Path | None = None,
         console: Console | None = None,
@@ -45,7 +44,7 @@ class ChatLoop:
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.agent_id
-        self.coordinator = coordinator or AgentCoordinator(strategy=ReActStrategy())
+        self._run = run
         self.session = session or Session.create(agent_id=self.agent_id)
         self.config_path = config_path
         self.console = console or Console()
@@ -64,26 +63,26 @@ class ChatLoop:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> "ChatLoop":
-        assembly = AppAssembly.from_config_path(config_path)
+        boot = Boot.from_config_path(config_path)
         if session_id is not None:
-            session_service = assembly.build_session_service()
+            session_service = boot.build_session_service()
             session = session_service.resume(session_id=session_id)
-            agent, coordinator = assembly.build_chat_runtime(agent_id=session.agent_id)
-            session_service = assembly.build_session_service(agent_id=session.agent_id)
+            agent, run = boot.build_run(agent_id=session.agent_id)
+            session_service = boot.build_session_service(agent_id=session.agent_id)
         else:
-            agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
-            session_service = assembly.build_session_service(agent_id=agent.agent_id)
+            agent, run = boot.build_run(agent_id=agent_id)
+            session_service = boot.build_session_service(agent_id=agent.agent_id)
             # 新会话绑定当前工作目录，供 sessions 列表默认过滤
             session = session_service.start(
                 agent_id=agent.agent_id,
                 cwd=str(Path.cwd().resolve()),
             )
-        if coordinator.deps is not None and coordinator.deps.session_service is None:
-            coordinator.deps.session_service = session_service
+        if run.session_service is None:
+            run.session_service = session_service
         return cls(
             agent=agent,
             agent_id=agent.agent_id,
-            coordinator=coordinator,
+            run=run,
             session=session,
             config_path=config_path,
             session_service=session_service,
@@ -94,8 +93,9 @@ class ChatLoop:
         text: str,
         event_handler: RuntimeEventHandler | None = None,
     ) -> AssistantMessage:
-        return await self.coordinator.run_turn(
-            agent=self.agent,
+        if self._run is None:
+            raise ValueError("Run 未提供")
+        return await self._run.turn(
             session=self.session,
             user_text=text,
             event_handler=event_handler,
@@ -279,18 +279,18 @@ class ChatLoop:
         return True
 
     async def _render_context_command(self) -> None:
-        deps = getattr(self.coordinator, "deps", None)
+        run = self._run
         last_meta = getattr(self, "_last_assistant_metadata", None)
-        if deps is None:
+        if run is None:
             observation = ContextObservation(
                 model_context=None,
                 predicted=True,
-                note="尚无 RunDependencies",
+                note="尚无 Run",
             )
         else:
             system = SystemContent.from_text(self.agent.system_instruction or "")
             tools = []
-            for tool in getattr(deps, "tools", []) or []:
+            for tool in getattr(run, "tools", []) or []:
                 spec = getattr(tool, "spec", None)
                 if spec is None:
                     continue
@@ -303,14 +303,14 @@ class ChatLoop:
                 )
             # 不触发 Hook：hook_feedback 传空
             try:
-                ctx = deps.context_assembler.assemble(
+                ctx = run.context_assembler.assemble(
                     entries=self.session.active_path(),
                     system=system,
                     tools=tools,
                     hook_feedback=[],
-                    unit_window=deps.unit_window,
+                    unit_window=run.unit_window,
                 )
-            except Exception as exc:  # 测试 mock / 不完整 deps
+            except Exception as exc:  # 测试 mock / 不完整 run
                 observation = ContextObservation(
                     model_context=None,
                     predicted=True,

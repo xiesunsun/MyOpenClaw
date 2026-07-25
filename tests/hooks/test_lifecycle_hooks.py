@@ -134,7 +134,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
         from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
         from myopenclaw.conversations.session import Session
         from myopenclaw.hooks.lifecycle import LifecycleHooks
-        from myopenclaw.runs.dependencies import RunDependencies
+        from myopenclaw.runs.run import Run
         from myopenclaw.runs.strategy.react import ReActStrategy
         from myopenclaw.shared.model_config import ModelConfig
         from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
@@ -177,14 +177,22 @@ class ReactHookIntegrationTests(unittest.TestCase):
         tool = EchoTool()
         session = Session.create(agent_id="Pickle")
         session.append_user(UserMessage(content=[TextContent(text="hi")]))
-        deps = RunDependencies(
+        from myopenclaw.tools.shell import ShellSessionManager
+
+        run = Run(
             agent=agent,
             provider=FakeProvider(),  # type: ignore[arg-type]
             tools=[tool],
             context_assembler=ContextAssembler(),
             lifecycle_hooks=LifecycleHooks(handlers=[DenyAllTools()]),
+            session_service=None,
+            file_access_policy=None,
+            workspace_files=None,
+            shell_session_manager=ShellSessionManager(),
+            unit_window=5,
+            strategy=ReActStrategy(max_steps=3),
         )
-        final = asyncio.run(ReActStrategy(max_steps=3).execute(deps=deps, session=session))
+        final = asyncio.run(ReActStrategy(max_steps=3).execute(run=run, session=session))
         self.assertEqual(0, tool.executed)
         roles = [e.payload.get("role") for e in session.active_path()]
         self.assertIn("tool", roles)

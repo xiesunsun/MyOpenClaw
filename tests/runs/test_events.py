@@ -8,11 +8,12 @@ from myopenclaw.context.model_context import ModelContext
 from myopenclaw.conversations.agent_message import AssistantMessage
 from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
 from myopenclaw.conversations.session import Session
+from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
 from myopenclaw.providers.base import BaseLLMProvider
-from myopenclaw.runs import AgentCoordinator, ReActStrategy, RuntimeEventType
-from myopenclaw.runs.dependencies import RunDependencies
+from myopenclaw.runs import ReActStrategy, Run, RuntimeEventType
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from myopenclaw.tools.shell import ShellSessionManager
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -56,12 +57,19 @@ class DelayEchoTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
-def _deps(*, agent: Agent, provider: BaseLLMProvider, tools: list[BaseTool]) -> RunDependencies:
-    return RunDependencies(
+def _run(*, agent: Agent, provider: BaseLLMProvider, tools: list[BaseTool], strategy: ReActStrategy) -> Run:
+    return Run(
         agent=agent,
         provider=provider,
         tools=tools,
         context_assembler=ContextAssembler(),
+        lifecycle_hooks=NoopLifecycleHooks(),
+        session_service=None,
+        file_access_policy=None,
+        workspace_files=None,
+        shell_session_manager=ShellSessionManager(),
+        unit_window=5,
+        strategy=strategy,
     )
 
 
@@ -78,31 +86,29 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=["echo"],
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(max_steps=4),
-            deps=_deps(
-                agent=agent,
-                provider=StubProvider(
-                    responses=[
-                        AssistantMessage(
-                            content=[
-                                ToolCallContent(
-                                    id="call-slow",
-                                    name="echo",
-                                    arguments={"text": "slow", "delay_ms": 40},
-                                ),
-                                ToolCallContent(
-                                    id="call-fast",
-                                    name="echo",
-                                    arguments={"text": "fast", "delay_ms": 0},
-                                ),
-                            ]
-                        ),
-                        AssistantMessage(content=[TextContent(text="done")]),
-                    ]
-                ),
-                tools=[DelayEchoTool()],
+        run = _run(
+            agent=agent,
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-slow",
+                                name="echo",
+                                arguments={"text": "slow", "delay_ms": 40},
+                            ),
+                            ToolCallContent(
+                                id="call-fast",
+                                name="echo",
+                                arguments={"text": "fast", "delay_ms": 0},
+                            ),
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
             ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=4),
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
         events = []
@@ -110,8 +116,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         async def capture(event) -> None:
             events.append(event)
 
-        result = await coordinator.run_turn(
-            agent=agent,
+        result = await run.turn(
             session=session,
             user_text="hello",
             event_handler=capture,
@@ -155,26 +160,24 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
             ),
             tool_ids=["missing"],
         )
-        coordinator = AgentCoordinator(
-            strategy=ReActStrategy(max_steps=2),
-            deps=_deps(
-                agent=agent,
-                provider=StubProvider(
-                    responses=[
-                        AssistantMessage(
-                            content=[
-                                ToolCallContent(
-                                    id="call-1",
-                                    name="missing",
-                                    arguments={},
-                                )
-                            ]
-                        ),
-                        AssistantMessage(content=[TextContent(text="done")]),
-                    ]
-                ),
-                tools=[],
+        run = _run(
+            agent=agent,
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="missing",
+                                arguments={},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
             ),
+            tools=[],
+            strategy=ReActStrategy(max_steps=2),
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
         events = []
@@ -182,8 +185,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         async def capture(event) -> None:
             events.append(event)
 
-        await coordinator.run_turn(
-            agent=agent,
+        await run.turn(
             session=session,
             user_text="hello",
             event_handler=capture,

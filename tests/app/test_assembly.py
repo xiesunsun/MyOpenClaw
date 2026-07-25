@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from myopenclaw.agents.agent import Agent
-from myopenclaw.app.assembly import AppAssembly
+from myopenclaw.app.boot import Boot
 from myopenclaw.config.app_config import AppConfig
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.context.assembler import ContextAssembler
@@ -17,7 +17,7 @@ from myopenclaw.integrations.openviking.session_sync import (
 from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
-class AppAssemblyTests(unittest.TestCase):
+class BootTests(unittest.TestCase):
     def test_resolve_agent_loads_behavior_and_declared_defaults(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -66,7 +66,7 @@ class AppAssemblyTests(unittest.TestCase):
             )
 
             config = AppConfig.load(config_path)
-            agent = AppAssembly(config).resolve_agent()
+            agent = Boot(config).resolve_agent()
 
             self.assertIsInstance(agent, Agent)
             self.assertEqual("Pickle", agent.agent_id)
@@ -122,9 +122,9 @@ class AppAssemblyTests(unittest.TestCase):
             config = AppConfig.load(config_path)
 
             with self.assertRaisesRegex(ValueError, "requires file_access_mode: full"):
-                AppAssembly(config).resolve_agent()
+                Boot(config).resolve_agent()
 
-    def test_build_chat_runtime_injects_context_cli_turn_window(self) -> None:
+    def test_build_run_injects_context_cli_turn_window(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -155,15 +155,15 @@ class AppAssemblyTests(unittest.TestCase):
                 ).strip()
             )
 
-            _, coordinator = AppAssembly.from_config_path(config_path).build_chat_runtime()
+            _, run = Boot.from_config_path(config_path).build_run()
 
-            self.assertEqual(16, coordinator.strategy.max_steps)
-            self.assertIsNotNone(coordinator.deps)
-            self.assertIsInstance(coordinator.deps.context_assembler, ContextAssembler)
-            self.assertEqual(7, coordinator.deps.unit_window)
+            self.assertEqual(16, run.strategy.max_steps)
+            self.assertIsNotNone(run)
+            self.assertIsInstance(run.context_assembler, ContextAssembler)
+            self.assertEqual(7, run.unit_window)
 
-    def test_build_chat_runtime_wires_openviking_session_recall_when_enabled(self) -> None:
-        """OV session recall is not on RunDependencies (Task 12); keep wiring smoke for runtime."""
+    def test_build_run_wires_openviking_session_recall_when_enabled(self) -> None:
+        """OV session recall is not on Run (Task 12); keep wiring smoke for runtime."""
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -201,13 +201,13 @@ class AppAssemblyTests(unittest.TestCase):
                 ).strip()
             )
 
-            _, coordinator = AppAssembly.from_config_path(config_path).build_chat_runtime(
+            _, run = Boot.from_config_path(config_path).build_run(
                 agent_id="Pickle"
             )
 
-            self.assertIsNotNone(coordinator.deps)
-            self.assertIsInstance(coordinator.deps.context_assembler, ContextAssembler)
-            self.assertFalse(hasattr(coordinator.deps, "session_recall_provider"))
+            self.assertIsNotNone(run)
+            self.assertIsInstance(run.context_assembler, ContextAssembler)
+            self.assertFalse(hasattr(run, "session_recall_provider"))
 
     def test_build_session_service_returns_session_service_with_sqlite_repo(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -241,7 +241,7 @@ class AppAssemblyTests(unittest.TestCase):
             pickel_home = root / "pickel-home"
             pickel_home.mkdir()
             with patch.dict(os.environ, {"PICKEL_HOME": str(pickel_home)}):
-                service = AppAssembly.from_config_path(config_path).build_session_service()
+                service = Boot.from_config_path(config_path).build_session_service()
 
             self.assertIsInstance(service, SessionService)
             self.assertIsInstance(service._repository, SQLiteSessionRepository)
@@ -290,7 +290,7 @@ class AppAssemblyTests(unittest.TestCase):
                 ).strip()
             )
 
-            service = AppAssembly.from_config_path(config_path).build_session_service(
+            service = Boot.from_config_path(config_path).build_session_service(
                 agent_id="Pickle"
             )
 
