@@ -157,6 +157,37 @@ def config_migrate(
         typer.echo(f"warning: {warning}", err=True)
 
 
+@config_app.command("set-default-model")
+def config_set_default_model(
+    provider: str = typer.Argument(..., help="provider 名，如 anthropic"),
+    model: str = typer.Argument(..., help="model 名"),
+    scope: str = typer.Option(
+        "global",
+        "--scope",
+        help="写入范围：global（~/.pickel）或 project（项目 .pickel）",
+    ),
+) -> None:
+    """持久化 default_llm 到 settings.json（会话内临时切换用 Environ，与此独立）。"""
+    from myopenclaw.config.settings import set_default_llm
+    from myopenclaw.shared.model_config import ModelSelection
+
+    if scope not in ("global", "project"):
+        typer.echo("scope 须为 global 或 project", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        path = set_default_llm(
+            ModelSelection(provider=provider, model=model),
+            scope=scope,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"default_llm -> {provider}/{model}")
+    typer.echo(f"settings: {path}")
+
+
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
 
