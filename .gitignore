@@ -88,6 +88,7 @@ Thumbs.db
 # ------------------------------
 # Project-local generated folders
 # ------------------------------
+# 旧会话库目录名（升级前）；现行数据在 ~/.pickel/，勿再使用项目旁 .myopenclaw
 .myopenclaw/
 pickle_workspace/
 
