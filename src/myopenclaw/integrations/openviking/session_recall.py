@@ -10,6 +10,10 @@ from myopenclaw.context import SessionRecallResult, SessionRecallSnippet
 from myopenclaw.conversations.session import Session
 from myopenclaw.integrations.openviking.config import OpenVikingConfig
 from myopenclaw.integrations.openviking.context_client import OpenVikingContextClient
+from myopenclaw.integrations.openviking.openviking_state import (
+    InMemoryOpenVikingStateStore,
+    OpenVikingStateStore,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -22,9 +26,13 @@ class OpenVikingSessionRecallProvider:
         *,
         config: OpenVikingConfig,
         client: OpenVikingContextClient,
+        state_store: OpenVikingStateStore | None = None,
     ) -> None:
         self._config = config
         self._client = client
+        self._state_store: OpenVikingStateStore = (
+            state_store if state_store is not None else InMemoryOpenVikingStateStore()
+        )
 
     async def recall(
         self,
@@ -33,16 +41,18 @@ class OpenVikingSessionRecallProvider:
         current_user_text: str,
     ) -> SessionRecallResult:
         recall_config = self._config.session_recall
+        state = self._state_store.get_state(session.session_id)
+        remote_session_id = state.remote_session_id if state is not None else None
         if (
             not self._config.enabled
             or not recall_config.enabled
-            or not session.remote_session_id
+            or not remote_session_id
         ):
             return SessionRecallResult()
         try:
             return await asyncio.to_thread(
                 self._recall_sync,
-                session.remote_session_id,
+                remote_session_id,
                 current_user_text,
             )
         except Exception as exc:

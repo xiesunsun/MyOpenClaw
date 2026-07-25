@@ -5,6 +5,10 @@ from myopenclaw.integrations.openviking.config import (
     OpenVikingConfig,
     OpenVikingSessionRecallConfig,
 )
+from myopenclaw.integrations.openviking.openviking_state import (
+    InMemoryOpenVikingStateStore,
+    OpenVikingSessionState,
+)
 from myopenclaw.integrations.openviking.session_recall import (
     OpenVikingSessionRecallProvider,
 )
@@ -76,14 +80,23 @@ class FailingOpenVikingClient:
 
 
 class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
+    def _store_with_remote(self, session_id: str, remote_session_id: str) -> InMemoryOpenVikingStateStore:
+        store = InMemoryOpenVikingStateStore()
+        store.put_state(
+            session_id,
+            OpenVikingSessionState(remote_session_id=remote_session_id),
+        )
+        return store
+
     async def test_recalls_session_context_with_search_only(self) -> None:
         client = FakeOpenVikingClient()
+        store = self._store_with_remote("session-1", "session-remote")
         provider = OpenVikingSessionRecallProvider(
             config=_config(),
             client=client,
+            state_store=store,
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.remote_session_id = "session-remote"
 
         result = await provider.recall(
             session=session,
@@ -102,6 +115,7 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
         provider = OpenVikingSessionRecallProvider(
             config=_config(),
             client=client,
+            state_store=InMemoryOpenVikingStateStore(),
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
@@ -111,12 +125,13 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], client.search_calls)
 
     async def test_failure_returns_empty_result(self) -> None:
+        store = self._store_with_remote("session-1", "session-remote")
         provider = OpenVikingSessionRecallProvider(
             config=_config(),
             client=FailingOpenVikingClient(),
+            state_store=store,
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.remote_session_id = "session-remote"
 
         result = await provider.recall(session=session, current_user_text="hello")
 

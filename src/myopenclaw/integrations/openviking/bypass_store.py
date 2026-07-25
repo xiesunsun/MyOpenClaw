@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from myopenclaw.integrations.openviking.openviking_state import OpenVikingSessionState
+
 
 class OpenVikingBypassStore:
     """独立表 integration_openviking_sessions。"""
@@ -52,3 +54,19 @@ class OpenVikingBypassStore:
                 """,
                 (session_id, json.dumps(payload)),
             )
+
+    def get_state(self, session_id: str) -> OpenVikingSessionState | None:
+        raw = self.get(session_id)
+        if raw is None:
+            return None
+        return OpenVikingSessionState.from_dict(raw)
+
+    def put_state(self, session_id: str, state: OpenVikingSessionState) -> None:
+        self.put(session_id, state.to_dict())
+
+    def get_or_create(self, session_id: str) -> OpenVikingSessionState:
+        state = self.get_state(session_id)
+        if state is None:
+            state = OpenVikingSessionState()
+            self.put_state(session_id, state)
+        return state

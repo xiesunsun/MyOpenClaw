@@ -11,6 +11,7 @@ from myopenclaw.context import (
     SessionRecallProvider,
 )
 from myopenclaw.context.assembler import ContextAssembler
+from myopenclaw.integrations.openviking.bypass_store import OpenVikingBypassStore
 from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
 from myopenclaw.integrations.openviking.context_client import SyncHTTPOpenVikingContextClient
 from myopenclaw.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
@@ -102,16 +103,25 @@ class AppAssembly:
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
         repository = SQLiteSessionRepository(db_path)
-        session_sync = self._build_session_sync(agent_id=agent_id)
+        session_sync = self._build_session_sync(
+            agent_id=agent_id,
+            db_path=db_path,
+        )
         return SessionService(repository, session_sync)
 
-    def _build_session_sync(self, agent_id: str | None = None) -> SessionSync:
+    def _build_session_sync(
+        self,
+        agent_id: str | None = None,
+        *,
+        db_path: Path | None = None,
+    ) -> SessionSync:
         openviking_config = self.app_config.openviking
         if openviking_config is None or not openviking_config.enabled:
             return NoopSessionSync()
         remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
         if remote_agent_id is None:
             return NoopSessionSync()
+        resolved_db = db_path or (self.app_config.root / ".myopenclaw" / "sessions.db")
         return OpenVikingSessionSync(
             config=openviking_config,
             remote_agent_id=remote_agent_id,
@@ -126,6 +136,8 @@ class AppAssembly:
                 commit_after=timedelta(minutes=openviking_config.commit_after_minutes),
                 commit_after_turns=openviking_config.commit_after_turns,
             ),
+            # OpenViking 游标旁路表，与 Session 核心解耦
+            state_store=OpenVikingBypassStore(resolved_db),
         )
 
     def _build_session_recall_provider(
@@ -143,12 +155,15 @@ class AppAssembly:
         remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
         if remote_agent_id is None:
             return NoopSessionRecallProvider()
+        db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
         return OpenVikingSessionRecallProvider(
             config=openviking_config,
             client=SyncHTTPOpenVikingContextClient(
                 openviking_config,
                 remote_agent_id=remote_agent_id,
             ),
+            # 与 session_sync 共用同一旁路库，读取 remote_session_id
+            state_store=OpenVikingBypassStore(db_path),
         )
 
     def _resolve_openviking_remote_agent_id(

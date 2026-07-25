@@ -4,12 +4,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from myopenclaw.conversations.message import MessageRole
+from myopenclaw.conversations.agent_message import AssistantMessage
 from myopenclaw.conversations.session import Session
+from myopenclaw.integrations.openviking.openviking_state import OpenVikingSessionState
+from myopenclaw.integrations.openviking.session_messages import list_syncable_agent_messages
 
 
 class CommitPolicy(Protocol):
-    def should_commit(self, *, session: Session, now: datetime) -> bool: ...
+    def should_commit(
+        self,
+        *,
+        session: Session,
+        state: OpenVikingSessionState,
+        now: datetime,
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -17,24 +25,34 @@ class ThresholdCommitPolicy:
     commit_after: timedelta
     commit_after_turns: int
 
-    def should_commit(self, *, session: Session, now: datetime) -> bool:
-        if not session.has_pending_remote_commit():
+    def should_commit(
+        self,
+        *,
+        session: Session,
+        state: OpenVikingSessionState,
+        now: datetime,
+    ) -> bool:
+        if not state.has_pending_remote_commit():
             return False
         if (
-            session.last_committed_at is not None
-            and now - session.last_committed_at >= self.commit_after
+            state.last_committed_at is not None
+            and now - state.last_committed_at >= self.commit_after
         ):
             return True
-        return self._assistant_messages_since_commit(session) >= self.commit_after_turns
+        return self._assistant_messages_since_commit(session, state) >= self.commit_after_turns
 
-    def _assistant_messages_since_commit(self, session: Session) -> int:
+    def _assistant_messages_since_commit(
+        self,
+        session: Session,
+        state: OpenVikingSessionState,
+    ) -> int:
         start_index = (
             0
-            if session.last_committed_message_index is None
-            else session.last_committed_message_index + 1
+            if state.last_committed_message_index is None
+            else state.last_committed_message_index + 1
         )
-        end_index = session.last_synced_message_index
+        end_index = state.last_synced_message_index
         if end_index is None:
             return 0
-        messages = session.messages[start_index : end_index + 1]
-        return sum(1 for message in messages if message.role == MessageRole.ASSISTANT)
+        messages = list_syncable_agent_messages(session)[start_index : end_index + 1]
+        return sum(1 for message in messages if isinstance(message, AssistantMessage))

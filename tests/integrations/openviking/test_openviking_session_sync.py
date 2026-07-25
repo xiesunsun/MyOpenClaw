@@ -1,11 +1,18 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
+from myopenclaw.conversations.content_blocks import TextContent
 from myopenclaw.conversations.session import Session
 from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
 from myopenclaw.integrations.openviking.config import OpenVikingConfig
+from myopenclaw.integrations.openviking.openviking_state import InMemoryOpenVikingStateStore
 from myopenclaw.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
 from myopenclaw.integrations.openviking.session_message_mapper import SessionMessageMapper
+from myopenclaw.integrations.openviking.session_messages import (
+    agent_message_plain_text,
+    list_syncable_agent_messages,
+)
 from myopenclaw.integrations.openviking.session_sync import OpenVikingSessionSync
 
 
@@ -61,6 +68,9 @@ class FailingSecondAppendClient(FakeSDKClient):
 
 
 class OpenVikingSessionSyncTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state_store = InMemoryOpenVikingStateStore()
+
     def _config(self) -> OpenVikingConfig:
         return OpenVikingConfig(
             enabled=True,
@@ -87,6 +97,7 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
                 commit_after=timedelta(minutes=30),
                 commit_after_turns=commit_after_turns,
             ),
+            state_store=self.state_store,
             now=lambda: now or datetime(2026, 4, 13, tzinfo=timezone.utc),
         )
 
@@ -103,75 +114,87 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
     def test_sync_appends_pending_messages_and_advances_watermark(self) -> None:
         client = FakeSDKClient()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_user_message("hello")
-        session.append_assistant_message("hi")
+        session.append_user(UserMessage(content=[TextContent(text="hello")]))
+        session.append_assistant(AssistantMessage(content=[TextContent(text="hi")]))
 
         self._sync(client).sync_pending_messages(session=session)
 
+        state = self.state_store.get_or_create(session.session_id)
         self.assertEqual(2, len(client.appended))
         self.assertEqual("user", client.appended[0]["role"])
         self.assertEqual("assistant", client.appended[1]["role"])
-        self.assertEqual("session-1", session.remote_session_id)
-        self.assertEqual(1, session.last_synced_message_index)
-        self.assertEqual("myopenclaw", session.openviking_account_id)
-        self.assertEqual("ssunxie", session.openviking_user_id)
-        self.assertEqual("remote-pickle", session.openviking_agent_id)
+        self.assertEqual("session-1", state.remote_session_id)
+        self.assertEqual(1, state.last_synced_message_index)
+        self.assertEqual("myopenclaw", state.openviking_account_id)
+        self.assertEqual("ssunxie", state.openviking_user_id)
+        self.assertEqual("remote-pickle", state.openviking_agent_id)
 
     def test_failed_sync_preserves_watermark_for_retry(self) -> None:
         client = FailingAppendClient()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_user_message("hello")
+        session.append_user(UserMessage(content=[TextContent(text="hello")]))
 
         self._sync(client).sync_pending_messages(session=session)
 
-        self.assertIsNone(session.last_synced_message_index)
-        self.assertEqual(["hello"], [message.content for message in session.pending_sync_messages()])
+        state = self.state_store.get_or_create(session.session_id)
+        self.assertIsNone(state.last_synced_message_index)
+        pending = list_syncable_agent_messages(session)[state.pending_sync_start_index() :]
+        self.assertEqual(["hello"], [agent_message_plain_text(m) for m in pending])
 
     def test_partial_sync_advances_watermark_for_successful_messages(self) -> None:
         client = FailingSecondAppendClient()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_user_message("hello")
-        session.append_assistant_message("hi")
+        session.append_user(UserMessage(content=[TextContent(text="hello")]))
+        session.append_assistant(AssistantMessage(content=[TextContent(text="hi")]))
 
         self._sync(client).sync_pending_messages(session=session)
 
+        state = self.state_store.get_or_create(session.session_id)
         self.assertEqual(1, len(client.appended))
-        self.assertEqual(0, session.last_synced_message_index)
+        self.assertEqual(0, state.last_synced_message_index)
+        pending = list_syncable_agent_messages(session)[state.pending_sync_start_index() :]
         self.assertEqual(
             ["hi"],
-            [message.content for message in session.pending_sync_messages()],
+            [agent_message_plain_text(m) for m in pending],
         )
 
     def test_force_commit_advances_commit_watermark(self) -> None:
         client = FakeSDKClient()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_user_message("hello")
-        session.mark_messages_synced(remote_session_id="session-1", last_message_index=0)
-        now = datetime(2026, 4, 13, 2, tzinfo=timezone.utc)
+        session.append_user(UserMessage(content=[TextContent(text="hello")]))
+        sync = self._sync(client, now=datetime(2026, 4, 13, 2, tzinfo=timezone.utc))
+        state = sync.state_for(session)
+        state.mark_messages_synced(remote_session_id="session-1", last_message_index=0)
+        sync.save_state(session, state)
 
-        self._sync(client, now=now).commit_pending_messages(session=session, force=True)
+        sync.commit_pending_messages(session=session, force=True)
 
+        state = sync.state_for(session)
         self.assertEqual(["session-1"], client.committed)
-        self.assertEqual(0, session.last_committed_message_index)
-        self.assertEqual(now, session.last_committed_at)
+        self.assertEqual(0, state.last_committed_message_index)
+        self.assertEqual(datetime(2026, 4, 13, 2, tzinfo=timezone.utc), state.last_committed_at)
 
     def test_policy_driven_commit_runs_after_sync(self) -> None:
         client = FakeSDKClient()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.append_assistant_message("one")
+        session.append_assistant(AssistantMessage(content=[TextContent(text="one")]))
 
         self._sync(client, commit_after_turns=1).sync_pending_messages(session=session)
 
+        state = self.state_store.get_or_create(session.session_id)
         self.assertEqual(["session-1"], client.committed)
-        self.assertEqual(0, session.last_committed_message_index)
+        self.assertEqual(0, state.last_committed_message_index)
 
     def test_delete_session_removes_remote_session(self) -> None:
         client = FakeSDKClient()
         client.existing.add("session-1")
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        session.remote_session_id = "session-1"
+        sync = self._sync(client)
+        state = sync.state_for(session)
+        state.remote_session_id = "session-1"
+        sync.save_state(session, state)
 
-        self._sync(client).delete_session(session=session)
+        sync.delete_session(session=session)
 
         self.assertEqual(["session-1"], client.deleted)
 
