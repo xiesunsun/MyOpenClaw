@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from myopenclaw.agents.agent import Agent
+from myopenclaw.config.environ import Environ
 from myopenclaw.context.assembler import ContextAssembler
 from myopenclaw.context.hook_feedback import HookFeedback
 from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
@@ -16,8 +18,8 @@ from myopenclaw.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from myopenclaw.providers import create_llm_provider
 from myopenclaw.providers.base import BaseLLMProvider
 from myopenclaw.runs.events import RuntimeEventHandler
-from myopenclaw.runs.strategy.base import ExecutionStrategy
 from myopenclaw.shared.file_access import FileAccessMode
+from myopenclaw.shared.model_config import ModelSelection
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext
 from myopenclaw.tools.catalog import builtin_tools
 from myopenclaw.tools.file_service import WorkspaceFileService
@@ -28,6 +30,10 @@ from myopenclaw.tools.policy import (
 )
 from myopenclaw.tools.registry import ToolRegistry
 from myopenclaw.tools.shell import ShellSessionManager
+
+if TYPE_CHECKING:
+    from myopenclaw.config.app_config import AppConfig
+    from myopenclaw.runs.strategy.base import ExecutionStrategy
 
 
 @dataclass
@@ -45,6 +51,7 @@ class Run:
     shell_session_manager: ShellSessionManager
     unit_window: int
     strategy: ExecutionStrategy
+    environ: Environ = field(default_factory=Environ)
 
     @classmethod
     def open(
@@ -89,7 +96,21 @@ class Run:
             shell_session_manager=shell_session_manager or ShellSessionManager(),
             unit_window=unit_window,
             strategy=strategy or ReActStrategy(),
+            environ=Environ(),
         )
+
+    def apply_environ_model(self, app_config: AppConfig) -> None:
+        """按 Environ 叠层重新 resolve model，更新 agent.model_config 与 provider。"""
+        base_selection = ModelSelection(
+            provider=self.agent.model_config.provider,
+            model=self.agent.model_config.model,
+        )
+        model_config = app_config.resolve_model_config(
+            base_selection,
+            environ=self.environ,
+        )
+        self.agent.model_config = model_config
+        self.provider = create_llm_provider(model_config)
 
     async def turn(
         self,

@@ -6,6 +6,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from myopenclaw.config.environ import Environ
 from myopenclaw.integrations.openviking.config import OpenVikingConfig
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import (
@@ -115,9 +116,22 @@ class AppConfig(BaseModel):
         return self.agents[resolved_agent_id]
 
     def resolve_model_config(
-        self, selection: ModelSelection | None = None
+        self,
+        selection: ModelSelection | None = None,
+        *,
+        environ: Environ | None = None,
     ) -> ModelConfig:
-        resolved_selection = selection or self.default_llm
+        """解析 ModelConfig。
+
+        selection 优先级：environ.llm > selection 参数 > default_llm。
+        provider_options：catalog 默认 << environ.provider_options。
+        """
+        base_selection = selection or self.default_llm
+        resolved_selection = (
+            environ.apply_to_selection(base_selection)
+            if environ is not None
+            else base_selection
+        )
         provider_catalog = self.providers.get(resolved_selection.provider)
         if provider_catalog is None:
             raise KeyError(f"Unknown provider: {resolved_selection.provider}")
@@ -135,7 +149,10 @@ class AppConfig(BaseModel):
             data["api_key"] = auth_entry["api_key"]
         if data.get("api_base") is None and auth_entry.get("api_base") is not None:
             data["api_base"] = auth_entry["api_base"]
-        return ModelConfig.model_validate(data)
+        model = ModelConfig.model_validate(data)
+        if environ is not None:
+            model = environ.overlay_model_config(model)
+        return model
 
     def resolve_file_access_mode(
         self, agent_id: str | None = None
