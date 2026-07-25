@@ -267,6 +267,43 @@ class ConfigLoaderTests(unittest.TestCase):
             self.assertFalse(config.openviking.session_recall.enabled)
             self.assertEqual(1000, config.openviking.session_recall.max_chars)
 
+    def test_legacy_config_yaml_supplies_defaults_when_settings_missing(self) -> None:
+        """未 migrate 时：仅有 config.yaml 也应能 Config.load（default_agent/llm）。"""
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            project = Path(tmpdir) / "project"
+            (project / "agents" / "Pickle").mkdir(parents=True)
+            (project / "agents" / "Pickle" / "AGENT.md").write_text("hi", encoding="utf-8")
+            (project / "config.yaml").write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            max_output_tokens: 1024
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (project / "workspace").mkdir()
+
+            with patch.dict(os.environ, {"PICKEL_HOME": str(home)}, clear=False):
+                config = Config.load(cwd=project, home=home)
+
+            self.assertEqual("Pickle", config.default_agent)
+            self.assertEqual("google/gemini", config.default_llm.provider)
+            self.assertIn("Pickle", config.agents)
+
     def test_legacy_config_yaml_agents_merged_when_present(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"

@@ -42,8 +42,8 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
-def _load_legacy_agents(project_root: Path) -> dict[str, Any]:
-    """P0 过渡：从项目 config.yaml 读取 agents 段。"""
+def _load_legacy_yaml(project_root: Path) -> dict[str, Any]:
+    """过渡：读取项目根 config.yaml 全文（未 migrate 时仍可启动）。"""
     legacy = project_root / _LEGACY_CONFIG_YAML
     if not legacy.is_file():
         return {}
@@ -51,10 +51,7 @@ def _load_legacy_agents(project_root: Path) -> dict[str, Any]:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         return {}
-    agents = data.get("agents")
-    if not isinstance(agents, dict):
-        return {}
-    return expand_env_vars(agents)
+    return expand_env_vars(data)
 
 
 class Config:
@@ -68,8 +65,10 @@ class Config:
     ) -> AppConfig:
         """加载并合并配置。
 
-        合并顺序：内置默认 < 全局 settings/models/auth < 项目 settings/models
-        （agents：settings 中的 agents < 项目 config.yaml agents，P0 过渡）
+        合并顺序（低 → 高）：
+        内置默认 < 项目 config.yaml（过渡）< 全局 settings/models/auth
+        < 项目 .pickel settings/models
+        agents：上述中的 agents < 目录 agents/（同 id 目录优先）
         """
         resolved_cwd = Path(cwd) if cwd is not None else Path.cwd()
         resolved_home = Path(home) if home is not None else home_dir()
@@ -82,25 +81,29 @@ class Config:
 
         project_settings: dict[str, Any] = {}
         project_models: dict[str, Any] = {}
+        legacy: dict[str, Any] = {}
         if project_root is not None:
             project_dir = project_root / _PROJECT_DIR
             project_settings = load_settings(settings_path(project_dir))
             project_models = load_models(models_path(project_dir))
+            legacy = _load_legacy_yaml(project_root)
 
-        # settings 字段合并
-        merged = deep_merge(_BUILTIN_DEFAULTS, global_settings)
+        # settings 字段：默认 < legacy yaml < 全局 < 项目 .pickel
+        merged = deep_merge(_BUILTIN_DEFAULTS, legacy)
+        merged = deep_merge(merged, global_settings)
         merged = deep_merge(merged, project_settings)
 
-        # models → providers
+        # providers：legacy 内嵌 < models.json 全局 < 项目 < settings 里偶发 providers
         providers: dict[str, Any] = {}
+        if isinstance(legacy.get("providers"), dict):
+            providers = deep_merge(providers, legacy["providers"])
         providers = deep_merge(providers, global_models.get("providers") or {})
         providers = deep_merge(providers, project_models.get("providers") or {})
-        # settings 里若带 providers（少见）也并入
         if isinstance(merged.get("providers"), dict):
             providers = deep_merge(providers, merged["providers"])
         merged["providers"] = providers
 
-        # openviking：settings 策略 + auth 密钥
+        # openviking：settings/legacy 策略 + auth 密钥
         openviking = merged.get("openviking")
         auth_ov = global_auth.get("openviking")
         if isinstance(openviking, dict) or isinstance(auth_ov, dict):
@@ -113,16 +116,14 @@ class Config:
         else:
             merged.pop("openviking", None)
 
-        # agents：settings < legacy config.yaml < 目录 agents/（同 id 目录优先）
+        # agents：merged（含 legacy）< 目录 agents/（同 id 目录优先）
         agents: dict[str, Any] = {}
         if isinstance(merged.get("agents"), dict):
             agents = deep_merge(agents, merged["agents"])
         if project_root is not None:
-            agents = deep_merge(agents, _load_legacy_agents(project_root))
             agents = deep_merge(agents, scan_agents(project_root))
         merged["agents"] = agents
 
-        # 清理不应直接进 AppConfig 的顶层噪声（models 文件键等已处理）
         auth_providers = global_auth.get("providers") or {}
         if not isinstance(auth_providers, dict):
             auth_providers = {}
