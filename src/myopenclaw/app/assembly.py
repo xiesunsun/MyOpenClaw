@@ -6,6 +6,7 @@ from myopenclaw.agents.behavior_loader import BehaviorLoader
 from myopenclaw.agents.skills import SkillManifest, SkillRegistry
 from myopenclaw.conversations.service import SessionService
 from myopenclaw.config.app_config import AppConfig
+from myopenclaw.config.paths import sessions_db_path
 from myopenclaw.context import (
     NoopSessionRecallProvider,
     SessionRecallProvider,
@@ -101,7 +102,9 @@ class AppAssembly:
 
 
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
-        db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
+        # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）
+        db_path = sessions_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         repository = SQLiteSessionRepository(db_path)
         session_sync = self._build_session_sync(
             agent_id=agent_id,
@@ -121,7 +124,8 @@ class AppAssembly:
         remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
         if remote_agent_id is None:
             return NoopSessionSync()
-        resolved_db = db_path or (self.app_config.root / ".myopenclaw" / "sessions.db")
+        resolved_db = db_path or sessions_db_path()
+        resolved_db.parent.mkdir(parents=True, exist_ok=True)
         return OpenVikingSessionSync(
             config=openviking_config,
             remote_agent_id=remote_agent_id,
@@ -136,7 +140,7 @@ class AppAssembly:
                 commit_after=timedelta(minutes=openviking_config.commit_after_minutes),
                 commit_after_turns=openviking_config.commit_after_turns,
             ),
-            # OpenViking 游标旁路表，与 Session 核心解耦
+            # OpenViking 游标旁路表，与 Session 核心解耦；与 sessions.db 同库
             state_store=OpenVikingBypassStore(resolved_db),
         )
 
@@ -155,7 +159,8 @@ class AppAssembly:
         remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
         if remote_agent_id is None:
             return NoopSessionRecallProvider()
-        db_path = self.app_config.root / ".myopenclaw" / "sessions.db"
+        db_path = sessions_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         return OpenVikingSessionRecallProvider(
             config=openviking_config,
             client=SyncHTTPOpenVikingContextClient(

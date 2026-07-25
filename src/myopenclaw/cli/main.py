@@ -66,10 +66,20 @@ def chat(
 def sessions(
     ctx: typer.Context,
     config: Path = typer.Option(Path("config.yaml"), "--config"),
+    all_sessions: bool = typer.Option(
+        False,
+        "--all",
+        help="列出全部会话（不按当前目录过滤）",
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    previews = AppAssembly.from_config_path(config).build_session_service().list_sessions()
+    # 默认只显示当前 cwd 下的会话
+    previews = (
+        AppAssembly.from_config_path(config)
+        .build_session_service()
+        .list_sessions(all_sessions=all_sessions)
+    )
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
     table.add_column("agent id")

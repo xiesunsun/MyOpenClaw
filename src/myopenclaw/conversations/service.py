@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from myopenclaw.conversations.repository import SessionRepository
@@ -14,6 +15,13 @@ from myopenclaw.integrations.openviking.session_sync import SessionSync
 
 class SessionNotFoundError(LookupError):
     pass
+
+
+def _normalize_cwd(cwd: str | None) -> str:
+    """归一化为绝对路径字符串；None 时取当前工作目录。"""
+    if cwd is None:
+        return str(Path.cwd().resolve())
+    return str(Path(cwd).resolve())
 
 
 class SessionService:
@@ -36,12 +44,13 @@ class SessionService:
         self._session_id_factory = session_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def start(self, *, agent_id: str) -> Session:
+    def start(self, *, agent_id: str, cwd: str | None = None) -> Session:
         now = self._now()
         session = Session.create(
             agent_id=agent_id,
             session_id=self._session_id_factory(),
             created_at=now,
+            cwd=_normalize_cwd(cwd),
         )
         self._repository.create(session)
         return session
@@ -52,8 +61,20 @@ class SessionService:
             raise SessionNotFoundError(f"Session not found: {session_id}")
         return session
 
-    def list_sessions(self, *, limit: int = 20) -> list[SessionPreview]:
-        return self._repository.list(limit=limit)
+    def list_sessions(
+        self,
+        *,
+        limit: int = 20,
+        cwd: str | None = None,
+        all_sessions: bool = False,
+    ) -> list[SessionPreview]:
+        """列出会话预览。
+
+        默认按当前（或显式）cwd 过滤；all_sessions=True 时不过滤。
+        """
+        if all_sessions:
+            return self._repository.list(limit=limit, cwd=None)
+        return self._repository.list(limit=limit, cwd=_normalize_cwd(cwd))
 
     def build_preview(self, *, session: Session) -> SessionPreview:
         return build_session_preview(session=session)

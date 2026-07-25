@@ -73,7 +73,11 @@ class ChatLoop:
         else:
             agent, coordinator = assembly.build_chat_runtime(agent_id=agent_id)
             session_service = assembly.build_session_service(agent_id=agent.agent_id)
-            session = session_service.start(agent_id=agent.agent_id)
+            # 新会话绑定当前工作目录，供 sessions 列表默认过滤
+            session = session_service.start(
+                agent_id=agent.agent_id,
+                cwd=str(Path.cwd().resolve()),
+            )
         if coordinator.deps is not None and coordinator.deps.session_service is None:
             coordinator.deps.session_service = session_service
         return cls(

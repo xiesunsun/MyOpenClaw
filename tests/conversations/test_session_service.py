@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
 from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
@@ -9,6 +13,8 @@ from myopenclaw.conversations.service import SessionNotFoundError, SessionServic
 from myopenclaw.conversations.session import Session
 from myopenclaw.conversations.session_entry import SessionEntry
 from myopenclaw.conversations.session_preview import SessionPreview
+from myopenclaw.integrations.openviking.session_sync import NoopSessionSync
+from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 class FakeSessionRepository:
@@ -20,6 +26,7 @@ class FakeSessionRepository:
         self.closed_calls: list[tuple[str, datetime]] = []
         self.deleted_session_ids: list[str] = []
         self.previews: list[SessionPreview] = []
+        self.list_calls: list[dict[str, object]] = []
 
     def create(self, session: Session) -> None:
         self.created_sessions.append(session)
@@ -31,8 +38,11 @@ class FakeSessionRepository:
     def list(
         self, *, limit: int = 20, cwd: str | None = None
     ) -> list[SessionPreview]:
-        del cwd
-        return self.previews[:limit]
+        self.list_calls.append({"limit": limit, "cwd": cwd})
+        items = self.previews
+        if cwd is not None:
+            items = [p for p in items if p.cwd == cwd]
+        return items[:limit]
 
     def append_entries(
         self,
@@ -101,13 +111,22 @@ class SessionServiceTests(unittest.TestCase):
         )
 
     def test_start_creates_and_persists_active_session(self) -> None:
-        session = self.service.start(agent_id="Pickle")
+        session = self.service.start(agent_id="Pickle", cwd="/tmp/proj-a")
 
         self.assertEqual("active", session.status)
         self.assertEqual(self.now, session.created_at)
         self.assertEqual(session, self.fake_repo.loaded["session-id"])
         self.assertEqual([], session.entries)
         self.assertIsNone(session.leaf_id)
+        self.assertEqual(str(Path("/tmp/proj-a").resolve()), session.cwd)
+
+    def test_start_defaults_cwd_to_process_cwd(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cwd = str(Path(tmpdir).resolve())
+            with patch("myopenclaw.conversations.service.Path.cwd", return_value=Path(cwd)):
+                session = self.service.start(agent_id="Pickle")
+
+        self.assertEqual(cwd, session.cwd)
 
     def test_resume_loads_existing_session(self) -> None:
         session = Session.create(
@@ -125,7 +144,8 @@ class SessionServiceTests(unittest.TestCase):
         with self.assertRaises(SessionNotFoundError):
             self.service.resume(session_id="missing")
 
-    def test_list_sessions_delegates_to_repository(self) -> None:
+    def test_list_sessions_delegates_to_repository_with_cwd_filter(self) -> None:
+        cwd_a = str(Path("/tmp/proj-a").resolve())
         self.fake_repo.previews = [
             SessionPreview(
                 session_id="session-1",
@@ -135,12 +155,86 @@ class SessionServiceTests(unittest.TestCase):
                 status="active",
                 message_count=0,
                 last_message="",
+                cwd=cwd_a,
             )
         ]
 
-        previews = self.service.list_sessions(limit=20)
+        previews = self.service.list_sessions(limit=20, cwd=cwd_a)
 
         self.assertEqual(["session-1"], [preview.session_id for preview in previews])
+        self.assertEqual(
+            [{"limit": 20, "cwd": cwd_a}],
+            self.fake_repo.list_calls,
+        )
+
+    def test_list_sessions_all_sessions_skips_cwd_filter(self) -> None:
+        self.fake_repo.previews = [
+            SessionPreview(
+                session_id="session-1",
+                agent_id="Pickle",
+                created_at=self.now,
+                updated_at=self.now,
+                status="active",
+                message_count=0,
+                last_message="",
+                cwd="/tmp/a",
+            ),
+            SessionPreview(
+                session_id="session-2",
+                agent_id="Pickle",
+                created_at=self.now,
+                updated_at=self.now,
+                status="active",
+                message_count=0,
+                last_message="",
+                cwd="/tmp/b",
+            ),
+        ]
+
+        previews = self.service.list_sessions(all_sessions=True)
+
+        self.assertEqual(
+            ["session-1", "session-2"],
+            [preview.session_id for preview in previews],
+        )
+        self.assertEqual(
+            [{"limit": 20, "cwd": None}],
+            self.fake_repo.list_calls,
+        )
+
+    def test_list_sessions_filters_two_cwds_with_sqlite(self) -> None:
+        """两个 cwd 各建 session；默认 list 只见当前 cwd；all 全见。"""
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "pickel-home"
+            home.mkdir()
+            db_path = home / "sessions.db"
+            repo = SQLiteSessionRepository(db_path)
+            service = SessionService(repo, NoopSessionSync())
+
+            cwd_a = str((Path(tmpdir) / "proj-a").resolve())
+            cwd_b = str((Path(tmpdir) / "proj-b").resolve())
+            Path(cwd_a).mkdir()
+            Path(cwd_b).mkdir()
+
+            session_a = service.start(agent_id="Pickle", cwd=cwd_a)
+            session_b = service.start(agent_id="Pickle", cwd=cwd_b)
+
+            only_a = service.list_sessions(cwd=cwd_a)
+            only_b = service.list_sessions(cwd=cwd_b)
+            all_previews = service.list_sessions(all_sessions=True)
+
+            self.assertEqual([session_a.session_id], [p.session_id for p in only_a])
+            self.assertEqual([session_b.session_id], [p.session_id for p in only_b])
+            self.assertEqual(
+                {session_a.session_id, session_b.session_id},
+                {p.session_id for p in all_previews},
+            )
+
+            # 全局路径：PICKEL_HOME 下 sessions.db
+            with patch.dict(os.environ, {"PICKEL_HOME": str(home)}):
+                from myopenclaw.config.paths import sessions_db_path
+
+                self.assertEqual(db_path, sessions_db_path())
 
     def test_build_preview_uses_last_message_rules(self) -> None:
         session = Session(

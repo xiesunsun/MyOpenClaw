@@ -1,7 +1,9 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import os
 import textwrap
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from myopenclaw.agents.agent import Agent
 from myopenclaw.app.assembly import AppAssembly
@@ -236,12 +238,15 @@ class AppAssemblyTests(unittest.TestCase):
                 ).strip()
             )
 
-            service = AppAssembly.from_config_path(config_path).build_session_service()
+            pickel_home = root / "pickel-home"
+            pickel_home.mkdir()
+            with patch.dict(os.environ, {"PICKEL_HOME": str(pickel_home)}):
+                service = AppAssembly.from_config_path(config_path).build_session_service()
 
             self.assertIsInstance(service, SessionService)
             self.assertIsInstance(service._repository, SQLiteSessionRepository)
             self.assertEqual(
-                root / ".myopenclaw" / "sessions.db",
+                pickel_home / "sessions.db",
                 service._repository.db_path,
             )
             self.assertIsInstance(service._session_sync, NoopSessionSync)
