@@ -9,7 +9,7 @@ from myopenclaw.conversations.agent_message import AssistantMessage
 from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
 from myopenclaw.conversations.session import Session
 from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
-from myopenclaw.providers.base import BaseLLMProvider
+from myopenclaw.providers.base import Provider
 from myopenclaw.runs import ReActStrategy, Run, RuntimeEventType
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
@@ -22,7 +22,7 @@ def _assistant_text(message: AssistantMessage) -> str:
     )
 
 
-class StubProvider(BaseLLMProvider):
+class StubProvider(Provider):
     def __init__(self, responses: list[AssistantMessage]) -> None:
         self.responses = list(responses)
 
@@ -57,7 +57,7 @@ class DelayEchoTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
-def _run(*, agent: Agent, provider: BaseLLMProvider, tools: list[BaseTool], strategy: ReActStrategy) -> Run:
+def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: ReActStrategy) -> Run:
     return Run(
         agent=agent,
         provider=provider,

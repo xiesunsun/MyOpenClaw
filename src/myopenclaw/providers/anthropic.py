@@ -21,11 +21,11 @@ from myopenclaw.conversations.content_blocks import (
     ThinkingContent,
     ToolCallContent,
 )
-from myopenclaw.providers.base import BaseLLMProvider
+from myopenclaw.providers.base import Provider
 from myopenclaw.shared.model_config import ModelConfig
 
 
-class AnthropicProvider(BaseLLMProvider):
+class AnthropicProvider(Provider):
     def __init__(
         self,
         model: str,

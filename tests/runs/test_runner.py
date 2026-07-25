@@ -13,7 +13,7 @@ from myopenclaw.conversations.agent_message import (
 from myopenclaw.conversations.content_blocks import TextContent, ThinkingContent, ToolCallContent
 from myopenclaw.conversations.session import Session
 from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
-from myopenclaw.providers.base import BaseLLMProvider
+from myopenclaw.providers.base import Provider
 from myopenclaw.runs import ReActStrategy, Run
 from myopenclaw.shared.model_config import ModelConfig
 from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
@@ -31,7 +31,7 @@ def _entry_roles(session: Session) -> list[str | None]:
     return [entry.payload.get("role") for entry in session.active_path()]
 
 
-class StubProvider(BaseLLMProvider):
+class StubProvider(Provider):
     def __init__(self, responses: list[AssistantMessage] | None = None) -> None:
         self.contexts: list[ModelContext] = []
         self.responses = list(responses or [AssistantMessage(content=[TextContent(text="assistant reply")])])
@@ -45,7 +45,7 @@ class StubProvider(BaseLLMProvider):
         return self.responses.pop(0)
 
 
-class HangingProvider(BaseLLMProvider):
+class HangingProvider(Provider):
     @classmethod
     def from_config(cls, config: ModelConfig) -> "HangingProvider":
         return cls()
@@ -88,7 +88,7 @@ class DelayEchoTool(BaseTool):
 def _run(
     *,
     agent: Agent,
-    provider: BaseLLMProvider,
+    provider: Provider,
     tools: list[BaseTool] | None = None,
     unit_window: int = 5,
     strategy: ReActStrategy | None = None,

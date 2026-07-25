@@ -10,10 +10,10 @@ if TYPE_CHECKING:
     from myopenclaw.shared.model_config import ModelConfig
 
 
-class BaseLLMProvider(ABC):
+class Provider(ABC):
     @classmethod
     @abstractmethod
-    def from_config(cls, config: "ModelConfig") -> "BaseLLMProvider":
+    def from_config(cls, config: "ModelConfig") -> "Provider":
         raise NotImplementedError
 
     @abstractmethod

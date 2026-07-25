@@ -16,7 +16,7 @@ from myopenclaw.conversations.session import Session
 from myopenclaw.hooks.events import UserPromptSubmitEvent
 from myopenclaw.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from myopenclaw.providers import create_llm_provider
-from myopenclaw.providers.base import BaseLLMProvider
+from myopenclaw.providers.base import Provider
 from myopenclaw.runs.events import RuntimeEventHandler
 from myopenclaw.shared.file_access import FileAccessMode
 from myopenclaw.shared.model_config import ModelSelection
@@ -41,7 +41,7 @@ class Run:
     """单次/会话级运行资源；open 构造，turn 执行用户一轮输入。"""
 
     agent: Agent
-    provider: BaseLLMProvider
+    provider: Provider
     tools: list[BaseTool]
     context_assembler: ContextAssembler
     lifecycle_hooks: LifecycleHooks
@@ -65,7 +65,7 @@ class Run:
         lifecycle_hooks: LifecycleHooks | None = None,
         file_access_policy: FileAccessPolicy | None = None,
         shell_session_manager: ShellSessionManager | None = None,
-        provider: BaseLLMProvider | None = None,
+        provider: Provider | None = None,
         tools: list[BaseTool] | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> Run:

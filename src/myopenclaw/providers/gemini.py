@@ -24,11 +24,11 @@ from myopenclaw.conversations.content_blocks import (
     ThinkingContent,
     ToolCallContent,
 )
-from myopenclaw.providers.base import BaseLLMProvider
+from myopenclaw.providers.base import Provider
 from myopenclaw.shared.model_config import ModelConfig
 
 
-class GeminiProvider(BaseLLMProvider):
+class GeminiProvider(Provider):
     COUNT_TOKENS_MAX_ATTEMPTS = 3
     COUNT_TOKENS_RETRY_BASE_DELAY_S = 0.2
 
