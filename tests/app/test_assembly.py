@@ -15,6 +15,7 @@ from pickel.integrations.openviking.session_sync import (
     OpenVikingSessionSync,
 )
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
+from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
 class BootTests(unittest.TestCase):
@@ -65,7 +66,7 @@ class BootTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             agent = Boot(config).resolve_agent()
 
             self.assertIsInstance(agent, Agent)
@@ -119,7 +120,7 @@ class BootTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             with self.assertRaisesRegex(ValueError, "requires file_access_mode: full"):
                 Boot(config).resolve_agent()
@@ -155,7 +156,7 @@ class BootTests(unittest.TestCase):
                 ).strip()
             )
 
-            _, run = Boot.from_config_path(config_path).build_run()
+            _, run = Boot.from_config(app_config_from_yaml_file(config_path)).build_run()
 
             self.assertEqual(16, run.strategy.max_steps)
             self.assertIsNotNone(run)
@@ -201,7 +202,7 @@ class BootTests(unittest.TestCase):
                 ).strip()
             )
 
-            _, run = Boot.from_config_path(config_path).build_run(
+            _, run = Boot.from_config(app_config_from_yaml_file(config_path)).build_run(
                 agent_id="Pickle"
             )
 
@@ -241,7 +242,7 @@ class BootTests(unittest.TestCase):
             pickel_home = root / "pickel-home"
             pickel_home.mkdir()
             with patch.dict(os.environ, {"PICKEL_HOME": str(pickel_home)}):
-                service = Boot.from_config_path(config_path).build_session_service()
+                service = Boot.from_config(app_config_from_yaml_file(config_path)).build_session_service()
 
             self.assertIsInstance(service, SessionService)
             self.assertIsInstance(service._repository, SQLiteSessionRepository)
@@ -290,7 +291,7 @@ class BootTests(unittest.TestCase):
                 ).strip()
             )
 
-            service = Boot.from_config_path(config_path).build_session_service(
+            service = Boot.from_config(app_config_from_yaml_file(config_path)).build_session_service(
                 agent_id="Pickle"
             )
 

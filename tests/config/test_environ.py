@@ -13,6 +13,7 @@ from pickel.config.app_config import AppConfig
 from pickel.config.environ import Environ
 from pickel.runs.run import Run
 from pickel.shared.model_config import ModelConfig, ModelSelection
+from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
 def _write_multi_model_config(root: Path) -> Path:
@@ -82,7 +83,7 @@ class EnvironTests(unittest.TestCase):
     def test_resolve_model_config_environ_overrides_selection(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            config = AppConfig.load(_write_multi_model_config(root))
+            config = app_config_from_yaml_file(_write_multi_model_config(root))
             env = Environ(
                 llm=ModelSelection(
                     provider="google/gemini", model="gemini-3-flash-preview"
@@ -98,7 +99,7 @@ class EnvironTests(unittest.TestCase):
     def test_resolve_model_config_environ_overrides_agent_selection(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            config = AppConfig.load(_write_multi_model_config(root))
+            config = app_config_from_yaml_file(_write_multi_model_config(root))
             agent_selection = ModelSelection(
                 provider="anthropic", model="claude-opus-4-7"
             )
@@ -115,7 +116,7 @@ class EnvironTests(unittest.TestCase):
     def test_resolve_model_config_merges_environ_provider_options(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            config = AppConfig.load(_write_multi_model_config(root))
+            config = app_config_from_yaml_file(_write_multi_model_config(root))
             env = Environ(provider_options={"thinking": "xhigh"})
 
             model = config.resolve_model_config(environ=env)
@@ -148,7 +149,7 @@ class EnvironTests(unittest.TestCase):
     def test_apply_environ_model_updates_agent_and_provider(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            config = AppConfig.load(_write_multi_model_config(root))
+            config = app_config_from_yaml_file(_write_multi_model_config(root))
             agent = Agent(
                 agent_id="Pickle",
                 workspace_path=root / "workspace",

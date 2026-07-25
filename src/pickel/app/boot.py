@@ -36,10 +36,6 @@ class Boot:
         self.app_config = app_config
 
     @classmethod
-    def from_config_path(cls, config_path: Path) -> "Boot":
-        return cls(AppConfig.load(config_path))
-
-    @classmethod
     def from_config(cls, app_config: AppConfig) -> "Boot":
         return cls(app_config)
 

@@ -114,7 +114,7 @@ class AgentsScanTests(unittest.TestCase):
             self.assertEqual("google/gemini", agent.llm.provider)
             self.assertEqual("gemini-3-flash-preview", agent.llm.model)
 
-    def test_directory_agent_wins_over_legacy_yaml(self) -> None:
+    def test_directory_agent_is_sole_agent_source(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             project = Path(tmpdir) / "project"
@@ -133,20 +133,6 @@ class AgentsScanTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (project / "from_dir").mkdir()
-            (project / "from_legacy").mkdir()
-            (project / "config.yaml").write_text(
-                textwrap.dedent(
-                    """
-                    agents:
-                      Foo:
-                        workspace_path: from_legacy
-                        behavior_path: agents/Foo
-                        tools:
-                          - from_legacy_tool
-                    """
-                ).strip(),
-                encoding="utf-8",
-            )
             self._minimal_home(home)
 
             config = Config.load(cwd=project, home=home)

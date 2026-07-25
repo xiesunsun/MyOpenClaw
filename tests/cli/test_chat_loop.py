@@ -555,7 +555,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session-1", rendered)
         self.assertIn("runtime reply", rendered)
 
-    async def test_from_config_path_uses_react_max_steps_from_app_config(self) -> None:
+    async def test_from_boot_uses_react_max_steps_from_app_config(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -585,7 +585,12 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 ).strip()
             )
 
-            loop = ChatLoop.from_config_path(config_path=config_path)
+            from pickel.app.boot import Boot
+            from tests.helpers.yaml_app_config import app_config_from_yaml_file
+
+            loop = ChatLoop.from_boot(
+                boot=Boot.from_config(app_config_from_yaml_file(config_path))
+            )
 
             self.assertEqual(16, loop._run.strategy.max_steps)
 

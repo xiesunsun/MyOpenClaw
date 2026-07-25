@@ -35,8 +35,8 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
-            result = self.runner.invoke(app, ["sessions", "--config", "config.yaml"])
+        with patch("pickel.cli.main._boot", return_value=fake_boot):
+            result = self.runner.invoke(app, ["sessions"])
 
         self.assertEqual(0, result.exit_code)
         self.assertIn("session-1", result.stdout)
@@ -49,10 +49,8 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
-            result = self.runner.invoke(
-                app, ["sessions", "--all", "--config", "config.yaml"]
-            )
+        with patch("pickel.cli.main._boot", return_value=fake_boot):
+            result = self.runner.invoke(app, ["sessions", "--all"])
 
         self.assertEqual(0, result.exit_code)
         fake_service.list_sessions.assert_called_once_with(all_sessions=True)
@@ -74,10 +72,10 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main._boot", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
-                ["sessions", "--config", "config.yaml"],
+                ["sessions"],
                 env={"COLUMNS": "120"},
             )
 
@@ -95,33 +93,6 @@ class MainSessionsCliTests(unittest.TestCase):
             proj_a.mkdir()
             proj_b.mkdir()
 
-            # 最小 config 供 from_config_path 加载
-            config_path = proj_a / "config.yaml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "default_agent: Pickle",
-                        "default_llm:",
-                        "  provider: google/gemini",
-                        "  model: gemini-3-flash-preview",
-                        "providers:",
-                        "  google/gemini:",
-                        "    models:",
-                        "      gemini-3-flash-preview:",
-                        "        temperature: 1.0",
-                        "        max_output_tokens: 1024",
-                        "        provider_options: {}",
-                        "agents:",
-                        "  Pickle:",
-                        "    workspace_path: workspace",
-                        "    behavior_path: agents/Pickle",
-                    ]
-                )
-            )
-            (proj_a / "agents" / "Pickle").mkdir(parents=True)
-            (proj_a / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
-            (proj_a / "workspace").mkdir()
-
             env = {**os.environ, "PICKEL_HOME": str(home)}
             with patch.dict(os.environ, env, clear=True):
                 db_path = home / "sessions.db"
@@ -132,21 +103,24 @@ class MainSessionsCliTests(unittest.TestCase):
                 sa = service.start(agent_id="Pickle", cwd=str(proj_a.resolve()))
                 sb = service.start(agent_id="Pickle", cwd=str(proj_b.resolve()))
 
-                # 在 proj-a 下默认 list：只应出现 sa
+                fake_boot = Mock()
+                fake_boot.build_session_service.return_value = service
+
                 with patch(
                     "pickel.conversations.service.Path.cwd",
                     return_value=proj_a.resolve(),
-                ):
+                ), patch("pickel.cli.main._boot", return_value=fake_boot):
                     default_result = self.runner.invoke(
                         app,
-                        ["sessions", "--config", str(config_path)],
+                        ["sessions"],
                         env={**env, "COLUMNS": "120"},
                     )
-                all_result = self.runner.invoke(
-                    app,
-                    ["sessions", "--all", "--config", str(config_path)],
-                    env={**env, "COLUMNS": "120"},
-                )
+                with patch("pickel.cli.main._boot", return_value=fake_boot):
+                    all_result = self.runner.invoke(
+                        app,
+                        ["sessions", "--all"],
+                        env={**env, "COLUMNS": "120"},
+                    )
 
             self.assertEqual(0, default_result.exit_code, default_result.stdout)
             self.assertIn(sa.session_id, default_result.stdout)
@@ -162,14 +136,14 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
 
         with (
-            patch("pickel.cli.main._resolve_boot", return_value=fake_boot),
+            patch("pickel.cli.main._boot", return_value=fake_boot),
             patch(
                 "pickel.cli.main.ChatLoop.from_boot", return_value=fake_loop
             ) as from_boot,
         ):
             result = self.runner.invoke(
                 app,
-                ["--config", "config.yaml", "--session-id", "session-1"],
+                ["--session-id", "session-1"],
             )
 
         self.assertEqual(0, result.exit_code)
@@ -177,11 +151,10 @@ class MainSessionsCliTests(unittest.TestCase):
             boot=fake_boot,
             agent_id=None,
             session_id="session-1",
-            config_path=Path("config.yaml"),
         )
 
     def test_cli_loads_layered_config_without_config_flag(self) -> None:
-        """无 --config 时走 Config.load + Boot.from_config。"""
+        """唯一路径：Config.load + Boot.from_config。"""
         import json
 
         with TemporaryDirectory() as tmpdir:
@@ -231,7 +204,7 @@ class MainSessionsCliTests(unittest.TestCase):
                     }
                 }
             }
-            (home).mkdir()
+            home.mkdir()
             (home / "settings.json").write_text(
                 json.dumps(settings), encoding="utf-8"
             )
@@ -256,9 +229,6 @@ class MainSessionsCliTests(unittest.TestCase):
                 patch(
                     "pickel.cli.main.Boot.from_config", return_value=fake_boot
                 ) as from_config,
-                patch(
-                    "pickel.cli.main.Boot.from_config_path"
-                ) as from_config_path,
             ):
                 result = self.runner.invoke(
                     app,
@@ -268,7 +238,6 @@ class MainSessionsCliTests(unittest.TestCase):
 
             self.assertEqual(0, result.exit_code, result.stdout + result.stderr)
             from_config.assert_called_once()
-            from_config_path.assert_not_called()
             app_config = from_config.call_args.args[0]
             self.assertEqual("Pickle", app_config.default_agent)
             fake_service.list_sessions.assert_called_once_with(all_sessions=False)
@@ -286,10 +255,10 @@ class MainSessionsCliTests(unittest.TestCase):
             delete_service,
         ]
 
-        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main._boot", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
-                ["sessions", "delete", "session-1", "--config", "config.yaml"],
+                ["sessions", "delete", "session-1"],
             )
 
         self.assertEqual(0, result.exit_code)
@@ -306,10 +275,10 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = lookup_service
 
-        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main._boot", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
-                ["sessions", "delete", "missing", "--config", "config.yaml"],
+                ["sessions", "delete", "missing"],
             )
 
         self.assertNotEqual(0, result.exit_code)

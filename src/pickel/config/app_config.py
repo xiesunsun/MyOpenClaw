@@ -3,7 +3,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from pickel.config.environ import Environ
@@ -78,24 +77,6 @@ class AppConfig(BaseModel):
                 agent_config.skills_path = self._resolve_path(agent_config.skills_path)
         return self
 
-    @classmethod
-    def load(cls, config_path: Path) -> "AppConfig":
-        """从单体 config.yaml 加载。
-
-        P0 过渡接口：共享 expand_env_vars 与 model_validate。
-        新路径请用 pickel.config.loader.Config.load。
-        """
-        config_file = (
-            config_path if config_path.is_absolute() else (Path.cwd() / config_path)
-        )
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_file}")
-        with config_file.open(encoding="utf-8") as handle:
-            config_data = expand_env_vars(yaml.safe_load(handle) or {})
-        config_data["root"] = config_file.parent
-        return cls.model_validate(config_data)
-
-    # 兼容旧私有方法名
     @classmethod
     def _expand_env_vars(cls, value: Any) -> Any:
         return expand_env_vars(value)

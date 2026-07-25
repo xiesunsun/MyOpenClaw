@@ -89,17 +89,17 @@ export GEMINI_API_KEY="your-gemini-api-key"
 # Anthropic credentials
 export ANTHROPIC_API_KEY_PICKLE="your-anthropic-api-key"
 ```
-You can adjust default model settings, security clearance (Sandbox/Full), and tool allowlists directly in `config.yaml`.
+Adjust defaults in `~/.pickel/settings.json` / `models.json` and `agents/*/agent.yaml`.
 
 ### 3. Run Interactive Sessions
 ```bash
-# Default: layered config discovery (~/.pickel + project .pickel / agents)
+# Layered config only: ~/.pickel + project .pickel / agents
 uv run pickel chat
 uv run pickel chat --agent Pickle
 uv run pickel sessions
 uv run pickel chat --session-id <session-id>
 uv run pickel sessions delete <session-id>
-# Legacy yaml: uv run pickel chat --config config.yaml
+# One-shot import: uv run pickel config migrate --from config.yaml
 ```
 
 ---

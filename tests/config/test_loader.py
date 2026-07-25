@@ -267,8 +267,8 @@ class ConfigLoaderTests(unittest.TestCase):
             self.assertFalse(config.openviking.session_recall.enabled)
             self.assertEqual(1000, config.openviking.session_recall.max_chars)
 
-    def test_legacy_config_yaml_supplies_defaults_when_settings_missing(self) -> None:
-        """未 migrate 时：仅有 config.yaml 也应能 Config.load（default_agent/llm）。"""
+    def test_missing_settings_raises_clear_error_not_reading_config_yaml(self) -> None:
+        """运行时不读 config.yaml；缺 settings 时明确报错。"""
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             home.mkdir()
@@ -276,41 +276,36 @@ class ConfigLoaderTests(unittest.TestCase):
             (project / "agents" / "Pickle").mkdir(parents=True)
             (project / "agents" / "Pickle" / "AGENT.md").write_text("hi", encoding="utf-8")
             (project / "config.yaml").write_text(
-                textwrap.dedent(
-                    """
-                    default_agent: Pickle
-                    default_llm:
-                      provider: google/gemini
-                      model: gemini-3-flash-preview
-                    providers:
-                      google/gemini:
-                        models:
-                          gemini-3-flash-preview:
-                            max_output_tokens: 1024
-                    agents:
-                      Pickle:
-                        workspace_path: workspace
-                        behavior_path: agents/Pickle
-                    """
-                ).strip(),
+                "default_agent: Pickle\n",
                 encoding="utf-8",
             )
-            (project / "workspace").mkdir()
 
-            with patch.dict(os.environ, {"PICKEL_HOME": str(home)}, clear=False):
-                config = Config.load(cwd=project, home=home)
+            with self.assertRaises(ValueError) as ctx:
+                Config.load(cwd=project, home=home)
 
-            self.assertEqual("Pickle", config.default_agent)
-            self.assertEqual("google/gemini", config.default_llm.provider)
-            self.assertIn("Pickle", config.agents)
+            msg = str(ctx.exception)
+            self.assertIn("default_agent", msg)
+            self.assertIn("migrate", msg)
 
-    def test_legacy_config_yaml_agents_merged_when_present(self) -> None:
+    def test_agents_come_from_directory_not_config_yaml(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             project = Path(tmpdir) / "project"
             (project / ".pickel").mkdir(parents=True)
             (project / "workspace").mkdir()
-            (project / "agents" / "Pickle").mkdir(parents=True)
+            agent_dir = project / "agents" / "Pickle"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "AGENT.md").write_text("# Pickle\n", encoding="utf-8")
+            (agent_dir / "agent.yaml").write_text(
+                textwrap.dedent(
+                    """
+                    workspace_path: workspace
+                    tools:
+                      - echo
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
 
             self._write_json(home / "settings.json", self._minimal_settings())
             self._write_json(home / "models.json", self._minimal_models())
@@ -321,10 +316,9 @@ class ConfigLoaderTests(unittest.TestCase):
                     """
                     agents:
                       Pickle:
-                        workspace_path: workspace
-                        behavior_path: agents/Pickle
+                        workspace_path: ignored
                         tools:
-                          - echo
+                          - should_not_load
                     """
                 ).strip(),
                 encoding="utf-8",
@@ -334,7 +328,6 @@ class ConfigLoaderTests(unittest.TestCase):
             agent = config.get_agent_config("Pickle")
 
             self.assertEqual(project.resolve() / "workspace", agent.workspace_path)
-            self.assertEqual(project.resolve() / "agents" / "Pickle", agent.behavior_path)
             self.assertEqual(["echo"], agent.tools)
 
     def test_builtin_defaults_apply_when_settings_omit_optional_fields(self) -> None:

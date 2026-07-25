@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from pickel.config.app_config import AppConfig
+from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
 class AppConfigTests(unittest.TestCase):
@@ -34,7 +35,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(8, config.react_max_steps)
 
@@ -64,7 +65,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(5, config.context_cli_turn_window)
 
@@ -101,7 +102,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertIsNotNone(config.openviking)
             assert config.openviking is not None
@@ -140,7 +141,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             agent_config = config.get_agent_config()
 
             self.assertEqual(root / "workspace", agent_config.workspace_path)
@@ -173,7 +174,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(16, config.react_max_steps)
 
@@ -204,7 +205,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(9, config.context_cli_turn_window)
 
@@ -234,7 +235,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
 
             self.assertEqual("google/gemini", model_config.provider)
@@ -268,7 +269,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
 
             self.assertEqual(1048576, model_config.max_input_tokens)
@@ -298,7 +299,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
 
             self.assertIsNone(model_config.temperature)
@@ -329,7 +330,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
 
             self.assertEqual("xhigh", model_config.provider_options["thinking"])
@@ -370,7 +371,7 @@ class AppConfigTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                config = AppConfig.load(config_path)
+                config = app_config_from_yaml_file(config_path)
 
             model_config = config.resolve_model_config()
             self.assertEqual("secret-key", model_config.api_key)
@@ -407,7 +408,7 @@ class AppConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ValueError, "Environment variable 'MISSING_API_KEY' is not set"
                 ):
-                    AppConfig.load(config_path)
+                    app_config_from_yaml_file(config_path)
 
     def test_file_access_mode_defaults_to_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -435,7 +436,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual("workspace", config.resolve_file_access_mode().value)
 
@@ -467,7 +468,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual("full", config.resolve_file_access_mode().value)
 
@@ -498,7 +499,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(root / ".agent" / "skills", config.resolve_skills_path())
 
@@ -530,7 +531,7 @@ class AppConfigTests(unittest.TestCase):
                 ).strip()
             )
 
-            config = AppConfig.load(config_path)
+            config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(root / "custom-skills", config.resolve_skills_path())
 

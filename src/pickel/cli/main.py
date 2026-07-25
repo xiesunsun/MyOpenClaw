@@ -15,38 +15,37 @@ sessions_app = typer.Typer(invoke_without_command=True)
 config_app = typer.Typer(help="配置相关命令")
 
 
-def _resolve_boot(config: Path | None) -> Boot:
-    """无 --config 时用分层 Config.load；有路径时走旧 yaml。"""
-    if config is None:
-        return Boot.from_config(Config.load(cwd=Path.cwd()))
-    return Boot.from_config_path(config)
+def _boot() -> Boot:
+    """唯一启动路径：分层 Config.load。"""
+    return Boot.from_config(Config.load(cwd=Path.cwd()))
 
 
 def _run_chat(
     *,
-    config: Path | None,
     agent: str | None,
     session_id: str | None,
 ) -> None:
     try:
         asyncio.run(
             ChatLoop.from_boot(
-                boot=_resolve_boot(config),
+                boot=_boot(),
                 agent_id=agent,
                 session_id=session_id,
-                config_path=config,
             ).run()
         )
     except SessionNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         message = str(exc).strip("'")
         if session_id is not None and message.startswith("Unknown agent: "):
             typer.echo(
                 f"Unable to resume session {session_id}: agent '{message.removeprefix('Unknown agent: ')}' is no longer configured.",
                 err=True,
             )
+            raise typer.Exit(code=1) from exc
+        if isinstance(exc, ValueError):
+            typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
         raise
 
@@ -55,27 +54,24 @@ def _run_chat(
 def main(
     ctx: typer.Context,
     agent: str | None = typer.Option(None, "--agent"),
-    config: Path | None = typer.Option(None, "--config"),
     session_id: str | None = typer.Option(None, "--session-id"),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    _run_chat(config=config, agent=agent, session_id=session_id)
+    _run_chat(agent=agent, session_id=session_id)
 
 
 @app.command()
 def chat(
     agent: str | None = typer.Option(None, "--agent"),
-    config: Path | None = typer.Option(None, "--config"),
     session_id: str | None = typer.Option(None, "--session-id"),
 ) -> None:
-    _run_chat(config=config, agent=agent, session_id=session_id)
+    _run_chat(agent=agent, session_id=session_id)
 
 
 @sessions_app.callback()
 def sessions(
     ctx: typer.Context,
-    config: Path | None = typer.Option(None, "--config"),
     all_sessions: bool = typer.Option(
         False,
         "--all",
@@ -84,12 +80,12 @@ def sessions(
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    # 默认只显示当前 cwd 下的会话
-    previews = (
-        _resolve_boot(config)
-        .build_session_service()
-        .list_sessions(all_sessions=all_sessions)
-    )
+    try:
+        boot = _boot()
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    previews = boot.build_session_service().list_sessions(all_sessions=all_sessions)
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
     table.add_column("agent id")
@@ -112,9 +108,12 @@ def sessions(
 @sessions_app.command("delete")
 def delete_session(
     session_id: str = typer.Argument(...),
-    config: Path | None = typer.Option(None, "--config"),
 ) -> None:
-    boot = _resolve_boot(config)
+    try:
+        boot = _boot()
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     lookup_service = boot.build_session_service()
     try:
         session = lookup_service.resume(session_id=session_id)
@@ -131,10 +130,10 @@ def config_migrate(
     from_path: Path = typer.Option(
         ...,
         "--from",
-        help="旧 config.yaml 路径",
+        help="旧 config.yaml 路径（仅迁移用，运行时不再读取）",
     ),
 ) -> None:
-    """将旧 config.yaml 迁移为分层 settings/models/auth 与 agents。"""
+    """将旧 config.yaml 一次性迁移为 ~/.pickel 分层文件与 agents/*.yaml。"""
     from pickel.config.migrate import migrate_from_yaml
 
     try:
@@ -167,7 +166,7 @@ def config_set_default_model(
         help="写入范围：global（~/.pickel）或 project（项目 .pickel）",
     ),
 ) -> None:
-    """持久化 default_llm 到 settings.json（会话内临时切换用 Environ，与此独立）。"""
+    """持久化 default_llm 到 settings.json。"""
     from pickel.config.settings import set_default_llm
     from pickel.shared.model_config import ModelSelection
 

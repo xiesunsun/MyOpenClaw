@@ -35,7 +35,7 @@
 
 ### 4. 强大的多 Agent 隔离与可插拔 Skills 架构
 应对复杂、多层次的自动化任务，Pickel Agent 原生支持多 Agent 生态与技能隔离：
-- **多 Agent 并存与环境隔离**：在 `config.yaml` 中，您可以为不同职责的 Agent（例如编码专家 `Pickle`、架构师 `Architect` 等）独立指定其专有的工作空间路径（Workspace Path）、系统提示词（System Prompt）、受控工具白名单、以及不同大模型 Provider 驱动。通过 `--agent` 参数即可一键拉起独立沙箱，实现多角色快速切换。
+- **多 Agent 并存与环境隔离**：在 `agents/<id>/` 与 `~/.pickel` 分层配置中，可为不同职责的 Agent（例如编码专家 `Pickle`、架构师 `Architect` 等）独立指定工作空间、行为文案、工具白名单与模型。通过 `--agent` 参数即可切换。
 - **热插拔 Skills 技能树**：开发者只需简单编写 Python 逻辑和 Markdown 规则说明，模块化 Skills 即可被特定 Agent 自动发现并动态注入其 Tool 注册表和 System Instructions 中，极易扩展和生态复用。
 
 ---
@@ -81,7 +81,7 @@ uv sync
 ```
 
 ### 2. 注入凭证与配置
-项目从根目录的 `config.yaml` 读取系统配置。您可以将敏感值通过环境变量进行注入。
+配置仅从分层路径读取：`~/.pickel/{settings,models,auth}.json`、项目 `.pickel/`、以及 `agents/<id>/`。敏感值可用环境变量（`${ENV}`）。旧 `config.yaml` 仅能通过 `pickel config migrate` 一次性导入。
 ```bash
 # Gemini 凭证配置
 export GEMINI_API_KEY="your-gemini-api-key"
@@ -89,17 +89,17 @@ export GEMINI_API_KEY="your-gemini-api-key"
 # Anthropic 凭证配置
 export ANTHROPIC_API_KEY_PICKLE="your-anthropic-api-key"
 ```
-可在 `config.yaml` 中根据需求调整默认大语言模型、安全文件访问级别以及工具白名单。
+可在 `~/.pickel/settings.json` / `models.json` 与 `agents/*/agent.yaml` 中调整默认模型、文件访问级别与工具白名单。
 
 ### 3. 运行交互会话
 ```bash
-# 默认从分层配置发现（~/.pickel + 项目 .pickel / agents）；可选 --config 指定旧 yaml
+# 分层配置：~/.pickel + 项目 .pickel / agents
 uv run pickel chat
 uv run pickel chat --agent Pickle
 uv run pickel sessions
 uv run pickel chat --session-id <session-id>
 uv run pickel sessions delete <session-id>
-# 兼容：uv run pickel chat --config config.yaml
+# 旧 yaml 仅迁移：uv run pickel config migrate --from config.yaml
 ```
 
 ---

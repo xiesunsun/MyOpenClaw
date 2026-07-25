@@ -145,7 +145,7 @@ uv run pickel chat --agent Pickle
 uv run pickel chat --session-id <id>
 uv run pickel sessions
 uv run pickel sessions delete <id>
-# 兼容旧 yaml：uv run pickel chat --config config.yaml
+# 缺配置时：uv run pickel config migrate --from config.yaml
 ```
 
 默认从分层配置发现（`~/.pickel` + 项目 `.pickel` / `agents`）。  

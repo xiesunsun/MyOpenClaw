@@ -35,7 +35,6 @@ class ChatLoop:
         agent_id: str | None = None,
         run: Run | None = None,
         session: Session | None = None,
-        config_path: Path | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str | Awaitable[str]] | None = None,
         context_usage_service: ContextUsageService | None = None,
@@ -46,7 +45,6 @@ class ChatLoop:
         self.agent_id = agent_id or agent.agent_id
         self._run = run
         self.session = session or Session.create(agent_id=self.agent_id)
-        self.config_path = config_path
         self.console = console or Console()
         self._prompt_input_reader: PromptToolkitInputReader | None = None
         self.input_reader = input_reader or self._default_input_reader
@@ -62,7 +60,6 @@ class ChatLoop:
         boot: Boot,
         agent_id: str | None = None,
         session_id: str | None = None,
-        config_path: Path | None = None,
     ) -> "ChatLoop":
         if session_id is not None:
             session_service = boot.build_session_service()
@@ -84,22 +81,7 @@ class ChatLoop:
             agent_id=agent.agent_id,
             run=run,
             session=session,
-            config_path=config_path,
             session_service=session_service,
-        )
-
-    @classmethod
-    def from_config_path(
-        cls,
-        config_path: Path,
-        agent_id: str | None = None,
-        session_id: str | None = None,
-    ) -> "ChatLoop":
-        return cls.from_boot(
-            boot=Boot.from_config_path(config_path),
-            agent_id=agent_id,
-            session_id=session_id,
-            config_path=config_path,
         )
 
     async def handle_user_input(
@@ -145,12 +127,7 @@ class ChatLoop:
     def _render_header(self) -> None:
         body = Group(
             Text(f"Agent: {self.agent_id}", style="bold cyan"),
-            Text(
-                f"Config: {self.config_path}"
-                if self.config_path
-                else "Config: default",
-                style="dim",
-            ),
+            Text("Config: ~/.pickel + project .pickel / agents", style="dim"),
             Text("/help  /context  /clear  /session  /exit", style="yellow"),
         )
         self.console.print(
