@@ -122,7 +122,7 @@ uv run pickel sessions delete <session-id>
 - **LLM Drivers**: Google GenAI (Gemini 3.0/3.1), Anthropic SDK (Claude/Jupiter)
 - **TUI & Console**: Prompt-Toolkit, Typer, Rich
 - **Sync Integration**: OpenViking (可选云端/远端适配器)
-- **Local Persistence**: SQLite 数据库 (本地存储 `.myopenclaw/sessions.db`)
+- **Local Persistence**: SQLite 数据库（`~/.pickel/sessions.db`，可用 `PICKEL_HOME` 覆盖）
 
 ---
 

@@ -93,20 +93,13 @@ You can adjust default model settings, security clearance (Sandbox/Full), and to
 
 ### 3. Run Interactive Sessions
 ```bash
-# Start a default agent session
-uv run pickel chat --config config.yaml
-
-# Start a session with a specific agent (e.g., Pickle)
-uv run pickel chat --config config.yaml --agent Pickle
-
-# List recent local sessions
-uv run pickel sessions --config config.yaml
-
-# Resume a specific local session
-uv run pickel chat --config config.yaml --session-id <session-id>
-
-# Delete a session
-uv run pickel sessions delete <session-id> --config config.yaml
+# Default: layered config discovery (~/.pickel + project .pickel / agents)
+uv run pickel chat
+uv run pickel chat --agent Pickle
+uv run pickel sessions
+uv run pickel chat --session-id <session-id>
+uv run pickel sessions delete <session-id>
+# Legacy yaml: uv run pickel chat --config config.yaml
 ```
 
 ---
@@ -129,7 +122,7 @@ Inside the interactive chat loop, you can use the following helper commands:
 - **LLM Drivers**: Google GenAI SDK (Gemini 3.0/3.1), Anthropic Python SDK (Claude/Jupiter)
 - **TUI & Console**: Prompt-Toolkit, Typer, Rich
 - **Sync Integration**: OpenViking (optional remote sync adapters)
-- **Local Persistence**: SQLite Database (stored under `.myopenclaw/sessions.db`)
+- **Local Persistence**: SQLite Database (`~/.pickel/sessions.db`; override with `PICKEL_HOME`)
 
 ---
 
