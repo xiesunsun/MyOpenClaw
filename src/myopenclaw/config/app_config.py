@@ -29,6 +29,25 @@ class AgentConfig(BaseModel):
     remote_agent_id: str | None = None
 
 
+def expand_env_vars(value: Any) -> Any:
+    """递归展开字符串中的 ${ENV}；变量缺失时抛 ValueError。供 loader 与 yaml 加载共用。"""
+    if isinstance(value, dict):
+        return {key: expand_env_vars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand_env_vars(item) for item in value]
+    if isinstance(value, str):
+        return _ENV_VAR_PATTERN.sub(_replace_env_var, value)
+    return value
+
+
+def _replace_env_var(match: re.Match[str]) -> str:
+    env_name = match.group(1)
+    env_value = os.environ.get(env_name)
+    if env_value is None:
+        raise ValueError(f"Environment variable '{env_name}' is not set")
+    return env_value
+
+
 class AppConfig(BaseModel):
     root: Path = Field(default_factory=Path.cwd, exclude=True)
     default_agent: str
@@ -40,6 +59,10 @@ class AppConfig(BaseModel):
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
     openviking: OpenVikingConfig | None = None
+    # auth.json 中 providers 级密钥；resolve_model_config 在模型缺字段时回填
+    auth_providers: dict[str, dict[str, Any]] = Field(
+        default_factory=dict, exclude=True
+    )
 
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":
@@ -56,36 +79,29 @@ class AppConfig(BaseModel):
 
     @classmethod
     def load(cls, config_path: Path) -> "AppConfig":
+        """从单体 config.yaml 加载。
+
+        P0 过渡接口：共享 expand_env_vars 与 model_validate。
+        新路径请用 myopenclaw.config.loader.Config.load。
+        """
         config_file = (
             config_path if config_path.is_absolute() else (Path.cwd() / config_path)
         )
         if not config_file.exists():
             raise FileNotFoundError(f"Config file not found: {config_file}")
         with config_file.open(encoding="utf-8") as handle:
-            config_data = cls._expand_env_vars(yaml.safe_load(handle) or {})
+            config_data = expand_env_vars(yaml.safe_load(handle) or {})
         config_data["root"] = config_file.parent
         return cls.model_validate(config_data)
 
+    # 兼容旧私有方法名
     @classmethod
     def _expand_env_vars(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: cls._expand_env_vars(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [cls._expand_env_vars(item) for item in value]
-        if isinstance(value, str):
-            return _ENV_VAR_PATTERN.sub(cls._replace_env_var, value)
-        return value
+        return expand_env_vars(value)
 
     @staticmethod
     def _replace_env_var(match: re.Match[str]) -> str:
-        env_name = match.group(1)
-        env_value = os.environ.get(env_name)
-        if env_value is None:
-            raise ValueError(f"Environment variable '{env_name}' is not set")
-        return env_value
+        return _replace_env_var(match)
 
     def _resolve_path(self, path: Path) -> Path:
         if path.is_absolute():
@@ -113,6 +129,12 @@ class AppConfig(BaseModel):
         data = provider_model.model_dump()
         data["provider"] = resolved_selection.provider
         data["model"] = resolved_selection.model
+        # 模型缺 api_key/api_base 时用 auth.providers 回填
+        auth_entry = self.auth_providers.get(resolved_selection.provider) or {}
+        if data.get("api_key") is None and auth_entry.get("api_key") is not None:
+            data["api_key"] = auth_entry["api_key"]
+        if data.get("api_base") is None and auth_entry.get("api_base") is not None:
+            data["api_base"] = auth_entry["api_base"]
         return ModelConfig.model_validate(data)
 
     def resolve_file_access_mode(
