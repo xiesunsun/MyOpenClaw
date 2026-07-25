@@ -1,0 +1,17 @@
+workspace_path: pickle_workspace
+tools:
+  - list_directory
+  - glob_search
+  - grep_search
+  - read_file
+  - read_many_files
+  - replace
+  - write_file
+  - shell_exec
+  - shell_restart
+  - shell_close
+file_access_mode: full
+llm:
+  provider: anthropic
+  model: claude-jupiter-v1-p
+remote_agent_id: ${OPENVIKING_AGENT_ID}

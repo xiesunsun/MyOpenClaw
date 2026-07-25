@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from myopenclaw.config.agents import scan_agents
 from myopenclaw.config.app_config import AppConfig, expand_env_vars
 from myopenclaw.config.auth import auth_path, load_auth
 from myopenclaw.config.models_catalog import load_models, models_path
@@ -112,12 +113,13 @@ class Config:
         else:
             merged.pop("openviking", None)
 
-        # agents：settings 内（可选）+ legacy config.yaml
+        # agents：settings < legacy config.yaml < 目录 agents/（同 id 目录优先）
         agents: dict[str, Any] = {}
         if isinstance(merged.get("agents"), dict):
             agents = deep_merge(agents, merged["agents"])
         if project_root is not None:
             agents = deep_merge(agents, _load_legacy_agents(project_root))
+            agents = deep_merge(agents, scan_agents(project_root))
         merged["agents"] = agents
 
         # 清理不应直接进 AppConfig 的顶层噪声（models 文件键等已处理）
