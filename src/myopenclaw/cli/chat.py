@@ -57,13 +57,13 @@ class ChatLoop:
         self._session_closed = False
 
     @classmethod
-    def from_config_path(
+    def from_boot(
         cls,
-        config_path: Path,
+        boot: Boot,
         agent_id: str | None = None,
         session_id: str | None = None,
+        config_path: Path | None = None,
     ) -> "ChatLoop":
-        boot = Boot.from_config_path(config_path)
         if session_id is not None:
             session_service = boot.build_session_service()
             session = session_service.resume(session_id=session_id)
@@ -86,6 +86,20 @@ class ChatLoop:
             session=session,
             config_path=config_path,
             session_service=session_service,
+        )
+
+    @classmethod
+    def from_config_path(
+        cls,
+        config_path: Path,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> "ChatLoop":
+        return cls.from_boot(
+            boot=Boot.from_config_path(config_path),
+            agent_id=agent_id,
+            session_id=session_id,
+            config_path=config_path,
         )
 
     async def handle_user_input(

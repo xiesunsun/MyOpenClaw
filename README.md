@@ -93,20 +93,13 @@ export ANTHROPIC_API_KEY_PICKLE="your-anthropic-api-key"
 
 ### 3. 运行交互会话
 ```bash
-# 启动默认 Agent 交互终端
-uv run pickel chat --config config.yaml
-
-# 指定特定的 Agent (例如：Pickle) 启动
-uv run pickel chat --config config.yaml --agent Pickle
-
-# 查看历史会话列表
-uv run pickel sessions --config config.yaml
-
-# 恢复特定的历史会话
-uv run pickel chat --config config.yaml --session-id <session-id>
-
-# 删除失效会话
-uv run pickel sessions delete <session-id> --config config.yaml
+# 默认从分层配置发现（~/.pickel + 项目 .pickel / agents）；可选 --config 指定旧 yaml
+uv run pickel chat
+uv run pickel chat --agent Pickle
+uv run pickel sessions
+uv run pickel chat --session-id <session-id>
+uv run pickel sessions delete <session-id>
+# 兼容：uv run pickel chat --config config.yaml
 ```
 
 ---

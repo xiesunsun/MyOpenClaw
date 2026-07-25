@@ -7,6 +7,7 @@ from rich.table import Table
 
 from myopenclaw.app.boot import Boot
 from myopenclaw.cli.chat import ChatLoop
+from myopenclaw.config.loader import Config
 from myopenclaw.conversations.service import SessionNotFoundError
 
 app = typer.Typer(invoke_without_command=True)
@@ -14,18 +15,26 @@ sessions_app = typer.Typer(invoke_without_command=True)
 config_app = typer.Typer(help="配置相关命令")
 
 
+def _resolve_boot(config: Path | None) -> Boot:
+    """无 --config 时用分层 Config.load；有路径时走旧 yaml。"""
+    if config is None:
+        return Boot.from_config(Config.load(cwd=Path.cwd()))
+    return Boot.from_config_path(config)
+
+
 def _run_chat(
     *,
-    config: Path,
+    config: Path | None,
     agent: str | None,
     session_id: str | None,
 ) -> None:
     try:
         asyncio.run(
-            ChatLoop.from_config_path(
-                config_path=config,
+            ChatLoop.from_boot(
+                boot=_resolve_boot(config),
                 agent_id=agent,
                 session_id=session_id,
+                config_path=config,
             ).run()
         )
     except SessionNotFoundError as exc:
@@ -46,7 +55,7 @@ def _run_chat(
 def main(
     ctx: typer.Context,
     agent: str | None = typer.Option(None, "--agent"),
-    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    config: Path | None = typer.Option(None, "--config"),
     session_id: str | None = typer.Option(None, "--session-id"),
 ) -> None:
     if ctx.invoked_subcommand is not None:
@@ -57,7 +66,7 @@ def main(
 @app.command()
 def chat(
     agent: str | None = typer.Option(None, "--agent"),
-    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    config: Path | None = typer.Option(None, "--config"),
     session_id: str | None = typer.Option(None, "--session-id"),
 ) -> None:
     _run_chat(config=config, agent=agent, session_id=session_id)
@@ -66,7 +75,7 @@ def chat(
 @sessions_app.callback()
 def sessions(
     ctx: typer.Context,
-    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    config: Path | None = typer.Option(None, "--config"),
     all_sessions: bool = typer.Option(
         False,
         "--all",
@@ -77,7 +86,7 @@ def sessions(
         return
     # 默认只显示当前 cwd 下的会话
     previews = (
-        Boot.from_config_path(config)
+        _resolve_boot(config)
         .build_session_service()
         .list_sessions(all_sessions=all_sessions)
     )
@@ -103,9 +112,9 @@ def sessions(
 @sessions_app.command("delete")
 def delete_session(
     session_id: str = typer.Argument(...),
-    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    config: Path | None = typer.Option(None, "--config"),
 ) -> None:
-    boot = Boot.from_config_path(config)
+    boot = _resolve_boot(config)
     lookup_service = boot.build_session_service()
     try:
         session = lookup_service.resume(session_id=session_id)

@@ -159,19 +159,119 @@ class MainSessionsCliTests(unittest.TestCase):
     def test_session_id_option_resumes_existing_session(self) -> None:
         fake_loop = Mock()
         fake_loop.run = AsyncMock(return_value=None)
+        fake_boot = Mock()
 
-        with patch("myopenclaw.cli.main.ChatLoop.from_config_path", return_value=fake_loop) as from_config_path:
+        with (
+            patch("myopenclaw.cli.main._resolve_boot", return_value=fake_boot),
+            patch(
+                "myopenclaw.cli.main.ChatLoop.from_boot", return_value=fake_loop
+            ) as from_boot,
+        ):
             result = self.runner.invoke(
                 app,
                 ["--config", "config.yaml", "--session-id", "session-1"],
             )
 
         self.assertEqual(0, result.exit_code)
-        from_config_path.assert_called_once_with(
-            config_path=Path("config.yaml"),
+        from_boot.assert_called_once_with(
+            boot=fake_boot,
             agent_id=None,
             session_id="session-1",
+            config_path=Path("config.yaml"),
         )
+
+    def test_cli_loads_layered_config_without_config_flag(self) -> None:
+        """无 --config 时走 Config.load + Boot.from_config。"""
+        import json
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "pickel-home"
+            project = Path(tmpdir) / "project"
+            (project / ".pickel").mkdir(parents=True)
+            (project / "agents" / "Pickle").mkdir(parents=True)
+            (project / "agents" / "Pickle" / "AGENT.md").write_text(
+                "You are Pickle.\n", encoding="utf-8"
+            )
+            (project / "agents" / "Pickle" / "agent.yaml").write_text(
+                "\n".join(
+                    [
+                        "workspace_path: workspace",
+                        "tools: []",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (project / "workspace").mkdir()
+
+            settings = {
+                "default_agent": "Pickle",
+                "default_llm": {
+                    "provider": "google/gemini",
+                    "model": "gemini-3-flash-preview",
+                },
+            }
+            models = {
+                "providers": {
+                    "google/gemini": {
+                        "models": {
+                            "gemini-3-flash-preview": {
+                                "temperature": 0.2,
+                                "max_output_tokens": 1024,
+                                "provider_options": {},
+                            }
+                        }
+                    }
+                }
+            }
+            auth = {
+                "providers": {
+                    "google/gemini": {
+                        "api_key": "test-key",
+                        "api_base": "https://example.com/v1",
+                    }
+                }
+            }
+            (home).mkdir()
+            (home / "settings.json").write_text(
+                json.dumps(settings), encoding="utf-8"
+            )
+            (home / "models.json").write_text(json.dumps(models), encoding="utf-8")
+            (home / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+
+            fake_service = Mock()
+            fake_service.list_sessions.return_value = []
+            fake_boot = Mock()
+            fake_boot.build_session_service.return_value = fake_service
+
+            env = {**os.environ, "PICKEL_HOME": str(home)}
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "myopenclaw.cli.main.Path.cwd", return_value=project.resolve()
+                ),
+                patch(
+                    "myopenclaw.config.loader.Path.cwd",
+                    return_value=project.resolve(),
+                ),
+                patch(
+                    "myopenclaw.cli.main.Boot.from_config", return_value=fake_boot
+                ) as from_config,
+                patch(
+                    "myopenclaw.cli.main.Boot.from_config_path"
+                ) as from_config_path,
+            ):
+                result = self.runner.invoke(
+                    app,
+                    ["sessions"],
+                    env={**env, "COLUMNS": "120"},
+                )
+
+            self.assertEqual(0, result.exit_code, result.stdout + result.stderr)
+            from_config.assert_called_once()
+            from_config_path.assert_not_called()
+            app_config = from_config.call_args.args[0]
+            self.assertEqual("Pickle", app_config.default_agent)
+            fake_service.list_sessions.assert_called_once_with(all_sessions=False)
 
     def test_sessions_delete_deletes_remote_then_local_for_session_agent(self) -> None:
         lookup_service = Mock()
