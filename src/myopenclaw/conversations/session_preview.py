@@ -66,6 +66,7 @@ class SessionPreview:
     status: str
     message_count: int
     last_message: str
+    cwd: str = ""
 
     def __post_init__(self) -> None:
         normalized = _truncate(_normalize_whitespace(self.last_message))

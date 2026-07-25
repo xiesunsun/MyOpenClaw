@@ -81,9 +81,9 @@ def test_append_entry_and_leaf_are_atomic(tmp_path, monkeypatch):
     assert loaded.entries == []
 
 
-def test_schema_user_version_is_2(tmp_path):
+def test_schema_user_version_is_3(tmp_path):
     repo = SQLiteSessionRepository(tmp_path / "s.db")
-    session = Session.create(agent_id="Pickle")
+    session = Session.create(agent_id="Pickle", cwd="/proj-a")
     repo.create(session)
 
     with sqlite3.connect(tmp_path / "s.db") as connection:
@@ -100,10 +100,16 @@ def test_schema_user_version_is_2(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'index'"
             ).fetchall()
         }
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+        }
 
-    assert version == 2
+    assert version == 3
     assert "sessions" in tables
     assert "session_entries" in tables
+    assert "cwd" in columns
     assert "idx_session_entries_session_parent" in indexes
     assert "idx_session_entries_session_created" in indexes
     assert "idx_sessions_agent_updated" in indexes
+    assert "idx_sessions_cwd_updated" in indexes

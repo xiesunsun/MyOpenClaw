@@ -1,4 +1,4 @@
-"""SQLiteSessionRepository：sessions + session_entries（user_version=2）。"""
+"""SQLiteSessionRepository：sessions + session_entries（user_version=3）。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             created_at = datetime(2026, 4, 13, tzinfo=timezone.utc)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=created_at,
             )
@@ -39,6 +40,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual("Pickle", loaded.agent_id)
+            self.assertEqual("/proj-a", loaded.cwd)
             self.assertEqual(session.leaf_id, loaded.leaf_id)
             self.assertEqual(1, len(loaded.active_path()))
             self.assertEqual("hello", loaded.entries[0].payload["content"][0]["text"])
@@ -48,11 +50,13 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             repo = SQLiteSessionRepository(Path(tmpdir) / "sessions.db")
             first = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
             )
             second = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-2",
                 created_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
             )
@@ -87,6 +91,54 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
                 [preview.last_message for preview in previews],
             )
             self.assertEqual([1, 1], [preview.message_count for preview in previews])
+            self.assertEqual(
+                ["/proj-a", "/proj-a"],
+                [preview.cwd for preview in previews],
+            )
+
+    def test_list_filters_by_cwd(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            repo = SQLiteSessionRepository(Path(tmpdir) / "sessions.db")
+            in_a = Session.create(
+                agent_id="Pickle",
+                cwd="/proj-a",
+                session_id="session-a",
+                created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
+            )
+            in_b = Session.create(
+                agent_id="Pickle",
+                cwd="/proj-b",
+                session_id="session-b",
+                created_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
+            )
+            in_a.append_user(UserMessage(content=[TextContent(text="from a")]))
+            in_b.append_user(UserMessage(content=[TextContent(text="from b")]))
+            in_b.touch(at=in_a.updated_at + timedelta(minutes=1))
+
+            repo.create(in_a)
+            repo.create(in_b)
+            repo.append_entries(
+                session_id="session-a",
+                entries=in_a.entries,
+                leaf_id=in_a.leaf_id,
+                updated_at=in_a.updated_at,
+            )
+            repo.append_entries(
+                session_id="session-b",
+                entries=in_b.entries,
+                leaf_id=in_b.leaf_id,
+                updated_at=in_b.updated_at,
+            )
+
+            filtered = repo.list(limit=20, cwd="/proj-a")
+            all_previews = repo.list(limit=20)
+
+            self.assertEqual(["session-a"], [p.session_id for p in filtered])
+            self.assertEqual(["/proj-a"], [p.cwd for p in filtered])
+            self.assertEqual(
+                ["session-b", "session-a"],
+                [p.session_id for p in all_previews],
+            )
 
     def test_append_entries_only_writes_new_range(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -94,6 +146,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             created_at = datetime(2026, 4, 13, tzinfo=timezone.utc)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=created_at,
             )
@@ -135,6 +188,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             repo = SQLiteSessionRepository(db_path)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
             )
@@ -153,6 +207,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             assert loaded is not None
             self.assertEqual("archived", loaded.status)
             self.assertEqual("first chat", loaded.title)
+            self.assertEqual("/proj-a", loaded.cwd)
             self.assertEqual(
                 datetime(2026, 4, 13, 3, tzinfo=timezone.utc),
                 loaded.updated_at,
@@ -167,10 +222,11 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
                 }
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-            self.assertEqual(2, version)
+            self.assertEqual(3, version)
             self.assertIn("sessions", tables)
             self.assertIn("session_entries", tables)
             self.assertIn("idx_sessions_agent_updated", tables)
+            self.assertIn("idx_sessions_cwd_updated", tables)
             self.assertIn("idx_session_entries_session_parent", tables)
 
     def test_no_legacy_openviking_migration(self) -> None:
@@ -180,6 +236,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             repo = SQLiteSessionRepository(db_path)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
             )
@@ -195,6 +252,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
                 {
                     "session_id",
                     "agent_id",
+                    "cwd",
                     "leaf_id",
                     "created_at",
                     "updated_at",
@@ -213,6 +271,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             created_at = datetime(2026, 4, 13, tzinfo=timezone.utc)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=created_at,
             )
@@ -246,6 +305,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
             repo = SQLiteSessionRepository(db_path)
             session = Session.create(
                 agent_id="Pickle",
+                cwd="/proj-a",
                 session_id="session-1",
                 created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
             )

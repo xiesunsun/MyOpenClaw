@@ -78,6 +78,7 @@ class SessionStorageMapperTests(unittest.TestCase):
         session = Session(
             session_id="session-1",
             agent_id="Pickle",
+            cwd="/proj-a",
             leaf_id=entry.entry_id,
             entries=[entry],
             created_at=created_at,
@@ -92,6 +93,7 @@ class SessionStorageMapperTests(unittest.TestCase):
         )
 
         self.assertEqual("Pickle", restored.agent_id)
+        self.assertEqual("/proj-a", restored.cwd)
         self.assertEqual(entry.entry_id, restored.leaf_id)
         self.assertEqual("hello chat", restored.title)
         self.assertEqual(1, len(restored.entries))
@@ -101,7 +103,7 @@ class SessionStorageMapperTests(unittest.TestCase):
     def test_session_preview_last_message_prefers_tool_names_when_content_is_empty(
         self,
     ) -> None:
-        session = Session(session_id="session-1", agent_id="Pickle")
+        session = Session(session_id="session-1", agent_id="Pickle", cwd="/proj-a")
         session.append_assistant(
             AssistantMessage(
                 content=[
@@ -118,6 +120,7 @@ class SessionStorageMapperTests(unittest.TestCase):
 
         self.assertEqual("[tools] read_file", preview.last_message)
         self.assertEqual(1, preview.message_count)
+        self.assertEqual("/proj-a", preview.cwd)
 
     def test_session_preview_tool_result_uses_truncated_text(self) -> None:
         session = Session(session_id="session-1", agent_id="Pickle")

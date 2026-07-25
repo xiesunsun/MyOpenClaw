@@ -24,17 +24,27 @@ from myopenclaw.conversations.session_entry import ENTRY_TYPE_MESSAGE
 
 class SessionTests(unittest.TestCase):
     def test_session_create_binds_session_to_agent(self) -> None:
-        session = Session.create(agent_id="Pickle", session_id="session-1")
+        session = Session.create(
+            agent_id="Pickle",
+            cwd="/proj-a",
+            session_id="session-1",
+        )
 
         self.assertEqual("session-1", session.session_id)
         self.assertEqual("Pickle", session.agent_id)
+        self.assertEqual("/proj-a", session.cwd)
         self.assertEqual([], session.entries)
         self.assertIsNone(session.leaf_id)
 
     def test_session_create_populates_persistence_metadata(self) -> None:
-        session = Session.create(agent_id="Pickle", session_id="session-1")
+        session = Session.create(
+            agent_id="Pickle",
+            cwd="/proj-a",
+            session_id="session-1",
+        )
 
         self.assertEqual("active", session.status)
+        self.assertEqual("/proj-a", session.cwd)
         self.assertIsNotNone(session.created_at)
         self.assertIsNotNone(session.updated_at)
         self.assertEqual(timezone.utc, session.created_at.tzinfo)

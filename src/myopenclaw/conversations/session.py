@@ -28,6 +28,7 @@ from myopenclaw.conversations.session_entry import (
 class Session:
     session_id: str
     agent_id: str
+    cwd: str = ""
     leaf_id: str | None = None
     entries: list[SessionEntry] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -39,6 +40,7 @@ class Session:
     def create(
         cls,
         agent_id: str,
+        cwd: str = "",
         session_id: Optional[str] = None,
         created_at: datetime | None = None,
     ) -> "Session":
@@ -46,6 +48,7 @@ class Session:
         return cls(
             session_id=session_id or str(uuid4()),
             agent_id=agent_id,
+            cwd=cwd,
             created_at=now,
             updated_at=now,
         )

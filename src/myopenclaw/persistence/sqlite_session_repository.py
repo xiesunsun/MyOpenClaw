@@ -1,4 +1,4 @@
-"""SQLite SessionRepository：sessions + session_entries（user_version=2）。
+"""SQLite SessionRepository：sessions + session_entries（user_version=3）。
 
 不做旧库迁移；以空库 / 新库为准。
 append_entries 在同一事务内 INSERT entries 并更新 leaf_id/updated_at。
@@ -40,16 +40,18 @@ class SQLiteSessionRepository(SessionRepository):
                 INSERT INTO sessions (
                     session_id,
                     agent_id,
+                    cwd,
                     leaf_id,
                     created_at,
                     updated_at,
                     status,
                     title
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["session_id"],
                     record["agent_id"],
+                    record["cwd"],
                     record["leaf_id"],
                     record["created_at"],
                     record["updated_at"],
@@ -66,6 +68,7 @@ class SQLiteSessionRepository(SessionRepository):
                 SELECT
                     session_id,
                     agent_id,
+                    cwd,
                     leaf_id,
                     created_at,
                     updated_at,
@@ -98,30 +101,54 @@ class SQLiteSessionRepository(SessionRepository):
             entry_records=entry_rows,
         )
 
-    def list(self, *, limit: int = 20) -> list[SessionPreview]:
+    def list(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> list[SessionPreview]:
         """按 updated_at 降序列会话预览。
 
         message_count / last_message 以各 session 的 active_path 为准
         （message entry 数；不含 compaction）。
+        cwd 非 None 时仅返回该工作目录下的会话。
         """
         self._ensure_schema()
         with self._connect() as connection:
-            session_rows = connection.execute(
-                """
-                SELECT
-                    session_id,
-                    agent_id,
-                    leaf_id,
-                    created_at,
-                    updated_at,
-                    status,
-                    title
-                FROM sessions
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if cwd is None:
+                session_rows = connection.execute(
+                    """
+                    SELECT
+                        session_id,
+                        agent_id,
+                        cwd,
+                        leaf_id,
+                        created_at,
+                        updated_at,
+                        status,
+                        title
+                    FROM sessions
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                session_rows = connection.execute(
+                    """
+                    SELECT
+                        session_id,
+                        agent_id,
+                        cwd,
+                        leaf_id,
+                        created_at,
+                        updated_at,
+                        status,
+                        title
+                    FROM sessions
+                    WHERE cwd = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (cwd, limit),
+                ).fetchall()
             if not session_rows:
                 return []
 
@@ -259,11 +286,12 @@ class SQLiteSessionRepository(SessionRepository):
         with self._connect() as connection:
             connection.executescript(
                 """
-                PRAGMA user_version = 2;
+                PRAGMA user_version = 3;
 
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
                     agent_id TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
                     leaf_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -290,6 +318,9 @@ class SQLiteSessionRepository(SessionRepository):
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated
                 ON sessions(agent_id, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_sessions_cwd_updated
+                ON sessions(cwd, updated_at);
                 """
             )
         self._schema_initialized = True
@@ -300,5 +331,3 @@ class SQLiteSessionRepository(SessionRepository):
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-

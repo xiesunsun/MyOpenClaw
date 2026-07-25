@@ -13,7 +13,9 @@ class SessionRepository(Protocol):
 
     def load(self, session_id: str) -> Session | None: ...
 
-    def list(self, *, limit: int = 20) -> list[SessionPreview]: ...
+    def list(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> list[SessionPreview]: ...
 
     def append_entries(
         self,

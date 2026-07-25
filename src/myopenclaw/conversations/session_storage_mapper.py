@@ -22,6 +22,7 @@ def session_to_metadata_record(session: Session) -> dict[str, Any]:
     return {
         "session_id": session.session_id,
         "agent_id": session.agent_id,
+        "cwd": session.cwd,
         "leaf_id": session.leaf_id,
         "created_at": _datetime_to_storage(session.created_at),
         "updated_at": _datetime_to_storage(session.updated_at),
@@ -63,6 +64,7 @@ def session_from_storage(
     return Session(
         session_id=str(session_record["session_id"]),
         agent_id=str(session_record["agent_id"]),
+        cwd=str(session_record["cwd"]),
         leaf_id=_optional_str(session_record["leaf_id"]),
         entries=[session_entry_from_record(record) for record in entry_records],
         created_at=_datetime_from_storage_required(session_record["created_at"]),
@@ -86,6 +88,7 @@ def build_session_preview(*, session: Session) -> SessionPreview:
         status=session.status,
         message_count=len(message_entries),
         last_message=last_message,
+        cwd=session.cwd,
     )
 
 
@@ -105,6 +108,7 @@ def session_preview_from_storage_record(record: Mapping[str, Any]) -> SessionPre
         status=str(record["status"]),
         message_count=int(record["message_count"]),
         last_message=last_message,
+        cwd=str(record.get("cwd") or ""),
     )
 
 

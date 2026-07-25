@@ -1,6 +1,8 @@
-# 数据库实体设计（升级目标）
+# 数据库实体设计
 
 **日期**: 2026-07-12  
+**更新日期**: 2026-07-25  
+**状态**: 已实现（`develop`）；与 harness 冲突时以 harness 与代码为准  
 **范围**：只描述 **要落库、可从 SQLite 还原** 的实体与落库层读写合同。  
 **不在本文**：TurnSnapshot、ModelContext、MemoryHit、RunDeps、Agent 整对象；OpenViking 同步状态机与 runtime 投影实现细节。
 
@@ -41,7 +43,7 @@ sessions 1 ── * session_entries
 | `status` | 仅 `active` \| `archived`；新建默认 `active` |
 | `entry_type` | 关闭集合，见 §4；未知类型读库时保留行，投影时跳过 |
 | 外键强度 | `session_id` 建议声明 FK；`parent_id` / `leaf_id` **不强制 SQLite FK**（由应用校验：同 `session_id`、目标存在） |
-| schema 版本 | 使用 SQLite `PRAGMA user_version`（或单行 meta 表）；本设计为 **version = 2**（旧线性库视为 1，不自动升） |
+| schema 版本 | 使用 SQLite `PRAGMA user_version`（或单行 meta 表）；本设计为 **version = 3**（含 `cwd`；v2 无 cwd，不自动升） |
 
 ---
 
@@ -53,6 +55,7 @@ sessions 1 ── * session_entries
 |------|----------|------|------|
 | `session_id` | TEXT | 否 | 主键，UUID4 |
 | `agent_id` | TEXT | 否 | 归属哪个 Agent（配置里的 id，如 Pickle）；**创建后不可改** |
+| `cwd` | TEXT | 否 | 创建会话时的工作目录（绝对、规范化路径）；列表默认按此过滤 |
 | `leaf_id` | TEXT | 是 | 当前指针 → `session_entries.entry_id`；空 = 尚无 entry |
 | `created_at` | TEXT | 否 | UTC ISO |
 | `updated_at` | TEXT | 否 | UTC ISO；任意封面或 append 成功时刷新 |
@@ -60,7 +63,10 @@ sessions 1 ── * session_entries
 | `title` | TEXT | 是 | 显示名；可后续填写 |
 
 **主键**：`session_id`  
-**索引**：`(agent_id, updated_at)` 便于按 agent 列会话  
+**索引**：
+
+- `(agent_id, updated_at)` 便于按 agent 列会话  
+- `(cwd, updated_at)` 便于按工作目录列会话  
 
 ### 3.1 哪些列可 UPDATE
 
@@ -71,6 +77,7 @@ sessions 1 ── * session_entries
 | `status` | 是 | 归档 / 恢复 |
 | `title` | 是 | 重命名、首条 user 生成标题 |
 | `agent_id` | **否** | 会话归属固定 |
+| `cwd` | **否** | 创建时写入，归属目录固定 |
 | `session_id` / `created_at` | **否** | 身份与创建时刻固定 |
 
 ### 3.2 不进这张表
@@ -368,11 +375,12 @@ OpenViking **相关事实的扩展落点**。
 ## 8. 建表 SQL 示意
 
 ```sql
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
     agent_id     TEXT NOT NULL,
+    cwd          TEXT NOT NULL,
     leaf_id      TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
@@ -382,6 +390,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated
     ON sessions (agent_id, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_cwd_updated
+    ON sessions (cwd, updated_at);
 
 CREATE TABLE IF NOT EXISTS session_entries (
     entry_id     TEXT PRIMARY KEY,
@@ -407,7 +418,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_session_created
 ## 9. 不变量（落库层清单）
 
 1. 一场对话 = 一行 `sessions` + 零或多行 `session_entries`。  
-2. `sessions.agent_id` 必填，指向配置中的 Agent；创建后不改。  
+2. `sessions.agent_id` 必填，指向配置中的 Agent；创建后不改。`sessions.cwd` 必填，创建时写入工作目录；创建后不改。  
 3. `entry_id` 全局唯一；`leaf_id` 为空表示尚无内容。  
 4. Entry **只追加**；分支 = 同父多子 + 改 `leaf_id`；禁止改历史 payload。  
 5. 默认推进为 **严格链式** append；同父多子 **只表示分支**，不表示并行 tool。  
@@ -422,7 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_session_created
 
 ## 10. 一句话
 
-> **库只存两样：Session 封面（agent_id、leaf_id、状态标题），和 Entry 链/树（message / compaction / openviking / model_change）。**  
+> **库只存两样：Session 封面（agent_id、cwd、leaf_id、状态标题），和 Entry 链/树（message / compaction / openviking / model_change）。**  
 > **读当前对话 = 从 leaf 回溯 parent；写 = 链式 append + 事务更新 leaf。**  
 > **其余全是运行时；旧库不兼容迁移，openviking 只留扩展位。**
 
@@ -434,3 +445,4 @@ CREATE INDEX IF NOT EXISTS idx_entries_session_created
 |------|------|
 | 2026-07-12 | 初版：仅数据库实体与表结构 |
 | 2026-07-12 | 增强：全局约定、可 UPDATE 字段、链式/分支不变量、事务与删除、leaf 回溯算法、compaction 合同、字段去留、openviking 仅扩展不兼容、SQL `user_version` |
+| 2026-07-25 | `sessions.cwd` NOT NULL；索引 `(cwd, updated_at)`；`user_version = 3`（不做 v2 自动迁移） |

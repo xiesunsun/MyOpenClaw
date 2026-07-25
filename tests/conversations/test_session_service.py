@@ -28,7 +28,10 @@ class FakeSessionRepository:
     def load(self, session_id: str) -> Session | None:
         return self.loaded.get(session_id)
 
-    def list(self, *, limit: int = 20) -> list[SessionPreview]:
+    def list(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> list[SessionPreview]:
+        del cwd
         return self.previews[:limit]
 
     def append_entries(
