@@ -5,16 +5,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.app.boot import Boot
-from myopenclaw.config.app_config import AppConfig
-from myopenclaw.conversations.service import SessionService
-from myopenclaw.context.assembler import ContextAssembler
-from myopenclaw.integrations.openviking.session_sync import (
+from pickel.agents.agent import Agent
+from pickel.app.boot import Boot
+from pickel.config.app_config import AppConfig
+from pickel.conversations.service import SessionService
+from pickel.context.assembler import ContextAssembler
+from pickel.integrations.openviking.session_sync import (
     NoopSessionSync,
     OpenVikingSessionSync,
 )
-from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 class BootTests(unittest.TestCase):
@@ -192,7 +192,7 @@ class BootTests(unittest.TestCase):
                     openviking:
                       enabled: true
                       base_url: https://openviking.example
-                      account_id: myopenclaw
+                      account_id: pickel
                       user_id: ssunxie
                       user_key: secret
                       session_recall:
@@ -280,7 +280,7 @@ class BootTests(unittest.TestCase):
                     openviking:
                       enabled: true
                       base_url: https://openviking.example
-                      account_id: myopenclaw
+                      account_id: pickel
                       user_id: ssunxie
                       user_key: secret
                       commit_after_minutes: 15

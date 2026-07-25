@@ -3,22 +3,22 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from myopenclaw.context.model_context import (
+from pickel.context.model_context import (
     ModelContext,
     SystemContent,
     ToolDefinition,
 )
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import (
+from pickel.conversations.content_blocks import (
     TextContent,
     ThinkingContent,
     ToolCallContent,
 )
-from myopenclaw.providers.anthropic import AnthropicProvider
+from pickel.providers.anthropic import AnthropicProvider
 
 
 class FakeAsyncMessageStream:

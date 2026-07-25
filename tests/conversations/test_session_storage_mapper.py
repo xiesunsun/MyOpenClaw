@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
@@ -14,10 +14,10 @@ from myopenclaw.conversations.agent_message import (
     agent_message_from_dict,
     agent_message_to_dict,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import ENTRY_TYPE_MESSAGE, SessionEntry
-from myopenclaw.conversations.session_storage_mapper import (
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import ENTRY_TYPE_MESSAGE, SessionEntry
+from pickel.conversations.session_storage_mapper import (
     build_session_preview,
     session_entry_from_record,
     session_entry_to_record,

@@ -5,24 +5,24 @@ from tempfile import TemporaryDirectory
 import textwrap
 from unittest.mock import AsyncMock, Mock, patch
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.cli.context_renderer import ContextRenderer
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.metadata import MessageMetadata
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import SessionEntry
-from myopenclaw.conversations.session_preview import SessionPreview
-from myopenclaw.cli.chat import ChatLoop
-from myopenclaw.runs.context_usage import (
+from pickel.agents.agent import Agent
+from pickel.cli.context_renderer import ContextRenderer
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.metadata import MessageMetadata
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import SessionEntry
+from pickel.conversations.session_preview import SessionPreview
+from pickel.cli.chat import ChatLoop
+from pickel.runs.context_usage import (
     ContextUsageCategory,
     ContextUsageDetail,
     ContextUsageSnapshot,
 )
-from myopenclaw.runs import RuntimeEvent, RuntimeEventType
-from myopenclaw.conversations.message import ToolCall
-from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import ToolExecutionResult
+from pickel.runs import RuntimeEvent, RuntimeEventType
+from pickel.conversations.message import ToolCall
+from pickel.shared.model_config import ModelConfig
+from pickel.tools.base import ToolExecutionResult
 from rich.console import Console
 from rich.text import Text
 
@@ -36,7 +36,7 @@ def _assistant_text(message: AssistantMessage) -> str:
 def _text_assistant(text: str, *, metadata: MessageMetadata | None = None) -> AssistantMessage:
     model_meta = None
     if metadata is not None:
-        from myopenclaw.conversations.agent_message import ModelResponseMetadata
+        from pickel.conversations.agent_message import ModelResponseMetadata
 
         model_meta = ModelResponseMetadata(
             provider=metadata.provider or "fake",
@@ -297,7 +297,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_render_turn_output_replays_assistant_tool_batch(self) -> None:
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        from myopenclaw.conversations.agent_message import ToolResultMessage
+        from pickel.conversations.agent_message import ToolResultMessage
 
         session.append_tool_result(
             ToolResultMessage(
@@ -330,7 +330,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[read_file]", tool_line)
         self.assertIn("hello world", tool_line)
 
-    @patch("myopenclaw.cli.chat.PromptToolkitInputReader")
+    @patch("pickel.cli.chat.PromptToolkitInputReader")
     async def test_chat_loop_uses_prompt_toolkit_reader_by_default(self, prompt_reader_cls: Mock) -> None:
         prompt_reader = AsyncMock(return_value="hello")
         prompt_reader_cls.return_value = prompt_reader

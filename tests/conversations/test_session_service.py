@@ -7,14 +7,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.service import SessionNotFoundError, SessionService
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import SessionEntry
-from myopenclaw.conversations.session_preview import SessionPreview
-from myopenclaw.integrations.openviking.session_sync import NoopSessionSync
-from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.service import SessionNotFoundError, SessionService
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import SessionEntry
+from pickel.conversations.session_preview import SessionPreview
+from pickel.integrations.openviking.session_sync import NoopSessionSync
+from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 class FakeSessionRepository:
@@ -123,7 +123,7 @@ class SessionServiceTests(unittest.TestCase):
     def test_start_defaults_cwd_to_process_cwd(self) -> None:
         with TemporaryDirectory() as tmpdir:
             cwd = str(Path(tmpdir).resolve())
-            with patch("myopenclaw.conversations.service.Path.cwd", return_value=Path(cwd)):
+            with patch("pickel.conversations.service.Path.cwd", return_value=Path(cwd)):
                 session = self.service.start(agent_id="Pickle")
 
         self.assertEqual(cwd, session.cwd)
@@ -232,7 +232,7 @@ class SessionServiceTests(unittest.TestCase):
 
             # 全局路径：PICKEL_HOME 下 sessions.db
             with patch.dict(os.environ, {"PICKEL_HOME": str(home)}):
-                from myopenclaw.config.paths import sessions_db_path
+                from pickel.config.paths import sessions_db_path
 
                 self.assertEqual(db_path, sessions_db_path())
 

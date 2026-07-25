@@ -10,8 +10,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from myopenclaw.config.agents import load_agent_dir, scan_agents
-from myopenclaw.config.loader import Config
+from pickel.config.agents import load_agent_dir, scan_agents
+from pickel.config.loader import Config
 
 
 class AgentsScanTests(unittest.TestCase):

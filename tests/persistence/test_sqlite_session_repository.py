@@ -9,10 +9,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
+from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 class SQLiteSessionRepositoryTests(unittest.TestCase):
@@ -300,7 +300,7 @@ class SQLiteSessionRepositoryTests(unittest.TestCase):
         self,
     ) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_dir = Path(tmpdir) / ".myopenclaw"
+            db_dir = Path(tmpdir) / ".pickel"
             db_path = db_dir / "sessions.db"
             repo = SQLiteSessionRepository(db_path)
             session = Session.create(

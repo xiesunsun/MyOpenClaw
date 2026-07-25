@@ -64,9 +64,9 @@ Pickel 从配置读取 `api_base` 并传给 `AsyncAnthropic(base_url=...)`。
 
 ```bash
 uv run python -c "
-from myopenclaw.app.boot import Boot
-from myopenclaw.config.loader import Config
-from myopenclaw.providers.factory import create_llm_provider
+from pickel.app.boot import Boot
+from pickel.config.loader import Config
+from pickel.providers.factory import create_llm_provider
 cfg = Boot.from_config(Config.load()).app_config
 mc = cfg.resolve_model_config(cfg.agents[cfg.default_agent].llm)
 p = create_llm_provider(mc)
@@ -121,7 +121,7 @@ Chat UI 已起来，**第一次 generate** 时失败。
 - `_ensure_schema` 使用 `CREATE TABLE IF NOT EXISTS`：**不改已有旧表结构**
 
 旧库特征示例：`user_version=0`，存在 `session_messages`，无 `session_entries`。  
-更早版本曾把库放在项目旁 `.myopenclaw/sessions.db`；`pickel migrate` 可读该旧路径并导入全局库。
+更早版本曾把库放在项目旁 `.pickel/sessions.db`；`pickel migrate` 可读该旧路径并导入全局库。
 
 **处理**
 
@@ -149,7 +149,7 @@ uv run pickel sessions delete <id>
 ```
 
 默认从分层配置发现（`~/.pickel` + 项目 `.pickel` / `agents`）。  
-入口：`pickel` → `myopenclaw.cli.main`。
+入口：`pickel` → `pickel.cli.main`。
 
 ---
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from myopenclaw.config.paths import (
+from pickel.config.paths import (
     discover_project_root,
     home_dir,
     sessions_db_path,
@@ -15,7 +15,7 @@ class PathsTests(unittest.TestCase):
     def test_home_dir_defaults_to_dot_pickel_under_user_home(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PICKEL_HOME", None)
-            with patch("myopenclaw.config.paths.Path.home", return_value=Path("/tmp/user")):
+            with patch("pickel.config.paths.Path.home", return_value=Path("/tmp/user")):
                 self.assertEqual(Path("/tmp/user") / ".pickel", home_dir())
 
     def test_home_dir_respects_pickel_home_env(self) -> None:

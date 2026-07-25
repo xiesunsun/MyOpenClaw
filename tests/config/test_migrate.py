@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from myopenclaw.cli.main import app
-from myopenclaw.config.migrate import migrate_from_yaml
+from pickel.cli.main import app
+from pickel.config.migrate import migrate_from_yaml
 
 
 class MigrateFromYamlTests(unittest.TestCase):
@@ -222,7 +222,7 @@ class MigrateFromYamlTests(unittest.TestCase):
             root = Path(tmpdir)
             home = root / "home"
             project = root / "project"
-            legacy_dir = project / ".myopenclaw"
+            legacy_dir = project / ".pickel"
             legacy_dir.mkdir(parents=True)
             legacy_db = legacy_dir / "sessions.db"
             with sqlite3.connect(legacy_db) as conn:

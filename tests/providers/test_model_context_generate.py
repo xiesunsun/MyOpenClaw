@@ -7,19 +7,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from myopenclaw.context.model_context import (
+from pickel.context.model_context import (
     ModelContext,
     SystemContent,
     ToolDefinition,
 )
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.providers.anthropic import AnthropicProvider
-from myopenclaw.providers.gemini import GeminiProvider
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.gemini import GeminiProvider
 
 
 def _sample_tool_history_context() -> ModelContext:

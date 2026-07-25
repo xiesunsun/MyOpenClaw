@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 
-from myopenclaw.agents.skills import (
+from pickel.agents.skills import (
     SkillRegistry,
     compose_system_instruction,
     compose_system_instruction_parts,

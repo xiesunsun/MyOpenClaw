@@ -1,14 +1,14 @@
 import asyncio
 import unittest
 
-from myopenclaw.hooks.decisions import (
+from pickel.hooks.decisions import (
     PreToolUseDecision,
     UserPromptSubmitDecision,
     merge_pre_tool_decisions,
     merge_user_prompt_decisions,
 )
-from myopenclaw.hooks.events import PreToolUseEvent, UserPromptSubmitEvent
-from myopenclaw.hooks.lifecycle import LifecycleHooks
+from pickel.hooks.events import PreToolUseEvent, UserPromptSubmitEvent
+from pickel.hooks.lifecycle import LifecycleHooks
 
 
 class MergeRulesTests(unittest.TestCase):
@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
 class DenyAllTools:
     async def pre_tool_use(self, event):
-        from myopenclaw.hooks.decisions import PreToolUseDecision
+        from pickel.hooks.decisions import PreToolUseDecision
         return PreToolUseDecision(action="deny", reason="denied-by-test")
 
 
@@ -128,16 +128,16 @@ class ReactHookIntegrationTests(unittest.TestCase):
     def test_pre_tool_deny_appends_synthetic_tool_result(self) -> None:
         from pathlib import Path
 
-        from myopenclaw.agents.agent import Agent
-        from myopenclaw.context.assembler import ContextAssembler
-        from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-        from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-        from myopenclaw.conversations.session import Session
-        from myopenclaw.hooks.lifecycle import LifecycleHooks
-        from myopenclaw.runs.run import Run
-        from myopenclaw.runs.strategy.react import ReActStrategy
-        from myopenclaw.shared.model_config import ModelConfig
-        from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+        from pickel.agents.agent import Agent
+        from pickel.context.assembler import ContextAssembler
+        from pickel.conversations.agent_message import AssistantMessage, UserMessage
+        from pickel.conversations.content_blocks import TextContent, ToolCallContent
+        from pickel.conversations.session import Session
+        from pickel.hooks.lifecycle import LifecycleHooks
+        from pickel.runs.run import Run
+        from pickel.runs.strategy.react import ReActStrategy
+        from pickel.shared.model_config import ModelConfig
+        from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 
         class FakeProvider:
             def __init__(self):
@@ -177,7 +177,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
         tool = EchoTool()
         session = Session.create(agent_id="Pickle")
         session.append_user(UserMessage(content=[TextContent(text="hi")]))
-        from myopenclaw.tools.shell import ShellSessionManager
+        from pickel.tools.shell import ShellSessionManager
 
         run = Run(
             agent=agent,

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from myopenclaw.context.window import apply_window, group_message_units
-from myopenclaw.conversations.agent_message import (
+from pickel.context.window import apply_window, group_message_units
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
 
 
 def _user(text: str) -> UserMessage:

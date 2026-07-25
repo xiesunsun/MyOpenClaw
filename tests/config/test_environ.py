@@ -8,11 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.config.app_config import AppConfig
-from myopenclaw.config.environ import Environ
-from myopenclaw.runs.run import Run
-from myopenclaw.shared.model_config import ModelConfig, ModelSelection
+from pickel.agents.agent import Agent
+from pickel.config.app_config import AppConfig
+from pickel.config.environ import Environ
+from pickel.runs.run import Run
+from pickel.shared.model_config import ModelConfig, ModelSelection
 
 
 def _write_multi_model_config(root: Path) -> Path:
@@ -161,7 +161,7 @@ class EnvironTests(unittest.TestCase):
             new_provider = MagicMock(name="new-provider")
 
             with patch(
-                "myopenclaw.runs.run.create_llm_provider",
+                "pickel.runs.run.create_llm_provider",
                 return_value=new_provider,
             ) as create_provider:
                 run = Run.open(agent=agent, provider=stub_provider, tools=[])

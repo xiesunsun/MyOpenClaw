@@ -18,10 +18,11 @@ dependencies = [
     "typer>=0.24.1",
     "mcp[cli]>=1.26.0",
     "openviking>=0.3.5",
+    "httpx[socks]>=0.28.1",
 ]
 
 [project.scripts]
-pickel = "myopenclaw.cli.main:app"
+pickel = "pickel.cli.main:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

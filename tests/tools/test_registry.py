@@ -1,7 +1,7 @@
 import unittest
 
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.registry import ToolRegistry
+from pickel.tools.catalog import builtin_tools
+from pickel.tools.registry import ToolRegistry
 
 
 class ToolRegistryTests(unittest.TestCase):

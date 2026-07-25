@@ -1,13 +1,13 @@
 import unittest
 
-from myopenclaw.context import (
+from pickel.context import (
     SessionRecallResult,
     SessionRecallSnippet,
     UserTurn,
     build_session_recall_message,
     render_session_recall,
 )
-from myopenclaw.context.service import ConversationContextService
+from pickel.context.service import ConversationContextService
 
 
 class SessionRecallTests(unittest.TestCase):
@@ -47,7 +47,7 @@ class SessionRecallTests(unittest.TestCase):
     def test_build_prompt_messages_prepends_session_recall_without_session_mutation(self) -> None:
         # ConversationContextService 已 deprecated；Session 无线性 messages。
         # 仅验证 from_turns 仍可将 recall 前置于 prompt（不依赖 entry 树）。
-        from myopenclaw.conversations.message import MessageRole, SessionMessage
+        from pickel.conversations.message import MessageRole, SessionMessage
 
         turns = [
             UserTurn(

@@ -1,11 +1,11 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
-from myopenclaw.integrations.openviking.openviking_state import OpenVikingSessionState
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
+from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
+from pickel.integrations.openviking.openviking_state import OpenVikingSessionState
 
 
 class CommitPolicyTests(unittest.TestCase):

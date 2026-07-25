@@ -9,14 +9,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from myopenclaw.config.settings import (
+from pickel.config.settings import (
     load_settings,
     save_settings,
     set_default_llm,
     settings_path,
     update_settings,
 )
-from myopenclaw.shared.model_config import ModelSelection
+from pickel.shared.model_config import ModelSelection
 
 
 class SettingsWriteTests(unittest.TestCase):
@@ -146,7 +146,7 @@ class SettingsWriteTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             cwd = Path(tmpdir) / "empty"
             cwd.mkdir()
-            with patch("myopenclaw.config.settings.discover_project_root", return_value=None):
+            with patch("pickel.config.settings.discover_project_root", return_value=None):
                 with self.assertRaises(ValueError):
                     set_default_llm(
                         ModelSelection(provider="anthropic", model="x"),

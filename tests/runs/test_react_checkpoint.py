@@ -7,18 +7,18 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.context.assembler import ContextAssembler
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import SessionEntry
-from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
-from myopenclaw.runs.run import Run
-from myopenclaw.runs.strategy.react import ReActStrategy
-from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
-from myopenclaw.tools.shell import ShellSessionManager
+from pickel.agents.agent import Agent
+from pickel.context.assembler import ContextAssembler
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import SessionEntry
+from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.runs.run import Run
+from pickel.runs.strategy.react import ReActStrategy
+from pickel.shared.model_config import ModelConfig
+from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.shell import ShellSessionManager
 
 
 class FakeProvider:

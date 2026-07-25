@@ -1,19 +1,19 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.integrations.openviking.commit_policy import ThresholdCommitPolicy
-from myopenclaw.integrations.openviking.config import OpenVikingConfig
-from myopenclaw.integrations.openviking.openviking_state import InMemoryOpenVikingStateStore
-from myopenclaw.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from myopenclaw.integrations.openviking.session_message_mapper import SessionMessageMapper
-from myopenclaw.integrations.openviking.session_messages import (
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
+from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
+from pickel.integrations.openviking.config import OpenVikingConfig
+from pickel.integrations.openviking.openviking_state import InMemoryOpenVikingStateStore
+from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
+from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
+from pickel.integrations.openviking.session_messages import (
     agent_message_plain_text,
     list_syncable_agent_messages,
 )
-from myopenclaw.integrations.openviking.session_sync import OpenVikingSessionSync
+from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
 
 
 class NotFoundError(Exception):
@@ -75,7 +75,7 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
         return OpenVikingConfig(
             enabled=True,
             base_url="https://openviking.example",
-            account_id="myopenclaw",
+            account_id="pickel",
             user_id="ssunxie",
             user_key="secret",
             commit_after_turns=8,
@@ -125,7 +125,7 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
         self.assertEqual("assistant", client.appended[1]["role"])
         self.assertEqual("session-1", state.remote_session_id)
         self.assertEqual(1, state.last_synced_message_index)
-        self.assertEqual("myopenclaw", state.openviking_account_id)
+        self.assertEqual("pickel", state.openviking_account_id)
         self.assertEqual("ssunxie", state.openviking_user_id)
         self.assertEqual("remote-pickle", state.openviking_agent_id)
 

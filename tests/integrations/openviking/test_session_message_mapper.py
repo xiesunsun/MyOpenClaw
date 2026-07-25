@@ -1,13 +1,13 @@
 import unittest
 
-from myopenclaw.conversations.message import (
+from pickel.conversations.message import (
     MessageRole,
     SessionMessage,
     ToolCall,
     ToolCallBatch,
     ToolCallResult,
 )
-from myopenclaw.integrations.openviking.session_message_mapper import SessionMessageMapper
+from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
 
 
 class SessionMessageMapperTests(unittest.TestCase):

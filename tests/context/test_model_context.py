@@ -1,11 +1,11 @@
-from myopenclaw.context.model_context import (
+from pickel.context.model_context import (
     ModelContext,
     SystemContent,
     SystemSection,
     ToolDefinition,
 )
-from myopenclaw.conversations.agent_message import UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextContent
 
 
 def test_model_context_holds_system_messages_tools():

@@ -1,4 +1,4 @@
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
@@ -7,7 +7,7 @@ from myopenclaw.conversations.agent_message import (
     agent_message_from_dict,
     agent_message_to_dict,
 )
-from myopenclaw.conversations.content_blocks import (
+from pickel.conversations.content_blocks import (
     ImageContent,
     TextContent,
     ThinkingContent,

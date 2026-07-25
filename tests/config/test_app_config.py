@@ -4,7 +4,7 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
-from myopenclaw.config.app_config import AppConfig
+from pickel.config.app_config import AppConfig
 
 
 class AppConfigTests(unittest.TestCase):

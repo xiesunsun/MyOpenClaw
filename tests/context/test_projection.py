@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from myopenclaw.context.projection import project_messages
-from myopenclaw.conversations.agent_message import (
+from pickel.context.projection import project_messages
+from pickel.conversations.agent_message import (
     AssistantMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import SessionEntry
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import SessionEntry
 
 
 def _append_unknown_entry(session: Session, *, entry_type: str, payload: dict) -> SessionEntry:

@@ -2,10 +2,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.registry import ToolRegistry
-from myopenclaw.tools.shell import (
+from pickel.tools.base import ToolExecutionContext
+from pickel.tools.catalog import builtin_tools
+from pickel.tools.registry import ToolRegistry
+from pickel.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
     PersistentShell,

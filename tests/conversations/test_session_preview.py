@@ -1,14 +1,14 @@
 import unittest
 from datetime import datetime, timezone
 
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
     agent_message_to_dict,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session_preview import (
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session_preview import (
     SessionPreview,
     preview_text_from_message_payload,
 )

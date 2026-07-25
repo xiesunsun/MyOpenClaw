@@ -7,8 +7,8 @@ UserTurn / SessionMessage 上的旧窗口行为。新组装路径见 tests/conte
 import unittest
 import warnings
 
-from myopenclaw.context import ConversationContextService, UserTurn
-from myopenclaw.conversations.message import (
+from pickel.context import ConversationContextService, UserTurn
+from pickel.conversations.message import (
     MessageRole,
     SessionMessage,
     ToolCall,
@@ -165,7 +165,7 @@ class ConversationContextTests(unittest.TestCase):
             UserTurn(user_message=_assistant("assistant only"))
 
     def test_collect_recent_user_turns_empty_without_linear_messages(self) -> None:
-        from myopenclaw.conversations.session import Session
+        from pickel.conversations.session import Session
 
         session = Session.create(agent_id="Pickle", session_id="session-1")
         service = ConversationContextService(cli_turn_window=3)

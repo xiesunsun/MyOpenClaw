@@ -2,18 +2,18 @@ import asyncio
 import unittest
 from pathlib import Path
 
-from myopenclaw.agents.agent import Agent
-from myopenclaw.context.assembler import ContextAssembler
-from myopenclaw.context.model_context import ModelContext
-from myopenclaw.conversations.agent_message import AssistantMessage
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.hooks.lifecycle import NoopLifecycleHooks
-from myopenclaw.providers.base import Provider
-from myopenclaw.runs import ReActStrategy, Run, RuntimeEventType
-from myopenclaw.shared.model_config import ModelConfig
-from myopenclaw.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
-from myopenclaw.tools.shell import ShellSessionManager
+from pickel.agents.agent import Agent
+from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context import ModelContext
+from pickel.conversations.agent_message import AssistantMessage
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session import Session
+from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.providers.base import Provider
+from pickel.runs import ReActStrategy, Run, RuntimeEventType
+from pickel.shared.model_config import ModelConfig
+from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.shell import ShellSessionManager
 
 
 def _assistant_text(message: AssistantMessage) -> str:

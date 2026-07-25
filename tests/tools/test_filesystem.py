@@ -2,11 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.file_formatter import FileToolFormatter
-from myopenclaw.tools.file_service import WorkspaceFileService
-from myopenclaw.tools.file_tools import ReadFileTool, ReplaceTool, WriteFileTool
-from myopenclaw.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
+from pickel.tools.base import ToolExecutionContext
+from pickel.tools.file_formatter import FileToolFormatter
+from pickel.tools.file_service import WorkspaceFileService
+from pickel.tools.file_tools import ReadFileTool, ReplaceTool, WriteFileTool
+from pickel.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
 
 
 class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):

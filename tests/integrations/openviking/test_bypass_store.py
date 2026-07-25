@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from myopenclaw.integrations.openviking.bypass_store import OpenVikingBypassStore
+from pickel.integrations.openviking.bypass_store import OpenVikingBypassStore
 
 
 def test_bypass_store_round_trip(tmp_path: Path):

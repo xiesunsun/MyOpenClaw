@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from typer.testing import CliRunner
 
-from myopenclaw.cli.main import app
-from myopenclaw.conversations.service import SessionNotFoundError, SessionService
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_preview import SessionPreview
-from myopenclaw.integrations.openviking.session_sync import NoopSessionSync
-from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.cli.main import app
+from pickel.conversations.service import SessionNotFoundError, SessionService
+from pickel.conversations.session import Session
+from pickel.conversations.session_preview import SessionPreview
+from pickel.integrations.openviking.session_sync import NoopSessionSync
+from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 class MainSessionsCliTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(app, ["sessions", "--config", "config.yaml"])
 
         self.assertEqual(0, result.exit_code)
@@ -49,7 +49,7 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app, ["sessions", "--all", "--config", "config.yaml"]
             )
@@ -74,7 +74,7 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = fake_service
 
-        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "--config", "config.yaml"],
@@ -134,7 +134,7 @@ class MainSessionsCliTests(unittest.TestCase):
 
                 # 在 proj-a 下默认 list：只应出现 sa
                 with patch(
-                    "myopenclaw.conversations.service.Path.cwd",
+                    "pickel.conversations.service.Path.cwd",
                     return_value=proj_a.resolve(),
                 ):
                     default_result = self.runner.invoke(
@@ -162,9 +162,9 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
 
         with (
-            patch("myopenclaw.cli.main._resolve_boot", return_value=fake_boot),
+            patch("pickel.cli.main._resolve_boot", return_value=fake_boot),
             patch(
-                "myopenclaw.cli.main.ChatLoop.from_boot", return_value=fake_loop
+                "pickel.cli.main.ChatLoop.from_boot", return_value=fake_loop
             ) as from_boot,
         ):
             result = self.runner.invoke(
@@ -247,17 +247,17 @@ class MainSessionsCliTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch(
-                    "myopenclaw.cli.main.Path.cwd", return_value=project.resolve()
+                    "pickel.cli.main.Path.cwd", return_value=project.resolve()
                 ),
                 patch(
-                    "myopenclaw.config.loader.Path.cwd",
+                    "pickel.config.loader.Path.cwd",
                     return_value=project.resolve(),
                 ),
                 patch(
-                    "myopenclaw.cli.main.Boot.from_config", return_value=fake_boot
+                    "pickel.cli.main.Boot.from_config", return_value=fake_boot
                 ) as from_config,
                 patch(
-                    "myopenclaw.cli.main.Boot.from_config_path"
+                    "pickel.cli.main.Boot.from_config_path"
                 ) as from_config_path,
             ):
                 result = self.runner.invoke(
@@ -286,7 +286,7 @@ class MainSessionsCliTests(unittest.TestCase):
             delete_service,
         ]
 
-        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "delete", "session-1", "--config", "config.yaml"],
@@ -306,7 +306,7 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
         fake_boot.build_session_service.return_value = lookup_service
 
-        with patch("myopenclaw.cli.main.Boot.from_config_path", return_value=fake_boot):
+        with patch("pickel.cli.main.Boot.from_config_path", return_value=fake_boot):
             result = self.runner.invoke(
                 app,
                 ["sessions", "delete", "missing", "--config", "config.yaml"],

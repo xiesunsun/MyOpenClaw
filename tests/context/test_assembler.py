@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from myopenclaw.context.assembler import ContextAssembler, append_hook_feedback
-from myopenclaw.context.hook_feedback import HookFeedback
-from myopenclaw.context.model_context import ModelContext, SystemContent, ToolDefinition
-from myopenclaw.conversations.agent_message import (
+from pickel.context.assembler import ContextAssembler, append_hook_feedback
+from pickel.context.hook_feedback import HookFeedback
+from pickel.context.model_context import ModelContext, SystemContent, ToolDefinition
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.tools.base import ToolSpec
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session import Session
+from pickel.tools.base import ToolSpec
 
 
 def test_assemble_projects_windows_and_appends_hook_feedback():

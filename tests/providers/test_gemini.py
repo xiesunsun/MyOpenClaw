@@ -4,19 +4,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from myopenclaw.context.model_context import (
+from pickel.context.model_context import (
     ModelContext,
     SystemContent,
     ToolDefinition,
 )
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.providers.gemini import GeminiProvider
-from myopenclaw.shared.model_config import ModelConfig
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.providers.gemini import GeminiProvider
+from pickel.shared.model_config import ModelConfig
 
 
 class GeminiProviderTests(unittest.TestCase):

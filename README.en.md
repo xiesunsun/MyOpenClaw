@@ -130,7 +130,7 @@ Inside the interactive chat loop, you can use the following helper commands:
 
 ```
 src/
-  myopenclaw/               # Core execution package (for pickel CLI command)
+  pickel/               # Core execution package (for pickel CLI command)
     agents/                 # Agent behavior prompt loading and skill lookup
     app/                    # Application Composition Root and startup harness
     cli/                    # TUI rendering and terminal interaction layers

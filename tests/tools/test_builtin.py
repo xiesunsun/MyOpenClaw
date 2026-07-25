@@ -2,11 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.file_service import WorkspaceFileService
-from myopenclaw.tools.policy import WorkspacePathAccessPolicy
-from myopenclaw.tools.registry import ToolRegistry
+from pickel.tools.base import ToolExecutionContext
+from pickel.tools.catalog import builtin_tools
+from pickel.tools.file_service import WorkspaceFileService
+from pickel.tools.policy import WorkspacePathAccessPolicy
+from pickel.tools.registry import ToolRegistry
 
 
 class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):

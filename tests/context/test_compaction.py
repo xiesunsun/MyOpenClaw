@@ -1,8 +1,8 @@
-from myopenclaw.context.compaction import apply_compaction, plan_keep_last_units
-from myopenclaw.context.projection import project_messages
-from myopenclaw.conversations.agent_message import AssistantMessage, UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
+from pickel.context.compaction import apply_compaction, plan_keep_last_units
+from pickel.context.projection import project_messages
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
 
 
 def test_plan_and_apply_compaction_keeps_tail_units():

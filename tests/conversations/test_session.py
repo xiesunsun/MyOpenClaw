@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
@@ -13,13 +13,13 @@ from myopenclaw.conversations.agent_message import (
     UserMessage,
     agent_message_from_dict,
 )
-from myopenclaw.conversations.content_blocks import (
+from pickel.conversations.content_blocks import (
     TextContent,
     ThinkingContent,
     ToolCallContent,
 )
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import ENTRY_TYPE_MESSAGE
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import ENTRY_TYPE_MESSAGE
 
 
 class SessionTests(unittest.TestCase):

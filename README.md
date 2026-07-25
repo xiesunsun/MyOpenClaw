@@ -130,7 +130,7 @@ uv run pickel sessions delete <session-id>
 
 ```
 src/
-  myopenclaw/               # 核心执行包 (对应 pickel 命令行)
+  pickel/               # 核心执行包 (对应 pickel 命令行)
     agents/                 # Agent 行为 prompt 装载与技能检索
     app/                    # 应用程序配置及启动装配根节点 (Composition Root)
     cli/                    # 命令行交互层逻辑与终端 TUI 渲染

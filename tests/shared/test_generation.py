@@ -1,6 +1,6 @@
 import unittest
 
-from myopenclaw.shared.generation import (
+from pickel.shared.generation import (
     FinishReason,
     GenerateRequest,
     GenerateResult,

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 
-from myopenclaw.conversations.agent_message import UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.session import Session
+from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
 def test_create_append_reload_active_path(tmp_path):

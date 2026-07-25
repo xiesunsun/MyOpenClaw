@@ -1,8 +1,8 @@
-from myopenclaw.context.model_context import ModelContext, SystemContent
-from myopenclaw.context.observation import ContextObservation
-from myopenclaw.conversations.agent_message import UserMessage
-from myopenclaw.conversations.content_blocks import TextContent
-from myopenclaw.cli.context_renderer import ModelContextRenderer
+from pickel.context.model_context import ModelContext, SystemContent
+from pickel.context.observation import ContextObservation
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextContent
+from pickel.cli.context_renderer import ModelContextRenderer
 
 
 def test_observation_predicted_flag():

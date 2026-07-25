@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from myopenclaw.conversations.agent_message import (
+from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
     agent_message_to_dict,
 )
-from myopenclaw.conversations.content_blocks import TextContent, ToolCallContent
-from myopenclaw.conversations.session import Session
-from myopenclaw.conversations.session_entry import (
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.session import Session
+from pickel.conversations.session_entry import (
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
     SessionEntry,
