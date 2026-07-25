@@ -11,6 +11,7 @@ from myopenclaw.conversations.service import SessionNotFoundError
 
 app = typer.Typer(invoke_without_command=True)
 sessions_app = typer.Typer(invoke_without_command=True)
+config_app = typer.Typer(help="配置相关命令")
 
 
 def _run_chat(
@@ -116,7 +117,39 @@ def delete_session(
     typer.echo(f"Deleted session {session_id}")
 
 
+@config_app.command("migrate")
+def config_migrate(
+    from_path: Path = typer.Option(
+        ...,
+        "--from",
+        help="旧 config.yaml 路径",
+    ),
+) -> None:
+    """将旧 config.yaml 迁移为分层 settings/models/auth 与 agents。"""
+    from myopenclaw.config.migrate import migrate_from_yaml
+
+    try:
+        summary = migrate_from_yaml(from_path)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"home: {summary['home']}")
+    typer.echo(f"settings: {summary['settings']}")
+    typer.echo(f"models: {summary['models']}")
+    typer.echo(f"auth: {summary['auth']}")
+    for agent in summary.get("agents") or []:
+        typer.echo(f"agent: {agent['id']} -> {agent['path']}")
+    sessions = summary.get("sessions") or {}
+    typer.echo(f"sessions: {sessions.get('action')}")
+    if summary.get("config_backup"):
+        typer.echo(f"config_backup: {summary['config_backup']}")
+    for warning in summary.get("warnings") or []:
+        typer.echo(f"warning: {warning}", err=True)
+
+
 app.add_typer(sessions_app, name="sessions")
+app.add_typer(config_app, name="config")
 
 
 if __name__ == "__main__":
