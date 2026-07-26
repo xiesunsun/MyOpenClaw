@@ -66,11 +66,12 @@ class ReActStrategy(ExecutionStrategy):
                 ),
             )
 
-            model_context = prepare(
+            model_context = await prepare(
                 run=run,
                 session=session,
                 hook_feedback=turn.hook_feedback_for_current_step(),
                 unit_window=run.unit_window,
+                recall_sources=run.recall_sources,
             )
             # before_request：可替换 context；feedback 并入当前请求消息
             before = await run.lifecycle_hooks.before_request(

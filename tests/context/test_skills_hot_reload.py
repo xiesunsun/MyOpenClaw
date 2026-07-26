@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import textwrap
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -52,12 +53,12 @@ def test_prepare_rediscovers_skills_when_skills_path_set():
         run = SimpleNamespace(agent=agent, tools=[], unit_window=5)
         session = Session.create(agent_id="Pickle")
 
-        first = prepare(run=run, session=session)
+        first = asyncio.run(prepare(run=run, session=session))
         assert "alpha: First skill." in first.system.as_text()
         assert "beta:" not in first.system.as_text()
 
         _write_skill(skills_root, "beta", "Second skill.")
-        second = prepare(run=run, session=session)
+        second = asyncio.run(prepare(run=run, session=session))
         assert "alpha: First skill." in second.system.as_text()
         assert "beta: Second skill." in second.system.as_text()
 
@@ -84,6 +85,6 @@ def test_prepare_uses_agent_skills_when_skills_path_is_none():
         run = SimpleNamespace(agent=agent, tools=[], unit_window=5)
         session = Session.create(agent_id="Pickle")
 
-        ctx = prepare(run=run, session=session)
+        ctx = asyncio.run(prepare(run=run, session=session))
         assert "disk-only" not in ctx.system.as_text()
         assert ctx.system.as_text() == "You are Pickle."

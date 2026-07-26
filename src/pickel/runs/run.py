@@ -53,6 +53,7 @@ class Run:
     unit_window: int
     strategy: ExecutionStrategy
     environ: Environ = field(default_factory=Environ)
+    recall_sources: list = field(default_factory=list)
 
     @classmethod
     def open(
@@ -69,6 +70,7 @@ class Run:
         provider: Provider | None = None,
         tools: list[BaseTool] | None = None,
         tool_registry: ToolRegistry | None = None,
+        recall_sources: list | None = None,
     ) -> Run:
         """解析 provider/tools/workspace，组装 Run。"""
         from pickel.runs.strategy.react import ReActStrategy
@@ -98,6 +100,7 @@ class Run:
             unit_window=unit_window,
             strategy=strategy or ReActStrategy(),
             environ=Environ(),
+            recall_sources=list(recall_sources or []),
         )
 
     def apply_environ_model(self, app_config: AppConfig) -> None:

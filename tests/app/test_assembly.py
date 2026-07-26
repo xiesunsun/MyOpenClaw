@@ -165,7 +165,7 @@ class BootTests(unittest.TestCase):
             self.assertEqual(7, run.unit_window)
 
     def test_build_run_wires_openviking_session_recall_when_enabled(self) -> None:
-        """OV session recall is not on Run (Task 12); keep wiring smoke for runtime."""
+        """OV session recall 经 Run.recall_sources 注入。"""
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -210,6 +210,40 @@ class BootTests(unittest.TestCase):
             self.assertIsNotNone(run)
             self.assertIsInstance(run.context_assembler, ContextAssembler)
             self.assertFalse(hasattr(run, "session_recall_provider"))
+            self.assertEqual(1, len(run.recall_sources))
+            self.assertEqual(1234, run.recall_sources[0]._max_chars)
+
+    def test_build_run_empty_recall_sources_when_openviking_disabled(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    default_agent: Pickle
+                    default_llm:
+                      provider: google/gemini
+                      model: gemini-3-flash-preview
+                    providers:
+                      google/gemini:
+                        models:
+                          gemini-3-flash-preview:
+                            temperature: 1.0
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """
+                ).strip()
+            )
+
+            _, run = Boot.from_config(app_config_from_yaml_file(config_path)).build_run()
+            self.assertEqual([], run.recall_sources)
 
     def test_build_session_service_returns_session_service_with_sqlite_repo(self) -> None:
         with TemporaryDirectory() as tmpdir:

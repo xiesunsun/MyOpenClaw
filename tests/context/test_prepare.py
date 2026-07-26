@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -80,11 +81,13 @@ def test_prepare_system_history_feedback_tools():
     run = _run(unit_window=2)
     feedback = [HookFeedback(source_event="PostToolBatch", text="hook note")]
 
-    ctx = prepare(
-        run=run,
-        session=session,
-        hook_feedback=feedback,
-        unit_window=2,
+    ctx = asyncio.run(
+        prepare(
+            run=run,
+            session=session,
+            hook_feedback=feedback,
+            unit_window=2,
+        )
     )
 
     assert isinstance(ctx, ModelContext)
@@ -113,11 +116,13 @@ def test_resolve_recalls_empty_is_noop():
     run = _run()
     session = Session.create(agent_id="Pickle")
     assert (
-        resolve_recalls(
-            messages=messages,
-            run=run,
-            session=session,
-            recall_sources=[],
+        asyncio.run(
+            resolve_recalls(
+                messages=messages,
+                run=run,
+                session=session,
+                recall_sources=[],
+            )
         )
         == messages
     )
@@ -128,15 +133,37 @@ def test_prepare_with_recall_source_appends_messages():
     session.append_user(UserMessage(content=[TextContent(text="hello")]))
 
     class _FakeRecall:
-        def provide(self, *, run, session):
+        async def provide(self, *, run, session, current_user_text: str = ""):
             return [UserMessage(content=[TextContent(text="recalled")])]
 
-    ctx = prepare(
-        run=_run(),
-        session=session,
-        recall_sources=[_FakeRecall()],
+    ctx = asyncio.run(
+        prepare(
+            run=_run(),
+            session=session,
+            recall_sources=[_FakeRecall()],
+        )
     )
     assert [m.content[0].text for m in ctx.messages if isinstance(m, UserMessage)] == [
         "hello",
         "recalled",
     ]
+
+
+def test_prepare_recall_receives_current_user_text_from_session():
+    session = Session.create(agent_id="Pickle")
+    session.append_user(UserMessage(content=[TextContent(text="query-me")]))
+    seen: list[str] = []
+
+    class _CaptureRecall:
+        async def provide(self, *, run, session, current_user_text: str = ""):
+            seen.append(current_user_text)
+            return []
+
+    asyncio.run(
+        prepare(
+            run=_run(),
+            session=session,
+            recall_sources=[_CaptureRecall()],
+        )
+    )
+    assert seen == ["query-me"]

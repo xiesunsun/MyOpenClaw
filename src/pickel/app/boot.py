@@ -15,6 +15,7 @@ from pickel.context.assembler import ContextAssembler
 from pickel.integrations.openviking.bypass_store import OpenVikingBypassStore
 from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
 from pickel.integrations.openviking.context_client import SyncHTTPOpenVikingContextClient
+from pickel.integrations.openviking.recall_adapter import OpenVikingRecall
 from pickel.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
 from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
 from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
@@ -98,8 +99,32 @@ class Boot:
             session_service=session_service,
             context_assembler=ContextAssembler(),
             unit_window=self.app_config.context_cli_turn_window,
+            recall_sources=self._build_recall_sources(agent_id=agent.agent_id),
         )
         return agent, run
+
+    def _build_recall_sources(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> list:
+        """OV session recall 开启时挂 OpenVikingRecall；否则空列表。"""
+        openviking_config = self.app_config.openviking
+        if (
+            openviking_config is None
+            or not openviking_config.enabled
+            or not openviking_config.session_recall.enabled
+        ):
+            return []
+        provider = self._build_session_recall_provider(agent_id=agent_id)
+        if isinstance(provider, NoopSessionRecallProvider):
+            return []
+        return [
+            OpenVikingRecall(
+                provider=provider,
+                max_chars=openviking_config.session_recall.max_chars,
+            )
+        ]
 
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）

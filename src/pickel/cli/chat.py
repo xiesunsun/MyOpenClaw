@@ -505,11 +505,12 @@ class ChatLoop:
         else:
             # 与 ReAct 一致走 prepare；不触发 Hook
             try:
-                ctx = prepare(
+                ctx = await prepare(
                     run=run,
                     session=self.session,
                     hook_feedback=[],
                     unit_window=getattr(run, "unit_window", 5),
+                    recall_sources=getattr(run, "recall_sources", None) or [],
                 )
             except Exception as exc:  # 测试 mock / 不完整 run
                 observation = ContextObservation(

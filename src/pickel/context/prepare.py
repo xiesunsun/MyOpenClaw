@@ -14,7 +14,8 @@ from pickel.context.model_context import ModelContext, SystemContent, ToolDefini
 from pickel.context.projection import project_messages
 from pickel.context.recall import Recall
 from pickel.context.window import apply_window
-from pickel.conversations.agent_message import AgentMessage
+from pickel.conversations.agent_message import AgentMessage, UserMessage
+from pickel.conversations.content_blocks import TextContent
 
 
 def resolve_system(*, run: Any) -> SystemContent:
@@ -40,19 +41,42 @@ def resolve_history(*, session: Any, unit_window: int) -> list[AgentMessage]:
     return apply_window(messages, unit_window=unit_window)
 
 
-def resolve_recalls(
+def extract_current_user_text(session: Any) -> str:
+    """从 session active path 取最后一条 user 的文本。"""
+    for message in reversed(project_messages(session.active_path())):
+        if not isinstance(message, UserMessage):
+            continue
+        parts = [
+            block.text
+            for block in message.content
+            if isinstance(block, TextContent) and block.text
+        ]
+        if parts:
+            return "\n".join(parts)
+    return ""
+
+
+async def resolve_recalls(
     *,
     messages: list[AgentMessage],
     run: Any,
     session: Any,
     recall_sources: Sequence[Recall],
+    current_user_text: str = "",
 ) -> list[AgentMessage]:
     """将各 Recall.provide 结果追加到消息列表。"""
     if not recall_sources:
         return list(messages)
+    text = current_user_text or extract_current_user_text(session)
     result = list(messages)
     for source in recall_sources:
-        result.extend(source.provide(run=run, session=session))
+        result.extend(
+            await source.provide(
+                run=run,
+                session=session,
+                current_user_text=text,
+            )
+        )
     return result
 
 
@@ -77,23 +101,25 @@ def resolve_tools(*, run: Any) -> list[ToolDefinition]:
     ]
 
 
-def prepare(
+async def prepare(
     *,
     run: Any,
     session: Any,
     hook_feedback: list[HookFeedback] | None = None,
     unit_window: int | None = None,
     recall_sources: Sequence[Recall] | None = None,
+    current_user_text: str = "",
 ) -> ModelContext:
     """组装一次模型调用入参（ModelContext / Request）。"""
     window = run.unit_window if unit_window is None else unit_window
     system = resolve_system(run=run)
     messages = resolve_history(session=session, unit_window=window)
-    messages = resolve_recalls(
+    messages = await resolve_recalls(
         messages=messages,
         run=run,
         session=session,
         recall_sources=recall_sources or [],
+        current_user_text=current_user_text,
     )
     messages = resolve_feedback(messages=messages, hook_feedback=hook_feedback)
     tools = resolve_tools(run=run)
