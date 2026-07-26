@@ -102,6 +102,51 @@ def chat(
     _run_chat(agent=agent, session_id=session_id)
 
 
+@app.command()
+def observe(
+    session: list[str] = typer.Option([], "--session", help="指定 session_id，可多次"),
+    out: Path = typer.Option(Path("pickel-observe.html"), "--out", help="输出 HTML 路径"),
+    limit: int = typer.Option(20, "--limit", help="无 --session 时导出最近 N 个含消息的会话"),
+) -> None:
+    """导出会话执行轨迹为自包含 HTML 观测平台。"""
+    from datetime import datetime, timezone
+
+    from pickel.config.paths import sessions_db_path
+    from pickel.observe.collector import collect_previews, collect_trajectory
+    from pickel.observe.html_report import render_html
+    from pickel.observe.trace_reader import read_trace
+    from pickel.persistence.sqlite_session_repository import (
+        SQLiteSessionRepository,
+    )
+    from pickel.runs.trace_sink import trace_path
+
+    repository = SQLiteSessionRepository(sessions_db_path())
+    if session:
+        sessions = [
+            loaded for sid in session if (loaded := repository.load(sid))
+        ]
+    else:
+        sessions = collect_previews(repository, limit=limit)
+    if not sessions:
+        typer.echo("没有可导出的会话", err=True)
+        raise typer.Exit(code=1)
+
+    trajectories = [
+        collect_trajectory(
+            item, enhancement=read_trace(trace_path(item.session_id))
+        )
+        for item in sessions
+    ]
+    out.write_text(
+        render_html(
+            trajectories,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(str(out.resolve()))
+
+
 @sessions_app.callback()
 def sessions(
     ctx: typer.Context,
