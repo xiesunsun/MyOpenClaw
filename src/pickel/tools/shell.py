@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import os
 from pathlib import Path
@@ -598,9 +598,7 @@ class ShellSessionManager:
                 shell=PersistentShell(
                     workspace_path=workspace_path.resolve(),
                     process=PtyShellProcess(
-
                         shell_program=self.shell_program, sandbox=self.sandbox
-
                     ),
                     output_dir=workspace_path.resolve()
                     / ".pickel" / "shell-output" / session_id,
@@ -612,19 +610,22 @@ class ShellSessionManager:
         session.last_used_at = time.time()
         return session
 
-    def restart(self, session_id: str, workspace_path: Path) -> ShellSession:
+    def restart(
+        self, session_id: str, workspace_path: Path, *, sandbox: bool = True
+    ) -> ShellSession:
         existing = self._sessions.get(session_id)
         if existing is not None:
             existing.shell.terminate()
+        policy = self.sandbox
+        if not sandbox and policy is not None and policy.allow_disable:
+            policy = replace(policy, enabled=False)
         session = ShellSession(
             session_id=session_id,
             workspace_path=workspace_path.resolve(),
             shell=PersistentShell(
                 workspace_path=workspace_path.resolve(),
                 process=PtyShellProcess(
-
-                    shell_program=self.shell_program, sandbox=self.sandbox
-
+                    shell_program=self.shell_program, sandbox=policy
                 ),
                 output_dir=workspace_path.resolve()
                 / ".pickel" / "shell-output" / session_id,
@@ -747,7 +748,11 @@ class ShellExecTool(BaseTool):
                 result.exit_code != 0
                 or result.shell_status not in (ShellStatus.READY, ShellStatus.RUNNING)
             ),
-            metadata=_result_metadata(result, created_new_shell=created_new_shell),
+            metadata=_result_metadata(
+                result,
+                created_new_shell=created_new_shell,
+                sandboxed=session.shell.process.sandboxed,
+            ),
         )
 
 
@@ -1046,7 +1051,16 @@ class ShellRestartTool(BaseTool):
         description="Restart the current session shell and reset it to the workspace root.",
         input_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "sandbox": {
+                    "type": "boolean",
+                    "description": (
+                        "Restart with the sandbox enabled (default true). "
+                        "Requests to disable it are ignored unless the user has "
+                        "set sandbox.allow_disable."
+                    ),
+                },
+            },
         },
     )
 
@@ -1056,13 +1070,30 @@ class ShellRestartTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         manager = _require_shell_manager(context)
-        session = manager.restart(context.session_id, context.workspace_path)
+        requested_sandbox = bool(arguments.get("sandbox", True))
+        session = manager.restart(
+            context.session_id, context.workspace_path, sandbox=requested_sandbox
+        )
+        policy = manager.sandbox
+        ignored = (
+            not requested_sandbox
+            and policy is not None
+            and policy.enabled
+            and not policy.allow_disable
+        )
+        message = f"Shell restarted at {session.workspace_path}"
+        if ignored:
+            message += (
+                " (sandbox=false ignored: set sandbox.allow_disable in settings "
+                "to permit unsandboxed shells)"
+            )
         return ToolExecutionResult(
-            content=f"Shell restarted at {session.workspace_path}",
+            content=message,
             metadata={
                 "cwd": str(session.workspace_path),
                 "shell_status": ShellStatus.READY,
                 "restarted": True,
+                "sandboxed": session.shell.process.sandboxed,
             },
         )
 

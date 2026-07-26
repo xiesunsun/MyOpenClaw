@@ -4,8 +4,16 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
+from pickel.tools.base import ToolExecutionContext
 from pickel.tools.sandbox import SandboxPolicy, SandboxSettings
-from pickel.tools.shell import PersistentShell, ShellStatus
+from pickel.tools.services import ToolServices
+from pickel.tools.shell import (
+    PersistentShell,
+    ShellExecTool,
+    ShellRestartTool,
+    ShellSessionManager,
+    ShellStatus,
+)
 
 HAS_BWRAP = shutil.which("bwrap") is not None
 
@@ -101,3 +109,51 @@ class SandboxedShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("err", result.stdout)
             finally:
                 shell.terminate()
+
+
+def _context(workspace: Path, manager: ShellSessionManager) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        agent_id="Pickle",
+        session_id="s",
+        workspace_path=workspace,
+        services=ToolServices(shell_sessions=manager),
+    )
+
+
+class EscapeHatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disable_request_is_ignored_by_default(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manager = ShellSessionManager(sandbox=_policy(tmp))
+            context = _context(tmp, manager)
+            try:
+                result = await ShellRestartTool().execute({"sandbox": False}, context)
+
+                self.assertIn("ignored", result.content.lower())
+                self.assertEqual(HAS_BWRAP, result.metadata["sandboxed"])
+            finally:
+                manager.close(context.session_id)
+
+    async def test_disable_is_honoured_when_allowed(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manager = ShellSessionManager(sandbox=_policy(tmp, allow_disable=True))
+            context = _context(tmp, manager)
+            try:
+                result = await ShellRestartTool().execute({"sandbox": False}, context)
+
+                self.assertFalse(result.metadata["sandboxed"])
+            finally:
+                manager.close(context.session_id)
+
+    async def test_exec_metadata_reports_sandbox_state(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manager = ShellSessionManager(sandbox=_policy(tmp))
+            context = _context(tmp, manager)
+            try:
+                result = await ShellExecTool().execute({"command": "echo hi"}, context)
+
+                self.assertEqual(HAS_BWRAP, result.metadata["sandboxed"])
+            finally:
+                manager.close(context.session_id)
