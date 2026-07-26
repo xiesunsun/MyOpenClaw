@@ -226,7 +226,7 @@ class ConfigLoaderTests(unittest.TestCase):
             self.assertEqual("model-key", model.api_key)
             self.assertEqual("https://auth.example.com", model.api_base)
 
-    def test_openviking_merges_settings_strategy_and_auth_secrets(self) -> None:
+    def test_extensions_openviking_merges_settings_strategy_and_auth_secrets(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             project = Path(tmpdir) / "project"
@@ -235,10 +235,12 @@ class ConfigLoaderTests(unittest.TestCase):
             self._write_json(
                 home / "settings.json",
                 self._minimal_settings(
-                    openviking={
-                        "enabled": True,
-                        "timeout_seconds": 45,
-                        "session_recall": {"enabled": False, "max_chars": 1000, "limit": 2},
+                    extensions={
+                        "openviking": {
+                            "enabled": True,
+                            "timeout_seconds": 45,
+                            "session_recall": {"enabled": False, "max_chars": 1000, "limit": 2},
+                        }
                     }
                 ),
             )
@@ -247,25 +249,28 @@ class ConfigLoaderTests(unittest.TestCase):
                 home / "auth.json",
                 {
                     "providers": {},
-                    "openviking": {
-                        "base_url": "https://ov.example",
-                        "account_id": "acc",
-                        "user_id": "user",
-                        "user_key": "secret",
+                    "extensions": {
+                        "openviking": {
+                            "base_url": "https://ov.example",
+                            "account_id": "acc",
+                            "user_id": "user",
+                            "user_key": "secret",
+                        }
                     },
                 },
             )
 
             config = Config.load(cwd=project, home=home)
 
-            self.assertIsNotNone(config.openviking)
-            assert config.openviking is not None
-            self.assertTrue(config.openviking.enabled)
-            self.assertEqual(45.0, config.openviking.timeout_seconds)
-            self.assertEqual("https://ov.example", config.openviking.base_url)
-            self.assertEqual("secret", config.openviking.user_key)
-            self.assertFalse(config.openviking.session_recall.enabled)
-            self.assertEqual(1000, config.openviking.session_recall.max_chars)
+            from pickel.extensions.openviking.config import OpenVikingConfig
+
+            parsed = OpenVikingConfig.model_validate(config.extensions["openviking"])
+            self.assertTrue(parsed.enabled)
+            self.assertEqual(45.0, parsed.timeout_seconds)
+            self.assertEqual("https://ov.example", parsed.base_url)
+            self.assertEqual("secret", parsed.user_key)
+            self.assertFalse(parsed.session_recall.enabled)
+            self.assertEqual(1000, parsed.session_recall.max_chars)
 
     def test_missing_settings_raises_clear_error_not_reading_config_yaml(self) -> None:
         """运行时不读 config.yaml；缺 settings 时明确报错。"""

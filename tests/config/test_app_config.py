@@ -69,7 +69,7 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(5, config.context_cli_turn_window)
 
-    def test_load_defaults_openviking_session_recall(self) -> None:
+    def test_extensions_section_passes_through_raw_and_extension_parses_defaults(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
@@ -92,23 +92,29 @@ class AppConfigTests(unittest.TestCase):
                         workspace_path: workspace
                         behavior_path: agents/Pickle
                         remote_agent_id: remote-pickle
-                    openviking:
-                      enabled: true
-                      base_url: https://openviking.example
-                      account_id: account
-                      user_id: user
-                      user_key: secret
+                    extensions:
+                      openviking:
+                        enabled: true
+                        base_url: https://openviking.example
+                        account_id: account
+                        user_id: user
+                        user_key: secret
                     """
                 ).strip()
             )
 
             config = app_config_from_yaml_file(config_path)
 
-            self.assertIsNotNone(config.openviking)
-            assert config.openviking is not None
-            self.assertTrue(config.openviking.session_recall.enabled)
-            self.assertEqual(6000, config.openviking.session_recall.max_chars)
-            self.assertEqual(5, config.openviking.session_recall.limit)
+            # core 只存原始 dict，不解析
+            section = config.extensions["openviking"]
+            self.assertTrue(section["enabled"])
+            # 默认值由 extension 自己的模型给出
+            from pickel.extensions.openviking.config import OpenVikingConfig
+
+            parsed = OpenVikingConfig.model_validate(section)
+            self.assertTrue(parsed.session_recall.enabled)
+            self.assertEqual(6000, parsed.session_recall.max_chars)
+            self.assertEqual(5, parsed.session_recall.limit)
 
     def test_load_resolves_agent_paths_relative_to_config_file(self) -> None:
         with TemporaryDirectory() as tmpdir:

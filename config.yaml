@@ -51,18 +51,19 @@ agents:
       - shell_exec
       - shell_restart
       - shell_close
-openviking:
-  enabled: false
-  base_url: ${OPENVIKING_BASE_URL}
-  account_id: ${OPENVIKING_ACCOUNT_ID}
-  user_id: ${OPENVIKING_USER_ID}
-  user_key: ${OPENVIKING_USER_KEY}
-  timeout_seconds: 30
-  commit_after_minutes: 30
-  commit_after_turns: 8
-  tool_output_max_chars: 4000
-  session_recall:
+extensions:
+  openviking:
     enabled: false
-    max_chars: 6000
-    limit: 5
-    min_score: null
+    base_url: ${OPENVIKING_BASE_URL}
+    account_id: ${OPENVIKING_ACCOUNT_ID}
+    user_id: ${OPENVIKING_USER_ID}
+    user_key: ${OPENVIKING_USER_KEY}
+    timeout_seconds: 30
+    commit_after_minutes: 30
+    commit_after_turns: 8
+    tool_output_max_chars: 4000
+    session_recall:
+      enabled: false
+      max_chars: 6000
+      limit: 5
+      min_score: null

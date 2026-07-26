@@ -6,7 +6,6 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from pickel.config.environ import Environ
-from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import (
     ModelConfig,
@@ -60,7 +59,6 @@ class AppConfig(BaseModel):
     trace_enabled: bool = False
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
-    openviking: OpenVikingConfig | None = None
     # extension 的原始配置段：core 不认识任何 extension 的配置模型，
     # 解析由 extension 自己做（ExtensionHost.config）
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)

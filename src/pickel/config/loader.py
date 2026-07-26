@@ -86,18 +86,6 @@ class Config:
             providers = deep_merge(providers, merged["providers"])
         merged["providers"] = providers
 
-        openviking = merged.get("openviking")
-        auth_ov = global_auth.get("openviking")
-        if isinstance(openviking, dict) or isinstance(auth_ov, dict):
-            ov_merged: dict[str, Any] = {}
-            if isinstance(openviking, dict):
-                ov_merged = deep_merge(ov_merged, openviking)
-            if isinstance(auth_ov, dict):
-                ov_merged = deep_merge(ov_merged, auth_ov)
-            merged["openviking"] = ov_merged if ov_merged else None
-        else:
-            merged.pop("openviking", None)
-
         # settings 的 extensions.<name> 与 auth.json 的 extensions.<name> 深合并，auth 优先
         extensions: dict[str, Any] = dict(merged.get("extensions") or {})
         auth_extensions = global_auth.get("extensions") or {}

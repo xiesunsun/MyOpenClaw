@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from pickel.agents.agent import Agent
 from pickel.app.boot import Boot
+from pickel.extensions_host.loader import load_extensions
+from pickel.tools.bus import ToolBus
 from pickel.config.app_config import AppConfig
 from pickel.conversations.service import SessionService
 from pickel.context.assembler import ContextAssembler
@@ -189,21 +191,26 @@ class BootTests(unittest.TestCase):
                         workspace_path: workspace
                         behavior_path: agents/Pickle
                         remote_agent_id: remote-pickle
-                    openviking:
-                      enabled: true
-                      base_url: https://openviking.example
-                      account_id: pickel
-                      user_id: ssunxie
-                      user_key: secret
-                      session_recall:
-                        max_chars: 1234
+                    extensions:
+                      openviking:
+                        enabled: true
+                        base_url: https://openviking.example
+                        account_id: pickel
+                        user_id: ssunxie
+                        user_key: secret
+                        session_recall:
+                          max_chars: 1234
                     """
                 ).strip()
             )
 
-            _, run = Boot.from_config(app_config_from_yaml_file(config_path)).build_run(
-                agent_id="Pickle"
+            app_config = app_config_from_yaml_file(config_path)
+            loaded = load_extensions(
+                tool_bus=ToolBus(), app_config=app_config, home=root
             )
+            _, run = Boot.from_config(
+                app_config, extensions=loaded.registry
+            ).build_run(agent_id="Pickle")
 
             self.assertIsNotNone(run)
             self.assertIsInstance(run.context_assembler, ContextAssembler)
@@ -236,11 +243,24 @@ class BootTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
+                    extensions:
+                      openviking:
+                        enabled: false
+                        base_url: https://openviking.example
+                        account_id: pickel
+                        user_id: ssunxie
+                        user_key: secret
                     """
                 ).strip()
             )
 
-            _, run = Boot.from_config(app_config_from_yaml_file(config_path)).build_run()
+            app_config = app_config_from_yaml_file(config_path)
+            loaded = load_extensions(
+                tool_bus=ToolBus(), app_config=app_config, home=root
+            )
+            _, run = Boot.from_config(
+                app_config, extensions=loaded.registry
+            ).build_run()
             self.assertEqual([], run.recall_sources)
 
     def test_build_session_service_returns_session_service_with_sqlite_repo(self) -> None:
@@ -312,22 +332,27 @@ class BootTests(unittest.TestCase):
                         workspace_path: workspace
                         behavior_path: agents/Pickle
                         remote_agent_id: remote-pickle
-                    openviking:
-                      enabled: true
-                      base_url: https://openviking.example
-                      account_id: pickel
-                      user_id: ssunxie
-                      user_key: secret
-                      commit_after_minutes: 15
-                      commit_after_turns: 4
-                      tool_output_max_chars: 1000
+                    extensions:
+                      openviking:
+                        enabled: true
+                        base_url: https://openviking.example
+                        account_id: pickel
+                        user_id: ssunxie
+                        user_key: secret
+                        commit_after_minutes: 15
+                        commit_after_turns: 4
+                        tool_output_max_chars: 1000
                     """
                 ).strip()
             )
 
-            service = Boot.from_config(app_config_from_yaml_file(config_path)).build_session_service(
-                agent_id="Pickle"
+            app_config = app_config_from_yaml_file(config_path)
+            loaded = load_extensions(
+                tool_bus=ToolBus(), app_config=app_config, home=root
             )
+            service = Boot.from_config(
+                app_config, extensions=loaded.registry
+            ).build_session_service(agent_id="Pickle")
 
             self.assertIsInstance(service._session_sync, CompositeSessionSync)
             self.assertEqual(1, len(service._session_sync._syncs))

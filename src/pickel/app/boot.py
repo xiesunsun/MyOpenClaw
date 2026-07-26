@@ -1,4 +1,3 @@
-from datetime import timedelta
 from pathlib import Path
 
 from pickel.agents.agent import Agent
@@ -7,26 +6,10 @@ from pickel.agents.skills import SkillRegistry
 from pickel.conversations.service import SessionService
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import sessions_db_path
-from pickel.context import (
-    NoopSessionRecallProvider,
-    SessionRecallProvider,
-)
 from pickel.context.assembler import ContextAssembler
-from pickel.extensions.openviking.bypass_store import OpenVikingBypassStore
-from pickel.extensions.openviking.commit_policy import ThresholdCommitPolicy
-from pickel.extensions.openviking.context_client import SyncHTTPOpenVikingContextClient
-from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
-from pickel.extensions.openviking.session_recall import OpenVikingSessionRecallProvider
-from pickel.extensions.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
-from pickel.conversations.session_sync import (
-    CompositeSessionSync,
-    NoopSessionSync,
-    SessionSync,
-)
+from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
-from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
 from pickel.tools.bus import ToolBus
@@ -136,126 +119,19 @@ class Boot:
             session_service=session_service,
             context_assembler=ContextAssembler(),
             unit_window=self.app_config.context_cli_turn_window,
-            recall_sources=self.resolve_recall_sources(agent.agent_id)
-            + self._build_recall_sources(agent_id=agent.agent_id),
+            recall_sources=self.resolve_recall_sources(agent.agent_id),
             lifecycle_hooks=LifecycleHooks(
                 handlers=self.resolve_hook_handlers(agent.agent_id)
             ),
         )
         return agent, run
 
-    def _build_recall_sources(
-        self,
-        *,
-        agent_id: str | None = None,
-    ) -> list:
-        """OV session recall 开启时挂 OpenVikingRecall；否则空列表。"""
-        openviking_config = self.app_config.openviking
-        if (
-            openviking_config is None
-            or not openviking_config.enabled
-            or not openviking_config.session_recall.enabled
-        ):
-            return []
-        provider = self._build_session_recall_provider(agent_id=agent_id)
-        if isinstance(provider, NoopSessionRecallProvider):
-            return []
-        return [
-            OpenVikingRecall(
-                provider=provider,
-                max_chars=openviking_config.session_recall.max_chars,
-            )
-        ]
-
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）
         db_path = sessions_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         repository = SQLiteSessionRepository(db_path)
-        syncs = list(self.resolve_session_syncs(agent_id))
-        legacy_sync = self._build_session_sync(agent_id=agent_id, db_path=db_path)
-        if not isinstance(legacy_sync, NoopSessionSync):
-            syncs.append(legacy_sync)
-        return SessionService(repository, CompositeSessionSync(syncs))
-
-    def _build_session_sync(
-        self,
-        agent_id: str | None = None,
-        *,
-        db_path: Path | None = None,
-    ) -> SessionSync:
-        openviking_config = self.app_config.openviking
-        if openviking_config is None or not openviking_config.enabled:
-            return NoopSessionSync()
-        remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
-        if remote_agent_id is None:
-            return NoopSessionSync()
-        resolved_db = db_path or sessions_db_path()
-        resolved_db.parent.mkdir(parents=True, exist_ok=True)
-        return OpenVikingSessionSync(
-            config=openviking_config,
-            remote_agent_id=remote_agent_id,
-            client=SyncHTTPOpenVikingSessionClient(
-                openviking_config,
-                remote_agent_id=remote_agent_id,
-            ),
-            message_mapper=SessionMessageMapper(
-                tool_output_max_chars=openviking_config.tool_output_max_chars
-            ),
-            commit_policy=ThresholdCommitPolicy(
-                commit_after=timedelta(minutes=openviking_config.commit_after_minutes),
-                commit_after_turns=openviking_config.commit_after_turns,
-            ),
-            # OpenViking 游标旁路表，与 Session 核心解耦；与 sessions.db 同库
-            state_store=OpenVikingBypassStore(resolved_db),
+        return SessionService(
+            repository,
+            CompositeSessionSync(self.resolve_session_syncs(agent_id)),
         )
-
-    def _build_session_recall_provider(
-        self,
-        *,
-        agent_id: str | None = None,
-    ) -> SessionRecallProvider:
-        openviking_config = self.app_config.openviking
-        if (
-            openviking_config is None
-            or not openviking_config.enabled
-            or not openviking_config.session_recall.enabled
-        ):
-            return NoopSessionRecallProvider()
-        remote_agent_id = self._resolve_openviking_remote_agent_id(agent_id=agent_id)
-        if remote_agent_id is None:
-            return NoopSessionRecallProvider()
-        db_path = sessions_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        return OpenVikingSessionRecallProvider(
-            config=openviking_config,
-            client=SyncHTTPOpenVikingContextClient(
-                openviking_config,
-                remote_agent_id=remote_agent_id,
-            ),
-            # 与 session_sync 共用同一旁路库，读取 remote_session_id
-            state_store=OpenVikingBypassStore(db_path),
-        )
-
-    def _resolve_openviking_remote_agent_id(
-        self,
-        *,
-        agent_id: str | None = None,
-    ) -> str | None:
-        openviking_config = self.app_config.openviking
-        if openviking_config is None:
-            return None
-        resolved_agent_id = agent_id or self.app_config.default_agent
-        remote_agent_config = openviking_config.agents.get(resolved_agent_id)
-        if remote_agent_config is not None:
-            if not remote_agent_config.enabled:
-                return None
-            return remote_agent_config.remote_agent_id
-        remote_agent_id = self.app_config.get_agent_config(
-            resolved_agent_id
-        ).remote_agent_id
-        if remote_agent_id is None:
-            raise ValueError(
-                f"OpenViking is enabled but no remote_agent_id is configured for agent '{resolved_agent_id}'"
-            )
-        return remote_agent_id
