@@ -532,9 +532,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         rendered = console.export_text()
-        # Task 10: /context 展示 ModelContext 观测（不触发旧 usage service）
-        self.assertIn("ModelContext", rendered)
-        self.assertIn("predicted=true", rendered)
+        # /context：prepare 预览结构，不走旧 ContextUsageService
+        self.assertIn("Context (prepare preview)", rendered)
+        self.assertIn("prepare", rendered.lower())
         self.assertEqual(0, len(context_usage_service.calls))
 
     async def test_session_command_renders_preview(self) -> None:

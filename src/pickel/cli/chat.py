@@ -494,16 +494,20 @@ class ChatLoop:
         return True
 
     async def _render_context_command(self) -> None:
+        """展示「下一 step 将发送」的 prepare 预览 + 可选上次 API usage。
+
+        说明：不会复现上一轮 generate 时的逐字节 Request（未持久化）；
+        而是用当前 Session + Run 再跑一遍 prepare，与 ReAct 路径一致。
+        """
         run = self._run
         last_meta = getattr(self, "_last_assistant_metadata", None)
         if run is None:
             observation = ContextObservation(
                 model_context=None,
                 predicted=True,
-                note="尚无 Run",
+                note="尚无 Run，无法组装",
             )
         else:
-            # 与 ReAct 一致走 prepare；不触发 Hook
             try:
                 ctx = await prepare(
                     run=run,
@@ -520,12 +524,20 @@ class ChatLoop:
                     note=f"组装失败: {exc}",
                 )
             else:
-                predicted = last_meta is None
+                # 有具体 prepare 结果即非“空预测”；标注为预览即可
                 observation = ContextObservation(
                     model_context=ctx,
-                    predicted=predicted,
+                    predicted=False,
                     assistant_metadata=last_meta,
-                    note=None if not predicted else "尚无实际模型调用；展示预测组装",
+                    note=(
+                        "下一 step 预览（prepare 实时组装；"
+                        "不含未提交的输入框内容；before_request 未执行）"
+                        + (
+                            ""
+                            if last_meta is not None
+                            else "；本会话尚未成功完成过模型调用（无 usage）"
+                        )
+                    ),
                 )
         renderable = ModelContextRenderer().render_observation(observation)
         self._render_message("System", renderable, style="cyan")
@@ -572,5 +584,7 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
+            # 供 /context 展示上次 API usage（非 prepare 原文缓存）
+            self._last_assistant_metadata = getattr(reply, "metadata", None)
             if not event_renderer.rendered_assistant_message:
                 self._render_assistant_message(reply)

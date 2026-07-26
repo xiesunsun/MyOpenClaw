@@ -76,16 +76,16 @@ class ContextRenderer:
 
 
 class ModelContextRenderer:
-    """展示 final/predicted ModelContext 与 cache usage。"""
+    """展示 prepare 预览的 ModelContext 结构 + 可选上次 API usage。"""
 
     def render_observation(self, observation) -> RenderableType:
-        from pickel.context.observation import ContextObservation
-
-        lines: list[RenderableType] = [Text("ModelContext", style="bold")]
-        if observation.predicted:
-            lines.append(Text("predicted=true（尚无实际 ModelContext 或仅预测）", style="yellow"))
+        lines: list[RenderableType] = [Text("Context (prepare preview)", style="bold")]
         if observation.note:
-            lines.append(Text(observation.note))
+            lines.append(Text(observation.note, style="dim"))
+        if observation.predicted and observation.model_context is None:
+            lines.append(
+                Text("无法组装（见 note）", style="yellow")
+            )
         ctx = observation.model_context
         if ctx is None:
             lines.append(Text("无 ModelContext"))
@@ -97,13 +97,25 @@ class ModelContextRenderer:
         except Exception:
             lines.append(Text("model_context present"))
         meta = observation.assistant_metadata
-        if meta and meta.usage:
-            u = meta.usage
-            lines.append(
-                Text(
-                    "usage: "
-                    f"in={u.input_tokens} out={u.output_tokens} "
-                    f"cache_read={u.cache_read_tokens} cache_write={u.cache_write_tokens}"
+        if meta is not None:
+            lines.append(Text("Last model call usage:", style="bold"))
+            if meta.usage:
+                u = meta.usage
+                lines.append(
+                    Text(
+                        "  "
+                        f"in={u.input_tokens} out={u.output_tokens} "
+                        f"cache_read={u.cache_read_tokens} "
+                        f"cache_write={u.cache_write_tokens}"
+                    )
                 )
-            )
+            else:
+                lines.append(Text("  (metadata present, no usage fields)"))
+            if getattr(meta, "model", None):
+                lines.append(
+                    Text(
+                        f"  model={getattr(meta, 'provider', '')}/"
+                        f"{getattr(meta, 'model', '')}"
+                    )
+                )
         return Group(*lines)
