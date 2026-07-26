@@ -54,6 +54,7 @@ settings.json 顶层 `sandbox` 段解析（全局+项目合并沿用现有 setti
 
 ```
 bwrap --die-with-parent
+      --new-session                    # 必需，见下方实测
       --ro-bind / /                    # 整机只读
       --dev /dev --proc /proc
       --bind <workspace> <workspace>   # 写=workspace
@@ -66,7 +67,18 @@ bwrap --die-with-parent
 
 - **写默认** = workspace + `/tmp`；**读默认** = 全机减 deny 清单。
 - **读拒绝默认清单**（存在才加）：`~/.pickel`、`~/.ssh`、`~/.aws`、`~/.config/gcloud`、`~/.kube`、`~/.docker`；settings `deny_read` 增补。符号链接 resolve 后再加入。
-- pty：slave fd 经 stdio 继承进 bwrap 内进程，控制终端语义不变（bwrap 不 setsid）；S1 的 job control / stderr 管道（`pass_fds`）照常——bwrap 默认继承传入 fd。
+
+**实测结论（bwrap 0.9.0 / Ubuntu 24.04 / 内核 6.17，设计前探针）**：
+
+| 发现 | 结论 |
+| --- | --- |
+| 不加 `--new-session` 时 bwrap 内 bash 的 job control 失效（`$-` 无 `m`、`tcgetpgrp` 返回 0） | **`--new-session` 必需**——S1 的超时探测与 `shell_interrupt` 全靠前台进程组，缺它整套信号语义作废。bwrap 内置 setsid，无需外部 `setsid` 二进制 |
+| `tcgetpgrp` 返回 0 时 `killpg(0, sig)` 会打到调用方自己的进程组（探针被自己 SIGINT 过一次） | `PtyShellProcess.foreground_pgid()` 现有的 `pgid <= 0 → None` 保护是硬要求，不可移除 |
+| `--dev`（隔离设备，15 个节点）与 `--dev-bind`（宿主 `/dev`，192 个节点）在 `--new-session` 下 job control 均正常 | 取 `--dev`（最小权限）。代价：沙箱内 `tty` 显示 `/dev/console` 而非 `/dev/pts/N`，不影响任何已知行为 |
+| `pass_fds` 传入的 stderr 管道穿透 bwrap 正常 | S1 的 stdout/stderr 分离无需改动 |
+| 写 workspace 成功、写 `src/pickel`（ro-bind 盖回）与 `/usr` 被拒、`~/.pickel` tmpfs 后不可见、`git` 等常规命令可用 | 边界语义符合设计 |
+
+**环境前置**：Ubuntu 24.04 默认 `kernel.apparmor_restrict_unprivileged_userns=1` 会让 bwrap 报 `setting up uid map: Permission denied`。需为 bwrap 写 AppArmor profile（`/etc/apparmor.d/bwrap`，`userns,` 规则）后 `systemctl reload apparmor`。这属于机器一次性配置，不在代码范围内；探测不到 bwrap 或 bwrap 启动失败时按 3.5 的降级路径处理。
 
 ### 3.3 拒写自身（自修改的许可证之前，先拒）
 
@@ -128,6 +140,7 @@ workspace 就是 pickel 仓库时（本项目日常），`src/pickel` 与 `agent
 
 1. **网络不设防**——出站通道存在，但凭据文件读不到、env 里没有，可外泄面已收窄；proxy allowlist 是下一期。
 2. **策略层在 core 不做 extension**——spawn hook 位点等有第二个消费者再造；pi-sandbox 形态记录在案。
-3. **`/proc` 全量挂载**——`--proc` 标准挂载，进程列表对沙箱内可见；隔离到 pid namespace（`--unshare-pid`）会破坏 job control 探测（`tcgetpgrp` 语义不变但 `ps` 类工具行为变），首版不动。
+3. **`/proc` 全量挂载**——`--proc` 标准挂载，进程列表对沙箱内可见；隔离到 pid namespace（`--unshare-pid`）会改变 `ps` 类工具行为且与 job control 探测的宿主 pgid 语义冲突，首版不动。
+6. **`--new-session` 的副作用可接受**——沙箱内 `tty` 报 `/dev/console`；bwrap 文档把它列为防 TIOCSTI 注入的安全建议项，方向一致。
 4. **bwrap 内嵌套容器场景不支持**——容器内跑 pickel 需 `sandbox.enabled: false` 或等 S2b 的 backend 抽象。
 5. **Landlock 候选**——内核 6.17 原生支持、零依赖，但 Python 生态弱；若 bwrap 路线遇阻可切换，策略层接口不变。
