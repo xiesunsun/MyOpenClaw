@@ -2,7 +2,7 @@
 
 > **For agentic workers:** 按任务顺序实现，步骤用 checkbox 跟踪。设计依据：`docs/upgrade/2026-07-26-tool-bus-design.md`；调研依据：`docs/upgrade/2026-07-26-tools-sandbox-research.md`。
 
-**Goal:** 把静态 `ToolRegistry` 改造为进程级可变 `ToolBus`，注册表与激活集分离，工具集在 turn 边界快照，为 T2（MCP + extension）与 V1（版本管理）留好挂点。
+**Goal:** 把静态 `ToolRegistry` 改造为进程级可变 `ToolBus`，注册表与激活集分离，工具集在 turn 边界快照，为 E1（extension 宿主）、T2（MCP 客户端）与 V1（版本管理）留好挂点。
 
 **Architecture:** 三层分离 —— `ToolBus`（进程级注册表，随时可变）／`ToolActivation`（turn 级激活集，三层求交）／`ToolSnapshot`（turn 内不可变视图，prepare 与 react 共用同一份）。`ToolExecutionContext` 的 `Any` 字段收敛为强类型 `ToolServices`。
 
@@ -131,17 +131,30 @@ class ToolBusRegistrationTests(unittest.TestCase):
         self.assertEqual("mcp__github__create_issue", entry.name)
         self.assertEqual("create_issue", entry.tool.spec.name)
 
-    def test_extension_shares_mcp_prefix_but_keeps_its_source(self) -> None:
+    def test_extension_tool_uses_its_own_prefix(self) -> None:
         bus = ToolBus()
 
         name = bus.register(
-            _stub_tool("run"),
+            _stub_tool("recall_search"),
             source=ToolSource.EXTENSION,
-            origin="my_tool",
+            origin="openviking",
         )
 
-        self.assertEqual("mcp__my_tool__run", name)
+        # extension 工具跑在本进程内，与 MCP 的子进程工具前缀必须分开
+        self.assertEqual("ext__openviking__recall_search", name)
         self.assertEqual(ToolSource.EXTENSION, bus.get(name).source)
+
+    def test_same_origin_across_mcp_and_extension_does_not_collide(self) -> None:
+        bus = ToolBus()
+
+        mcp_name = bus.register(_stub_tool("run"), source=ToolSource.MCP, origin="shared")
+        ext_name = bus.register(
+            _stub_tool("run"), source=ToolSource.EXTENSION, origin="shared"
+        )
+
+        self.assertEqual("mcp__shared__run", mcp_name)
+        self.assertEqual("ext__shared__run", ext_name)
+        self.assertEqual(2, len(bus.list_names()))
 
     def test_non_builtin_without_origin_is_rejected(self) -> None:
         bus = ToolBus()
@@ -162,14 +175,23 @@ class ToolBusRegistrationTests(unittest.TestCase):
         self.assertEqual("v2", entry.version)
         self.assertFalse(entry.enabled)  # 运维关掉的工具不因重连自动打开
 
-    def test_cross_source_same_origin_conflicts(self) -> None:
-        # 加了 mcp__<origin>__ 前缀后，跨来源撞名只可能发生在两个非 builtin 来源
-        # 用了相同 origin（例如一个 MCP server 与一个 extension 都叫 shared）
+    def test_origin_containing_double_underscore_is_rejected(self) -> None:
+        # 否则 server "a" + 工具 "b__c" 与 server "a__b" + 工具 "c"
+        # 会得到同一个 mcp__a__b__c，前缀方案出现歧义
         bus = ToolBus()
-        bus.register(_stub_tool("run"), source=ToolSource.MCP, origin="shared")
+
+        with self.assertRaises(ValueError):
+            bus.register(_stub_tool("c"), source=ToolSource.MCP, origin="a__b")
+
+    def test_builtin_name_shaped_like_a_qualified_name_conflicts(self) -> None:
+        # 唯一还能触发跨来源撞名的场景：内置工具名恰好长成前缀形式
+        bus = ToolBus()
+        bus.register(_stub_tool("mcp__github__create_issue"), source=ToolSource.BUILTIN)
 
         with self.assertRaises(ToolNameConflictError):
-            bus.register(_stub_tool("run"), source=ToolSource.EXTENSION, origin="shared")
+            bus.register(
+                _stub_tool("create_issue"), source=ToolSource.MCP, origin="github"
+            )
 
     def test_builtin_and_prefixed_tool_never_collide(self) -> None:
         bus = ToolBus()
@@ -259,7 +281,10 @@ from pickel.tools.base import BaseTool
 
 
 class ToolSource(StrEnum):
-    """工具来源。extension 与 mcp 共用命名空间前缀，但来源分开记以便列举与信任分级。"""
+    """工具来源。三者命名空间前缀各自独立：builtin 裸名、mcp__、ext__。
+
+    MCP 工具跑在子进程，extension 工具跑在本进程内 —— 执行位置与信任级别不同。
+    """
 
     BUILTIN = "builtin"
     MCP = "mcp"
@@ -282,13 +307,27 @@ class ToolEntry:
     enabled: bool = True
 
 
+_PREFIX_BY_SOURCE = {
+    ToolSource.MCP: "mcp",
+    ToolSource.EXTENSION: "ext",
+}
+
+
 def qualified_name(spec_name: str, source: ToolSource, origin: str | None) -> str:
-    """按来源计算最终名。内置工具用裸名，其余加 mcp__<origin>__ 前缀。"""
+    """按来源计算最终名。
+
+    内置工具用裸名；MCP 工具加 mcp__<server>__，extension 工具加 ext__<extension>__。
+    两者前缀不同：MCP 工具跑在子进程里，extension 工具跑在本进程内，
+    执行位置与信任级别都不同，名字上就要能区分。
+    """
     if source is ToolSource.BUILTIN:
         return spec_name
     if not origin:
         raise ValueError(f"source '{source}' requires a non-empty origin")
-    return f"mcp__{origin}__{spec_name}"
+    if "__" in origin:
+        # 否则 origin 'a' + 工具 'b__c' 与 origin 'a__b' + 工具 'c' 会撞成同一个名字
+        raise ValueError(f"origin '{origin}' must not contain '__'")
+    return f"{_PREFIX_BY_SOURCE[source]}__{origin}__{spec_name}"
 
 
 class ToolBus:
@@ -326,7 +365,10 @@ class ToolBus:
         self._entries.pop(name, None)
 
     def unregister_origin(self, source: ToolSource, origin: str) -> list[str]:
-        """卸掉某来源某 origin 的全部工具，返回被卸的名字。T2 用于 MCP server 断开。"""
+        """卸掉某来源某 origin 的全部工具，返回被卸的名字。
+
+        E1 用于 extension 重载/卸载，T2 用于 MCP server 断开。
+        """
         names = [
             name
             for name, entry in self._entries.items()
@@ -375,7 +417,7 @@ def bus_with(tools: Iterable[BaseTool]) -> ToolBus:
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 ```
 
-Expected: PASS（13 passed）
+Expected: PASS（全部通过）
 
 - [ ] **Step 5: 确认全量不退化**
 
@@ -588,7 +630,7 @@ class ToolSnapshot:
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 ```
 
-Expected: PASS（19 passed）
+Expected: PASS（全部通过）
 
 - [ ] **Step 5: 确认全量不退化**
 
@@ -671,9 +713,10 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.tools.services'`
 ```python
 """工具运行期服务容器。
 
-只放进程内工具需要的服务。extension 收敛为本地 MCP server 后，
-进程内工具只剩内置工具，一个字段明确的 dataclass 就够，不做按需注入。
-S2 沙箱化时从这里替换实现即可。
+宿主提供给进程内工具的服务。extension 工具也在进程内跑，但它在装载时
+用闭包持有自己的依赖，只从这里取宿主服务；服务种类由 core 决定、数量有限，
+一个字段明确的 dataclass 就够，不做「能力声明 + 按需注入」。
+S2 沙箱化时从这里替换实现即可，工具侧代码不动。
 """
 
 from __future__ import annotations
@@ -1147,7 +1190,7 @@ Expected: FAIL，`TypeError: TurnState.__init__() got an unexpected keyword argu
 uv run --with pytest --with pytest-asyncio pytest tests/runs/test_react_tool_snapshot.py -q
 ```
 
-Expected: PASS（2 passed）
+Expected: PASS（全部通过）
 
 - [ ] **Step 5: react 在 turn 开始取快照**
 
@@ -1869,6 +1912,7 @@ git commit -m "refactor(tools): 删除 ToolRegistry 与 Run.tools 兼容层，�
 | --- | --- |
 | `tests/tools/test_shell.py` 的 6 例 ANSI 失败 | S1 |
 | `tests/providers/` 的 12 例缺 key 失败 | 环境，非代码问题 |
-| MCP 客户端与 extension 装载器 | T2 |
+| extension 宿主与装载器（hook handler / recall source / 命令 / skill 路径的注册） | E1 |
+| MCP 客户端 | T2（实现为一个内置 extension） |
 | 沙箱、跨 agent 进程隔离 | S2 |
 | `ToolEntry.version` 的填充逻辑、skill 版本与审批 | V1 |

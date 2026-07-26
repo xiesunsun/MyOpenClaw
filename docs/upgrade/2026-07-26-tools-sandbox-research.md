@@ -52,7 +52,25 @@
 | 无 stdin 交互 | 无向运行中进程写入的通道 | 交互式命令（含 sudo 提示）直接卡死 |
 | 旧命名残留 | marker 前缀 `__MYOPENCLAW_DONE_` | — |
 
-### 1.4 权限与隔离
+### 1.4 已有的扩展点（extension 宿主的事实基础）
+
+对照 Pi 的 `ExtensionAPI`，本项目已经有相当一部分位点，问题是**没有任何注册机制把第三方接上去**：
+
+| 位点 | 现状 | 缺口 |
+| --- | --- | --- |
+| hook 生命周期 | `hooks/lifecycle.py` 的 `LifecycleHooks(handlers=[...])` + `HookHandler` Protocol，6 个事件（`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PostToolBatch` / `BeforeRequest` / `TurnEnd`），决策合并规则完备（deny > ask > allow、`model_context` 覆盖、feedback 拼接） | **生产路径完全没接**：`Run.open` 只有 `lifecycle_hooks or NoopLifecycleHooks()`，`Boot` 从不传 handler。整套 hook 目前只有测试在用 |
+| 上下文召回 | `context/recall.py` 的 `Recall` Protocol（`provide(run, session, current_user_text) -> list[AgentMessage]`），`Run.recall_sources` 逐源 await 后拼进 history | 唯一实现者 openviking 由 `boot._build_recall_sources` **硬编码**装配 |
+| 会话同步 | `boot._build_session_sync` | 同样硬编码 openviking |
+| 工具 | `ToolRegistry` 静态表 | T1 改为 `ToolBus` 后可注册 |
+| 斜杠命令 | `cli/chat.py` 的 if/elif 分派 | 无注册机制 |
+| skills 路径 | `agent.skills_path` 单一路径 | 无法由扩展贡献额外路径（对应 Pi 的 `resources_discover`） |
+| system prompt 分段 | `prepare.resolve_system` 固定三段（behavior + skills_guidance + skills_catalog） | 可经 `BeforeRequest` hook 替换整个 `ModelContext`，但没有「追加一段」的窄入口 |
+| compaction | `context/compaction.py` 纯函数（`plan_keep_last_units` / `apply_compaction`） | 无 hook 位点，无法自定义摘要策略（对应 Pi 的 `session_before_compact`） |
+| provider | `create_llm_provider(model_config)` 工厂 | 无注册机制 |
+
+结论：**hook 系统与 Recall 协议已经建好，缺的是宿主侧的装载器**。`BeforeRequestDecision.model_context` 可整体替换拟发送上下文，这个位点的表达力等价于 Pi 的 `context` 事件 —— 记忆注入类 extension 已经有落脚点。
+
+### 1.5 权限与隔离
 
 | 层 | 现状 |
 | --- | --- |
@@ -108,6 +126,42 @@
 3. Pi 的 `prepareArguments(args)` 是**参数 schema 演进的兼容 shim**：resume 旧 session 时把旧参数迁移到新 schema。这是工具版本管理里最便宜、最实用的一招。
 4. Pi 明确禁止在 extension 工厂里启长驻资源（watcher / timer / 进程），必须放 `session_start` 并在 `session_shutdown` 清理 —— 热插拔正确性的关键纪律。
 5. 三家都把「项目目录来的扩展」和「用户自己的扩展」分成两个信任等级。
+
+#### extension 不是「工具的一种打包形式」
+
+这一点必须单独讲清，因为它决定了范围划分。**Pi 的 extension 是 harness 插件，`registerTool` 只是它众多能力里的一项**，且往往不是主要的那项。extension 的实质是「在 harness 的各个位点上改变 harness 自身的行为」。
+
+Pi 的 `ExtensionAPI` 能力面（按类别）：
+
+| 类别 | 能力 |
+| --- | --- |
+| 上下文与记忆 | `before_agent_start`（注入消息、改 system prompt）、`context`（在送 LLM 前重写 messages）、`session_before_compact`（自定义压缩摘要） |
+| 工具 | `registerTool`、`setActiveTools`、`tool_call`（拦截 / 改参 / block）、`tool_result`（patch 输出） |
+| provider | `registerProvider` / `unregisterProvider` / `setModel`、`before_provider_headers` / `before_provider_request` / `after_provider_response` |
+| 输入与命令 | `input` 事件（handled / transform / continue）、`registerCommand`、`registerShortcut`、`registerFlag` |
+| UI | `registerMessageRenderer` / `registerEntryRenderer`、`ctx.ui.confirm / select / input / notify / setStatus / setWidget / setTitle / custom` |
+| 会话 | `appendEntry`（不进 LLM 上下文的自定义条目）、`setSessionName` / `setLabel`、`newSession` / `fork` / `navigateTree` / `switchSession` |
+| 资源发现 | `resources_discover` 贡献 skillPaths / promptPaths / themePaths |
+| 信任 | `project_trust` 事件 |
+
+生态实例印证了这个重心分布（`awesome-pi.site/extensions`）：
+
+| 类别 | 实例 |
+| --- | --- |
+| 记忆与上下文 | `pi-memory`（跨日志语义搜索 + 长期记忆）、`pi-vault-mind`（Obsidian + LanceDB）、`pi-observational-memory`（缓存友好的分层压缩与反思）、`@cortexkit/pi-magic-context` |
+| 子代理与编排 | `pi-subagents`、`pi-crew`、`pi-taskflow`（静态验证的任务图 + 隔离子代理） |
+| 权限与沙箱 | **`pi-sandbox`（OS 级沙箱 + 交互权限提示）**、`pi-defender`、`cc-safety-net`（拦破坏性 git / fs 命令） |
+| provider 路由 | `pi-multi-account`（多账号故障转移）、`pi-auto-models`（配额驱动切换）、`pi-cache-optimizer`（稳定提示、缓存兼容） |
+| 成本与 token | `pi-lean-ctx`、`pi-mega-compact`、`pi-downshift`、`pi-caveman`（减 75% 输出 token） |
+| 会话与检查点 | `pi-chrono`（会话回滚 + 文件状态恢复）、`@ayulab/pi-rewind` |
+| 观测 | `pi-langfuse`、`@braintrust/pi-extension`、`@senad-d/observme`（OpenTelemetry） |
+| 工具类 | `pi-web-access`、`pi-shazam`（结构分析）、`pi-readseek`、`@pi-stef/atlassian` |
+
+OpenClaw 自身就是用 extension 做上下文裁剪（静默削减超大 tool result）与压缩加固（用多阶段管线替换默认摘要，保留文件操作历史与工具失败数据）。
+
+**对本项目的直接含义**：`openviking` 现在被硬编码在 `app/boot.py`（`_build_recall_sources` / `_build_session_sync` / `_build_session_recall_provider` 三大段），它本该是一个 extension —— 按 query 检索记忆并注入 context，正是 `Recall` 协议这个位点。**「extension 是本地 MCP server」是错的**：MCP 是跨进程的工具协议，喂不了 hook 位点、改不了 context 装配、注册不了斜杠命令。二者是不同层的东西，必须分开做。
+
+注意 `pi-sandbox` 的存在：**沙箱本身也可以是一个 extension**，这对 S2 的形态有直接启示。
 
 ### 3.2 版本管理
 
@@ -198,6 +252,8 @@ Hermes 的 shell 相关配置：`persistent_shell: true`（长驻 bash）、`tim
 2. **注册表可变性与激活集要分离。** Pi 的 `registerTool` + `setActiveTools` 是两件事：前者管「存在哪些工具」，后者管「这一 turn 暴露哪些给模型」。当前 `agent.tool_ids` 只有后者的静态版本。
 3. **`ToolRegistry` 需要重做成总线**：来源分层（builtin / mcp / extension）+ 版本 + 启停 + `unregister` + 列举。`Run.open` 里的一次性构造要换成注入一个长生命周期的 registry。
 4. **`ToolExecutionContext` 的 `Any` 字段是热插拔的直接障碍** —— 第三方工具需要什么服务无法声明。需要一个显式的能力/服务容器。
+
+4b. **extension 是 harness 插件，不是工具来源的一种包装。** 它要挂的是 hook 位点、context 装配、命令、UI、provider —— MCP 协议表达不了这些。因此 extension 与 MCP 是两条独立的线：MCP 是「多一个工具来源」，extension 是「多一处能改 harness 行为的地方」。二者唯一的交集是 extension 也可以 `register_tool`。**MCP 客户端本身可以实现为一个内置 extension** —— 这是检验 extension API 是否够用的好试金石。
 5. **版本管理用 git 而非自造。** 版本号缺省回落 commit SHA（Claude Code 的做法）对「agent 自改」最合适；代码目录按版本隔离、数据目录跨版本持久；旧版本延迟回收给运行中会话留宽限期。
 6. **skill 需要三样东西才能被 agent 管理**：`skill_manage` 式的定点 `patch` 工具、暂存+diff+审批通道、内容护栏扫描。skill 发现已经是热的，不用重做。
 7. **Sandbox 分两层实现，可分期**：先做「进程级边界」（Linux bubblewrap + 网络 proxy allowlist + 凭据 deny/mask + 拒写自身配置），后做「后端可换」（local / docker / ssh / 云 sandbox）。前者收益立刻兑现在 `shell_exec` 这个后门上。
@@ -209,19 +265,22 @@ Hermes 的 shell 相关配置：`persistent_shell: true`（长驻 bash）、`tim
 
 ## 五、范围分解建议
 
-用户描述的整体是多个独立子系统，不宜一份设计稿覆盖。建议拆成五个子项目，各自走「设计 → 计划 → 实施」：
+用户描述的整体是多个独立子系统，不宜一份设计稿覆盖。建议拆成六个子项目，各自走「设计 → 计划 → 实施」：
 
 | # | 子项目 | 内容 | 依赖 | 独立价值 |
 | --- | --- | --- | --- | --- |
-| **T1** | 工具总线与热插拔 | `ToolRegistry` 重做为可变总线（来源分层 / 启停 / unregister / 列举）；激活集与注册表分离；turn 边界快照；`ToolExecutionContext` 换成显式服务容器；`Run.open` 改为注入长生命周期 registry | 无 | 后续三项的地基 |
-| **T2** | 工具来源接入 | MCP 客户端（`mcp[cli]` 依赖已在）+ extension 装载机制（自动发现目录 + 信任门 + 生命周期钩子 + 动态注册） | T1 | 打通「内置 + MCP + extension」三来源 |
+| **T1** | 工具总线与热插拔 | `ToolRegistry` 重做为可变总线（来源分层 / 启停 / unregister / 列举）；激活集与注册表分离；turn 边界快照；`ToolExecutionContext` 换成显式服务容器；`Run.open` 改为注入长生命周期总线 | 无 | 后续各项的地基 |
+| **E1** | **Extension 宿主** | extension API（`register_tool` / `add_hook_handler` / `add_recall_source` / `register_command` / `add_skill_path`）；自动发现目录（用户级 + 项目级）与信任门；装载与卸载生命周期；`/reload` 重载。**把 `LifecycleHooks` 接进生产路径**（现在是死的）。验收标准：**把 openviking 从 `boot.py` 的三大段硬编码改造成第一个 extension** | T1 | harness 可被第三方改造；openviking 出 core |
+| **T2** | MCP 客户端 | stdio / SSE MCP server 连接、工具发现与命名空间、断线重连与 `unregister_origin`。**实现为一个内置 extension**，以此检验 E1 的 API 是否够用 | T1、E1 | 接入外部工具生态 |
 | **S1** | Shell 升级 | 修 ANSI 清洗（当前 6 个失败测试）、输出三档上限、stdout/stderr 分离、超时不杀会话、后台任务、stdin 交互、危险命令拦截 | 无 | **立刻可交付，修现存失败测试** |
-| **S2** | Sandbox | 进程级：Linux bubblewrap + 网络 proxy allowlist + 凭据 deny/mask + 拒写自身配置/代码 + 逃生口与严格模式；后端级：backend 抽象（local / docker / ssh），落在 `shell_exec` | S1 | 自修改的许可证 |
-| **V1** | 工具与 skill 版本管理 | git 为底的版本模型；skill frontmatter 扩展（版本 / 依赖 / 所需环境变量 / 生命周期状态）；`skill_manage` 定点 patch；暂存+diff+审批；内容护栏；工具参数 schema 演进 shim | T1、S2 | 进化的种群机制 |
+| **S2** | Sandbox | 进程级：Linux bubblewrap + 网络 proxy allowlist + 凭据 deny/mask + 拒写自身配置/代码 + 逃生口与严格模式；后端级：backend 抽象（local / docker / ssh），落在 `shell_exec`。参考 `pi-sandbox`：**沙箱策略层可以本身是一个 extension**，OS 原语在 core | S1、（E1 可选） | 自修改的许可证 |
+| **V1** | 工具与 skill 版本管理 | git 为底的版本模型；skill frontmatter 扩展（版本 / 依赖 / 所需环境变量 / 生命周期状态）；`skill_manage` 定点 patch；暂存+diff+审批；内容护栏；工具参数 schema 演进 shim。extension 的版本管理复用同一套（Pi 用 npm/git 语义，Claude Code 用 semver + git SHA 回落） | T1、E1、S2 | 进化的种群机制 |
 
-依赖关系：`T1 → T2`，`T1 + S2 → V1`，`S1 → S2`。`S1` 与 `T1` 相互独立，可并行。
+依赖关系：`T1 → E1 → T2`，`T1 + E1 + S2 → V1`，`S1 → S2`。`S1` 与 `T1` 相互独立，可并行。
 
-自进化闭环（评估器 + trace 驱动优化）是 V1 之后的第六项，本轮不设计。
+自进化闭环（评估器 + trace 驱动优化）是 V1 之后的第七项，本轮不设计。
+
+**E1 的位置变化说明**：初版分解把 extension 与 MCP 合成一个 T2，前提是「extension 收敛为本地 MCP server」。该前提是错的（见 3.1「extension 不是工具的一种打包形式」），extension 是 harness 插件层，需要独立的宿主设计，且它是 T2 与 V1 的前置而非并列项。
 
 ---
 

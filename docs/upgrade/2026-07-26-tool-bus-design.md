@@ -15,7 +15,7 @@ T1 是 T2（MCP + extension 接入）与 V1（版本管理）的地基，本身�
 | 做 | 不做 |
 | --- | --- |
 | `ToolBus` 替代 `ToolRegistry`：可变、来源分层、启停、版本字段、列举 | MCP 客户端实现（T2） |
-| 注册表与激活集分离；激活集三层求交 | extension 装载器（T2） |
+| 注册表与激活集分离；激活集三层求交 | extension 宿主与装载器（E1） |
 | turn 边界快照；prepare 与 react 共用同一份 | 沙箱与进程隔离（S2） |
 | `ToolExecutionContext` 的 `Any` 字段换成强类型 `ToolServices` | skill 版本与审批（V1） |
 | `tool_set_active` 内置工具 | 工具参数 schema 演进 shim（V1） |
@@ -137,17 +137,25 @@ class ToolBus:
     def snapshot(self, activation: ToolActivation) -> ToolSnapshot: ...
 ```
 
-`register` 同名冲突处理：同 `source` + 同 `origin` 视为重新注册（覆盖，用于 T2 的 MCP 重连）；跨 `source` 同名直接 `ToolNameConflictError` —— 命名空间前缀（3.2）已保证跨来源不会撞名，撞了就是 bug，不静默覆盖。
+`register` 的冲突规则：
+
+| 情形 | 行为 |
+| --- | --- |
+| 同 `source` + 同 `origin` + 同工具名 | 覆盖，保留原 `enabled`（用于 E1 的 extension 重载、T2 的 MCP 重连） |
+| `origin` 含 `__` | `ValueError` —— 否则 origin `a` + 工具 `b__c` 与 origin `a__b` + 工具 `c` 会撞成同一个 `mcp__a__b__c`，前缀方案出现歧义 |
+| 最终名已被别的来源占用 | `ToolNameConflictError`，不静默覆盖 |
+
+前缀分开后（3.2），跨来源撞名只剩一种可能：某个内置工具名恰好长成 `mcp__x__y` / `ext__x__y` 的形状。罕见，但静默覆盖比报错更糟。
 
 ### 3.2 命名空间
 
-| 来源 | 工具名形态 | 例 |
-| --- | --- | --- |
-| builtin | 裸名 | `read_file` |
-| mcp | `mcp__<server>__<tool>` | `mcp__github__create_issue` |
-| extension | `mcp__<ext>__<tool>` | `mcp__my_tool__run` |
+| 来源 | 工具名形态 | 例 | 执行位置 |
+| --- | --- | --- | --- |
+| builtin | 裸名 | `read_file` | 进程内 |
+| mcp | `mcp__<server>__<tool>` | `mcp__github__create_issue` | MCP 子进程 |
+| extension | `ext__<extension>__<tool>` | `ext__openviking__recall_search` | **进程内** |
 
-extension 收敛为本地 stdio MCP server（见调研结论），因此与 MCP 共用一套前缀，`ToolSource` 仍区分二者用于列举与信任分级。
+三者前缀各自独立。**extension 工具是进程内的 `BaseTool`，与 MCP 的跨进程工具是不同的东西**，不能共用 `mcp__` 前缀 —— 那会让模型（和读日志的人）误判它的执行位置与信任级别。extension 是 harness 插件（能挂 hook、能贡献 recall source、能注册命令），`register_tool` 只是它能力面里的一项；MCP 是纯工具协议。详见调研文档 3.1「extension 不是『工具的一种打包形式』」。
 
 前缀由 bus 在 `register` 时按 `source` + `origin` 计算，结果写入 `ToolEntry.name`。工具自身的 `spec.name` 保持裸名不变（工具不需要知道自己被挂在什么命名空间下）。
 
@@ -222,7 +230,9 @@ class ToolExecutionContext:
 
 消费点只有两个 helper：`tools/file_tools.py:12-14` 的 `_require_workspace_files`、`tools/shell.py:455` 的 `_require_shell_manager`，各改一行为 `context.services.*`。
 
-不做「能力声明 + 按需注入」：extension 收敛到 MCP 后，进程内工具只剩内置工具（我们自己写），一个字段明确的 dataclass 就够，多一层间接只增加理解成本。
+**不做「能力声明 + 按需注入」**，尽管 extension 工具也在进程内跑：extension 在装载时通过闭包持有自己需要的依赖（数据库连接、HTTP 客户端等，与 Pi 的 `execute(..., ctx)` 同构），只从 `context.services` 取宿主服务。宿主服务的种类由 core 决定、数量有限且我们自己写，一个字段明确的 dataclass 就够；`ToolServices` 加字段是 core 的动作，不是第三方的扩展点。多一层「声明 + 解析」只增加理解成本，不增加能力。
+
+S2 沙箱化时替换 `ToolServices` 里的实现（沙箱化的 shell / 受限文件服务），工具侧代码不动 —— 这也是保持它为窄接口的理由。
 
 ### 3.5 `tool_set_active` 内置工具
 
@@ -337,14 +347,16 @@ turn 开始（ReActStrategy.execute）
 
 ---
 
-## 8. 为 T2 / V1 预留的接口
+## 8. 为 E1 / T2 / V1 预留的接口
 
 | 后续项 | T1 已备好的挂点 |
 | --- | --- |
-| T2 MCP 接入 | `ToolSource.MCP`、命名空间前缀、`unregister_origin`（server 断开时批量卸载）、bus 跨 reload 存活 |
-| T2 extension | `ToolSource.EXTENSION` + 同一套 MCP 前缀 |
+| E1 extension 宿主 | `ToolSource.EXTENSION` + `ext__<extension>__` 前缀；`register` / `unregister_origin` 支持按 extension 名批量装卸；bus 跨 `/reload` 存活，使 extension 重载不牵连其他来源 |
+| T2 MCP 接入 | `ToolSource.MCP` + `mcp__<server>__` 前缀、`unregister_origin`（server 断开时批量卸载）、bus 跨 reload 存活 |
 | V1 版本管理 | `ToolEntry.version` / `origin` 字段已在，等待填充 |
 | S2 沙箱 | `ToolServices` 是工具获取运行期能力的唯一入口，沙箱化的 shell / 文件服务从这里替换即可 |
+
+**T1 只提供工具这一个扩展点。** E1 要接的其余位点（hook handler、recall source、斜杠命令、skill 路径）不在 T1 范围 —— 但其中 `LifecycleHooks(handlers=[...])` 与 `Recall` 协议已在仓库里建好，E1 主要缺的是宿主侧装载器（见调研文档 1.4）。
 
 ---
 
