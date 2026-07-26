@@ -141,7 +141,10 @@ class PtyShellProcess:
     def _spawn_command(self) -> list[str]:
         shell_name = Path(self.shell_program).name
         if "bash" in shell_name:
-            return [self.shell_program, "--noprofile", "--norc", "-s"]
+            # --noediting：pty 上没有人类编辑命令，不需要 readline；
+            # 不关的话 bash≥5.1 的 bracketed-paste 会把 \x1b[?2004h/l
+            # 写进 pty 流，混进工具结果进而污染发给模型的上下文
+            return [self.shell_program, "--noprofile", "--norc", "--noediting", "-s"]
         if "zsh" in shell_name:
             return [self.shell_program, "-f", "-s"]
         return [self.shell_program]
