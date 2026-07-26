@@ -11,7 +11,17 @@ from pickel.tools.file_tools import (
     ReplaceTool,
     WriteFileTool,
 )
-from pickel.tools.shell import ShellCloseTool, ShellExecTool, ShellRestartTool
+from pickel.tools.shell import (
+    ShellCloseTool,
+    ShellExecTool,
+    ShellInterruptTool,
+    ShellKillTool,
+    ShellOutputTool,
+    ShellRestartTool,
+    ShellStdinTool,
+    ShellTasksTool,
+    ShellWaitTool,
+)
 
 
 def builtin_tools() -> list[BaseTool]:
@@ -27,6 +37,12 @@ def builtin_tools() -> list[BaseTool]:
         ReplaceTool(formatter),
         WriteFileTool(formatter),
         ShellExecTool(),
+        ShellWaitTool(),
+        ShellStdinTool(),
+        ShellInterruptTool(),
+        ShellTasksTool(),
+        ShellOutputTool(),
+        ShellKillTool(),
         ShellRestartTool(),
         ShellCloseTool(),
     ]

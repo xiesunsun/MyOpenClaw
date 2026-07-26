@@ -29,11 +29,31 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
 
         tools = [
             bus.get(name).tool
-            for name in ["shell_exec", "shell_restart", "shell_close"]
+            for name in [
+                "shell_exec",
+                "shell_wait",
+                "shell_stdin",
+                "shell_interrupt",
+                "shell_tasks",
+                "shell_output",
+                "shell_kill",
+                "shell_restart",
+                "shell_close",
+            ]
         ]
 
         self.assertEqual(
-            ["shell_exec", "shell_restart", "shell_close"],
+            [
+                "shell_exec",
+                "shell_wait",
+                "shell_stdin",
+                "shell_interrupt",
+                "shell_tasks",
+                "shell_output",
+                "shell_kill",
+                "shell_restart",
+                "shell_close",
+            ],
             [tool.spec.name for tool in tools],
         )
 

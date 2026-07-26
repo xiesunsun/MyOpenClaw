@@ -44,19 +44,10 @@ raw 采集上限   2 MiB   read 循环累计超过即停止采集，标记 trunc
 
 ### 3.2 超时不杀会话（问题 2）
 
-超时后的降级阶梯，每级都先试保会话：
+**超时不发任何信号**：到点直接返回已采集的部分输出，`shell_status=RUNNING`、`timed_out=True`，会话进 pending 状态（`_pending_marker` 不清空），前台命令继续跑。杀不杀、何时杀交给模型经 `shell_interrupt` 决策（SIGINT→SIGKILL 阶梯在那里，见 3.4）。
 
-```
-超时到点
-  1. SIGINT 前台进程组（不是 shell 本身），等 2s 内出 marker
-       → 出了：会话保住，返回 timed_out=True + 已采集输出，shell_status=READY
-  2. 没出：SIGKILL 前台进程组，再等 2s
-       → 出了：同上
-  3. 还没出（shell 自身挂了/卡死）：terminate 整个会话，shell_status=TERMINATED
-```
-
-- 前台进程组 id：pty 上 `os.tcgetpgrp(master_fd)`；等于 shell 自身 pgid 时跳过 kill（没有前台命令在跑）。
-- 现状的 `interrupt()`（SIGINT 发给 shell 的进程组）是错的对象——它把信号发给 `start_new_session` 后的整个会话组，等于连 shell 一起打。改为对前台组。
+- 前台进程组 id：pty 上 `os.tcgetpgrp(master_fd)`；等于 shell 自身 pid 时视为没有前台命令。
+- 现状的 `interrupt()`（SIGINT 发给 shell 的进程组）是错的对象——它把信号发给 `start_new_session` 后的整个会话组，等于连 shell 一起打。信号一律只对前台组。
 
 ### 3.3 exec 异步化（问题 3）
 
@@ -70,9 +61,10 @@ raw 采集上限   2 MiB   read 循环累计超过即停止采集，标记 trunc
 | --- | --- |
 | `shell_wait` | 继续等当前前台命令，直到 marker 或再次超时（参数 `timeout_ms`）。返回增量输出 |
 | `shell_stdin` | 向前台命令写入文本（参数 `text`，可选 `newline=True`）。返回写入后短窗口内的增量输出 |
-| `shell_interrupt` | 对前台进程组发 SIGINT（可选 `kill=True` 升级 SIGKILL）。返回增量输出与会话状态 |
+| `shell_interrupt` | 对前台进程组发 SIGINT，2s 内 marker 不出自动升级 SIGKILL 再等 2s（`kill=True` 直接 SIGKILL）；仍不出才 terminate 会话（TERMINATED）。返回增量输出与会话状态 |
 
-- 三者共享「会话处于前台命令未完成」状态：`PersistentShell` 增 `pending_marker: str | None`，exec 超时（保住会话时）不清空，三件套据此续读。
+- 三者共享「会话处于前台命令未完成」状态：`PersistentShell` 增 `_pending_marker: str | None`（`pending` property），exec 超时不清空，三件套据此续读。
+- 三件套的 `is_error` 只看 TERMINATED：SIGINT 的 exit 130 是被请求动作的正常结果。
 - `shell_exec` 在 pending 状态被调用时报错并提示用三件套（或 `shell_interrupt` 后重试），不排队——排队语义复杂且模型容易困惑。
 
 ### 3.5 后台任务（问题 4）
@@ -95,17 +87,21 @@ shell_exec 增参数 background: bool = False
 
 ### 3.6 stdout/stderr 分离（问题 6）
 
-**stderr 走独立 pipe，stdout 留 pty**：
+**命令 stderr 走独立 pipe，stdout 与 bash 自身 stderr 留 pty**：
 
 ```python
+r, w = os.pipe()
 self._process = subprocess.Popen(..., stdin=slave_fd, stdout=slave_fd,
-                                 stderr=subprocess.PIPE, ...)
+                                 stderr=slave_fd, pass_fds=(w,), ...)
+# wrapper 组级重定向：{ :\n<command>\n} 2>&<w>
 ```
+
+- **bash 自身的 stderr 必须留在 tty**：bash 以 stderr 判定控制终端，接管道会让 job control 静默失效（前台命令不再有独立进程组，3.2/3.4 的信号语义全部失灵）。命令的 stderr 由 wrapper 花括号组上的 `2>&N` 送进 `pass_fds` 传入的管道。
 
 - 子进程视角：stdout 是 tty（保色彩/交互探测语义）、stderr 不是——绝大多数 CLI 按 stdout 判断 tty，行为不变。
 - 读循环同时 select master_fd 与 stderr pipe，分别累计。
 - 结果组装：`content` = stdout；stderr 非空时以 `--- stderr ---\n...` 附加在 content 尾部（模型一眼可辨），`metadata.stderr_chars` 记长度。上限与 3.1 共享总额度。
-- **代价声明**：marker 写在 stdout（wrapped command 的 printf），stderr 无 marker——命令结束以 stdout marker 为准，结束后再 drain stderr 一个短窗口（50ms）。stderr 与 stdout 的相对顺序不保证（本来 pty 合流也不保证到字节级）。
+- **代价声明**：marker 走 stdout（由 PROMPT_COMMAND 发射，见 §8），stderr 无 marker——命令结束以 stdout marker 为准，结束后再 drain stderr 一个短窗口（50ms）。stderr 与 stdout 的相对顺序不保证（本来 pty 合流也不保证到字节级）。
 
 ### 3.7 ANSI 清洗（问题 7）
 
@@ -178,3 +174,6 @@ _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\))
 2. **后台任务输出环形缓冲 + 落盘，不推事件**——E2 的事件总线上线后可考虑把后台任务完成推成 runtime 事件，本稿不做。
 3. **stderr 分离牺牲字节级顺序**——pty 合流本也不保证；换来的归属清晰对模型价值更大。
 4. **上限值硬编码不配置化**——需要再说（YAGNI）。
+5. **marker 由 PROMPT_COMMAND 发射，不再拼在 wrapper 行尾**（实施中发现）——前台命令死于 SIGINT 时交互式 bash 丢弃当前命令列表剩余部分，行尾 `; printf marker` 永不执行；PROMPT_COMMAND 在回到顶层提示符时必执行，中断后照样拿到 marker+退出码。marker 为空不发射、发射后即清空，避免启动噪声与重复发射。
+6. **wrapper 用花括号组包命令**——bash 先把整个复合命令解析完（stdin 队列被 parser 消费干净）再执行，命令内部的 `read` 只会等新输入，不会吃掉后续行。
+7. **超时语义比原稿更保守**（语义精化）——超时不发任何信号直接返回 RUNNING，SIGINT→SIGKILL 阶梯整体移入 `shell_interrupt`，杀进程永远是模型的显式决策。
