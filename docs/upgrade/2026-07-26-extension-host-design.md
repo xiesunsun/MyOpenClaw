@@ -184,6 +184,38 @@ core 不校验 extension 的配置内容，只做 `expand_env_vars`（沿用现�
 
 **旧的顶层 `openviking:` 段废弃**（决策已定）。`AppConfig.openviking` 字段与那行 import 一并删除。`config/migrate.py` 增一条：迁移时把旧顶层 `openviking` 段折算进 `extensions.openviking`，并在日志里说明。当前 `config.yaml` 的 `openviking.enabled` 是 `false`，破坏面很小。
 
+### 密钥从 auth.json 来
+
+现状 `config/loader.py:88-98` 对 openviking 有一段专门逻辑：settings 里的 `openviking`（策略）与 `auth.json` 里的 `openviking`（`user_key` 等密钥）深合并，auth 优先。`migrate.py` 也按「策略进 settings、密钥进 auth」拆分。
+
+extension 化后这段要通用化，而不是删掉 —— 否则 extension 的密钥只能写进 settings，与既有的密钥分离约定相悖：
+
+```python
+        # settings 的 extensions.<name> 与 auth.json 的 extensions.<name> 深合并，auth 优先
+        extensions: dict[str, Any] = dict(merged.get("extensions") or {})
+        auth_extensions = global_auth.get("extensions") or {}
+        if isinstance(auth_extensions, dict):
+            for name, auth_section in auth_extensions.items():
+                if isinstance(auth_section, dict):
+                    extensions[name] = deep_merge(extensions.get(name) or {}, auth_section)
+        merged["extensions"] = extensions
+```
+
+`auth.json` 的形态：
+
+```json
+{
+  "providers": { "...": {} },
+  "extensions": {
+    "openviking": { "user_key": "...", "account_id": "...", "user_id": "..." }
+  }
+}
+```
+
+`migrate.py` 的折算相应分两路：旧 `auth.json` 顶层 `openviking` 段 → `auth.json` 的 `extensions.openviking`；旧 settings 顶层 `openviking` 段 → settings 的 `extensions.openviking`。
+
+`auth_providers` 那条既有通路（`AppConfig.auth_providers`，供 `resolve_model_config` 回填模型密钥）不动 —— 那是 provider 的密钥，与 extension 无关。
+
 ### 启用与禁用
 
 `enabled` 由 extension 自己的配置模型定义（openviking 已有该字段），core 不强制。理由：core 不认识 extension 的配置模型，无法在解析前判断 `enabled`；而 extension 在 `setup` 里 `if not config.enabled: return` 一行就够，比 core 多加一层 `extensions.<name>.enabled` 约定更简单。

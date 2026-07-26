@@ -10,7 +10,10 @@
 
 ## Global Constraints
 
-- 每个任务结束时测试基线不得退化。**基线（T1 开始前实测）：`18 failed, 331 passed, 1 skipped`**。判据是**失败数恒为 18 且失败清单逐条不变**，通过数只增不减。其中 6 例 `tests/tools/test_shell.py` 失败源于 Linux bash bracketed-paste 转义（属 S1，不在本计划范围），12 例 `tests/providers/test_gemini.py` 与 `test_model_context_generate.py` 失败源于缺 `GEMINI_API_KEY`。T1 不得让失败数增加。
+- 每个任务结束时测试基线不得退化。**基线（T1 开始前实测）：`18 failed, 331 passed, 1 skipped`**。判据是**失败数恒为 18 且按文件的失败分布不变**，通过数只增不减。构成：6 例 `tests/tools/test_shell.py`（Linux bash bracketed-paste 转义，属 S1）；12 例缺 API key 的 provider 初始化失败，分散在 `tests/app/test_assembly.py`(3)、`tests/cli/test_chat_loop.py`(1)、`tests/providers/test_gemini.py`(7)、`tests/providers/test_model_context_generate.py`(1)。核对用：
+  ```bash
+  uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | grep FAILED | sed 's/::.*//' | sort | uniq -c
+  ```
 - 测试命令：`uv run --with pytest --with pytest-asyncio pytest -q`（本仓库 `pyproject.toml` 未声明 pytest 依赖，必须用 `--with`）。
 - 新模块首行 `from __future__ import annotations`，与 `src/pickel/tools/` 现有模块一致。
 - 注释与 docstring 用中文，命名直接通俗（`AGENTS.md` 编码原则）。

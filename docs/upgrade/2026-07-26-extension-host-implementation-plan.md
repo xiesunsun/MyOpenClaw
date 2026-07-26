@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 测试命令：`uv run --with pytest --with pytest-asyncio pytest -q`。
-- 基线：T1 完成后的失败集合（应为 6 例 `tests/tools/test_shell.py` ANSI + 12 例 `tests/providers/` 缺 key）。**判据是失败清单逐条不变**，通过数只增不减。
+- 基线：T1 完成后的失败集合 —— 6 例 `tests/tools/test_shell.py`（ANSI，属 S1）+ 12 例缺 API key 的 provider 初始化失败（分散在 `tests/app/test_assembly.py`、`tests/cli/test_chat_loop.py`、`tests/providers/`）。**判据是失败数恒为 18 且按文件的分布不变**，通过数只增不减。核对用 `pytest -q 2>&1 | grep FAILED | sed 's/::.*//' | sort | uniq -c`。
 - 新模块首行 `from __future__ import annotations`。注释与 docstring 用中文，命名直接（`AGENTS.md`）。
 - **包名区分**：`pickel.extensions_host`（core 侧宿主）与 `pickel.extensions`（内置 extension 存放处）。不要混。
 - extension 的身份是发现时的目录名，不可自报；`ExtensionHost` 是 per-extension 实例，绑定该名字。
