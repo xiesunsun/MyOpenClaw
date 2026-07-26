@@ -235,6 +235,18 @@ extension 化后这段要通用化，而不是删掉 —— 否则 extension 的
 
 `PICKEL_HOME` 环境变量已被 `paths.home_dir()` 支持，测试用它指向临时目录即可，不需要额外的注入口子。
 
+装载结果的实际形状（实现定稿）：
+
+```python
+@dataclass
+class LoadResult:
+    registry: ExtensionRegistry     # 收集到的贡献
+    errors: list[ExtensionLoadError]
+    modules: dict[str, ModuleType]  # 已成功装载的模块，供 teardown_extensions 用
+```
+
+`load_extensions(..., builtin_package=None)` 可关掉内置发现 —— 实施中发现搬进 `extensions/` 的 openviking 会被 loader 单测扫到，测试用该参数隔离；生产默认 `"pickel.extensions"` 不变。
+
 ### 失败隔离
 
 | 失败 | 行为 |
@@ -271,7 +283,8 @@ extension 化后这段要通用化，而不是删掉 —— 否则 extension 的
 | extension 装载失败 | 隔离、记错、继续；已注册工具回滚 |
 | 工厂求值抛异常 | 记错，该贡献视为 `None`（等于该 agent 不启用它），不影响 Run 构造 |
 | hook handler 抛异常 | 沿用 `lifecycle.py:_call` 的 best-effort 吞掉 |
-| recall source 抛异常 | **现状 `resolve_recalls` 无保护，会冒泡打断 turn。** E1 补上：逐源 try/except，失败源记错后跳过 |
+| recall source 抛异常 | 逐源 try/except，失败源记日志后跳过（E1 已实现，`context/prepare.py`） |
+| openviking 启用但 agent 无 `remote_agent_id` | **行为变更**：迁移前 boot 路径抛 `ValueError`（agent 起不来）；工厂路径返回 `None`（该 agent 不启用该贡献）。extension 配不全不该弄挂 agent |
 | session sync 抛异常 | `CompositeSessionSync` 记错后继续下一个 |
 | 两个 extension 同名（内置与用户级重名） | 用户级覆盖内置，记一条 warning。理由：允许用户就地替换内置实现 |
 | extension 注册的工具名与内置工具撞 | 由 T1 的 `ext__` 前缀保证不会撞 |
@@ -312,3 +325,5 @@ extension 化后这段要通用化，而不是删掉 —— 否则 extension 的
 3. **装载序固定为「内置 → 用户级，同级字典序」**，无显式 priority。多个 extension 争同一位点（例如两个都想改 `model_context`）时，靠既有合并规则（最后一个覆盖）裁决。若将来出现真实冲突，再引入 priority。
 4. **`setup` 只在启动与 `/reload` 时跑一次**，没有 Pi 的「运行时动态注册」（`session_start` 内 `registerTool` 立即生效）。E1 的注册表在 turn 边界之外变更，与 T1 的快照语义天然兼容；动态注册留给 E2。
 5. **`AgentScope` 只带 `agent_id` + `app_config`。** 工厂拿不到 Run / Session（它们此时还不存在）。需要会话级状态的 extension 只能在 hook handler 的事件里拿 —— 这与 Pi 的 `ctx` 分层一致。
+6. **`/reload` 的 extension 重载是「先卸后装」**（`teardown_extensions` → `load_extensions_async`），在 ChatLoop 的事件循环内直接 await（不能 `asyncio.run`）。`LoadResult` 经 `Boot.extension_result` 从 CLI 装载入口传递到 ChatLoop。
+7. **`build_session_service` 恒返回 `CompositeSessionSync`**（可能为空），不再有 Noop/具体类型二分 —— 调用方无需判型，坏 sync 由 Composite 逐个隔离。

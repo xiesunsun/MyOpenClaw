@@ -83,7 +83,7 @@ Task 7c 是**原子切换点**：在它之前 openviking 走旧的 `boot._build_
   - `NoopSessionSync`
   - `CompositeSessionSync(syncs: Sequence[SessionSync])` —— 逐个调用，单个异常隔离
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/conversations/test_session_sync.py`（若 `tests/conversations/` 无 `__init__.py` 则一并创建空文件）：
 
@@ -161,7 +161,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/conversations/test_session_sync.py -q
@@ -169,7 +169,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/conversations/test_sessi
 
 Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.conversations.session_sync'`
 
-- [ ] **Step 3: 实现 `src/pickel/conversations/session_sync.py`**
+- [x] **Step 3: 实现 `src/pickel/conversations/session_sync.py`**
 
 ```python
 """会话同步协议与组合器。
@@ -262,7 +262,7 @@ class CompositeSessionSync:
             )
 ```
 
-- [ ] **Step 4: 集成层改为从 core import**
+- [x] **Step 4: 集成层改为从 core import**
 
 `src/pickel/integrations/openviking/session_sync.py`：删掉 `SessionSync` Protocol 与 `NoopSessionSync` 两个定义，顶部改为
 
@@ -272,7 +272,7 @@ from pickel.conversations.session_sync import NoopSessionSync, SessionSync
 
 保留 `OpenVikingSessionSync`。若该文件不再用到 `Protocol`，从 `typing` import 里去掉。
 
-- [ ] **Step 5: 改 core 与 boot 的 import**
+- [x] **Step 5: 改 core 与 boot 的 import**
 
 ```bash
 grep -rn "from pickel.integrations.openviking.session_sync import" src/ tests/ | grep -v __pycache__
@@ -280,7 +280,7 @@ grep -rn "from pickel.integrations.openviking.session_sync import" src/ tests/ |
 
 对每个命中点：`SessionSync` / `NoopSessionSync` 改从 `pickel.conversations.session_sync` import；`OpenVikingSessionSync` 保持原路径。`conversations/service.py` 与 `app/boot.py` 都在此列。
 
-- [ ] **Step 6: 跑测试**
+- [x] **Step 6: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/conversations/ tests/integrations/ -q 2>&1 | tail -3
@@ -289,7 +289,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/pickel/conversations/session_sync.py src/pickel/conversations/service.py \
@@ -310,7 +310,7 @@ git commit -m "refactor(conversations): SessionSync 协议回归 core，新增 C
 **Interfaces:**
 - Produces: `AppConfig.extensions: dict[str, dict[str, Any]]`；loader 把 settings 的 `extensions.<name>` 与 `auth.json` 的 `extensions.<name>` 深合并（auth 优先）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/config/test_extensions_config.py`：
 
@@ -388,7 +388,7 @@ if __name__ == "__main__":
 
 先跑一次确认 `Config.load(cwd=..., home=...)` 的入参形态与断言中的配置最小集能通过校验；若 `AppConfig` 还要求别的必填键，按报错补进 `settings` 字典（不要改 `AppConfig` 的必填性）。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/config/test_extensions_config.py -q
@@ -396,7 +396,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/config/test_extensions_c
 
 Expected: FAIL，`AttributeError: 'AppConfig' object has no attribute 'extensions'`
 
-- [ ] **Step 3: 加 `AppConfig.extensions`**
+- [x] **Step 3: 加 `AppConfig.extensions`**
 
 `src/pickel/config/app_config.py`，在 `openviking` 字段附近加：
 
@@ -408,7 +408,7 @@ Expected: FAIL，`AttributeError: 'AppConfig' object has no attribute 'extension
 
 `openviking` 字段与其 import **本任务保留**（Task 7c 才删），保证中间状态可跑。
 
-- [ ] **Step 4: loader 通用合并**
+- [x] **Step 4: loader 通用合并**
 
 `src/pickel/config/loader.py`，在现有 openviking 专段（约 line 89-99）**之后**插入：
 
@@ -428,7 +428,7 @@ Expected: FAIL，`AttributeError: 'AppConfig' object has no attribute 'extension
 
 openviking 专段本任务保留，Task 7c 删。
 
-- [ ] **Step 5: 跑测试**
+- [x] **Step 5: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/config/ -q 2>&1 | tail -3
@@ -437,7 +437,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pickel/config/app_config.py src/pickel/config/loader.py tests/config/test_extensions_config.py
@@ -460,7 +460,7 @@ git commit -m "feat(config): extensions 配置段，settings 与 auth 深合并"
   - `ExtensionRegistry`：`hook_factories` / `recall_factories` / `sync_factories`（各 `list[Callable[[AgentScope], Any | None]]`）；`extension_names: list[str]`；`hook_handlers(scope)` / `recall_sources(scope)` / `session_syncs(scope)` 三个求值方法（过滤 `None`、异常隔离）
   - `ExtensionHost(name, config_section, tool_bus, registry)`：`register_tool(tool)` / `add_hook_handler(factory)` / `add_recall_source(factory)` / `add_session_sync(factory)` / `config(model)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/extensions_host/__init__.py`（空）与 `tests/extensions_host/test_host.py`：
 
@@ -589,7 +589,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/ -q
@@ -597,7 +597,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/ -q
 
 Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.extensions_host'`
 
-- [ ] **Step 3: 实现 `errors.py`**
+- [x] **Step 3: 实现 `errors.py`**
 
 ```python
 """Extension 宿主的错误类型。"""
@@ -613,7 +613,7 @@ class ExtensionConfigError(Exception):
     """extension 的配置段校验失败。"""
 ```
 
-- [ ] **Step 4: 实现 `registry.py`**
+- [x] **Step 4: 实现 `registry.py`**
 
 ```python
 """Extension 贡献的收集与求值。"""
@@ -683,7 +683,7 @@ class ExtensionRegistry:
         return results
 ```
 
-- [ ] **Step 5: 实现 `host.py`**
+- [x] **Step 5: 实现 `host.py`**
 
 ```python
 """给 extension 用的宿主 API。
@@ -760,7 +760,7 @@ class ExtensionHost:
         self._registry.sync_factories.append(factory)
 ```
 
-- [ ] **Step 6: 实现 `__init__.py`**
+- [x] **Step 6: 实现 `__init__.py`**
 
 ```python
 """Extension 宿主：发现、装载并收集 extension 的贡献。
@@ -781,7 +781,7 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 7: 跑测试**
+- [x] **Step 7: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/ -q
@@ -790,7 +790,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/pickel/extensions_host/ tests/extensions_host/
@@ -814,7 +814,7 @@ git commit -m "feat(extensions): ExtensionHost 与贡献注册表"
   - `async def load_extensions_async(...)` —— `setup` 可为 `async def`；同步入口内部 `asyncio.run`
   - `teardown_extensions(...)`：对已装载模块调可选的 `teardown(host)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/extensions_host/test_loader.py`：
 
@@ -1019,7 +1019,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/test_loader.py -q
@@ -1027,7 +1027,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/test_loa
 
 Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.extensions_host.loader'`
 
-- [ ] **Step 3: 建内置 extension 包**
+- [x] **Step 3: 建内置 extension 包**
 
 `src/pickel/extensions/__init__.py`：
 
@@ -1035,7 +1035,7 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.extensions_host.l
 """内置 extension 存放处。每个子目录一个 extension，暴露 setup(host)。"""
 ```
 
-- [ ] **Step 4: 实现 `loader.py`**
+- [x] **Step 4: 实现 `loader.py`**
 
 ```python
 """Extension 发现与装载。
@@ -1210,7 +1210,7 @@ def _import_from_path(name: str, path: Path) -> ModuleType:
 
 `except (ExtensionConfigError, Exception)` 里 `ExtensionConfigError` 是冗余的（它是 `Exception` 子类），写出来只为表达意图；实现时可简化为 `except Exception`，行为一致。
 
-- [ ] **Step 5: 导出 `load_extensions`**
+- [x] **Step 5: 导出 `load_extensions`**
 
 `src/pickel/extensions_host/__init__.py` 增加：
 
@@ -1225,7 +1225,7 @@ from pickel.extensions_host.loader import (
 
 并把这四个名字加进 `__all__`。
 
-- [ ] **Step 6: 跑测试**
+- [x] **Step 6: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions_host/ -q
@@ -1234,7 +1234,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/pickel/extensions_host/loader.py src/pickel/extensions_host/__init__.py \
@@ -1252,7 +1252,7 @@ git commit -m "feat(extensions): ExtensionLoader 发现装载与失败隔离"
 - Modify: `src/pickel/context/prepare.py`
 - Test: `tests/context/test_prepare.py`（追加）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/context/test_prepare.py`（pytest 函数式）追加：
 
@@ -1291,7 +1291,7 @@ def test_failing_recall_source_does_not_break_the_turn():
 
 若 `_run()` helper 已在 Task 6 of T1 被改造为不带 `tools`，直接沿用其当前形态。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/context/test_prepare.py -q -k recall
@@ -1299,7 +1299,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/context/test_prepare.py 
 
 Expected: FAIL，`RuntimeError: recall exploded` 冒泡
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/pickel/context/prepare.py` 的 `resolve_recalls`，把循环体改为：
 
@@ -1323,7 +1323,7 @@ Expected: FAIL，`RuntimeError: recall exploded` 冒泡
 
 文件顶部加 `import logging` 与 `logger = logging.getLogger(__name__)`（若已有则复用）。
 
-- [ ] **Step 4: 跑测试**
+- [x] **Step 4: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/context/ -q 2>&1 | tail -3
@@ -1332,7 +1332,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试通过；全量失败清单不变。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/pickel/context/prepare.py tests/context/test_prepare.py
@@ -1355,7 +1355,7 @@ git commit -m "fix(context): recall 单源失败不再打断 turn"
   - `build_run` 传 `recall_sources` 与 `lifecycle_hooks=LifecycleHooks(handlers=...)`
   - `build_session_service` 用 `CompositeSessionSync`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/app/test_boot_extensions.py`：
 
@@ -1411,7 +1411,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/app/test_boot_extensions.py -q
@@ -1419,7 +1419,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/app/test_boot_extensions
 
 Expected: FAIL，`TypeError: Boot.from_config() got an unexpected keyword argument 'extensions'`
 
-- [ ] **Step 3: Boot 接受 registry**
+- [x] **Step 3: Boot 接受 registry**
 
 `src/pickel/app/boot.py`：
 
@@ -1455,7 +1455,7 @@ from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
 ```
 
-- [ ] **Step 4: 加三个求值方法**
+- [x] **Step 4: 加三个求值方法**
 
 `Boot` 类内追加：
 
@@ -1476,7 +1476,7 @@ from pickel.hooks.lifecycle import LifecycleHooks
 
 `SimpleNamespace` 假 config 没有 `default_agent`，测试里都显式传了 agent_id，所以 `_scope` 里的 `or self.app_config.default_agent` 只在 agent_id 为 None 时才求值 —— 测试不会踩到。
 
-- [ ] **Step 5: `build_run` 用 registry 的贡献**
+- [x] **Step 5: `build_run` 用 registry 的贡献**
 
 把 `build_run` 里的
 
@@ -1496,7 +1496,7 @@ from pickel.hooks.lifecycle import LifecycleHooks
 
 `_build_recall_sources`（openviking 旧路径）**本任务保留并列**，Task 7c 删除后只剩 registry 一路。`Run.open` 的 `lifecycle_hooks` 参数已存在，此处首次在生产路径传入非 Noop 的实例。
 
-- [ ] **Step 6: `build_session_service` 用 Composite**
+- [x] **Step 6: `build_session_service` 用 Composite**
 
 把
 
@@ -1520,7 +1520,7 @@ from pickel.hooks.lifecycle import LifecycleHooks
 
 `NoopSessionSync` 从 `pickel.conversations.session_sync` import（Task 1 已迁）。Task 7c 删掉 `_build_session_sync` 后这里简化为 `CompositeSessionSync(self.resolve_session_syncs(agent_id))`。
 
-- [ ] **Step 7: 跑测试**
+- [x] **Step 7: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/app/ tests/integrations/ -q 2>&1 | tail -3
@@ -1529,7 +1529,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变（openviking 仍走旧路径，行为不变）。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/pickel/app/boot.py tests/app/test_boot_extensions.py
@@ -1547,7 +1547,7 @@ git commit -m "feat(app): Boot 接 ExtensionRegistry，LifecycleHooks 接进生�
 - Move: `tests/integrations/openviking/` → `tests/extensions/openviking/`
 - Modify: 全仓库对旧路径的 import
 
-- [ ] **Step 1: 搬家**
+- [x] **Step 1: 搬家**
 
 ```bash
 git mv src/pickel/integrations/openviking src/pickel/extensions/openviking
@@ -1566,7 +1566,7 @@ git rm src/pickel/integrations/__init__.py tests/integrations/__init__.py
 touch tests/extensions/__init__.py && git add tests/extensions/__init__.py
 ```
 
-- [ ] **Step 2: 批量改 import 路径**
+- [x] **Step 2: 批量改 import 路径**
 
 ```bash
 grep -rl "pickel\.integrations\.openviking" src/ tests/ | grep -v __pycache__ | \
@@ -1581,7 +1581,7 @@ grep -rn "integrations" src/ tests/ | grep -v __pycache__
 
 Expected: 无命中（`docs/openviking/` 下的文档不在此列，不改）。
 
-- [ ] **Step 3: 跑全量**
+- [x] **Step 3: 跑全量**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -1589,7 +1589,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 全量失败清单不变。纯搬家不该改变任何行为。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A src/pickel tests/
@@ -1609,7 +1609,7 @@ git commit -m "refactor: openviking 集成迁入 extensions/ 目录（纯搬家�
 **Interfaces:**
 - Produces: `setup(host: ExtensionHost) -> None`；内部两个工厂 `_make_recall(scope)` / `_make_session_sync(scope)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/extensions/openviking/test_setup.py`：
 
@@ -1701,7 +1701,7 @@ if __name__ == "__main__":
 
 最后一个用例的 `app_config` 形状要与实现里读取 `remote_agent_id` 的方式对齐 —— 先看现状 `boot._resolve_openviking_remote_agent_id` 的读法（先查 `openviking.agents.<id>`，再查 `app_config.get_agent_config(<id>).remote_agent_id`），实现时保持同样的优先级，测试的假 config 按实现调整。**不要改变原有优先级**，那是行为回归面。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions/openviking/test_setup.py -q
@@ -1709,7 +1709,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/extensions/openviking/te
 
 Expected: FAIL，`ImportError: cannot import name 'setup'`
 
-- [ ] **Step 3: 实现 `setup()`**
+- [x] **Step 3: 实现 `setup()`**
 
 `src/pickel/extensions/openviking/__init__.py`。把 `boot.py` 的四个方法（`_build_recall_sources` / `_build_session_sync` / `_build_session_recall_provider` / `_resolve_openviking_remote_agent_id`）逐段搬过来，改写为模块级函数 + 两个工厂。骨架：
 
@@ -1797,7 +1797,7 @@ def _make_recall(config: OpenVikingConfig, scope) -> Any | None:
 
 **行为回归要点**：迁移前 `_resolve_openviking_remote_agent_id` 在「openviking 启用但 agent 无 `remote_agent_id`」时抛 `ValueError`；工厂路径改为返回 `None`（该 agent 不启用）。这是有意的行为变更 —— 一个 extension 配不全不该让 agent 起不来。在 `setup` 的 docstring 里写明。
 
-- [ ] **Step 4: 跑测试**
+- [x] **Step 4: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/extensions/ -q 2>&1 | tail -3
@@ -1806,7 +1806,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 新测试全过；全量失败清单不变（尚未接线，旧路径仍在跑）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/pickel/extensions/openviking/__init__.py tests/extensions/openviking/test_setup.py
@@ -1825,7 +1825,7 @@ git commit -m "feat(extensions): openviking 的 setup 与两个 per-agent 工厂
 - Modify: `src/pickel/config/loader.py`（删 openviking 专段）
 - Modify: `config.yaml`（顶层 `openviking:` → `extensions.openviking:`）
 
-- [ ] **Step 1: 改 `config.yaml`**
+- [x] **Step 1: 改 `config.yaml`**
 
 把顶层 `openviking:` 整段改为 `extensions.openviking:`（缩进整体右移两格）：
 
@@ -1848,7 +1848,7 @@ extensions:
       min_score: null
 ```
 
-- [ ] **Step 2: 删 boot 的四个方法与并列路径**
+- [x] **Step 2: 删 boot 的四个方法与并列路径**
 
 `src/pickel/app/boot.py`：
 
@@ -1857,15 +1857,15 @@ extensions:
 - `build_session_service` 简化为 `SessionService(repository, CompositeSessionSync(self.resolve_session_syncs(agent_id)))`
 - 删掉全部 openviking import 与 `SessionRecallProvider` / `NoopSessionRecallProvider` / `SessionSync` / `NoopSessionSync` / `timedelta` 等只被删除代码用到的 import
 
-- [ ] **Step 3: 删 `AppConfig.openviking`**
+- [x] **Step 3: 删 `AppConfig.openviking`**
 
 `src/pickel/config/app_config.py`：删 `openviking: OpenVikingConfig | None = None` 字段与 `from pickel.extensions.openviking.config import OpenVikingConfig`（Task 7a 后路径已变）。
 
-- [ ] **Step 4: 删 loader 的 openviking 专段**
+- [x] **Step 4: 删 loader 的 openviking 专段**
 
 `src/pickel/config/loader.py`：删掉 Task 2 Step 4 保留的那段（`openviking = merged.get("openviking")` 起、`merged.pop("openviking", None)` 止）。`extensions` 段的通用合并保留。
 
-- [ ] **Step 5: 解耦验收**
+- [x] **Step 5: 解耦验收**
 
 ```bash
 grep -rn "openviking" src/pickel/app/ src/pickel/config/ src/pickel/conversations/ src/pickel/context/ | grep -v __pycache__
@@ -1873,7 +1873,7 @@ grep -rn "openviking" src/pickel/app/ src/pickel/config/ src/pickel/conversation
 
 Expected: **无命中**（`config/migrate.py` 的迁移逻辑是 Task 9 才加，此时也应无命中）。这是 E1 的核心判据。
 
-- [ ] **Step 6: 跑全量**
+- [x] **Step 6: 跑全量**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -5
@@ -1885,7 +1885,7 @@ Expected: 全量失败清单不变。若 `tests/config/` 有断言 `AppConfig.op
 grep -rn "\.openviking\b\|_build_session_sync\|_build_recall_sources" tests/ | grep -v __pycache__
 ```
 
-- [ ] **Step 7: 手动验收**
+- [x] **Step 7: 手动验收**
 
 ```bash
 uv run pickel chat
@@ -1893,7 +1893,7 @@ uv run pickel chat
 
 确认能正常起对话（`extensions.openviking.enabled` 为 `false`，等于零注册）。退出。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A src/pickel config.yaml tests/
@@ -1912,7 +1912,7 @@ core 不再有任何 openviking 引用。"
 - Modify: `src/pickel/cli/chat.py`（`_handle_reload_command`、装载错误渲染）
 - Test: `tests/cli/test_extension_load_errors.py`（新建）
 
-- [ ] **Step 1: `_boot()` 装载 extension**
+- [x] **Step 1: `_boot()` 装载 extension**
 
 `src/pickel/cli/main.py` 的 `_boot()`：
 
@@ -1929,7 +1929,7 @@ def _boot() -> Boot:
 
 顶部 import 增加 `ToolBus`、`install_builtin_tools`、`load_extensions`。**装载错误只警告、不阻止启动**。
 
-- [ ] **Step 2: `/reload` 重载 extension**
+- [x] **Step 2: `/reload` 重载 extension**
 
 `src/pickel/cli/chat.py` 的 `_handle_reload_command`：在 `Boot.from_config(...)` 之前，先卸载再重装：
 
@@ -1954,7 +1954,7 @@ def _boot() -> Boot:
 
 若嫌在同步方法里 `asyncio.run` 别扭，给 `teardown_extensions` 加一个同步包装 `teardown_extensions_sync(result, *, tool_bus)`，内部 `asyncio.run`，与 `load_extensions` 的形态一致。
 
-- [ ] **Step 3: 写测试**
+- [x] **Step 3: 写测试**
 
 创建 `tests/cli/test_extension_load_errors.py`，测「装载失败只警告不抛」：
 
@@ -1994,7 +1994,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 4: 跑全量**
+- [x] **Step 4: 跑全量**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -2002,7 +2002,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 全量失败清单不变。
 
-- [ ] **Step 5: 手动验收**
+- [x] **Step 5: 手动验收**
 
 ```bash
 mkdir -p ~/.pickel/extensions/probe
@@ -2033,7 +2033,7 @@ uv run pickel chat
 rm -rf ~/.pickel/extensions/probe
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pickel/cli/ tests/cli/test_extension_load_errors.py
@@ -2050,7 +2050,7 @@ git commit -m "feat(cli): 启动与 /reload 装载 extension，错误只警告�
 
 旧 `config.yaml` 的顶层 `openviking` 段要分两路折算：策略 → settings 的 `extensions.openviking`；密钥 → `auth.json` 的 `extensions.openviking`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/config/test_migrate.py` 的测试类里追加。该文件已有 `_write_yaml` 与 `_minimal_yaml` helper（见 line 93 附近用法），直接复用：
 
@@ -2112,13 +2112,13 @@ git commit -m "feat(cli): 启动与 /reload 装载 extension，错误只警告�
 grep -n '"openviking"' tests/config/test_migrate.py
 ```
 
-- [ ] **Step 2: 实现**
+- [x] **Step 2: 实现**
 
 `src/pickel/config/migrate.py`：
 - `_build_settings` 里把 `settings["openviking"] = strategy` 改为 `settings.setdefault("extensions", {})["openviking"] = strategy`
 - `_build_auth` 里把 `auth["openviking"] = ov_secrets` 改为 `auth.setdefault("extensions", {})["openviking"] = ov_secrets`
 
-- [ ] **Step 3: 跑测试**
+- [x] **Step 3: 跑测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/config/ -q 2>&1 | tail -3
@@ -2127,7 +2127,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: 全量失败清单不变。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/pickel/config/migrate.py tests/config/test_migrate.py
@@ -2138,7 +2138,7 @@ git commit -m "feat(config): migrate 把旧 openviking 段折算进 extensions"
 
 ## Task 10: 验收与文档校对
 
-- [ ] **Step 1: 解耦判据**
+- [x] **Step 1: 解耦判据**
 
 ```bash
 grep -rn "openviking" src/pickel/app/ src/pickel/config/app_config.py src/pickel/config/loader.py \
@@ -2153,7 +2153,7 @@ wc -l src/pickel/app/boot.py
 
 Expected: 约 110 行（迁移前 220 行）。
 
-- [ ] **Step 2: 全量测试**
+- [x] **Step 2: 全量测试**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -2162,7 +2162,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | grep FAILED | sort
 
 Expected: 失败清单只有 `tests/tools/test_shell.py`（6 例，属 S1）与 `tests/providers/`（12 例，缺 key）。
 
-- [ ] **Step 3: 手动验收清单**
+- [x] **Step 3: 手动验收清单**
 
 ```bash
 uv run pickel chat
@@ -2172,7 +2172,7 @@ uv run pickel chat
 - `/reload` 正常
 - `pickel sessions` 列表正常（`build_session_service` 已换 `CompositeSessionSync`）
 
-- [ ] **Step 4: 校对设计稿**
+- [x] **Step 4: 校对设计稿**
 
 按实际实现修订 `docs/upgrade/2026-07-26-extension-host-design.md`：
 - §3.1 若 `ExtensionHost` 的构造参数与稿中不同，据实修改
@@ -2180,7 +2180,7 @@ uv run pickel chat
 - §7 补「openviking 配不全时从抛 `ValueError` 改为返回 `None`」这条行为变更（Task 7b Step 3）
 - §10 补实施中发现的新取舍
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A docs/upgrade/2026-07-26-extension-host-design.md
