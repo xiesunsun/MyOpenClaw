@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from pickel.config.environ import Environ
 from pickel.shared.file_access import FileAccessMode
+from pickel.tools.sandbox import SandboxSettings
 from pickel.shared.model_config import (
     ModelConfig,
     ModelSelection,
@@ -62,6 +63,8 @@ class AppConfig(BaseModel):
     # extension 的原始配置段：core 不认识任何 extension 的配置模型，
     # 解析由 extension 自己做（ExtensionHost.config）
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # 进程级沙箱（S2）：默认开，缺 bwrap 降级；strict 时缺依赖即拒绝
+    sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     # auth.json 中 providers 级密钥；resolve_model_config 在模型缺字段时回填
     auth_providers: dict[str, dict[str, Any]] = Field(
         default_factory=dict, exclude=True

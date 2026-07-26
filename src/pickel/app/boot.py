@@ -5,7 +5,7 @@ from pickel.agents.behavior_loader import BehaviorLoader
 from pickel.agents.skills import SkillRegistry
 from pickel.conversations.service import SessionService
 from pickel.config.app_config import AppConfig
-from pickel.config.paths import sessions_db_path
+from pickel.config.paths import home_dir, sessions_db_path
 from pickel.context.assembler import ContextAssembler
 from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
@@ -13,6 +13,8 @@ from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
 from pickel.tools.bus import ToolBus
+from pickel.tools.sandbox import SandboxPolicy
+from pickel.tools.shell import ShellSessionManager
 from pickel.tools.catalog import install_builtin_tools
 from pickel.runs import ReActStrategy
 from pickel.runs.run import Run
@@ -36,6 +38,18 @@ class Boot:
         self.extensions = extensions or ExtensionRegistry()
         # CLI 装载入口回填 LoadResult，供 ChatLoop 在 /reload 时 teardown 旧 extension
         self.extension_result = None
+        self._sandbox_policy: SandboxPolicy | None = None
+
+    @property
+    def sandbox_policy(self) -> SandboxPolicy:
+        """进程级沙箱策略。shell 会话经它包裹 spawn（S2）。"""
+        if self._sandbox_policy is None:
+            self._sandbox_policy = SandboxPolicy.from_settings(
+                self.app_config.sandbox,
+                home=home_dir(),
+                project_root=self.app_config.root,
+            )
+        return self._sandbox_policy
 
     @classmethod
     def from_config(
@@ -125,6 +139,7 @@ class Boot:
             lifecycle_hooks=LifecycleHooks(
                 handlers=self.resolve_hook_handlers(agent.agent_id)
             ),
+            shell_session_manager=ShellSessionManager(sandbox=self.sandbox_policy),
         )
         return agent, run
 
