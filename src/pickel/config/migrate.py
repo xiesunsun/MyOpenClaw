@@ -16,7 +16,7 @@ import yaml
 
 from pickel.config.paths import home_dir, sessions_db_path
 
-# openviking：策略进 settings，密钥进 auth
+# openviking：策略进 settings 的 extensions.openviking，密钥进 auth 的 extensions.openviking
 _OPENVIKING_SECRET_KEYS = frozenset(
     {"base_url", "account_id", "user_id", "user_key"}
 )
@@ -139,7 +139,7 @@ def _build_settings(raw: dict[str, Any], *, project_root: Path) -> dict[str, Any
             k: v for k, v in ov.items() if k in _OPENVIKING_STRATEGY_KEYS
         }
         if strategy:
-            settings["openviking"] = strategy
+            settings.setdefault("extensions", {})["openviking"] = strategy
 
     return settings
 
@@ -194,7 +194,7 @@ def _build_auth(
             if k in _OPENVIKING_SECRET_KEYS and v is not None
         }
         if ov_secrets:
-            auth["openviking"] = ov_secrets
+            auth.setdefault("extensions", {})["openviking"] = ov_secrets
     return auth
 
 

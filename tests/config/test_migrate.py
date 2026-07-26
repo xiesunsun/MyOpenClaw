@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import yaml
 from typer.testing import CliRunner
 
 from pickel.cli.main import app
@@ -18,6 +19,47 @@ from pickel.config.migrate import migrate_from_yaml
 
 
 class MigrateFromYamlTests(unittest.TestCase):
+
+    def test_legacy_openviking_section_migrates_under_extensions(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            project = root / "project"
+            project.mkdir()
+            (project / "agents" / "Pickle").mkdir(parents=True)
+            (project / "agents" / "Pickle" / "AGENT.md").write_text(
+                "# Pickle\n", encoding="utf-8"
+            )
+            config_path = project / "config.yaml"
+            raw = yaml.safe_load(textwrap.dedent(self._minimal_yaml()))
+            raw["openviking"]["enabled"] = True
+            raw["openviking"]["session_recall"] = {
+                "enabled": True,
+                "max_chars": 1234,
+            }
+            config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+            migrate_from_yaml(config_path, home=home, project_root=project)
+
+            settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+
+            strategy = settings["extensions"]["openviking"]
+            self.assertTrue(strategy["enabled"])
+            self.assertEqual(30, strategy["commit_after_minutes"])
+            self.assertEqual(8, strategy["commit_after_turns"])
+            self.assertEqual(
+                {"enabled": True, "max_chars": 1234}, strategy["session_recall"]
+            )
+            self.assertNotIn("user_key", strategy)
+            self.assertNotIn("openviking", settings)
+
+            secrets = auth["extensions"]["openviking"]
+            self.assertEqual("${OPENVIKING_USER_KEY}", secrets["user_key"])
+            self.assertEqual("${OPENVIKING_BASE_URL}", secrets["base_url"])
+            self.assertNotIn("commit_after_minutes", secrets)
+            self.assertNotIn("openviking", auth)
+
     def _write_yaml(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(content).strip() + "\n", encoding="utf-8")
@@ -109,12 +151,13 @@ class MigrateFromYamlTests(unittest.TestCase):
                 {"provider": "anthropic", "model": "claude-test"},
                 settings["default_llm"],
             )
-            # openviking 策略无密钥
-            self.assertIn("openviking", settings)
-            self.assertNotIn("base_url", settings["openviking"])
-            self.assertNotIn("user_key", settings["openviking"])
-            self.assertFalse(settings["openviking"]["enabled"])
-            self.assertEqual(30, settings["openviking"]["timeout_seconds"])
+            # openviking 策略无密钥，折算进 extensions 段
+            self.assertNotIn("openviking", settings)
+            ov_strategy = settings["extensions"]["openviking"]
+            self.assertNotIn("base_url", ov_strategy)
+            self.assertNotIn("user_key", ov_strategy)
+            self.assertFalse(ov_strategy["enabled"])
+            self.assertEqual(30, ov_strategy["timeout_seconds"])
 
             models = json.loads((home / "models.json").read_text(encoding="utf-8"))
             anthropic_model = models["providers"]["anthropic"]["models"]["claude-test"]
@@ -132,10 +175,10 @@ class MigrateFromYamlTests(unittest.TestCase):
                 auth["providers"]["anthropic"]["api_base"],
             )
             self.assertEqual(
-                "${OPENVIKING_BASE_URL}", auth["openviking"]["base_url"]
+                "${OPENVIKING_BASE_URL}", auth["extensions"]["openviking"]["base_url"]
             )
             self.assertEqual(
-                "${OPENVIKING_USER_KEY}", auth["openviking"]["user_key"]
+                "${OPENVIKING_USER_KEY}", auth["extensions"]["openviking"]["user_key"]
             )
 
             agent_yaml = project / "agents" / "Pickle" / "agent.yaml"
@@ -172,7 +215,7 @@ class MigrateFromYamlTests(unittest.TestCase):
                                 "api_base": "https://keep.example",
                             }
                         },
-                        "openviking": {"user_key": "keep-ov"},
+                        "extensions": {"openviking": {"user_key": "keep-ov"}},
                     }
                 ),
                 encoding="utf-8",
@@ -190,10 +233,13 @@ class MigrateFromYamlTests(unittest.TestCase):
                 "https://keep.example",
                 auth["providers"]["anthropic"]["api_base"],
             )
-            self.assertEqual("keep-ov", auth["openviking"]["user_key"])
+            self.assertEqual(
+                "keep-ov", auth["extensions"]["openviking"]["user_key"]
+            )
             # 未冲突的 openviking 键可补入
             self.assertEqual(
-                "${OPENVIKING_BASE_URL}", auth["openviking"]["base_url"]
+                "${OPENVIKING_BASE_URL}",
+                auth["extensions"]["openviking"]["base_url"],
             )
             self.assertTrue(summary["auth_merged"])
             self.assertIn("providers.anthropic.api_key", summary["auth_skipped_keys"])
