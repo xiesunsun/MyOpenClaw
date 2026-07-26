@@ -59,6 +59,20 @@ class _ToolCallProvider:
         yield StreamCompleted(message=await self.generate(context))
 
 
+class _HangingStreamProvider:
+    """产 2 个文本增量后在 stream 内部永久挂起——模拟「流式生成期中断」。"""
+
+    async def stream(self, context):
+        from pickel.providers.stream import TextDelta
+
+        yield TextDelta(text="你")
+        yield TextDelta(text="好")
+        await asyncio.get_running_loop().create_future()  # 挂起点在 stream 内
+
+    async def generate(self, context):
+        raise AssertionError("流式路径不应回退到 generate")
+
+
 def _messages(session):
     out = []
     for entry in session.active_path():
@@ -182,6 +196,33 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=10)
 
+        self.assertFalse([e for e in events if isinstance(e, TurnCompleted)])
+        self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
+
+    async def test_流式生成期中断也发_turn_interrupted(self) -> None:
+        """stream 消费期取消不发事件的话，UI 收不到「已中断本轮」提示。"""
+        from pickel.runs.runtime_events import TurnCompleted, TurnFailed
+
+        session = Session.create(agent_id="Pickle", session_id="s1")
+        run = self._run(_HangingStreamProvider(), [_HangingTool()])
+        bus = EventBus()
+        events = []
+        bus.subscribe(lambda e: events.append(e))
+
+        task = asyncio.create_task(
+            run.turn(session=session, user_text="hi", bus=bus)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+        interrupted = [e for e in events if isinstance(e, TurnInterrupted)]
+        self.assertEqual(1, len(interrupted))
+        self.assertEqual(1, interrupted[0].at_step)
+        # 已流出的增量必须进 partial_text——中断时不能丢掉已生成的文本
+        self.assertIn("你", interrupted[0].partial_text)
+        self.assertIn("好", interrupted[0].partial_text)
         self.assertFalse([e for e in events if isinstance(e, TurnCompleted)])
         self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
 

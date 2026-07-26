@@ -383,16 +383,37 @@ class ReActStrategy(ExecutionStrategy):
         不是两次 delta 之间的间隔。
         """
         timeout_seconds = self._provider_timeout_seconds(run)
+        text_parts: list[str] = []
         coro = self._consume_stream(
             run=run,
             context=context,
             bus=bus,
             envelope=envelope,
             step_index=step_index,
+            text_parts=text_parts,
         )
-        if timeout_seconds is None:
-            return await coro
-        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+        try:
+            if timeout_seconds is None:
+                return await coro
+            return await asyncio.wait_for(coro, timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            # 用户中断落在 stream 消费期：工具循环那处 except 只覆盖
+            # 工具执行期，这里不发 TurnInterrupted 的话 UI 收不到任何
+            # 中断事件。两处互斥不会双发——stream 期取消到不了工具循环，
+            # 工具期取消时本 try 早已正常返回。
+            # 必须在 wait_for 外层捕获：超时是 wait_for 取消内层 coro，
+            # 在 _consume_stream 里捕获会把超时误报成用户中断；这里
+            # 超时抛 TimeoutError，不进本分支，行为保持现状。
+            await self._emit(
+                bus,
+                TurnInterrupted(
+                    envelope=envelope(step_index),
+                    at_step=step_index,
+                    partial_text="".join(text_parts),
+                ),
+            )
+            # CancelledError 继承 BaseException，吞掉会破坏 asyncio 取消机制
+            raise
 
     async def _consume_stream(
         self,
@@ -402,8 +423,13 @@ class ReActStrategy(ExecutionStrategy):
         bus: EventBus | None,
         envelope,
         step_index: int,
+        text_parts: list[str],
     ) -> AssistantMessage:
         """取到 StreamCompleted 就返回；上游生成器显式关闭。
+
+        text_parts 由调用方持有，逐个收集已流出的 TextDelta 文本：
+        取消把本协程整个撕掉，调用方要在 except 里拿到已生成的
+        partial_text，只能靠这种外部可见的累积。
 
         `async for` 里 return/break 不会关闭上游 async generator——它的
         finally 要等 GC 或事件循环 shutdown 才跑，上游握着 provider 的
@@ -419,6 +445,8 @@ class ReActStrategy(ExecutionStrategy):
             async for delta in iterator:
                 if isinstance(delta, StreamCompleted):
                     return delta.message
+                if isinstance(delta, TextDelta):
+                    text_parts.append(delta.text)
                 event = self._delta_to_event(delta, envelope(step_index))
                 if event is not None:
                     await self._emit(bus, event)
