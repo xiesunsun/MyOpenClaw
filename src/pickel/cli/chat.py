@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pickel.app.boot import Boot
-from pickel.cli.context_renderer import ContextRenderer, ModelContextRenderer
+from pickel.cli.context_renderer import ContextRenderer
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
-from pickel.context.observation import ContextObservation
 from pickel.context.prepare import prepare
 from pickel.conversations.service import SessionService
 from pickel.conversations.session_storage_mapper import build_session_preview
@@ -22,8 +21,10 @@ from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.runs import (
     RuntimeEventHandler,
 )
-from pickel.runs.context_usage import ContextUsageService
+from pickel.runs.measure import measure
 from pickel.runs.run import Run
+from pickel.runs.turn_usage import last_turn_usage, session_usage
+from pickel.runs.usage_anchor import resolve_anchor
 from pickel.shared.model_config import ModelSelection
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
@@ -43,7 +44,6 @@ class ChatLoop:
         session: Session | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str | Awaitable[str]] | None = None,
-        context_usage_service: ContextUsageService | None = None,
         context_renderer: ContextRenderer | None = None,
         session_service: SessionService | None = None,
         boot: Boot | None = None,
@@ -57,7 +57,6 @@ class ChatLoop:
         self._prompt_input_reader: PromptToolkitInputReader | None = None
         self.input_reader = input_reader or self._default_input_reader
         self._fallback_message_count = self._read_session_message_count()
-        self._context_usage_service = context_usage_service or ContextUsageService()
         self._context_renderer = context_renderer or ContextRenderer()
         self._session_service = session_service
         self._session_closed = False
@@ -231,7 +230,7 @@ class ChatLoop:
             "/agent [id]        List agents or switch (new empty Session)\n"
             "/new               New empty Session, same agent\n"
             "/reload            Reload disk config/skills/agent (keep Environ)\n"
-            "/context           Show current ModelContext observation\n"
+            "/context           Show context usage (preview) and API usage\n"
             "/session           Show current session details\n"
             "/clear             Clear the screen and redraw the header\n"
             "/exit              Exit the chat loop"
@@ -494,52 +493,57 @@ class ChatLoop:
         return True
 
     async def _render_context_command(self) -> None:
-        """展示「下一 step 将发送」的 prepare 预览 + 可选上次 API usage。
+        """`/context` = ContextUsage 视图（设计 §7）。
 
-        说明：不会复现上一轮 generate 时的逐字节 Request（未持久化）；
-        而是用当前 Session + Run 再跑一遍 prepare，与 ReAct 路径一致。
+        展示「若现在进入下一 step，prepare 将发出的 Request」的估计占用，
+        外加从 Session 派生的真实 API usage。只读：不跑 hook、不执行 recall、
+        不写 Session。
         """
+        last_turn = last_turn_usage(self.session)
+        total = session_usage(self.session)
         run = self._run
-        last_meta = getattr(self, "_last_assistant_metadata", None)
+
+        usage = None
+        note = None
         if run is None:
-            observation = ContextObservation(
-                model_context=None,
-                predicted=True,
-                note="尚无 Run，无法组装",
-            )
+            note = "尚无 Run，无法组装上下文"
         else:
             try:
-                ctx = await prepare(
+                request = await prepare(
                     run=run,
                     session=self.session,
                     hook_feedback=[],
-                    unit_window=getattr(run, "unit_window", 5),
-                    recall_sources=getattr(run, "recall_sources", None) or [],
+                    unit_window=run.unit_window,
+                    # §7.3：预览不得执行 recall（含远程 OV）
+                    recall_sources=[],
+                )
+                model_config = run.agent.model_config
+                usage = await measure(
+                    request=request,
+                    anchor=resolve_anchor(
+                        session=self.session,
+                        request=request,
+                        provider=model_config.provider,
+                        model=model_config.model,
+                    ),
+                    provider=run.provider,
+                    model_config=model_config,
                 )
             except Exception as exc:  # 测试 mock / 不完整 run
-                observation = ContextObservation(
-                    model_context=None,
-                    predicted=True,
-                    assistant_metadata=last_meta,
-                    note=f"组装失败: {exc}",
-                )
-            else:
-                # 有具体 prepare 结果即非“空预测”；标注为预览即可
-                observation = ContextObservation(
-                    model_context=ctx,
-                    predicted=False,
-                    assistant_metadata=last_meta,
-                    note=(
-                        "下一 step 预览（prepare 实时组装；"
-                        "不含未提交的输入框内容；before_request 未执行）"
-                        + (
-                            ""
-                            if last_meta is not None
-                            else "；本会话尚未成功完成过模型调用（无 usage）"
-                        )
-                    ),
-                )
-        renderable = ModelContextRenderer().render_observation(observation)
+                note = f"组装失败: {exc}"
+
+        if last_turn is None and note is None:
+            note = "本会话尚未成功完成过模型调用（无 API usage）"
+
+        renderable = self._context_renderer.render(
+            usage,
+            last_turn=last_turn,
+            session_total=total if total is not None and total.steps > 1 else None,
+            note=note,
+            source_line=(
+                "Source: prepare preview · hooks skipped · recall skipped · no draft input"
+            ),
+        )
         self._render_message("System", renderable, style="cyan")
 
     async def run(self) -> None:
@@ -584,7 +588,6 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            # 供 /context 展示上次 API usage（非 prepare 原文缓存）
-            self._last_assistant_metadata = getattr(reply, "metadata", None)
+            # last usage 由 /context 从 Session 派生（§11.8），不在此缓存
             if not event_renderer.rendered_assistant_message:
                 self._render_assistant_message(reply)

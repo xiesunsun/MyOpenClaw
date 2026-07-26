@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pickel.agents.agent import Agent
+from pickel.agents.skills import SkillManifest, compose_system_instruction_parts
 from pickel.context.hook_feedback import HookFeedback
 from pickel.context.model_context import ModelContext
 from pickel.context.prepare import prepare, resolve_recalls
@@ -109,6 +110,64 @@ def test_prepare_system_history_feedback_tools():
     assert texts[1] == ("assistant", ["c1"])
     assert texts[2] == ("tool", "c1", "x")
     assert texts[3] == ("user", "hook note")
+
+
+def _skill(name: str) -> "SkillManifest":
+    return SkillManifest(
+        name=name,
+        description=f"{name} description",
+        skill_dir=Path(f"/tmp/pickle/skills/{name}"),
+        skill_file=Path(f"/tmp/pickle/skills/{name}/SKILL.md"),
+    )
+
+
+def test_prepare_system_sections_split_without_skills():
+    """无 skills 时只有 behavior 一段。"""
+    session = Session.create(agent_id="Pickle")
+    ctx = asyncio.run(prepare(run=_run(), session=session))
+
+    assert [s.name for s in ctx.system.sections] == ["behavior"]
+
+
+def test_prepare_system_sections_split_with_skills():
+    """有 skills 时拆为 behavior / skills_guidance / skills_catalog 三段。"""
+    session = Session.create(agent_id="Pickle")
+    run = _run(agent=_agent(skills=[_skill("alpha"), _skill("beta")]))
+
+    ctx = asyncio.run(prepare(run=run, session=session))
+
+    assert [s.name for s in ctx.system.sections] == [
+        "behavior",
+        "skills_guidance",
+        "skills_catalog",
+    ]
+    assert ctx.system.sections[0].text == "You are Pickle."
+    assert "alpha" in ctx.system.sections[2].text
+    assert "beta" in ctx.system.sections[2].text
+
+
+def test_prepare_system_as_text_equals_full_instruction():
+    """分段后 provider 收到的 system 文本逐字节不变。"""
+    session = Session.create(agent_id="Pickle")
+
+    for skills in ([], [_skill("alpha")], [_skill("alpha"), _skill("beta")]):
+        for behavior in ("You are Pickle.", ""):
+            agent = _agent(behavior_instruction=behavior, skills=skills)
+            expected = compose_system_instruction_parts(behavior, skills).full_instruction
+
+            ctx = asyncio.run(prepare(run=_run(agent=agent), session=session))
+
+            assert ctx.system.as_text() == expected
+
+
+def test_prepare_system_sections_skip_empty_behavior():
+    """behavior 为空时不产生空 section。"""
+    session = Session.create(agent_id="Pickle")
+    run = _run(agent=_agent(behavior_instruction="", skills=[_skill("alpha")]))
+
+    ctx = asyncio.run(prepare(run=run, session=session))
+
+    assert [s.name for s in ctx.system.sections] == ["skills_guidance", "skills_catalog"]
 
 
 def test_resolve_recalls_empty_is_noop():

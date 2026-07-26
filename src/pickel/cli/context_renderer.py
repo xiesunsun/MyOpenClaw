@@ -4,118 +4,117 @@ from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
 
-from pickel.runs.context_usage import ContextUsageCategory, ContextUsageSnapshot
+from pickel.runs.measure import ContextUsage
+from pickel.runs.turn_usage import TurnUsage
 
 
 class ContextRenderer:
+    """ContextUsage + 真实 API usage 的 `/context` 视图（设计 §7.2）。"""
+
     BAR_WIDTH = 32
 
-    def render(self, snapshot: ContextUsageSnapshot) -> RenderableType:
-        sections: list[RenderableType] = [
-            Text("Context Usage", style="bold"),
-            self._render_usage_header(snapshot),
-            self._render_category_summary(snapshot),
-        ]
+    def render(
+        self,
+        usage: ContextUsage | None,
+        *,
+        last_turn: TurnUsage | None = None,
+        session_total: TurnUsage | None = None,
+        note: str | None = None,
+        source_line: str | None = None,
+    ) -> RenderableType:
+        sections: list[RenderableType] = [Text("Context Usage", style="bold")]
+        if note:
+            sections.append(Text(note, style="dim"))
 
-        skills = snapshot.category("skills")
-        if skills.details:
-            sections.append(self._render_skills_breakdown(skills))
+        if usage is None:
+            sections.append(Text("无法组装上下文（见上）", style="yellow"))
+        else:
+            sections.append(self._render_header(usage))
+            sections.append(self._render_categories(usage))
+            catalog = self._find(usage, "skills_catalog")
+            if catalog is not None and catalog.details:
+                sections.append(self._render_details(catalog))
 
+        if last_turn is not None:
+            sections.append(self._render_turn("Last turn", last_turn))
+        if session_total is not None:
+            sections.append(self._render_turn("Session total", session_total))
+
+        if source_line:
+            sections.append(Text(source_line, style="dim"))
         return Group(*sections)
 
-    def _render_usage_header(self, snapshot: ContextUsageSnapshot) -> RenderableType:
-        used = self._format_token_count(snapshot.total_tokens)
-        maximum = self._format_token_count(snapshot.max_input_tokens)
+    def _render_header(self, usage: ContextUsage) -> RenderableType:
         return Group(
-            Text(snapshot.model_label, style="cyan"),
-            Text(f"{used} / {maximum}"),
-            Text(self._render_bar(snapshot)),
+            Text(usage.model_label, style="cyan"),
+            Text(
+                f"{self._tokens(usage.total_tokens)} / {self._tokens(usage.max_input_tokens)}"
+                f"  {self._percent(usage)}"
+            ),
+            Text(self._bar(usage)),
+            Text(
+                "measured（真实 usage 锚）" if usage.is_measured else "estimated（本地估计）",
+                style="dim",
+            ),
         )
 
-    def _render_category_summary(self, snapshot: ContextUsageSnapshot) -> Table:
+    def _render_categories(self, usage: ContextUsage) -> Table:
         table = Table.grid(padding=(0, 2))
-        table.add_row(Text("Estimated usage by category", style="bold"), Text(""))
-        for category in snapshot.categories:
-            table.add_row(
-                Text(category.label),
-                Text(self._format_category_usage(category)),
-            )
-        table.add_row(
-            Text("Free space"),
-            Text(self._format_token_count(snapshot.free_tokens)),
-        )
+        table.add_row(Text("By category（估计）", style="bold"), Text(""))
+        for category in usage.categories:
+            table.add_row(Text(category.label), Text(self._tokens(category.tokens)))
+        table.add_row(Text("Free space"), Text(self._tokens(usage.free_tokens)))
         return table
 
-    def _render_skills_breakdown(self, category: ContextUsageCategory) -> Table:
+    def _render_details(self, category) -> Table:
         table = Table.grid(padding=(0, 2))
-        table.add_row(Text("Skills breakdown", style="bold"), Text(""))
+        table.add_row(Text("Skills breakdown（估计）", style="bold"), Text(""))
         for detail in category.details:
-            table.add_row(
-                Text(detail.label),
-                Text(self._format_token_count(detail.token_count)),
-            )
+            table.add_row(Text(detail.label), Text(self._tokens(detail.tokens)))
         return table
 
-    def _render_bar(self, snapshot: ContextUsageSnapshot) -> str:
-        if snapshot.total_tokens is None or snapshot.max_input_tokens in (None, 0):
+    def _render_turn(self, title: str, turn: TurnUsage) -> RenderableType:
+        lines: list[RenderableType] = [Text(f"{title}", style="bold")]
+        suffix = f"  steps={turn.steps}" if turn.steps else ""
+        lines.append(Text(f"  实际输入={turn.actual_input_tokens:,}{suffix}"))
+        lines.append(
+            Text(
+                f"    in={turn.input_tokens:,} "
+                f"cache_read={turn.cache_read_tokens:,} "
+                f"cache_write={turn.cache_write_tokens:,}"
+            )
+        )
+        lines.append(Text(f"  out={turn.output_tokens:,}"))
+        if turn.elapsed_ms:
+            lines.append(Text(f"  duration_ms={turn.elapsed_ms:,}"))
+        if turn.hook_injected_chars:
+            lines.append(Text(f"  hook_injected_chars={turn.hook_injected_chars:,}"))
+        if turn.model_label:
+            lines.append(Text(f"  model={turn.model_label}"))
+        return Group(*lines)
+
+    def _bar(self, usage: ContextUsage) -> str:
+        if usage.max_input_tokens in (None, 0):
             return "[unknown]"
-        ratio = max(0.0, min(1.0, snapshot.total_tokens / snapshot.max_input_tokens))
+        ratio = max(0.0, min(1.0, usage.total_tokens / usage.max_input_tokens))
         filled = round(self.BAR_WIDTH * ratio)
         return f"[{'#' * filled}{'-' * (self.BAR_WIDTH - filled)}]"
 
     @staticmethod
-    def _format_token_count(value: int | None) -> str:
+    def _percent(usage: ContextUsage) -> str:
+        if usage.max_input_tokens in (None, 0):
+            return ""
+        return f"{usage.total_tokens / usage.max_input_tokens * 100:.1f}%"
+
+    @staticmethod
+    def _find(usage: ContextUsage, key: str):
+        for category in usage.categories:
+            if category.key == key:
+                return category
+        return None
+
+    @staticmethod
+    def _tokens(value: int | None) -> str:
         if value is None:
             return "unknown"
         return f"{value:,} tokens"
-
-    def _format_category_usage(self, category: ContextUsageCategory) -> str:
-        if category.char_count is not None and category.token_count is None:
-            return f"{category.char_count:,} chars"
-        return self._format_token_count(category.token_count)
-
-
-class ModelContextRenderer:
-    """展示 prepare 预览的 ModelContext 结构 + 可选上次 API usage。"""
-
-    def render_observation(self, observation) -> RenderableType:
-        lines: list[RenderableType] = [Text("Context (prepare preview)", style="bold")]
-        if observation.note:
-            lines.append(Text(observation.note, style="dim"))
-        if observation.predicted and observation.model_context is None:
-            lines.append(
-                Text("无法组装（见 note）", style="yellow")
-            )
-        ctx = observation.model_context
-        if ctx is None:
-            lines.append(Text("无 ModelContext"))
-            return Group(*lines)
-        try:
-            lines.append(Text(f"system_sections={len(ctx.system.sections)}"))
-            lines.append(Text(f"messages={len(ctx.messages)}"))
-            lines.append(Text(f"tools={len(ctx.tools)}"))
-        except Exception:
-            lines.append(Text("model_context present"))
-        meta = observation.assistant_metadata
-        if meta is not None:
-            lines.append(Text("Last model call usage:", style="bold"))
-            if meta.usage:
-                u = meta.usage
-                lines.append(
-                    Text(
-                        "  "
-                        f"in={u.input_tokens} out={u.output_tokens} "
-                        f"cache_read={u.cache_read_tokens} "
-                        f"cache_write={u.cache_write_tokens}"
-                    )
-                )
-            else:
-                lines.append(Text("  (metadata present, no usage fields)"))
-            if getattr(meta, "model", None):
-                lines.append(
-                    Text(
-                        f"  model={getattr(meta, 'provider', '')}/"
-                        f"{getattr(meta, 'model', '')}"
-                    )
-                )
-        return Group(*lines)

@@ -10,7 +10,12 @@ from typing import Any, Sequence
 
 from pickel.context.assembler import append_hook_feedback
 from pickel.context.hook_feedback import HookFeedback
-from pickel.context.model_context import ModelContext, SystemContent, ToolDefinition
+from pickel.context.model_context import (
+    ModelContext,
+    SystemContent,
+    SystemSection,
+    ToolDefinition,
+)
 from pickel.context.projection import project_messages
 from pickel.context.recall import Recall
 from pickel.context.window import apply_window
@@ -22,6 +27,9 @@ def resolve_system(*, run: Any) -> SystemContent:
     """behavior + templates + skills catalog。
 
     skills_path 非空时每次 prepare 重新 discover；否则用 agent.skills。
+
+    产出三段命名 section 供 measure 分栏；as_text() 与 full_instruction 逐字节相同
+    （两者都是「过滤空串后 \\n\\n 拼接」），provider 侧无感知。
     """
     # 惰性导入：避免 agents.skills → context 包 → prepare 循环
     from pickel.agents.skills import SkillRegistry, compose_system_instruction_parts
@@ -32,7 +40,17 @@ def resolve_system(*, run: Any) -> SystemContent:
     else:
         skills = list(agent.skills)
     parts = compose_system_instruction_parts(agent.behavior_instruction, skills)
-    return SystemContent.from_text(parts.full_instruction)
+    return SystemContent(
+        sections=[
+            SystemSection(name=name, text=text)
+            for name, text in (
+                ("behavior", parts.base_instruction),
+                ("skills_guidance", parts.skills_guidance),
+                ("skills_catalog", parts.skills_catalog),
+            )
+            if text
+        ]
+    )
 
 
 def resolve_history(*, session: Any, unit_window: int) -> list[AgentMessage]:

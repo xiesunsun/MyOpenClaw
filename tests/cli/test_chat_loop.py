@@ -14,11 +14,8 @@ from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.conversations.session_preview import SessionPreview
 from pickel.cli.chat import ChatLoop
-from pickel.runs.context_usage import (
-    ContextUsageCategory,
-    ContextUsageDetail,
-    ContextUsageSnapshot,
-)
+from pickel.conversations.agent_message import ModelResponseMetadata, ModelUsage
+from pickel.runs.usage_anchor import context_fingerprint
 from pickel.runs import RuntimeEvent, RuntimeEventType
 from pickel.conversations.message import ToolCall
 from pickel.shared.model_config import ModelConfig
@@ -185,20 +182,15 @@ class StubContextRun:
         raise AssertionError("turn should not be called")
 
 
-class StubContextUsageService:
-    def __init__(self, snapshot: ContextUsageSnapshot) -> None:
-        self.snapshot = snapshot
-        self.calls: list[tuple[Agent, object, list[object] | None]] = []
+class ExplodingRecall:
+    """/context 若执行 recall 就会炸（§7.3 预览不得执行 recall）。"""
 
-    async def build(
-        self,
-        *,
-        agent: Agent,
-        context: object,
-        prompt_messages=None,
-    ) -> ContextUsageSnapshot:
-        self.calls.append((agent, context, prompt_messages))
-        return self.snapshot
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def provide(self, *, run, session, current_user_text=""):
+        self.calls += 1
+        raise AssertionError("/context 不得执行 recall")
 
 
 class FakeSessionService:
@@ -491,51 +483,117 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/agent", rendered)
         self.assertIn("/reload", rendered)
 
-    async def test_context_command_renders_usage_summary(self) -> None:
-        output = StringIO()
-        console = Console(file=output, force_terminal=False, width=120, record=True)
-        submitted_inputs = iter(["/context", "/exit"])
-        snapshot = ContextUsageSnapshot(
-            model_label="google/gemini / gemini-3-flash-preview",
-            max_input_tokens=1048576,
-            total_tokens=7000,
-            categories=[
-                ContextUsageCategory(key="system", label="System prompt", token_count=3200),
-                ContextUsageCategory(
-                    key="skills",
-                    label="Skills",
-                    token_count=900,
-                    details=[ContextUsageDetail(label="excel", token_count=450)],
-                ),
-                ContextUsageCategory(key="messages", label="Messages", token_count=2300),
-                ContextUsageCategory(
-                    key="session_recall",
-                    label="Session recall message",
-                    token_count=None,
-                    char_count=1842,
-                ),
-                ContextUsageCategory(key="tools", label="Tools", token_count=600),
-            ],
-            free_tokens=1041576,
-        )
-        context_usage_service = StubContextUsageService(snapshot)
-        loop = ChatLoop(
-            agent=self._build_agent(),
-            run=StubContextRun(self._build_agent()),
-            session=Session.create(agent_id="Pickle", session_id="session-1"),
+    def _context_loop(self, *, session, console, inputs, run=None):
+        agent = self._build_agent()
+        return ChatLoop(
+            agent=agent,
+            run=run if run is not None else StubContextRun(agent),
+            session=session,
             console=console,
-            input_reader=lambda _: next(submitted_inputs),
-            context_usage_service=context_usage_service,
+            input_reader=lambda _: next(inputs),
             context_renderer=ContextRenderer(),
         )
 
+    async def test_context_command_renders_token_categories_and_bar(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/context", "/exit"])
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        run = StubContextRun(self._build_agent())
+        run.provider.count_context_tokens = AsyncMock(return_value=None)
+
+        loop = self._context_loop(
+            session=session,
+            console=console,
+            inputs=submitted_inputs,
+            run=run,
+        )
         await loop.run()
 
         rendered = console.export_text()
-        # /context：prepare 预览结构，不走旧 ContextUsageService
-        self.assertIn("Context (prepare preview)", rendered)
-        self.assertIn("prepare", rendered.lower())
-        self.assertEqual(0, len(context_usage_service.calls))
+        self.assertIn("Context Usage", rendered)
+        self.assertIn("By category", rendered)
+        self.assertIn("tokens", rendered)
+        # §7.4：不再是 sections/messages/tools 的个数 dump
+        self.assertNotIn("system_sections=", rendered)
+
+    async def test_context_command_does_not_execute_recall(self) -> None:
+        """§7.3 / §11.6：预览不得执行 recall（含远程 OV）。"""
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/context", "/exit"])
+        run = StubContextRun(self._build_agent())
+        run.provider.count_context_tokens = AsyncMock(return_value=None)
+        recall = ExplodingRecall()
+        run.recall_sources = [recall]
+
+        loop = self._context_loop(
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            inputs=submitted_inputs,
+            run=run,
+        )
+        await loop.run()
+
+        self.assertEqual(0, recall.calls)
+        self.assertIn("recall skipped", console.export_text())
+
+    async def test_context_command_reads_last_usage_from_session(self) -> None:
+        """§11.8：last usage 只从 Session 派生，新进程读同一 Session 仍能显示。"""
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/context", "/exit"])
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        session.append_user(UserMessage(content=[TextContent(text="hi")]))
+        session.append_assistant(
+            AssistantMessage(
+                content=[TextContent(text="hello")],
+                metadata=ModelResponseMetadata(
+                    provider="google/gemini",
+                    model="gemini-3-flash-preview",
+                    elapsed_ms=1234,
+                    usage=ModelUsage(
+                        input_tokens=111,
+                        output_tokens=22,
+                        cache_read_tokens=8000,
+                    ),
+                ),
+            )
+        )
+        run = StubContextRun(self._build_agent())
+        run.provider.count_context_tokens = AsyncMock(return_value=None)
+
+        # 全新 ChatLoop 实例：从未在本进程内跑过 turn
+        loop = self._context_loop(
+            session=session,
+            console=console,
+            inputs=submitted_inputs,
+            run=run,
+        )
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("Last turn", rendered)
+        # 实际输入 = 111 + 8000 + 0
+        self.assertIn("8,111", rendered)
+        self.assertIn("1,234", rendered)
+
+    async def test_context_command_survives_prepare_failure(self) -> None:
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["/context", "/exit"])
+        run = StubContextRun(self._build_agent())
+        run.unit_window = "not-an-int"  # 触发 prepare 内部异常
+
+        loop = self._context_loop(
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            inputs=submitted_inputs,
+            run=run,
+        )
+        await loop.run()
+
+        self.assertIn("组装失败", console.export_text())
 
     async def test_session_command_renders_preview(self) -> None:
         output = StringIO()

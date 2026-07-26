@@ -40,6 +40,12 @@ class ModelResponseMetadata:
     finish_message: str | None = None
     elapsed_ms: int | None = None
     usage: ModelUsage | None = None
+    # 该次请求的 system+tools 指纹；供 UsageAnchor 判断锚是否仍然适用。
+    # None 表示本次升级之前写入的旧 entry（锚保守失效）。
+    context_fingerprint: str | None = None
+    # before_request hook 对 Request 的改写量（字符）。0 = 无改写；
+    # None = 本次升级之前写入的旧 entry。使 /context 预览与实际请求的偏差可发现。
+    hook_injected_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,8 @@ def _metadata_to_dict(metadata: ModelResponseMetadata) -> dict[str, Any]:
         "usage": (
             _model_usage_to_dict(metadata.usage) if metadata.usage is not None else None
         ),
+        "context_fingerprint": metadata.context_fingerprint,
+        "hook_injected_chars": metadata.hook_injected_chars,
     }
 
 
@@ -124,6 +132,8 @@ def _metadata_from_dict(
         finish_message=data.get("finish_message"),
         elapsed_ms=data.get("elapsed_ms"),
         usage=_model_usage_from_dict(data.get("usage")),
+        context_fingerprint=data.get("context_fingerprint"),
+        hook_injected_chars=data.get("hook_injected_chars"),
     )
 
 

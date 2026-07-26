@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from dataclasses import replace
 from numbers import Real
 from uuid import uuid4
 
@@ -29,7 +30,9 @@ from pickel.conversations.message import ToolCall
 from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.runs.run import Run
+from pickel.runs.estimator import request_char_count
 from pickel.runs.events import RuntimeEvent, RuntimeEventType
+from pickel.runs.usage_anchor import context_fingerprint
 from pickel.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
 from pickel.runs.turn_state import ToolExecutionOutcome, TurnState
 from pickel.tools.base import ToolExecutionResult
@@ -73,6 +76,14 @@ class ReActStrategy(ExecutionStrategy):
                 unit_window=run.unit_window,
                 recall_sources=run.recall_sources,
             )
+            # 指纹取 prepare 输出（hook 前）：/context 预览不跑 hook，
+            # 记 hook 后的 Request 会让有 hook 时锚永远失效。
+            prepared_fingerprint = context_fingerprint(
+                model_context,
+                provider=run.agent.model_config.provider,
+                model=run.agent.model_config.model,
+            )
+            prepared_chars = request_char_count(model_context)
             # before_request：可替换 context；feedback 并入当前请求消息
             before = await run.lifecycle_hooks.before_request(
                 BeforeRequestEvent(
@@ -105,7 +116,15 @@ class ReActStrategy(ExecutionStrategy):
                 context=model_context,
             )
             elapsed_ms = round((time.perf_counter() - start) * 1000)
-            assistant = self._ensure_metadata(run, assistant, elapsed_ms)
+            assistant = self._ensure_metadata(
+                run,
+                assistant,
+                elapsed_ms,
+                context_fingerprint_value=prepared_fingerprint,
+                hook_injected_chars=(
+                    request_char_count(model_context) - prepared_chars
+                ),
+            )
             last_assistant = assistant
 
             # checkpoint BEFORE tools
@@ -437,29 +456,27 @@ class ReActStrategy(ExecutionStrategy):
         run: Run,
         assistant: AssistantMessage,
         elapsed_ms: int,
+        *,
+        context_fingerprint_value: str,
+        hook_injected_chars: int,
     ) -> AssistantMessage:
-        if assistant.metadata is not None:
-            # frozen dataclass: rebuild if elapsed missing
-            meta = assistant.metadata
-            if meta.elapsed_ms is None:
-                meta = ModelResponseMetadata(
-                    provider=meta.provider,
-                    model=meta.model,
-                    provider_model_version=meta.provider_model_version,
-                    provider_response_id=meta.provider_response_id,
-                    finish_reason=meta.finish_reason,
-                    finish_message=meta.finish_message,
-                    elapsed_ms=elapsed_ms,
-                    usage=meta.usage,
-                )
-                return AssistantMessage(content=list(assistant.content), metadata=meta)
-            return assistant
-        return AssistantMessage(
-            content=list(assistant.content),
-            metadata=ModelResponseMetadata(
+        """补齐可观测 metadata：耗时、上下文指纹、hook 改写量。
+
+        指纹与 hook 改写量只有本层知道，provider 无从填写，故一律在此覆盖。
+        """
+        meta = assistant.metadata
+        if meta is None:
+            meta = ModelResponseMetadata(
                 provider=run.agent.model_config.provider,
                 model=run.agent.model_config.model,
-                elapsed_ms=elapsed_ms,
+            )
+        return AssistantMessage(
+            content=list(assistant.content),
+            metadata=replace(
+                meta,
+                elapsed_ms=meta.elapsed_ms if meta.elapsed_ms is not None else elapsed_ms,
+                context_fingerprint=context_fingerprint_value,
+                hook_injected_chars=max(0, hook_injected_chars),
             ),
         )
 
