@@ -35,6 +35,22 @@ class EnvFilterTests(unittest.TestCase):
 
         self.assertEqual({"PATH": "/usr/bin", "HOME": "/home/u"}, filtered)
 
+    def test_credential_words_are_matched_anywhere_in_the_name(self) -> None:
+        # 后缀匹配会漏掉 ANTHROPIC_API_KEY_PICKLE 这类中缀命名——实测泄露过
+        policy = _policy()
+
+        filtered = policy.filter_env({
+            "ANTHROPIC_API_KEY_PICKLE": "leak",
+            "TOKEN_FOR_CI": "leak",
+            "MY_SECRET_THING": "leak",
+            "OPENVIKING_USER_KEY": "leak",
+            "SSH_KEY_PATH": "leak",
+            "PATH": "/usr/bin",
+            "MONKEY_MODE": "harmless",
+        })
+
+        self.assertEqual({"PATH": "/usr/bin", "MONKEY_MODE": "harmless"}, filtered)
+
     def test_env_deny_adds_exact_names(self) -> None:
         policy = _policy(env_deny=["MY_PLAIN_VAR"])
 

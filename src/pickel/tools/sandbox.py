@@ -22,16 +22,24 @@ _BWRAP = "bwrap"
 class SandboxUnavailableError(RuntimeError):
     pass
 
-# 凭据形状的环境变量名（大小写不敏感）；命中即从 shell 环境剥离
+
+# 凭据形状的环境变量名（大小写不敏感）；命中即从 shell 环境剥离。
+# 中缀匹配而非后缀：实测 ANTHROPIC_API_KEY_PICKLE 这类命名会从 *_API_KEY 漏出去。
+# 代价是误杀无害变量（如 TOKENIZERS_PARALLELISM）——用 sandbox.env_allow 豁免，
+# 宁可误杀也不漏。
 _CREDENTIAL_ENV_PATTERNS = (
-    "*_API_KEY",
-    "*_TOKEN",
-    "*_SECRET",
-    "*_PASSWORD",
-    "*_CREDENTIALS",
-    "*_ACCESS_KEY",
-    "*_ACCESS_KEY_ID",
-    "*_SECRET_ACCESS_KEY",
+    "*API_KEY*",
+    "*APIKEY*",
+    "*TOKEN*",
+    "*SECRET*",
+    "*PASSWORD*",
+    "*PASSWD*",
+    "*CREDENTIAL*",
+    "*ACCESS_KEY*",
+    "*PRIVATE_KEY*",
+    # 兜底：带下划线前缀的 KEY 一律视为凭据（OPENVIKING_USER_KEY、SSH_KEY_PATH…）；
+    # 无下划线的 MONKEY_MODE 之类不受影响
+    "*_KEY*",
 )
 
 # 默认读拒绝目录（相对 home），存在才挂 tmpfs

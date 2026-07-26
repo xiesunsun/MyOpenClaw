@@ -95,7 +95,8 @@ workspace 就是 pickel 仓库时（本项目日常），`src/pickel` 与 `agent
 
 与 bwrap 无关，纯 spawn 层，**降级裸跑时也生效**：
 
-- 默认模式：变量名匹配 `*_API_KEY` / `*_TOKEN` / `*_SECRET` / `*_PASSWORD` / `*_CREDENTIALS` / `*_ACCESS_KEY`（大小写不敏感）即剥离。
+- 默认模式（大小写不敏感、**中缀**匹配）：`*API_KEY*`、`*APIKEY*`、`*TOKEN*`、`*SECRET*`、`*PASSWORD*`、`*PASSWD*`、`*CREDENTIAL*`、`*ACCESS_KEY*`、`*PRIVATE_KEY*`、`*_KEY*`。
+- **中缀而非后缀是实测改出来的**：首版用 `*_API_KEY` 后缀匹配，真机验收时 `ANTHROPIC_API_KEY_PICKLE` 与 `OPENVIKING_USER_KEY` 两个真凭据直接漏进沙箱。代价是误杀无害变量（`TOKENIZERS_PARALLELISM` 之类）——用 `env_allow` 豁免，宁可误杀不可漏。
 - `env_deny` 增补精确名；`env_allow` 豁免（如用户确要给 shell `GITHUB_TOKEN`）。
 - 实现点：`PtyShellProcess.spawn` 构造 `shell_env` 后过 `policy.filter_env(shell_env)`。
 
@@ -141,6 +142,7 @@ workspace 就是 pickel 仓库时（本项目日常），`src/pickel` 与 `agent
 1. **网络不设防**——出站通道存在，但凭据文件读不到、env 里没有，可外泄面已收窄；proxy allowlist 是下一期。
 2. **策略层在 core 不做 extension**——spawn hook 位点等有第二个消费者再造；pi-sandbox 形态记录在案。
 3. **`/proc` 全量挂载**——`--proc` 标准挂载，进程列表对沙箱内可见；隔离到 pid namespace（`--unshare-pid`）会改变 `ps` 类工具行为且与 job control 探测的宿主 pgid 语义冲突，首版不动。
-6. **`--new-session` 的副作用可接受**——沙箱内 `tty` 报 `/dev/console`；bwrap 文档把它列为防 TIOCSTI 注入的安全建议项，方向一致。
-4. **bwrap 内嵌套容器场景不支持**——容器内跑 pickel 需 `sandbox.enabled: false` 或等 S2b 的 backend 抽象。
-5. **Landlock 候选**——内核 6.17 原生支持、零依赖，但 Python 生态弱；若 bwrap 路线遇阻可切换，策略层接口不变。
+4. **`--new-session` 的副作用可接受**——沙箱内 `tty` 报 `/dev/console`；bwrap 文档把它列为防 TIOCSTI 注入的安全建议项，方向一致。
+5. **bwrap 内嵌套容器场景不支持**——容器内跑 pickel 需 `sandbox.enabled: false` 或等 S2b 的 backend 抽象。
+6. **Landlock 候选**——内核 6.17 原生支持、零依赖，但 Python 生态弱；若 bwrap 路线遇阻可切换，策略层接口不变。
+7. **env 剥离宁可误杀**——中缀匹配会连带剥掉部分无害变量；沙箱内的命令因此拿不到任何凭据（包括 `OPENVIKING_USER_KEY`），需要凭据的场景走 pickel 进程内的 extension 而非 shell。
