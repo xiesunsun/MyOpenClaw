@@ -123,3 +123,79 @@ def test_turn_failed_不携带_traceback_到_dict_之外的地方():
 
     assert data["error_type"] == "ValueError"
     assert data["traceback"] == "line1\nline2"
+
+
+def test_delta_事件的_event_type_唯一且不与既有冲突():
+    from pickel.runs.runtime_events import (
+        TextDeltaEvent,
+        ThinkingDeltaEvent,
+        ToolCallArgsDeltaEvent,
+        TurnInterrupted,
+    )
+
+    new_types = [
+        ThinkingDeltaEvent, TextDeltaEvent, ToolCallArgsDeltaEvent, TurnInterrupted,
+    ]
+    old_types = [
+        TurnStarted, StepStarted, ToolCallStarted, ToolCallCompleted,
+        AssistantMessageEvent, TurnCompleted, TurnFailed,
+    ]
+    values = [cls.EVENT_TYPE for cls in new_types + old_types]
+
+    assert len(set(values)) == len(values)
+
+
+def test_delta_事件可_json_序列化():
+    from pickel.runs.runtime_events import (
+        TextDeltaEvent,
+        ThinkingDeltaEvent,
+        ToolCallArgsDeltaEvent,
+        TurnInterrupted,
+    )
+
+    events = [
+        ThinkingDeltaEvent(envelope=_envelope(), text="想"),
+        TextDeltaEvent(envelope=_envelope(), text="你好"),
+        ToolCallArgsDeltaEvent(
+            envelope=_envelope(), tool_call_id="c1", partial_json='{"a"'
+        ),
+        TurnInterrupted(envelope=_envelope(), at_step=2, partial_text="写到一半"),
+    ]
+
+    for event in events:
+        data = event.to_dict()
+        json.dumps(data)
+        assert data["seq"] == 3
+
+
+def test_text_delta_事件载荷():
+    from pickel.runs.runtime_events import TextDeltaEvent
+
+    data = TextDeltaEvent(envelope=_envelope(), text="你好").to_dict()
+
+    assert data["event_type"] == "text_delta"
+    assert data["text"] == "你好"
+
+
+def test_tool_call_args_delta_事件载荷():
+    from pickel.runs.runtime_events import ToolCallArgsDeltaEvent
+
+    data = ToolCallArgsDeltaEvent(
+        envelope=_envelope(), tool_call_id="c1", partial_json='{"a": 1}'
+    ).to_dict()
+
+    assert data["event_type"] == "tool_call_args_delta"
+    assert data["tool_call_id"] == "c1"
+    assert data["partial_json"] == '{"a": 1}'
+
+
+def test_turn_interrupted_载荷():
+    from pickel.runs.runtime_events import TurnInterrupted
+
+    data = TurnInterrupted(
+        envelope=_envelope(), at_step=2, partial_text="写到一半"
+    ).to_dict()
+
+    assert data["event_type"] == "turn_interrupted"
+    assert data["at_step"] == 2
+    assert data["partial_text"] == "写到一半"

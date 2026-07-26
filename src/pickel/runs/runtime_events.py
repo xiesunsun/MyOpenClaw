@@ -184,6 +184,55 @@ class TurnFailed(RuntimeEventBase):
         }
 
 
+@dataclass(frozen=True)
+class ThinkingDeltaEvent(RuntimeEventBase):
+    EVENT_TYPE: ClassVar[str] = "thinking_delta"
+
+    text: str = ""
+
+    def _payload(self) -> dict[str, Any]:
+        return {"text": self.text}
+
+
+@dataclass(frozen=True)
+class TextDeltaEvent(RuntimeEventBase):
+    EVENT_TYPE: ClassVar[str] = "text_delta"
+
+    text: str = ""
+
+    def _payload(self) -> dict[str, Any]:
+        return {"text": self.text}
+
+
+@dataclass(frozen=True)
+class ToolCallArgsDeltaEvent(RuntimeEventBase):
+    """工具参数的增量 JSON；拼完才是合法 JSON，UI 不要中途解析。"""
+
+    EVENT_TYPE: ClassVar[str] = "tool_call_args_delta"
+
+    tool_call_id: str = ""
+    partial_json: str = ""
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "tool_call_id": self.tool_call_id,
+            "partial_json": self.partial_json,
+        }
+
+
+@dataclass(frozen=True)
+class TurnInterrupted(RuntimeEventBase):
+    """用户中断；partial_text 是已生成但未完成的正文。"""
+
+    EVENT_TYPE: ClassVar[str] = "turn_interrupted"
+
+    at_step: int = 0
+    partial_text: str = ""
+
+    def _payload(self) -> dict[str, Any]:
+        return {"at_step": self.at_step, "partial_text": self.partial_text}
+
+
 RuntimeEventHandler: TypeAlias = Callable[
     [RuntimeEventBase], Awaitable[None] | None
 ]
