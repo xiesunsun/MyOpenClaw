@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator
+import dataclasses
+from typing import AsyncGenerator
 
 import pytest
 
@@ -23,7 +24,7 @@ def _message(text: str = "done") -> AssistantMessage:
     return AssistantMessage(content=[TextContent(text=text)])
 
 
-async def _gen(deltas: list[StreamDelta]) -> AsyncIterator[StreamDelta]:
+async def _gen(deltas: list[StreamDelta]) -> AsyncGenerator[StreamDelta, None]:
     for delta in deltas:
         yield delta
 
@@ -61,15 +62,46 @@ def test_accumulate_空流报错():
         asyncio.run(accumulate(_gen([])))
 
 
-def test_delta_是_frozen():
-    delta = TextDelta(text="a")
-    with pytest.raises(Exception) as exc:
-        delta.text = "b"  # type: ignore[misc]
-    assert type(exc.value).__name__ == "FrozenInstanceError"
+def test_四种_delta_都是_frozen():
+    deltas: list[StreamDelta] = [
+        TextDelta(text="a"),
+        ThinkingDelta(text="a"),
+        ToolCallArgsDelta(tool_call_id="c1", partial_json="{"),
+        StreamCompleted(message=_message()),
+    ]
+
+    for delta in deltas:
+        field_name = dataclasses.fields(delta)[0].name
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(delta, field_name, "mutated")
 
 
-def test_模块无网络无_provider_依赖():
-    """StreamDelta 是纯值对象，不得依赖任何 SDK。"""
+def test_accumulate_关闭上游生成器():
+    """取到 StreamCompleted 就提前 return，上游的 finally 必须已经跑过。
+
+    否则接真 provider 时，握着 HTTP 流的生成器要等事件循环 shutdown 才清理。
+    """
+    closed: list[str] = []
+
+    async def upstream() -> AsyncGenerator[StreamDelta, None]:
+        try:
+            yield StreamCompleted(message=_message())
+            yield TextDelta(text="never reached")
+        finally:
+            closed.append("cleanup")
+
+    asyncio.run(accumulate(upstream()))
+
+    assert closed == ["cleanup"]
+
+
+def test_stream_源码不出现_SDK_名字():
+    """源码文本级检查：本模块自己不提 provider SDK。
+
+    只断言文本，不是导入图级隔离——`pickel.providers.__init__` 仍会 eager
+    import 两个 SDK，连这条测试的 import 都会把它们拉进内存。收紧那一层要动
+    包的重导出契约，不在本任务范围内。
+    """
     from pathlib import Path
 
     import pickel.providers.stream as module
@@ -77,3 +109,14 @@ def test_模块无网络无_provider_依赖():
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "anthropic" not in source
     assert "genai" not in source
+
+
+def test_stream_源码不出现_UI_库名字():
+    """纯值对象模块不得碰渲染层。"""
+    from pathlib import Path
+
+    import pickel.providers.stream as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "rich" not in source
+    assert "prompt_toolkit" not in source
