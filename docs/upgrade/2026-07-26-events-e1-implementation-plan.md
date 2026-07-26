@@ -661,12 +661,18 @@ def test_订阅者抛异常不影响其余订阅者():
     assert len(survivors) == 1
 
 
-def test_订阅者抛异常不传播给_emit_调用方():
+def test_唯一订阅者抛异常时_emit_仍正常返回():
     """红线 2：UI 崩了不该杀掉正在跑的 turn。"""
     bus = EventBus()
-    bus.subscribe(lambda e: (_ for _ in ()).throw(RuntimeError("boom")))
 
-    asyncio.run(bus.emit(StepStarted()))  # 不抛即通过
+    def explode(event):
+        raise RuntimeError("boom")
+
+    bus.subscribe(explode)
+
+    emitted = asyncio.run(bus.emit(StepStarted()))
+
+    assert emitted.envelope.seq == 0
 
 
 def test_异步订阅者被_await():
@@ -1559,12 +1565,19 @@ def test_父目录不存在时自动创建(tmp_path: Path):
     assert path.is_file()
 
 
-def test_不开启时不产生文件(tmp_path: Path):
-    """未构造 sink 就不该有任何文件——本测试锁住「默认关」的可观察后果。"""
-    bus = EventBus()
-    asyncio.run(_emit(bus))
+def test_close_后不再写入(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    sink(StepStarted())
+    sink.close()
 
-    assert list(tmp_path.iterdir()) == []
+    before = path.read_text(encoding="utf-8")
+    try:
+        sink(StepStarted())
+    except ValueError:
+        pass  # 写已关闭的文件句柄
+
+    assert path.read_text(encoding="utf-8") == before
 
 
 def test_模块不提供任何读回接口():
