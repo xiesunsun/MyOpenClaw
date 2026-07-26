@@ -5,6 +5,7 @@ from pathlib import Path
 from pickel.agents.agent import Agent
 from pickel.context.assembler import ContextAssembler
 from pickel.context.model_context import ModelContext
+from pickel.context.prepare import prepare
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -12,7 +13,7 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
-from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
 from pickel.runs.event_bus import EventBus
@@ -21,7 +22,9 @@ from pickel.runs.runtime_events import (
     StepStarted,
     ToolCallCompleted,
     ToolCallStarted,
+    TurnCompleted,
 )
+from pickel.runs.usage_anchor import resolve_anchor
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
 from pickel.tools.shell import ShellSessionManager
@@ -95,6 +98,52 @@ class DelayEchoTool(BaseTool):
     ) -> ToolExecutionResult:
         await asyncio.sleep(int(arguments.get("delay_ms", 0)) / 1000)
         return ToolExecutionResult(content=str(arguments["text"]))
+
+
+def _agent() -> Agent:
+    return Agent(
+        agent_id="Pickle",
+        workspace_path=Path("/tmp/pickle"),
+        behavior_path=Path("/tmp/pickle/AGENT.md"),
+        behavior_instruction="You are Pickle.",
+        model_config=ModelConfig(
+            provider="google/gemini",
+            model="gemini-3-flash-preview",
+        ),
+        tool_ids=["echo"],
+    )
+
+
+class RecordingHooks(LifecycleHooks):
+    """记录 hook 真正看到的参数与结果。"""
+
+    def __init__(self) -> None:
+        super().__init__(handlers=[])
+        self.pre_arguments: list[dict] = []
+        self.post_arguments: list[dict] = []
+        self.post_results: list[str] = []
+
+    async def pre_tool_use(self, event):
+        self.pre_arguments.append(dict(event.arguments))
+        return await super().pre_tool_use(event)
+
+    async def post_tool_use(self, event):
+        self.post_arguments.append(dict(event.arguments))
+        self.post_results.append(event.result_content)
+        return await super().post_tool_use(event)
+
+
+def _tool_result_texts(session: Session) -> list[str]:
+    """从落盘 entry 取 tool 结果文本（不经事件）。"""
+    texts: list[str] = []
+    for entry in session.active_path():
+        payload = entry.payload if isinstance(entry.payload, dict) else {}
+        if payload.get("role") != "tool":
+            continue
+        for block in payload.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                texts.append(block.get("text") or "")
+    return texts
 
 
 def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: ReActStrategy) -> Run:
@@ -341,6 +390,117 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, final.usage.steps)
         self.assertEqual(200, final.usage.input_tokens)
         self.assertEqual(20, final.usage.output_tokens)
+
+    async def test_max_steps_路径上两个事件对同一_turn_给出同一份_usage(self) -> None:
+        """AssistantMessageEvent 与 TurnCompleted 描述同一件事，数字必须一致。
+
+        二者求值时机不同（一个在 strategy 内、一个在 strategy 返回后），
+        只要合成消息带 usage metadata，后者就会多数一步。
+        """
+        agent = _agent()
+        provider = AlwaysToolCallProvider()
+        run = _run(
+            agent=agent,
+            provider=provider,
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        bus = EventBus()
+        events = []
+        bus.subscribe(lambda event: events.append(event))
+
+        await run.turn(session=session, user_text="hello", bus=bus)
+
+        assistant_event = [e for e in events if isinstance(e, AssistantMessageEvent)][-1]
+        turn_completed = [e for e in events if isinstance(e, TurnCompleted)][-1]
+        self.assertEqual(assistant_event.usage, turn_completed.usage)
+        self.assertEqual(2, turn_completed.usage.steps)
+        self.assertEqual(200, turn_completed.usage.input_tokens)
+        self.assertEqual(20, turn_completed.usage.output_tokens)
+
+    async def test_max_steps_之后_usage_锚仍指向最后一次真实调用(self) -> None:
+        """合成消息不得让 /context 的锚失效（否则每次观测都退回远程 count）。"""
+        agent = _agent()
+        provider = AlwaysToolCallProvider()
+        run = _run(
+            agent=agent,
+            provider=provider,
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+
+        await run.turn(session=session, user_text="hello", bus=None)
+
+        request = await prepare(
+            run=run,
+            session=session,
+            hook_feedback=[],
+            unit_window=run.unit_window,
+            recall_sources=[],
+        )
+        anchor = resolve_anchor(
+            session=session,
+            request=request,
+            provider=agent.model_config.provider,
+            model=agent.model_config.model,
+        )
+
+        self.assertIsNotNone(anchor)
+        # 锚 = 最后一次真实调用（in=100 / out=10），合成消息只当 trailing 估计
+        self.assertEqual(100, anchor.input_tokens)
+        self.assertEqual(10, anchor.output_tokens)
+        self.assertTrue(anchor.trailing_messages)
+
+    async def test_订阅者篡改事件参数改不动工具执行_hook_输入与落盘(self) -> None:
+        """红线 8 的可执行定义：runtime 事件订阅者只读，不是控制点。
+
+        事件 payload 与执行路径共享 dict 时，订阅者改一下 arguments 就能
+        同时劫持工具执行与 PreToolUse/PostToolUse 看到的输入。
+        """
+        agent = _agent()
+        hooks = RecordingHooks()
+        run = _run(
+            agent=agent,
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "ORIGINAL"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=4),
+        )
+        run.lifecycle_hooks = hooks
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        bus = EventBus()
+
+        def hijack(event) -> None:
+            if isinstance(event, ToolCallStarted):
+                event.tool_call.arguments["text"] = "HIJACKED"
+            if isinstance(event, ToolCallCompleted):
+                event.tool_result.content = "HIJACKED"
+                event.tool_result.metadata["injected"] = True
+
+        bus.subscribe(hijack)
+
+        await run.turn(session=session, user_text="hello", bus=bus)
+
+        # 工具按原参数执行，落盘的 tool_result 是原参数的结果
+        self.assertEqual(["ORIGINAL"], _tool_result_texts(session))
+        # hook 看到的输入同样没被改写
+        self.assertEqual([{"text": "ORIGINAL"}], hooks.pre_arguments)
+        self.assertEqual([{"text": "ORIGINAL"}], hooks.post_arguments)
+        self.assertEqual(["ORIGINAL"], hooks.post_results)
 
 
 def _without_turn_events(events):

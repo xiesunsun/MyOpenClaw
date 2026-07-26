@@ -73,7 +73,6 @@ class ReActStrategy(ExecutionStrategy):
         if initial_hook_feedback:
             turn.step_hook_feedback.extend(initial_hook_feedback)
             turn.hook_feedback.extend(initial_hook_feedback)
-        last_assistant: AssistantMessage | None = None
 
         for step_index in range(1, self.max_steps + 1):
             step = turn.begin_step(step_index)
@@ -135,7 +134,6 @@ class ReActStrategy(ExecutionStrategy):
                     request_char_count(model_context) - prepared_chars
                 ),
             )
-            last_assistant = assistant
 
             # checkpoint BEFORE tools
             entry = session.append_assistant(assistant)
@@ -173,16 +171,11 @@ class ReActStrategy(ExecutionStrategy):
             batch_outcomes: list[dict] = []
             # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
             for call_index, tool_call in enumerate(tool_calls):
-                runtime_call = ToolCall(
-                    id=tool_call.id,
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
-                )
                 await self._emit(
                     bus,
                     ToolCallStarted(
                         envelope=envelope(step_index),
-                        tool_call=runtime_call,
+                        tool_call=self._event_tool_call(tool_call),
                         batch_id=batch_id,
                         call_index=call_index,
                         total_calls=len(tool_calls),
@@ -239,8 +232,8 @@ class ReActStrategy(ExecutionStrategy):
                     bus,
                     ToolCallCompleted(
                         envelope=envelope(step_index),
-                        tool_call=runtime_call,
-                        tool_result=result,
+                        tool_call=self._event_tool_call(tool_call),
+                        tool_result=replace(result, metadata=dict(result.metadata)),
                         batch_id=batch_id,
                         call_index=call_index,
                         total_calls=len(tool_calls),
@@ -281,14 +274,15 @@ class ReActStrategy(ExecutionStrategy):
                 turn.hook_feedback.append(fb)
 
         # max steps
-        # 必须在 append 之前求值：max_msg 复用 last_assistant.metadata（同一份 usage），
-        # 落盘后 last_turn_usage 会把最后一次 generate 的用量数第二遍。
-        max_steps_usage = last_turn_usage(session)
+        # 合成消息不带 metadata：它不是一次模型调用，复用最后一次 generate 的
+        # metadata 会让 last_turn_usage / session_usage 把那次用量数第二遍
+        # （AssistantMessageEvent 与 TurnCompleted 就会对同一 turn 给出不同数字）。
+        # 无 metadata 的 assistant 由 resolve_anchor 当作可跳过的 trailing 消息，
+        # 锚仍落在最后一次真实调用上——见 usage_anchor.resolve_anchor。
         max_msg = AssistantMessage(
             content=[
                 TextContent(text="Reached the maximum number of reasoning steps.")
             ],
-            metadata=last_assistant.metadata if last_assistant else None,
         )
         entry = session.append_assistant(max_msg)
         self._flush_entry(run, session, entry)
@@ -297,7 +291,7 @@ class ReActStrategy(ExecutionStrategy):
             AssistantMessageEvent(
                 envelope=envelope(self.max_steps),
                 text="Reached the maximum number of reasoning steps.",
-                usage=max_steps_usage,
+                usage=last_turn_usage(session),
             ),
         )
         return max_msg
@@ -354,6 +348,20 @@ class ReActStrategy(ExecutionStrategy):
                 content=f"Tool '{tool_call.name}' failed: {exc}",
                 is_error=True,
             )
+
+    @staticmethod
+    def _event_tool_call(tool_call: ToolCallContent) -> ToolCall:
+        """事件用的 tool call 快照：arguments 必须是拷贝（红线 8）。
+
+        共享同一个 dict 就等于把执行参数交给订阅者：emit 之后本方法下面才取
+        `dict(tool_call.arguments)` 去执行、才构造 PreToolUse 事件，订阅者改一下
+        就能同时劫持工具执行与 hook 输入。每次 emit 都建新拷贝，事件之间也不串。
+        """
+        return ToolCall(
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=dict(tool_call.arguments),
+        )
 
     @staticmethod
     def _assistant_text(assistant: AssistantMessage) -> str:

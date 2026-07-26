@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 
 import pickel.runs.trace_sink as trace_module
+from pickel.config.paths import home_dir
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import StepStarted, TurnStarted
-from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled
+from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
 from pickel.shared.event_envelope import EventEnvelope
 
 
@@ -36,6 +37,14 @@ def test_app_config_默认_trace_关闭():
     from pickel.config.loader import _BUILTIN_DEFAULTS
 
     assert _BUILTIN_DEFAULTS["trace_enabled"] is False
+
+
+def test_trace_path_是_home_下的_traces_目录里的_jsonl(tmp_path: Path, monkeypatch):
+    """真实路径本身也要被断言：ChatLoop 的测试全都把 trace_path patch 掉了。"""
+    monkeypatch.setenv("PICKEL_HOME", str(tmp_path))
+
+    assert trace_path("s1") == tmp_path / "traces" / "s1.jsonl"
+    assert trace_path("s1") == home_dir() / "traces" / "s1.jsonl"
 
 
 def test_写出的每行都是合法_json(tmp_path: Path):

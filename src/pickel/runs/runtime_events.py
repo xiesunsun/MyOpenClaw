@@ -2,6 +2,12 @@
 
 与 hook 事件的区别：这些是 fire-and-forget 广播，订阅者只读，
 不得改写 agent 行为（设计红线 8）。
+
+**加新事件类型时的硬约束**：payload 里的可变对象（dict / list / 非 frozen
+dataclass）必须是拷贝，不得与执行路径共享引用。发射点自己负责拷贝，例如
+`arguments=dict(tool_call.arguments)`、`replace(result, metadata=dict(result.metadata))`。
+共享引用等于把「只读广播」变成控制点：订阅者改一下事件字段，就能改掉随后
+真正执行用的参数、或改掉 hook 看到的输入——红线 8 就此失守。
 """
 
 from __future__ import annotations

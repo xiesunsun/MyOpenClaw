@@ -160,6 +160,42 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
 
+    async def test_hook_阻断轮的_turn_completed_usage_为_None_不泄漏上一轮(self) -> None:
+        """阻断轮没发生任何模型调用，usage 必须是 None。
+
+        若照搬成功路径去 last_turn_usage(session)，Session 里还留着上一轮的
+        assistant，阻断轮会把上一轮用量重报一遍。
+        """
+        from pickel.hooks.decisions import UserPromptSubmitDecision
+
+        class BlockSecondTurnHooks(NoopLifecycleHooks):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def user_prompt_submit(self, event):
+                self.calls += 1
+                if self.calls == 1:
+                    return UserPromptSubmitDecision()
+                return UserPromptSubmitDecision(action="block", reason="nope")
+
+        run = _run(_Provider(reply=_reply()))
+        run.lifecycle_hooks = BlockSecondTurnHooks()
+        session = Session.create(agent_id="Pickle", session_id="s1")
+        bus = EventBus()
+        events = []
+        bus.subscribe(lambda e: events.append(e))
+
+        await run.turn(session=session, user_text="hello", bus=bus)
+        completed = [e for e in events if isinstance(e, TurnCompleted)]
+        self.assertEqual(1, completed[0].usage.steps)
+
+        await run.turn(session=session, user_text="blocked", bus=bus)
+
+        completed = [e for e in events if isinstance(e, TurnCompleted)]
+        self.assertEqual(2, len(completed))
+        self.assertIsNone(completed[1].usage)
+
 
 if __name__ == "__main__":
     unittest.main()
