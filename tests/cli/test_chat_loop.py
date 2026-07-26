@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -7,8 +9,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from pickel.agents.agent import Agent
 from pickel.cli.context_renderer import ContextRenderer
+from pickel.context.assembler import ContextAssembler
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.runs import ReActStrategy, Run
+from pickel.tools.shell import ShellSessionManager
 from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
@@ -16,7 +22,15 @@ from pickel.conversations.session_preview import SessionPreview
 from pickel.cli.chat import ChatLoop
 from pickel.conversations.agent_message import ModelResponseMetadata, ModelUsage
 from pickel.runs.usage_anchor import context_fingerprint
-from pickel.runs import RuntimeEvent, RuntimeEventType
+from pickel.runs.event_bus import EventBus
+from pickel.runs.runtime_events import (
+    AssistantMessageEvent,
+    StepStarted,
+    ToolCallCompleted,
+    ToolCallStarted,
+)
+from pickel.runs.turn_usage import TurnUsage
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.conversations.message import ToolCall
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
@@ -27,6 +41,15 @@ from rich.text import Text
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
         block.text for block in message.content if isinstance(block, TextContent) and block.text
+    )
+
+
+def _model_metadata() -> ModelResponseMetadata:
+    return ModelResponseMetadata(
+        provider="google/gemini",
+        model="gemini-3-flash-preview",
+        elapsed_ms=100,
+        usage=ModelUsage(input_tokens=100, output_tokens=10),
     )
 
 
@@ -53,15 +76,16 @@ class StubRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.ASSISTANT_MESSAGE,
+        if bus is not None:
+            # 真 Run.turn 会填 session_id/turn_id，桩照做，否则 trace 路由测不出问题
+            await bus.emit(
+                AssistantMessageEvent(
+                    envelope=EventEnvelope(session_id=session.session_id),
                     text="runtime reply",
                 )
             )
@@ -74,7 +98,7 @@ class SilentRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         reply = _text_assistant("runtime reply")
@@ -88,10 +112,25 @@ class ErrorRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        # 真 Run 在失败前也已经发过事件；桩照做，否则「失败轮不退订渲染器」
+        # 这种回归在后续轮次里没有任何可观测痕迹
+        if bus is not None:
+            await bus.emit(StepStarted(envelope=EventEnvelope(step_index=1)))
         raise ValueError("boom")
+
+
+class InterruptRun:
+    async def turn(
+        self,
+        *,
+        session: Session,
+        user_text: str,
+        bus: EventBus | None = None,
+    ) -> AssistantMessage:
+        raise KeyboardInterrupt
 
 
 class StubToolRun:
@@ -100,36 +139,29 @@ class StubToolRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.MODEL_STEP_STARTED,
-                    step_index=1,
-                )
-            )
+        if bus is not None:
+            await bus.emit(StepStarted(envelope=EventEnvelope(step_index=1)))
         tool_call = ToolCall(
             id="call-1",
             name="read_file",
             arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
         )
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                    step_index=1,
+        if bus is not None:
+            await bus.emit(
+                ToolCallStarted(
+                    envelope=EventEnvelope(step_index=1),
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
                     tool_call=tool_call,
                 )
             )
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
-                    step_index=1,
+            await bus.emit(
+                ToolCallCompleted(
+                    envelope=EventEnvelope(step_index=1),
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
@@ -144,13 +176,15 @@ class StubToolRun:
                     ),
                 )
             )
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.ASSISTANT_MESSAGE,
+            await bus.emit(
+                AssistantMessageEvent(
+                    envelope=EventEnvelope(step_index=1),
                     text="final reply",
-                    metadata=MessageMetadata(
-                        provider="google/gemini",
-                        model="gemini-3-flash-preview",
+                    usage=TurnUsage(
+                        steps=1,
+                        input_tokens=11,
+                        output_tokens=7,
+                        model_label="google/gemini / gemini-3-flash-preview",
                     ),
                 )
             )
@@ -177,7 +211,7 @@ class StubContextRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         raise AssertionError("turn should not be called")
 
@@ -267,10 +301,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             console=console,
         )
 
-        result = await loop.handle_user_input(
-            "hello",
-            event_handler=loop.create_event_handler(),
-        )
+        bus, _, _unsubscribe = loop.create_event_bus()
+        result = await loop.handle_user_input("hello", bus=bus)
 
         titles = [call.args[0].title for call in console.print.call_args_list]
         started_render = str(console.print.call_args_list[1].args[0].renderable)
@@ -446,6 +478,295 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(session_service.closed)
         self.assertEqual("session-1", session_service.closed_sessions[0].session_id)
+
+    async def test_trace_sink_receives_events_and_closes_on_exit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["hello", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                sink = loop._trace_sink
+                await loop.run()
+
+            events = [
+                json.loads(line)
+                for line in trace_file.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(["assistant_message"], [e["event_type"] for e in events])
+        self.assertIsNone(loop._trace_sink)
+        self.assertTrue(sink.closed)
+
+    async def test_trace_sink_closes_when_turn_raises_keyboard_interrupt(self) -> None:
+        """Ctrl-C 打断 turn 不经过 _close_session，句柄由 run() 的 finally 释放。"""
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["hello"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=InterruptRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                sink = loop._trace_sink
+                with self.assertRaises(KeyboardInterrupt):
+                    await loop.run()
+
+        self.assertTrue(sink.closed)
+
+    async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PICKEL_TRACE", None)
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=StubRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=Mock(),
+            )
+
+        self.assertIsNone(loop._trace_sink)
+
+    async def test_seq_stays_monotonic_across_turns_in_one_session(self) -> None:
+        """红线 4：seq 是 session 内全序的唯一来源。
+
+        每轮新建 EventBus 会让 seq 归零，同一 trace 文件里按 seq 排序就把多轮交错了。
+        """
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["one", "two", "three", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+
+            seqs = [
+                json.loads(line)["seq"]
+                for line in trace_file.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual([0, 1, 2], seqs)
+
+    async def test_turn_renderer_is_unsubscribed_so_later_turns_render_once(self) -> None:
+        """bus 长命后，每轮的渲染器必须退订，否则第 N 轮打印 N 遍。"""
+        console = Mock()
+        submitted_inputs = iter(["one", "two", "three", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            run=StubRun(),
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(3, titles.count("Assistant"))
+
+    async def test_失败轮也退订渲染器_后续轮次不翻倍(self) -> None:
+        """异常路径的退订只由 finally 保证，挪出去就是「一轮失败后越印越多」。"""
+        console = Mock()
+        submitted_inputs = iter(["one", "two", "three", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            run=ErrorRun(),
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        panels = [call.args[0] for call in console.print.call_args_list]
+        titles = [getattr(panel, "title", None) for panel in panels]
+        errors = [
+            panel
+            for panel in panels
+            if getattr(panel, "title", None) == "System"
+            and getattr(panel, "border_style", None) == "red"
+        ]
+
+        self.assertEqual(3, len(errors))
+        # 每轮 1 次：渲染器没退订的话第 2/3 轮会打 2/3 遍
+        self.assertEqual(3, titles.count("Thinking"))
+        self.assertEqual(0, titles.count("Assistant"))
+
+    async def test_真实_run_端到端_事件序列_seq_trace_与渲染次数(self) -> None:
+        """组装层集成：真 Run + ReAct + ChatLoop + 长命 bus + trace sink。
+
+        tests/runs/* 碰不到 trace sink 与渲染器订阅，tests/cli/* 又只用桩 Run，
+        这条把两个半场接起来，钉住一次真实 turn 的完整事件序列。
+        """
+        from tests.runs.test_events import DelayEchoTool, StubProvider
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            agent = self._build_agent()
+            run = Run(
+                agent=agent,
+                provider=StubProvider(
+                    responses=[
+                        AssistantMessage(
+                            content=[
+                                ToolCallContent(
+                                    id="call-1",
+                                    name="echo",
+                                    arguments={"text": "hi"},
+                                )
+                            ],
+                            metadata=_model_metadata(),
+                        ),
+                        AssistantMessage(
+                            content=[TextContent(text="done")],
+                            metadata=_model_metadata(),
+                        ),
+                    ]
+                ),
+                tools=[DelayEchoTool()],
+                context_assembler=ContextAssembler(),
+                lifecycle_hooks=NoopLifecycleHooks(),
+                session_service=None,
+                file_access_policy=None,
+                workspace_files=None,
+                shell_session_manager=ShellSessionManager(),
+                unit_window=5,
+                strategy=ReActStrategy(max_steps=4),
+            )
+            console = Mock()
+            submitted_inputs = iter(["hello", "/exit"])
+            # 不 patch trace_path：走真实实现（PICKEL_HOME 改写 home_dir）
+            with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
+                loop = ChatLoop(
+                    agent=agent,
+                    run=run,
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=console,
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+
+            trace_file = home / "traces" / "session-1.jsonl"
+            records = [
+                json.loads(line)
+                for line in trace_file.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(
+            [
+                "turn_started",
+                "step_started",
+                "tool_call_started",
+                "tool_call_completed",
+                "step_started",
+                "assistant_message",
+                "turn_completed",
+            ],
+            [record["event_type"] for record in records],
+        )
+        self.assertEqual(list(range(7)), [record["seq"] for record in records])
+        self.assertEqual({"session-1"}, {record["session_id"] for record in records})
+        self.assertEqual(1, len({record["turn_id"] for record in records}))
+        self.assertEqual(
+            {"text": "hi"}, records[2]["tool_call"]["arguments"]
+        )
+        self.assertEqual("hi", records[3]["tool_result"]["content"])
+        self.assertEqual("done", records[5]["text"])
+        # 同一 turn 的两个事件必须给出同一份 usage
+        self.assertEqual(
+            {"steps": 2, "input_tokens": 200, "output_tokens": 20},
+            {
+                key: records[5]["usage"][key]
+                for key in ("steps", "input_tokens", "output_tokens")
+            },
+        )
+        self.assertEqual(records[5]["usage"], records[6]["usage"])
+
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(
+            ["MyOpenClaw Chat", "Thinking", "Tool", "Tool", "Thinking", "Assistant", "System"],
+            titles,
+        )
+
+    async def test_new_session_rebuilds_trace_sink_for_new_session_id(self) -> None:
+        """/new 换了 session，trace 文件必须跟着换，否则两个 session 混在一个文件里。"""
+        with TemporaryDirectory() as tmpdir:
+            traces = Path(tmpdir)
+            submitted_inputs = iter(["hello", "/new", "hello", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch(
+                    "pickel.cli.chat.trace_path",
+                    side_effect=lambda session_id: traces / f"{session_id}.jsonl",
+                ),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+                new_session_id = loop.session.session_id
+
+            written = sorted(path.name for path in traces.glob("*.jsonl"))
+            first = json.loads(
+                (traces / "session-1.jsonl").read_text(encoding="utf-8").strip()
+            )
+            second = json.loads(
+                (traces / f"{new_session_id}.jsonl").read_text(encoding="utf-8").strip()
+            )
+
+        self.assertNotEqual("session-1", new_session_id)
+        self.assertEqual(2, len(written))
+        self.assertEqual("session-1", first["session_id"])
+        self.assertEqual(new_session_id, second["session_id"])
+
+    async def test_trace_open_failure_does_not_break_startup(self) -> None:
+        """可观测性组件不得弄挂主流程：traces 目录不可写时降级而非崩。"""
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        with (
+            patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+            patch(
+                "pickel.cli.chat.JsonlTraceSink",
+                side_effect=PermissionError("Permission denied: ~/.pickel/traces"),
+            ),
+        ):
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=StubRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=console,
+                input_reader=lambda _: next(submitted_inputs),
+            )
+            await loop.run()
+
+        self.assertIsNone(loop._trace_sink)
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(1, titles.count("Assistant"))
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()

@@ -3,11 +3,14 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-# ToolCallBatch 仅为运行时/回放展示 shim；落盘已统一为 AgentMessage（Task 5）。
-# Task 8 后改为基于 AssistantMessage/ToolResultMessage 渲染。
-from pickel.conversations.message import ToolCallBatch
-from pickel.conversations.metadata import MessageMetadata
-from pickel.runs import RuntimeEvent, RuntimeEventType
+from pickel.runs.runtime_events import (
+    AssistantMessageEvent,
+    RuntimeEventBase,
+    StepStarted,
+    ToolCallCompleted,
+    ToolCallStarted,
+)
+from pickel.runs.turn_usage import TurnUsage
 from pickel.tools.base import ToolExecutionResult
 
 
@@ -16,16 +19,16 @@ class ChatEventRenderer:
         self.console = console
         self.rendered_assistant_message = False
 
-    async def handle_event(self, event: RuntimeEvent) -> None:
-        if event.event_type == RuntimeEventType.MODEL_STEP_STARTED:
+    async def handle_event(self, event: RuntimeEventBase) -> None:
+        if isinstance(event, StepStarted):
             self._render_message(
                 "Thinking",
-                Text(f"Step {event.step_index}"),
+                Text(f"Step {event.envelope.step_index}"),
                 style="magenta",
             )
             return
 
-        if event.event_type == RuntimeEventType.TOOL_CALL_STARTED and event.tool_call is not None:
+        if isinstance(event, ToolCallStarted) and event.tool_call is not None:
             self._render_message(
                 "Tool",
                 self._render_tool_started(event.tool_call.name, event.tool_call.arguments),
@@ -33,49 +36,25 @@ class ChatEventRenderer:
             )
             return
 
-        if event.event_type in {
-            RuntimeEventType.TOOL_CALL_COMPLETED,
-            RuntimeEventType.TOOL_CALL_FAILED,
-        } and event.tool_call is not None:
+        if isinstance(event, ToolCallCompleted) and event.tool_call is not None:
             tool_result = event.tool_result or ToolExecutionResult(content="")
             self._render_message(
                 "Tool",
                 self._render_tool_finished(
-                    event.tool_call.name,
-                    event.tool_call.arguments,
-                    tool_result,
+                    event.tool_call.name, event.tool_call.arguments, tool_result
                 ),
                 style="red" if tool_result.is_error else "green",
             )
             return
 
-        if event.event_type == RuntimeEventType.ASSISTANT_MESSAGE:
+        if isinstance(event, AssistantMessageEvent):
             self.rendered_assistant_message = True
             content: RenderableType = Markdown(event.text)
-            if event.metadata is not None:
-                content = Group(Markdown(event.text), self._render_assistant_footer(event.metadata))
+            if event.usage is not None:
+                content = Group(
+                    Markdown(event.text), self._render_assistant_footer(event.usage)
+                )
             self._render_message("Assistant", content, style="yellow")
-
-    @classmethod
-    def render_tool_batch_transcript(cls, batch: ToolCallBatch) -> list[tuple[str, Text]]:
-        """渲染运行时 ToolCallBatch 回放；非持久消息合同。"""
-        results_by_call_id = {result.call_id: result for result in batch.results}
-        entries: list[tuple[str, Text]] = []
-        for tool_call in batch.calls:
-            tool_result = results_by_call_id.get(tool_call.id)
-            if tool_result is None:
-                continue
-            renderable = cls._render_tool_finished(
-                tool_call.name,
-                tool_call.arguments,
-                ToolExecutionResult(
-                    content=tool_result.content,
-                    is_error=tool_result.is_error,
-                    metadata=dict(tool_result.metadata),
-                ),
-            )
-            entries.append(("red" if tool_result.is_error else "green", renderable))
-        return entries
 
     @classmethod
     def _render_tool_started(cls, name: str, arguments: dict[str, object]) -> Text:
@@ -110,19 +89,18 @@ class ChatEventRenderer:
             )
         )
 
-    def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
+    def _render_assistant_footer(self, usage: TurnUsage) -> Text:
         footer = Text(style="dim", justify="right")
-        footer.append(f"{metadata.provider} / {metadata.model}")
-        stats = []
-        if metadata.input_tokens is not None:
-            stats.append(f"in {metadata.input_tokens}")
-        if metadata.output_tokens is not None:
-            stats.append(f"out {metadata.output_tokens}")
-        if metadata.elapsed_ms is not None:
-            stats.append(f"{metadata.elapsed_ms / 1000:.1f}s")
-        if stats:
-            footer.append("\n")
-            footer.append(" · ".join(stats))
+        if usage.model_label:
+            footer.append(usage.model_label)
+        stats = [
+            f"in {usage.actual_input_tokens}",
+            f"out {usage.output_tokens}",
+        ]
+        if usage.elapsed_ms:
+            stats.append(f"{usage.elapsed_ms / 1000:.1f}s")
+        footer.append("\n")
+        footer.append(" · ".join(stats))
         return footer
 
     @staticmethod

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import time
+import traceback
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from pickel.agents.agent import Agent
 from pickel.config.environ import Environ
@@ -17,7 +20,9 @@ from pickel.hooks.events import UserPromptSubmitEvent
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers import create_llm_provider
 from pickel.providers.base import Provider
-from pickel.runs.events import RuntimeEventHandler
+from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
+from pickel.runs.turn_usage import last_turn_usage
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import ModelSelection
 from pickel.tools.base import BaseTool, ToolExecutionContext
@@ -34,6 +39,7 @@ from pickel.tools.shell import ShellSessionManager
 if TYPE_CHECKING:
     from pickel.app.boot import Boot
     from pickel.config.app_config import AppConfig
+    from pickel.runs.event_bus import EventBus
     from pickel.runs.strategy.base import ExecutionStrategy
 
 
@@ -139,7 +145,7 @@ class Run:
         *,
         session: Session,
         user_text: str,
-        event_handler: RuntimeEventHandler | None = None,
+        bus: "EventBus | None" = None,
     ) -> AssistantMessage:
         """turn 边界：UserPromptSubmit hook → 写 user → strategy.execute。"""
         if session.agent_id != self.agent.agent_id:
@@ -148,16 +154,37 @@ class Run:
                 f"not '{self.agent.agent_id}'"
             )
 
+        turn_id = str(uuid4())
+
+        def envelope() -> EventEnvelope:
+            return EventEnvelope(session_id=session.session_id, turn_id=turn_id)
+
+        async def emit(event) -> None:
+            if bus is not None:
+                await bus.emit(event)
+
+        await emit(TurnStarted(envelope=envelope(), user_text=user_text))
+        started = time.perf_counter()
+
         decision = await self.lifecycle_hooks.user_prompt_submit(
             UserPromptSubmitEvent(
                 session_id=session.session_id,
+                turn_id=turn_id,
                 prompt=user_text,
             )
         )
         if decision.action == "block":
-            return AssistantMessage(
+            blocked = AssistantMessage(
                 content=[TextContent(text=decision.reason or "请求被 Hook 阻止")]
             )
+            await emit(
+                TurnCompleted(
+                    envelope=envelope(),
+                    usage=None,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000),
+                )
+            )
+            return blocked
 
         user_entry = session.append_user(
             UserMessage(content=[TextContent(text=user_text)])
@@ -168,16 +195,37 @@ class Run:
                 entries=[user_entry],
             )
 
-        return await self.strategy.execute(
-            run=self,
-            session=session,
-            event_handler=event_handler,
-            initial_hook_feedback=(
-                [HookFeedback(source_event="UserPromptSubmit", text=decision.feedback_text)]
-                if decision.feedback_text
-                else None
-            ),
+        try:
+            reply = await self.strategy.execute(
+                run=self,
+                session=session,
+                bus=bus,
+                turn_id=turn_id,
+                initial_hook_feedback=(
+                    [HookFeedback(source_event="UserPromptSubmit", text=decision.feedback_text)]
+                    if decision.feedback_text
+                    else None
+                ),
+            )
+        except Exception as exc:
+            await emit(
+                TurnFailed(
+                    envelope=envelope(),
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                    traceback_text=traceback.format_exc(),
+                )
+            )
+            raise
+
+        await emit(
+            TurnCompleted(
+                envelope=envelope(),
+                usage=last_turn_usage(session),
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
         )
+        return reply
 
     def get_tool_execution_context(self, session_id: str) -> ToolExecutionContext:
         return ToolExecutionContext(

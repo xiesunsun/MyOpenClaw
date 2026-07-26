@@ -95,3 +95,8 @@ pickle_workspace/
 # Keep committed agent spec/docs
 # (Do NOT ignore agents/ entirely unless you want all agent defs local-only)
 # agents/
+
+# ------------------------------
+# Claude Code worktrees
+# ------------------------------
+.claude/worktrees/

@@ -3,25 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+
+from pickel.shared.event_envelope import EventIdentity
 
 if TYPE_CHECKING:
     from pickel.context.model_context import ModelContext
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 @dataclass(frozen=True)
-class HookEventBase:
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    session_id: str = ""
-    turn_id: str = ""
-    step_index: int | None = None
-    occurred_at: datetime = field(default_factory=_now)
+class HookEventBase(EventIdentity):
+    """向后兼容的别名基类；身份字段全部来自 EventIdentity。"""
 
 
 @dataclass(frozen=True)
