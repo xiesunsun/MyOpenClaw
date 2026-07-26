@@ -1,5 +1,5 @@
 from pickel.tools.base import BaseTool
-from pickel.tools.builtin import echo
+from pickel.tools.builtin import echo, tool_set_active
 from pickel.tools.bus import ToolBus, ToolSource
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_tools import (
@@ -18,6 +18,7 @@ def builtin_tools() -> list[BaseTool]:
     formatter = FileToolFormatter()
     return [
         echo,
+        tool_set_active,
         ListDirectoryTool(formatter),
         GlobSearchTool(formatter),
         GrepSearchTool(formatter),

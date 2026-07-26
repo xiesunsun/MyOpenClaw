@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -116,6 +117,18 @@ class Run:
         """
         return [entry.tool for entry in self.tool_bus.snapshot(self.activation).entries]
 
+    # --- ActivationControl 协议：供 tool_set_active 收窄/恢复激活集 ---
+
+    def allowed_names(self) -> frozenset[str]:
+        return self.activation.allowed
+
+    def disable_tools(self, names: Iterable[str]) -> None:
+        """agent 自我收窄激活集，下一 turn 生效（本 turn 快照已取）。"""
+        self.activation = self.activation.with_agent_disabled(names)
+
+    def enable_tools(self, names: Iterable[str]) -> None:
+        self.activation = self.activation.with_agent_enabled(names)
+
     def apply_environ_model(self, app_config: AppConfig) -> None:
         """按 Environ 叠层重新 resolve model，更新 agent.model_config 与 provider。"""
         base_selection = ModelSelection(
@@ -203,6 +216,7 @@ class Run:
             services=ToolServices(
                 workspace_files=self.workspace_files,
                 shell_sessions=self.shell_session_manager,
+                activation_control=self,
             ),
         )
 
