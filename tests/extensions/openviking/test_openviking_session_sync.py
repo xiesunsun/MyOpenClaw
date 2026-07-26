@@ -4,16 +4,16 @@ from datetime import datetime, timedelta, timezone
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
-from pickel.integrations.openviking.config import OpenVikingConfig
-from pickel.integrations.openviking.openviking_state import InMemoryOpenVikingStateStore
-from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
-from pickel.integrations.openviking.session_messages import (
+from pickel.extensions.openviking.commit_policy import ThresholdCommitPolicy
+from pickel.extensions.openviking.config import OpenVikingConfig
+from pickel.extensions.openviking.openviking_state import InMemoryOpenVikingStateStore
+from pickel.extensions.openviking.session_client import SyncHTTPOpenVikingSessionClient
+from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
+from pickel.extensions.openviking.session_messages import (
     agent_message_plain_text,
     list_syncable_agent_messages,
 )
-from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
+from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 
 
 class NotFoundError(Exception):

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pickel.context.models import SessionRecallResult, SessionRecallSnippet
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.recall_adapter import OpenVikingRecall
+from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
 
 
 class _StubProvider:

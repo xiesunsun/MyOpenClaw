@@ -8,9 +8,9 @@ from typing import Any
 
 from pickel.context import SessionRecallResult, SessionRecallSnippet
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.config import OpenVikingConfig
-from pickel.integrations.openviking.context_client import OpenVikingContextClient
-from pickel.integrations.openviking.openviking_state import (
+from pickel.extensions.openviking.config import OpenVikingConfig
+from pickel.extensions.openviking.context_client import OpenVikingContextClient
+from pickel.extensions.openviking.openviking_state import (
     InMemoryOpenVikingStateStore,
     OpenVikingStateStore,
 )

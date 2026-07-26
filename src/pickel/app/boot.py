@@ -12,13 +12,13 @@ from pickel.context import (
     SessionRecallProvider,
 )
 from pickel.context.assembler import ContextAssembler
-from pickel.integrations.openviking.bypass_store import OpenVikingBypassStore
-from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
-from pickel.integrations.openviking.context_client import SyncHTTPOpenVikingContextClient
-from pickel.integrations.openviking.recall_adapter import OpenVikingRecall
-from pickel.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
-from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
+from pickel.extensions.openviking.bypass_store import OpenVikingBypassStore
+from pickel.extensions.openviking.commit_policy import ThresholdCommitPolicy
+from pickel.extensions.openviking.context_client import SyncHTTPOpenVikingContextClient
+from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
+from pickel.extensions.openviking.session_recall import OpenVikingSessionRecallProvider
+from pickel.extensions.openviking.session_client import SyncHTTPOpenVikingSessionClient
+from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
 from pickel.conversations.session_sync import (
     CompositeSessionSync,
     NoopSessionSync,
@@ -26,7 +26,7 @@ from pickel.conversations.session_sync import (
 )
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
-from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
+from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
 from pickel.tools.bus import ToolBus

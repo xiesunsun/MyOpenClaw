@@ -7,7 +7,7 @@ from pickel.conversations.message import (
     ToolCallBatch,
     ToolCallResult,
 )
-from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
+from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
 
 
 class SessionMessageMapperTests(unittest.TestCase):

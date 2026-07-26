@@ -6,16 +6,16 @@ from datetime import datetime, timezone
 
 from pickel.conversations.session import Session
 from pickel.conversations.session_sync import NoopSessionSync, SessionSync
-from pickel.integrations.openviking.commit_policy import CommitPolicy
-from pickel.integrations.openviking.config import OpenVikingConfig
-from pickel.integrations.openviking.openviking_state import (
+from pickel.extensions.openviking.commit_policy import CommitPolicy
+from pickel.extensions.openviking.config import OpenVikingConfig
+from pickel.extensions.openviking.openviking_state import (
     InMemoryOpenVikingStateStore,
     OpenVikingSessionState,
     OpenVikingStateStore,
 )
-from pickel.integrations.openviking.session_client import OpenVikingSessionClient
-from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
-from pickel.integrations.openviking.session_messages import (
+from pickel.extensions.openviking.session_client import OpenVikingSessionClient
+from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
+from pickel.extensions.openviking.session_messages import (
     agent_message_to_session_message,
     list_syncable_agent_messages,
 )

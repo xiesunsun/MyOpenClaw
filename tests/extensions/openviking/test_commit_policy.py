@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.commit_policy import ThresholdCommitPolicy
-from pickel.integrations.openviking.openviking_state import OpenVikingSessionState
+from pickel.extensions.openviking.commit_policy import ThresholdCommitPolicy
+from pickel.extensions.openviking.openviking_state import OpenVikingSessionState
 
 
 class CommitPolicyTests(unittest.TestCase):

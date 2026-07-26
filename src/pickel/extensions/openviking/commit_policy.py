@@ -6,8 +6,8 @@ from typing import Protocol
 
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.openviking_state import OpenVikingSessionState
-from pickel.integrations.openviking.session_messages import list_syncable_agent_messages
+from pickel.extensions.openviking.openviking_state import OpenVikingSessionState
+from pickel.extensions.openviking.session_messages import list_syncable_agent_messages
 
 
 class CommitPolicy(Protocol):

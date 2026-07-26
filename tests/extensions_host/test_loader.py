@@ -77,6 +77,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
                 tool_bus=ToolBus(),
                 app_config=_app_config(),
                 home=home,
+                builtin_package=None,
             )
 
             self.assertEqual([], result.errors)
@@ -90,7 +91,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "probe_ext", _TOOL_EXT)
             bus = ToolBus()
 
-            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home)
+            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None)
 
             self.assertEqual([], result.errors)
             entry = bus.get("ext__probe_ext__probe")
@@ -102,7 +103,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "async_ext", _ASYNC_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home
+                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
             )
 
             self.assertEqual([], result.errors)
@@ -119,7 +120,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "real", _RECALL_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home
+                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
             )
 
             self.assertEqual(["real"], result.registry.extension_names)
@@ -127,7 +128,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
     def test_missing_extensions_dir_is_not_an_error(self) -> None:
         with TemporaryDirectory() as tmp:
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=Path(tmp)
+                tool_bus=ToolBus(), app_config=_app_config(), home=Path(tmp), builtin_package=None
             )
 
             self.assertEqual([], result.errors)
@@ -141,7 +142,7 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "zzz_healthy", _RECALL_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home
+                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
             )
 
             self.assertEqual(1, len(result.errors))
@@ -154,7 +155,7 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "no_setup", _NO_SETUP_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home
+                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
             )
 
             self.assertEqual(1, len(result.errors))
@@ -166,7 +167,7 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "half_dead", _SETUP_BOOM_AFTER_TOOL_EXT)
             bus = ToolBus()
 
-            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home)
+            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None)
 
             self.assertEqual(1, len(result.errors))
             # 半装状态必须回滚，否则 bus 里留着一个无人维护的工具
@@ -189,6 +190,7 @@ class LoaderIsolationTests(unittest.TestCase):
                 tool_bus=ToolBus(),
                 app_config=_app_config({"cfg_ext": {"count": "not-an-int"}}),
                 home=home,
+                builtin_package=None,
             )
 
             self.assertEqual(1, len(result.errors))

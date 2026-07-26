@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from pickel.config.environ import Environ
-from pickel.integrations.openviking.config import OpenVikingConfig
+from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import (
     ModelConfig,

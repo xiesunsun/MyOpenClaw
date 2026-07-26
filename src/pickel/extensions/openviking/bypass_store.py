@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from pickel.integrations.openviking.openviking_state import OpenVikingSessionState
+from pickel.extensions.openviking.openviking_state import OpenVikingSessionState
 
 
 class OpenVikingBypassStore:

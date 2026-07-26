@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from pickel.integrations.openviking.config import OpenVikingConfig
+from pickel.extensions.openviking.config import OpenVikingConfig
 
 
 class OpenVikingSessionClient(Protocol):

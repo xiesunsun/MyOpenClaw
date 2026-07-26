@@ -42,10 +42,19 @@ def load_extensions(
     tool_bus: ToolBus,
     app_config: Any,
     home: Path | None = None,
+    builtin_package: str | None = _BUILTIN_PACKAGE,
 ) -> LoadResult:
-    """同步入口。setup 可以是 async def，内部 asyncio.run 承接。"""
+    """同步入口。setup 可以是 async def，内部 asyncio.run 承接。
+
+    builtin_package=None 可关掉内置发现（测试隔离用）。
+    """
     return asyncio.run(
-        load_extensions_async(tool_bus=tool_bus, app_config=app_config, home=home)
+        load_extensions_async(
+            tool_bus=tool_bus,
+            app_config=app_config,
+            home=home,
+            builtin_package=builtin_package,
+        )
     )
 
 
@@ -54,11 +63,12 @@ async def load_extensions_async(
     tool_bus: ToolBus,
     app_config: Any,
     home: Path | None = None,
+    builtin_package: str | None = _BUILTIN_PACKAGE,
 ) -> LoadResult:
     result = LoadResult()
     sections = getattr(app_config, "extensions", None) or {}
 
-    for name, module_loader in _discover(home).items():
+    for name, module_loader in _discover(home, builtin_package).items():
         try:
             module = module_loader()
         except Exception as exc:
@@ -115,12 +125,15 @@ async def teardown_extensions(result: LoadResult, *, tool_bus: ToolBus) -> None:
         tool_bus.unregister_origin(ToolSource.EXTENSION, name)
 
 
-def _discover(home: Path | None) -> dict[str, Any]:
+def _discover(home: Path | None, builtin_package: str | None) -> dict[str, Any]:
     """名字 → 返回模块的可调用。用户级同名覆盖内置。"""
     found: dict[str, Any] = {}
 
-    for name in _iter_builtin_module_names():
-        found[name] = lambda n=name: importlib.import_module(f"{_BUILTIN_PACKAGE}.{n}")
+    if builtin_package is not None:
+        for name in _iter_builtin_module_names(builtin_package):
+            found[name] = lambda n=name, pkg=builtin_package: importlib.import_module(
+                f"{pkg}.{n}"
+            )
 
     user_root = (home or home_dir()) / _USER_DIR_NAME
     for path in _iter_user_paths(user_root):
@@ -130,9 +143,9 @@ def _discover(home: Path | None) -> dict[str, Any]:
     return dict(sorted(found.items()))
 
 
-def _iter_builtin_module_names() -> list[str]:
+def _iter_builtin_module_names(builtin_package: str) -> list[str]:
     try:
-        package = importlib.import_module(_BUILTIN_PACKAGE)
+        package = importlib.import_module(builtin_package)
     except ModuleNotFoundError:
         return []
     return [

@@ -1,15 +1,15 @@
 import unittest
 
 from pickel.conversations.session import Session
-from pickel.integrations.openviking.config import (
+from pickel.extensions.openviking.config import (
     OpenVikingConfig,
     OpenVikingSessionRecallConfig,
 )
-from pickel.integrations.openviking.openviking_state import (
+from pickel.extensions.openviking.openviking_state import (
     InMemoryOpenVikingStateStore,
     OpenVikingSessionState,
 )
-from pickel.integrations.openviking.session_recall import (
+from pickel.extensions.openviking.session_recall import (
     OpenVikingSessionRecallProvider,
 )
 
