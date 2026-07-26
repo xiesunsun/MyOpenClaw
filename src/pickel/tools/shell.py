@@ -583,9 +583,10 @@ class ShellExecTool(BaseTool):
             )
 
         try:
-            result = session.shell.exec(
+            result = await asyncio.to_thread(
+                session.shell.exec,
                 str(arguments["command"]),
-                timeout_ms=int(timeout_ms) if timeout_ms is not None else None,
+                int(timeout_ms) if timeout_ms is not None else None,
             )
         except RuntimeError as exc:
             return ToolExecutionResult(content=str(exc), is_error=True)

@@ -1,5 +1,7 @@
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 import unittest
 
 from pickel.tools.services import ToolServices
@@ -426,3 +428,29 @@ class ForegroundInteractionTests(unittest.IsolatedAsyncioTestCase):
                     shell.wait_foreground(timeout_ms=100)
             finally:
                 shell.terminate()
+
+
+class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exec_does_not_block_event_loop(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            ticker_task = asyncio.create_task(ticker())
+            try:
+                await tool.execute({"command": "sleep 0.6; echo done"}, context)
+                # exec 结束瞬间采样：若 exec 阻塞 loop，ticker 此刻还没跑过几次
+                ticks_during = ticks
+            finally:
+                ticker_task.cancel()
+                manager.close(context.session_id)
+
+        self.assertGreaterEqual(ticks_during, 8)
