@@ -136,7 +136,7 @@ class MainSessionsCliTests(unittest.TestCase):
         fake_boot = Mock()
 
         with (
-            patch("pickel.cli.main._boot", return_value=fake_boot),
+            patch("pickel.cli.main._boot_async", AsyncMock(return_value=fake_boot)),
             patch(
                 "pickel.cli.main.ChatLoop.from_boot", return_value=fake_loop
             ) as from_boot,

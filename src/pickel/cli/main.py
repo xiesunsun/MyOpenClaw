@@ -9,7 +9,7 @@ from pickel.app.boot import Boot
 from pickel.cli.chat import ChatLoop
 from pickel.config.loader import Config
 from pickel.conversations.service import SessionNotFoundError
-from pickel.extensions_host.loader import load_extensions
+from pickel.extensions_host.loader import load_extensions, load_extensions_async
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 
@@ -18,12 +18,14 @@ sessions_app = typer.Typer(invoke_without_command=True)
 config_app = typer.Typer(help="配置相关命令")
 
 
-def _boot() -> Boot:
-    """唯一启动路径：分层 Config.load + extension 装载。"""
+def _prepare_boot() -> tuple[Config, ToolBus]:
     app_config = Config.load(cwd=Path.cwd())
     tool_bus = ToolBus()
     install_builtin_tools(tool_bus)
-    result = load_extensions(tool_bus=tool_bus, app_config=app_config)
+    return app_config, tool_bus
+
+
+def _finish_boot(app_config: Config, tool_bus: ToolBus, result) -> Boot:
     # 装载错误只警告、不阻止启动：一个坏 extension 不该弄挂 CLI
     for error in result.errors:
         typer.secho(f"Extension load error: {error}", fg=typer.colors.YELLOW, err=True)
@@ -32,19 +34,38 @@ def _boot() -> Boot:
     return boot
 
 
+def _boot() -> Boot:
+    """同步启动路径（chat 之外的命令）：分层 Config.load + extension 装载。"""
+    app_config, tool_bus = _prepare_boot()
+    result = load_extensions(tool_bus=tool_bus, app_config=app_config)
+    return _finish_boot(app_config, tool_bus, result)
+
+
+async def _boot_async() -> Boot:
+    """chat 的启动路径：extension 装载发生在 chat 自己的事件循环里。
+
+    MCP 连接由背景任务持有——若在临时 asyncio.run 里装载，
+    进入 chat 循环时连接已随旧循环死掉，首次调用只能靠重连兜住。
+    """
+    app_config, tool_bus = _prepare_boot()
+    result = await load_extensions_async(tool_bus=tool_bus, app_config=app_config)
+    return _finish_boot(app_config, tool_bus, result)
+
+
 def _run_chat(
     *,
     agent: str | None,
     session_id: str | None,
 ) -> None:
+    async def _main() -> None:
+        await ChatLoop.from_boot(
+            boot=await _boot_async(),
+            agent_id=agent,
+            session_id=session_id,
+        ).run()
+
     try:
-        asyncio.run(
-            ChatLoop.from_boot(
-                boot=_boot(),
-                agent_id=agent,
-                session_id=session_id,
-            ).run()
-        )
+        asyncio.run(_main())
     except SessionNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

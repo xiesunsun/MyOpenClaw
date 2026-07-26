@@ -47,7 +47,13 @@ class ExtensionHost:
         return self._tool_bus.unregister_origin(ToolSource.MCP, server)
 ```
 
-这就是试金石结论：E1 API 缺的只有「以非本 extension 身份注册工具」这一小块，其余（async setup、teardown、config 解析、装载失败隔离）全部够用。
+试金石结论（实施后共三条发现）：
+
+1. E1 API 缺「以非本 extension 身份注册工具」——补 `register_mcp_tool`/`unregister_mcp_origin`。
+2. `ExtensionHost` 原本不暴露 `app_config`——mcp 需要项目根定位 `.mcp.json`，已增 `host.app_config`。
+3. **extension 装载必须发生在使用方的事件循环里**——MCP 连接由背景任务持有，`_boot` 的同步 `load_extensions`（内部 `asyncio.run`）建的连接会随临时循环死掉，chat 首调只能靠重连兜住。已为 chat 增 `_boot_async` 路径（其余 CLI 命令仍走同步装载）。
+
+其余（async setup、teardown、config 解析、装载失败隔离）全部够用。
 
 ### 3.2 配置：`.mcp.json`
 
@@ -88,6 +94,8 @@ McpConnection(spec)
 - `setup(host)` 为 async（loader 已支持）：逐 server `McpConnection.open()`，成功后为每个发现的工具 `host.register_mcp_tool(McpProxyTool(connection, tool), server=name)`。
 - 单 server 连接/initialize/发现失败：记 warning，跳过该 server，其余照常——与 extension 装载失败隔离同语义。启动不因任何 server 阻断。
 - 连接超时：initialize + list_tools 整体 10s，超时按失败处理。
+- 单次工具调用超时 60s（asyncio.wait_for），超时转 is_error，不触发重连（连接还活着）。
+- 死亡探测（实施发现）：子进程死后持有栈的背景任务仍阻塞在 shutdown 事件上，`runner.done()` 探测不到；连接丢失由 call_tool 的异常类型判定（anyio ClosedResource/BrokenResource、McpError "Connection closed"）并置 `_dead`。
 - teardown：全部 `connection.close()`（/reload 走这里，重装后重读配置重连）。
 
 ### 3.4 工具代理：McpProxyTool
