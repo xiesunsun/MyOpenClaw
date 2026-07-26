@@ -440,6 +440,103 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("runtime reply", rendered)
         self.assertIn("google/gemini / gemini-3-flash-preview", rendered)
 
+    async def test_真实_run_流式与工具_无边框渲染顺序与_footer(self) -> None:
+        """E3 组装层集成：真 Run + 流式 provider + 工具，一轮完整无边框输出。
+
+        钉住：无 Panel 残留、⏺ 工具行与结果行、思考中前缀、footer 三段式
+        （§5.1 口径的 in→out）、各段落顺序。
+        """
+        from tests.runs.test_events import DelayEchoTool
+
+        class _StreamingToolProvider:
+            """两步：先 tool_call（无增量），再 thinking+text 增量。"""
+
+            def __init__(self) -> None:
+                self._step = 0
+
+            async def stream(self, context):
+                from pickel.providers.stream import (
+                    StreamCompleted,
+                    TextDelta,
+                    ThinkingDelta,
+                )
+
+                self._step += 1
+                if self._step == 1:
+                    yield StreamCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCallContent(
+                                    id="call-1", name="echo", arguments={"text": "hi"}
+                                )
+                            ],
+                            metadata=_model_metadata(),
+                        )
+                    )
+                    return
+                yield ThinkingDelta(text="想一下")
+                yield TextDelta(text="do")
+                yield TextDelta(text="ne")
+                yield StreamCompleted(
+                    message=AssistantMessage(
+                        content=[TextContent(text="done")],
+                        metadata=_model_metadata(),
+                    )
+                )
+
+            async def generate(self, context):
+                from pickel.providers.stream import accumulate
+
+                return await accumulate(self.stream(context))
+
+        agent = self._build_agent()
+        run = Run(
+            agent=agent,
+            provider=_StreamingToolProvider(),
+            tool_bus=(_bus := bus_with([DelayEchoTool()])),
+            activation=ToolActivation(allowed=frozenset(_bus.list_names())),
+            context_assembler=ContextAssembler(),
+            lifecycle_hooks=NoopLifecycleHooks(),
+            session_service=None,
+            file_access_policy=None,
+            workspace_files=None,
+            shell_session_manager=ShellSessionManager(),
+            unit_window=5,
+            strategy=ReActStrategy(max_steps=4),
+        )
+        console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["hello", "/exit"])
+        loop = ChatLoop(
+            agent=agent,
+            run=run,
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertNotIn("╭", rendered)
+        self.assertIn("⏺ echo", rendered)
+        self.assertIn("ok · hi", rendered)
+        self.assertIn("· 思考中……", rendered)
+        self.assertIn("done", rendered)
+        # 两步合计：input 100+100=200、output 10+10=20、elapsed 100+100ms=0.2s
+        self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
+        # 顺序：工具行 < 结果行 < 思考行 < footer
+        self.assertLess(rendered.index("⏺ echo"), rendered.index("ok · hi"))
+        self.assertLess(rendered.index("ok · hi"), rendered.index("· 思考中……"))
+        self.assertLess(
+            rendered.index("· 思考中……"),
+            rendered.index("google/gemini / gemini-3-flash-preview · 200→20"),
+        )
+        # 流式预览行（do+ne）与工具行不粘连：思考行之后有独立的流式文字
+        streaming_lines = [
+            line for line in rendered.splitlines() if line.strip() == "done"
+        ]
+        self.assertTrue(streaming_lines, "流式预览与 Markdown 正文各占独立行")
+
     async def test_run_does_not_duplicate_final_reply_after_assistant_event(self) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
