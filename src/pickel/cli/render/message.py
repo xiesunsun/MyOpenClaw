@@ -74,4 +74,6 @@ def render_assistant(
     console.print(Markdown(text))
     footer = format_footer(usage, fallback_model_label)
     if footer is not None:
-        console.print(Text(footer, style="dim", justify="right"))
+        # justify 必须给 print：Text(justify=...) 只在块内对齐，
+        # 单行文本块宽即行宽，不会相对 console 宽度右对齐
+        console.print(Text(footer, style="dim"), justify="right")

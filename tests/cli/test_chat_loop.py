@@ -27,6 +27,7 @@ from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     StepStarted,
+    TextDeltaEvent,
     ToolCallCompleted,
     ToolCallStarted,
 )
@@ -37,7 +38,19 @@ from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolActivation, bus_with
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.text import Text
+
+
+def _markdown_replies(console: Mock, text: str) -> list[Markdown]:
+    """事件渲染出的 assistant 正文（无边框 Markdown）；用于数渲染次数。"""
+    return [
+        call.args[0]
+        for call in console.print.call_args_list
+        if call.args
+        and isinstance(call.args[0], Markdown)
+        and call.args[0].markup == text
+    ]
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -118,9 +131,11 @@ class ErrorRun:
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         # 真 Run 在失败前也已经发过事件；桩照做，否则「失败轮不退订渲染器」
-        # 这种回归在后续轮次里没有任何可观测痕迹
+        # 这种回归在后续轮次里没有任何可观测痕迹。StepStarted 在 E3 已不上
+        # 屏，可观测痕迹靠流式 delta。
         if bus is not None:
             await bus.emit(StepStarted(envelope=EventEnvelope(step_index=1)))
+            await bus.emit(TextDeltaEvent(text="failing"))
         raise ValueError("boom")
 
 
@@ -345,7 +360,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(self) -> None:
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        console = Mock()
+        console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
         loop = ChatLoop(
             agent=agent,
             run=StubToolRun(),
@@ -356,19 +371,20 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         bus, _, _unsubscribe = loop.create_event_bus()
         result = await loop.handle_user_input("hello", bus=bus)
 
-        titles = [call.args[0].title for call in console.print.call_args_list]
-        started_render = str(console.print.call_args_list[1].args[0].renderable)
-        completed_render = str(console.print.call_args_list[2].args[0].renderable)
+        rendered = console.export_text()
 
         self.assertEqual("final reply", _assistant_text(result))
-        self.assertEqual(["Thinking", "Tool", "Tool", "Assistant"], titles)
-        self.assertIn("read_file(path=", started_render)
-        self.assertIn("status: running", started_render)
-        self.assertNotIn("step:", started_render)
-        self.assertIn("read_file(path=", completed_render)
-        self.assertIn("status: ok", completed_render)
-        self.assertIn("result: file content", completed_render)
-        self.assertNotIn("meta:", completed_render)
+        self.assertIn("⏺ read_file", rendered)
+        self.assertIn("path=", rendered)
+        self.assertIn("running", rendered)
+        self.assertIn("ok · file content", rendered)
+        self.assertIn("final reply", rendered)
+        self.assertIn("google/gemini / gemini-3-flash-preview · 11→7", rendered)
+        # 工具行先于最终正文
+        self.assertLess(rendered.index("⏺ read_file"), rendered.index("final reply"))
+        self.assertNotIn("Step 1", rendered)  # E3：Step 行不再上屏
+        self.assertNotIn("shell_status", rendered)  # metadata 不上屏
+        self.assertNotIn("╭", rendered)  # 无 Panel
 
     async def test_render_turn_output_replays_assistant_tool_batch(self) -> None:
         agent = self._build_agent()
@@ -453,7 +469,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
-        self.assertEqual(1, titles.count("Assistant"))
+        self.assertEqual(1, len(_markdown_replies(console, "runtime reply")))
+        # chat.py 的 fallback（Panel "Assistant"）不得再画一遍
+        self.assertEqual(0, titles.count("Assistant"))
         self.assertNotIn("You", titles)
 
     async def test_run_renders_full_traceback_when_turn_fails(self) -> None:
@@ -677,8 +695,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await loop.run()
 
-        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
-        self.assertEqual(3, titles.count("Assistant"))
+        self.assertEqual(3, len(_markdown_replies(console, "runtime reply")))
 
     async def test_失败轮也退订渲染器_后续轮次不翻倍(self) -> None:
         """异常路径的退订只由 finally 保证，挪出去就是「一轮失败后越印越多」。"""
@@ -702,10 +719,15 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             if getattr(panel, "title", None) == "System"
             and getattr(panel, "border_style", None) == "red"
         ]
+        deltas = [
+            call
+            for call in console.print.call_args_list
+            if call.args and call.args[0] == "failing"
+        ]
 
         self.assertEqual(3, len(errors))
-        # 每轮 1 次：渲染器没退订的话第 2/3 轮会打 2/3 遍
-        self.assertEqual(3, titles.count("Thinking"))
+        # 每轮 1 次：渲染器没退订的话第 2/3 轮的流式 delta 会打 2/3 遍
+        self.assertEqual(3, len(deltas))
         self.assertEqual(0, titles.count("Assistant"))
 
     async def test_真实_run_端到端_事件序列_seq_trace_与渲染次数(self) -> None:
@@ -750,7 +772,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 unit_window=5,
                 strategy=ReActStrategy(max_steps=4),
             )
-            console = Mock()
+            console = Console(
+                file=StringIO(), force_terminal=False, width=120, record=True
+            )
             submitted_inputs = iter(["hello", "/exit"])
             # 不 patch trace_path：走真实实现（PICKEL_HOME 改写 home_dir）
             with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
@@ -799,11 +823,14 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(records[5]["usage"], records[6]["usage"])
 
-        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
-        self.assertEqual(
-            ["MyOpenClaw Chat", "Thinking", "Tool", "Tool", "Thinking", "Assistant", "System"],
-            titles,
-        )
+        rendered = console.export_text()
+        self.assertIn("⏺ echo", rendered)
+        self.assertIn("ok · hi", rendered)
+        self.assertIn("done", rendered)
+        self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
+        # 工具行先于最终正文；Step 行不再上屏
+        self.assertLess(rendered.index("⏺ echo"), rendered.rindex("done"))
+        self.assertNotIn("Step 1", rendered)
 
     async def test_真实_run_流式_provider_trace_中_delta_先于_assistant_message_且_seq_连续(self) -> None:
         """组装层集成（流式）：真 Run + 流式 fake provider + ChatLoop + trace sink。
@@ -956,8 +983,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             await loop.run()
 
         self.assertIsNone(loop._trace_sink)
-        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
-        self.assertEqual(1, titles.count("Assistant"))
+        self.assertEqual(1, len(_markdown_replies(console, "runtime reply")))
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()
