@@ -1,3 +1,4 @@
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 
@@ -120,3 +121,40 @@ class ExtensionRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpHostApiTests(unittest.TestCase):
+    def _mcp_host(self, bus: ToolBus) -> ExtensionHost:
+        return ExtensionHost(
+            name="mcp",
+            config_section=None,
+            tool_bus=bus,
+            registry=ExtensionRegistry(),
+            app_config=SimpleNamespace(root=Path("/tmp/project")),
+        )
+
+    def test_register_mcp_tool_uses_mcp_prefix_and_server_origin(self) -> None:
+        bus = ToolBus()
+        host = self._mcp_host(bus)
+
+        qualified = host.register_mcp_tool(_stub_tool("create_issue"), server="github")
+
+        self.assertEqual("mcp__github__create_issue", qualified)
+        self.assertEqual("github", bus.get(qualified).origin)
+        self.assertIs(ToolSource.MCP, bus.get(qualified).source)
+
+    def test_unregister_mcp_origin_removes_only_that_server(self) -> None:
+        bus = ToolBus()
+        host = self._mcp_host(bus)
+        host.register_mcp_tool(_stub_tool("a"), server="github")
+        host.register_mcp_tool(_stub_tool("b"), server="jira")
+
+        removed = host.unregister_mcp_origin("github")
+
+        self.assertEqual(["mcp__github__a"], removed)
+        self.assertEqual(["mcp__jira__b"], bus.list_names(source=ToolSource.MCP))
+
+    def test_app_config_is_exposed(self) -> None:
+        host = self._mcp_host(ToolBus())
+
+        self.assertEqual(Path("/tmp/project"), host.app_config.root)

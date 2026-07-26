@@ -92,6 +92,7 @@ async def load_extensions_async(
             config_section=sections.get(name),
             tool_bus=tool_bus,
             registry=result.registry,
+            app_config=app_config,
         )
         try:
             outcome = setup(host)

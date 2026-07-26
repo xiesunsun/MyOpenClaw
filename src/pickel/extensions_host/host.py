@@ -26,8 +26,10 @@ class ExtensionHost:
         config_section: dict[str, Any] | None,
         tool_bus: ToolBus,
         registry: ExtensionRegistry,
+        app_config: Any = None,
     ) -> None:
         self.name = name
+        self.app_config = app_config
         self._config_section = config_section
         self._tool_bus = tool_bus
         self._registry = registry
@@ -55,6 +57,18 @@ class ExtensionHost:
             source=ToolSource.EXTENSION,
             origin=self.name,
         )
+
+    def register_mcp_tool(self, tool: BaseTool, *, server: str) -> str:
+        """注册 MCP 代理工具。最终名为 mcp__<server>__<tool>。
+
+        与 register_tool 的 ext__ 前缀分开：MCP 工具跑在子进程里，
+        执行位置与信任级别不同，名字上必须能区分（T1 设计）。
+        """
+        return self._tool_bus.register(tool, source=ToolSource.MCP, origin=server)
+
+    def unregister_mcp_origin(self, server: str) -> list[str]:
+        """卸掉某个 MCP server 的全部工具（断连/重连失败路径）。"""
+        return self._tool_bus.unregister_origin(ToolSource.MCP, server)
 
     def add_hook_handler(self, factory: Factory) -> None:
         """注册 hook handler 工厂：(AgentScope) -> handler | None。
