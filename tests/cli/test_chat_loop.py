@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -16,7 +18,15 @@ from pickel.conversations.session_preview import SessionPreview
 from pickel.cli.chat import ChatLoop
 from pickel.conversations.agent_message import ModelResponseMetadata, ModelUsage
 from pickel.runs.usage_anchor import context_fingerprint
-from pickel.runs import RuntimeEvent, RuntimeEventType
+from pickel.runs.event_bus import EventBus
+from pickel.runs.runtime_events import (
+    AssistantMessageEvent,
+    StepStarted,
+    ToolCallCompleted,
+    ToolCallStarted,
+)
+from pickel.runs.turn_usage import TurnUsage
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.conversations.message import ToolCall
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
@@ -53,18 +63,13 @@ class StubRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.ASSISTANT_MESSAGE,
-                    text="runtime reply",
-                )
-            )
+        if bus is not None:
+            await bus.emit(AssistantMessageEvent(text="runtime reply"))
         return reply
 
 
@@ -74,7 +79,7 @@ class SilentRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         reply = _text_assistant("runtime reply")
@@ -88,10 +93,21 @@ class ErrorRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
         raise ValueError("boom")
+
+
+class InterruptRun:
+    async def turn(
+        self,
+        *,
+        session: Session,
+        user_text: str,
+        bus: EventBus | None = None,
+    ) -> AssistantMessage:
+        raise KeyboardInterrupt
 
 
 class StubToolRun:
@@ -100,36 +116,29 @@ class StubToolRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         session.append_user(UserMessage(content=[TextContent(text=user_text)]))
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.MODEL_STEP_STARTED,
-                    step_index=1,
-                )
-            )
+        if bus is not None:
+            await bus.emit(StepStarted(envelope=EventEnvelope(step_index=1)))
         tool_call = ToolCall(
             id="call-1",
             name="read_file",
             arguments={"path": "/tmp/" + "very-long-segment/" * 12 + "file.txt"},
         )
-        if event_handler is not None:
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                    step_index=1,
+        if bus is not None:
+            await bus.emit(
+                ToolCallStarted(
+                    envelope=EventEnvelope(step_index=1),
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
                     tool_call=tool_call,
                 )
             )
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.TOOL_CALL_COMPLETED,
-                    step_index=1,
+            await bus.emit(
+                ToolCallCompleted(
+                    envelope=EventEnvelope(step_index=1),
                     batch_id="batch-1",
                     call_index=0,
                     total_calls=1,
@@ -144,13 +153,15 @@ class StubToolRun:
                     ),
                 )
             )
-            await event_handler(
-                RuntimeEvent(
-                    event_type=RuntimeEventType.ASSISTANT_MESSAGE,
+            await bus.emit(
+                AssistantMessageEvent(
+                    envelope=EventEnvelope(step_index=1),
                     text="final reply",
-                    metadata=MessageMetadata(
-                        provider="google/gemini",
-                        model="gemini-3-flash-preview",
+                    usage=TurnUsage(
+                        steps=1,
+                        input_tokens=11,
+                        output_tokens=7,
+                        model_label="google/gemini / gemini-3-flash-preview",
                     ),
                 )
             )
@@ -177,7 +188,7 @@ class StubContextRun:
         *,
         session: Session,
         user_text: str,
-        event_handler=None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         raise AssertionError("turn should not be called")
 
@@ -267,10 +278,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             console=console,
         )
 
-        result = await loop.handle_user_input(
-            "hello",
-            event_handler=loop.create_event_handler(),
-        )
+        bus, _ = loop.create_event_bus()
+        result = await loop.handle_user_input("hello", bus=bus)
 
         titles = [call.args[0].title for call in console.print.call_args_list]
         started_render = str(console.print.call_args_list[1].args[0].renderable)
@@ -446,6 +455,67 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(session_service.closed)
         self.assertEqual("session-1", session_service.closed_sessions[0].session_id)
+
+    async def test_trace_sink_receives_events_and_closes_on_exit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["hello", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                sink = loop._trace_sink
+                await loop.run()
+
+            events = [
+                json.loads(line)
+                for line in trace_file.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(["assistant_message"], [e["event_type"] for e in events])
+        self.assertIsNone(loop._trace_sink)
+        self.assertTrue(sink._handle.closed)
+
+    async def test_trace_sink_closes_when_turn_raises_keyboard_interrupt(self) -> None:
+        """Ctrl-C 打断 turn 不经过 _close_session，句柄由 run() 的 finally 释放。"""
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["hello"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=InterruptRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                sink = loop._trace_sink
+                with self.assertRaises(KeyboardInterrupt):
+                    await loop.run()
+
+        self.assertTrue(sink._handle.closed)
+
+    async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PICKEL_TRACE", None)
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=StubRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=Mock(),
+            )
+
+        self.assertIsNone(loop._trace_sink)
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()

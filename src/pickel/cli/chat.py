@@ -18,9 +18,9 @@ from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
-# 仍用旧扁平事件的 handler 签名；Task 7 把 CLI 切到 EventBus 后此 import 消失。
-from pickel.runs.events import RuntimeEventHandler
+from pickel.runs.event_bus import EventBus
 from pickel.runs.measure import measure
+from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
 from pickel.runs.run import Run
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
@@ -61,6 +61,11 @@ class ChatLoop:
         self._session_closed = False
         self._boot = boot
         self._app_config = app_config or (boot.app_config if boot is not None else None)
+        self._trace_sink = None
+        if trace_enabled(
+            self._app_config.trace_enabled if self._app_config is not None else False
+        ):
+            self._trace_sink = JsonlTraceSink(trace_path(self.session.session_id))
 
     @classmethod
     def from_boot(
@@ -97,18 +102,21 @@ class ChatLoop:
     async def handle_user_input(
         self,
         text: str,
-        event_handler: RuntimeEventHandler | None = None,
+        bus: "EventBus | None" = None,
     ) -> AssistantMessage:
         if self._run is None:
             raise ValueError("Run 未提供")
         return await self._run.turn(
-            session=self.session,
-            user_text=text,
-            event_handler=event_handler,
+            session=self.session, user_text=text, bus=bus
         )
 
-    def create_event_handler(self) -> RuntimeEventHandler:
-        return ChatEventRenderer(self.console).handle_event
+    def create_event_bus(self) -> tuple[EventBus, ChatEventRenderer]:
+        bus = EventBus()
+        renderer = ChatEventRenderer(self.console)
+        bus.subscribe(renderer.handle_event)
+        if self._trace_sink is not None:
+            bus.subscribe(self._trace_sink)
+        return bus, renderer
 
     def render_turn_output(self, reply: AssistantMessage, *, start_index: int) -> None:
         for entry in self.session.entries[start_index:]:
@@ -257,11 +265,18 @@ class ChatLoop:
         self._render_message("System", summary, style="cyan")
 
     def _close_session(self) -> None:
+        self._close_trace_sink()
         if self._session_closed:
             return
         if self._session_service is not None:
             self._session_service.close(session=self.session)
         self._session_closed = True
+
+    def _close_trace_sink(self) -> None:
+        """trace 文件句柄的唯一释放点；幂等，异常路径由 run() 的 finally 兜底。"""
+        if self._trace_sink is not None:
+            self._trace_sink.close()
+            self._trace_sink = None
 
     def _list_available_models(self) -> list[str]:
         """从 app_config.providers 列出 provider/model。"""
@@ -547,6 +562,14 @@ class ChatLoop:
 
     async def run(self) -> None:
         self._render_header()
+        # turn 中途的 KeyboardInterrupt 不经过下面任何 _close_session，
+        # 故 trace 句柄在此兜底释放。
+        try:
+            await self._loop()
+        finally:
+            self._close_trace_sink()
+
+    async def _loop(self) -> None:
         while True:
             try:
                 raw_user_input = self.input_reader("You > ")
@@ -570,13 +593,10 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            event_renderer = ChatEventRenderer(self.console)
+            bus, event_renderer = self.create_event_bus()
             start_index = len(self.session.entries)
             try:
-                reply = await self.handle_user_input(
-                    user_input,
-                    event_handler=event_renderer.handle_event,
-                )
+                reply = await self.handle_user_input(user_input, bus=bus)
                 if self._session_service is not None:
                     self._session_service.flush_new_entries(
                         session=self.session,
