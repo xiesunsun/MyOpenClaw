@@ -12,9 +12,12 @@ from pickel.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
     PersistentShell,
+    ShellKillTool,
+    ShellOutputTool,
     ShellRestartTool,
     ShellSessionManager,
     ShellStatus,
+    ShellTasksTool,
 )
 
 
@@ -454,3 +457,73 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
                 manager.close(context.session_id)
 
         self.assertGreaterEqual(ticks_during, 8)
+
+
+class BackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_exec_returns_task_id_and_output_is_pollable(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            try:
+                started = await tool.execute(
+                    {"command": "echo bg-line; sleep 0.2; echo bg-done", "background": True},
+                    context,
+                )
+                self.assertFalse(started.is_error)
+                task_id = started.metadata["task_id"]
+
+                output_tool = ShellOutputTool()
+                deadline = time.monotonic() + 5
+                text = ""
+                while time.monotonic() < deadline:
+                    polled = await output_tool.execute({"task_id": task_id}, context)
+                    text += polled.content
+                    if "bg-done" in text:
+                        break
+                    await asyncio.sleep(0.1)
+                self.assertIn("bg-line", text)
+                self.assertIn("bg-done", text)
+            finally:
+                manager.close(context.session_id)
+
+    async def test_tasks_lists_and_kill_terminates(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            try:
+                started = await tool.execute(
+                    {"command": "sleep 60", "background": True}, context
+                )
+                task_id = started.metadata["task_id"]
+
+                listed = await ShellTasksTool().execute({}, context)
+                self.assertIn(task_id, listed.content)
+
+                killed = await ShellKillTool().execute({"task_id": task_id}, context)
+                self.assertFalse(killed.is_error)
+                task = manager.get_background(context.session_id, task_id)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and task.status() == "running":
+                    await asyncio.sleep(0.05)
+                self.assertEqual("exited", task.status())
+            finally:
+                manager.close(context.session_id)
+
+    async def test_close_kills_background_tasks(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            started = await tool.execute(
+                {"command": "sleep 60", "background": True}, context
+            )
+            task = manager.get_background(context.session_id, started.metadata["task_id"])
+
+            manager.close(context.session_id)
+
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and task.status() == "running":
+                await asyncio.sleep(0.05)
+            self.assertEqual("exited", task.status())

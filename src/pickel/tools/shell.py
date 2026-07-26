@@ -11,6 +11,7 @@ import select
 import signal
 import subprocess
 import termios
+import threading
 import time
 from typing import Any
 from uuid import uuid4
@@ -462,14 +463,101 @@ class ShellSession:
     last_used_at: float
 
 
+class BackgroundTask:
+    """独立 pty 上跑的一条后台命令。reader 线程持续采集输出。"""
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        command: str,
+        workspace_path: Path,
+        shell_program: str,
+        limits: OutputLimits | None = None,
+    ) -> None:
+        self.task_id = task_id
+        self.command = command
+        self.started_at = time.time()
+        self._limits = limits or OutputLimits()
+        self._lock = threading.Lock()
+        self._buffer = ""
+        self._process = PtyShellProcess(shell_program=shell_program)
+        self._process.spawn(workspace_path)
+        self._process.write(self.command + "\nexit $?\n")
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self) -> None:
+        while self._process.is_alive():
+            out, err = self._process.read_chunks(timeout_ms=200)
+            if out or err:
+                self._append(out + err)
+        # 进程退出后 drain 残余
+        out, err = self._process.read_chunks(timeout_ms=100)
+        if out or err:
+            self._append(out + err)
+
+    def _append(self, text: str) -> None:
+        with self._lock:
+            self._buffer += text
+            if len(self._buffer) > self._limits.raw_max_chars:
+                keep = self._limits.raw_max_chars // 2
+                self._buffer = (
+                    self._buffer[:keep] + "\n... [dropped] ...\n"
+                    + self._buffer[-keep // 2 :]
+                )
+
+    def read_output(self, since: int = 0) -> tuple[str, int]:
+        with self._lock:
+            text = _normalize_output(self._buffer)
+        return text[since:], len(text)
+
+    def status(self) -> str:
+        return "running" if self._process.is_alive() else "exited"
+
+    @property
+    def exit_code(self) -> int | None:
+        proc = self._process._process
+        return None if proc is None else proc.poll()
+
+    def kill(self) -> None:
+        self._process.terminate()
+
+
 class ShellSessionManager:
     def __init__(self, shell_program: str = "/bin/bash") -> None:
         self.shell_program = shell_program
         self._sessions: dict[str, ShellSession] = {}
+        self._background: dict[str, dict[str, BackgroundTask]] = {}
 
     def __del__(self) -> None:
         for session_id in list(self._sessions):
             self.close(session_id)
+
+    def start_background(
+        self, session_id: str, workspace_path: Path, command: str
+    ) -> BackgroundTask:
+        task = BackgroundTask(
+            task_id=uuid4().hex[:8],
+            command=command,
+            workspace_path=workspace_path.resolve(),
+            shell_program=self.shell_program,
+        )
+        self._background.setdefault(session_id, {})[task.task_id] = task
+        return task
+
+    def background_tasks(self, session_id: str) -> list[BackgroundTask]:
+        return list(self._background.get(session_id, {}).values())
+
+    def get_background(self, session_id: str, task_id: str) -> BackgroundTask | None:
+        return self._background.get(session_id, {}).get(task_id)
+
+    def kill_background(self, session_id: str, task_id: str) -> bool:
+        task = self.get_background(session_id, task_id)
+        if task is None:
+            return False
+        task.kill()
+        return True
 
     def get(self, session_id: str) -> ShellSession | None:
         return self._sessions.get(session_id)
@@ -518,6 +606,8 @@ class ShellSessionManager:
         session = self._sessions.pop(session_id, None)
         if session is not None:
             session.shell.terminate()
+        for task in self._background.pop(session_id, {}).values():
+            task.kill()
 
 
 class ShellExecTool(BaseTool):
@@ -539,6 +629,12 @@ class ShellExecTool(BaseTool):
                     "description": "Optional timeout override for this command in milliseconds.",
                     "minimum": 1,
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run in the background; returns a task_id to poll with shell_output."
+                    ),
+                },
             },
             "required": ["command"],
         },
@@ -550,6 +646,16 @@ class ShellExecTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         manager = _require_shell_manager(context)
+
+        if arguments.get("background"):
+            task = manager.start_background(
+                context.session_id, context.workspace_path, str(arguments["command"])
+            )
+            return ToolExecutionResult(
+                content=f"Background task started: {task.task_id}",
+                metadata={"task_id": task.task_id, "background": True},
+            )
+
         created_new_shell = manager.get(context.session_id) is None
         session = manager.get_or_create(context.session_id, context.workspace_path)
 
@@ -762,6 +868,131 @@ class ShellInterruptTool(BaseTool):
             )
         )
         return _foreground_result(result)
+
+
+def _unknown_task_result(
+    manager: ShellSessionManager, session_id: str, task_id: str
+) -> ToolExecutionResult:
+    known = [task.task_id for task in manager.background_tasks(session_id)]
+    listing = ", ".join(known) if known else "(none)"
+    return ToolExecutionResult(
+        content=f"Unknown task_id: {task_id}. Known tasks: {listing}",
+        is_error=True,
+    )
+
+
+class ShellTasksTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_tasks",
+        description="List background tasks started with shell_exec background=true in this session.",
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        tasks = manager.background_tasks(context.session_id)
+        if not tasks:
+            return ToolExecutionResult(content="No background tasks.")
+        lines = []
+        now = time.time()
+        for task in tasks:
+            runtime = int(now - task.started_at)
+            command = task.command.replace("\n", " ")[:60]
+            lines.append(f"{task.task_id}  {task.status()}  {runtime}s  {command}")
+        return ToolExecutionResult(
+            content="\n".join(lines),
+            metadata={"task_ids": [task.task_id for task in tasks]},
+        )
+
+
+class ShellOutputTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_output",
+        description=(
+            "Read output from a background task. Pass the `since` offset from the previous "
+            "call's metadata to read only new output."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Background task id returned by shell_exec.",
+                },
+                "since": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Read from this offset (metadata.next_since of the previous call).",
+                },
+            },
+            "required": ["task_id"],
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        task_id = str(arguments["task_id"])
+        task = manager.get_background(context.session_id, task_id)
+        if task is None:
+            return _unknown_task_result(manager, context.session_id, task_id)
+        text, next_since = task.read_output(since=int(arguments.get("since", 0)))
+        return ToolExecutionResult(
+            content=text,
+            metadata={
+                "task_id": task.task_id,
+                "next_since": next_since,
+                "status": task.status(),
+                "exit_code": task.exit_code,
+            },
+        )
+
+
+class ShellKillTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_kill",
+        description="Terminate a background task started with shell_exec background=true.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Background task id returned by shell_exec.",
+                },
+            },
+            "required": ["task_id"],
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        task_id = str(arguments["task_id"])
+        task = manager.get_background(context.session_id, task_id)
+        if task is None:
+            return _unknown_task_result(manager, context.session_id, task_id)
+        await asyncio.to_thread(task.kill)
+        return ToolExecutionResult(
+            content=f"Task {task.task_id} killed.",
+            metadata={
+                "task_id": task.task_id,
+                "status": task.status(),
+                "exit_code": task.exit_code,
+            },
+        )
 
 
 class ShellRestartTool(BaseTool):
