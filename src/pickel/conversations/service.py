@@ -10,7 +10,7 @@ from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.conversations.session_preview import SessionPreview
 from pickel.conversations.session_storage_mapper import build_session_preview
-from pickel.integrations.openviking.session_sync import SessionSync
+from pickel.conversations.session_sync import SessionSync
 
 
 class SessionNotFoundError(LookupError):

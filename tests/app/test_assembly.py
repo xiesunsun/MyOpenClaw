@@ -10,10 +10,8 @@ from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
 from pickel.conversations.service import SessionService
 from pickel.context.assembler import ContextAssembler
-from pickel.integrations.openviking.session_sync import (
-    NoopSessionSync,
-    OpenVikingSessionSync,
-)
+from pickel.conversations.session_sync import NoopSessionSync
+from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 

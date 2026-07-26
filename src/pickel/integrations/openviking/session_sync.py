@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Protocol
 
 from pickel.conversations.session import Session
+from pickel.conversations.session_sync import NoopSessionSync, SessionSync
 from pickel.integrations.openviking.commit_policy import CommitPolicy
 from pickel.integrations.openviking.config import OpenVikingConfig
 from pickel.integrations.openviking.openviking_state import (
@@ -23,35 +23,6 @@ from pickel.integrations.openviking.session_messages import (
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
-
-
-class SessionSync(Protocol):
-    def sync_pending_messages(self, *, session: Session) -> None: ...
-
-    def commit_pending_messages(
-        self,
-        *,
-        session: Session,
-        force: bool = False,
-    ) -> None: ...
-
-    def delete_session(self, *, session: Session) -> None: ...
-
-
-class NoopSessionSync:
-    def sync_pending_messages(self, *, session: Session) -> None:
-        return None
-
-    def commit_pending_messages(
-        self,
-        *,
-        session: Session,
-        force: bool = False,
-    ) -> None:
-        return None
-
-    def delete_session(self, *, session: Session) -> None:
-        return None
 
 
 class OpenVikingSessionSync:

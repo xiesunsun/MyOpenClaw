@@ -19,11 +19,8 @@ from pickel.integrations.openviking.recall_adapter import OpenVikingRecall
 from pickel.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
 from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
 from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
-from pickel.integrations.openviking.session_sync import (
-    NoopSessionSync,
-    OpenVikingSessionSync,
-    SessionSync,
-)
+from pickel.conversations.session_sync import NoopSessionSync, SessionSync
+from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
 from pickel.tools.bus import ToolBus

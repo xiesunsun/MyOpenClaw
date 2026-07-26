@@ -11,7 +11,7 @@ from pickel.cli.main import app
 from pickel.conversations.service import SessionNotFoundError, SessionService
 from pickel.conversations.session import Session
 from pickel.conversations.session_preview import SessionPreview
-from pickel.integrations.openviking.session_sync import NoopSessionSync
+from pickel.conversations.session_sync import NoopSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 
 
