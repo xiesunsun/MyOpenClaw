@@ -192,19 +192,31 @@ class SkillStore:
 
     def _apply(self, action: str, skill_name: str, target: str) -> Path:
         path = self._skill_file(skill_name)
-        if action == "delete":
-            if path.is_file():
-                path.unlink()
-            skill_dir = path.parent
-            if skill_dir.is_dir() and not any(skill_dir.iterdir()):
-                skill_dir.rmdir()
-            return path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(target, encoding="utf-8")
+        try:
+            if action == "delete":
+                if path.is_file():
+                    path.unlink()
+                skill_dir = path.parent
+                if skill_dir.is_dir() and not any(skill_dir.iterdir()):
+                    skill_dir.rmdir()
+                return path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(target, encoding="utf-8")
+        except OSError as exc:
+            # 配置里的 skills 目录可能指向别的机器的路径（跨机器带过来的
+            # settings.json），原始 OSError 会一路冒到 CLI 顶层崩掉会话
+            raise SkillStoreError(
+                f"Cannot write skill to {path}: {exc}"
+            ) from exc
         return path
 
     def _stage(self, request: SkillWriteRequest, target: str) -> str:
-        self.pending_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.pending_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SkillStoreError(
+                f"Cannot create the pending queue at {self.pending_dir}: {exc}"
+            ) from exc
         pending_id = uuid4().hex[:8]
         payload = {
             "id": pending_id,
@@ -214,9 +226,12 @@ class SkillStore:
             "created_at": time.time(),
             "agent_id": self.agent_id,
         }
-        self._pending_path(pending_id).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            self._pending_path(pending_id).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            raise SkillStoreError(f"Cannot stage the write: {exc}") from exc
         return pending_id
 
     def _pending_path(self, pending_id: str) -> Path:

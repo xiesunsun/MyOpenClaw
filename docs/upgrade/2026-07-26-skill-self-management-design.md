@@ -151,7 +151,8 @@ skill_manage(action, skill_name, content?, old_text?, new_text?)
 | `patch`/`delete` 的 skill 不存在 | is_error + 现有 skill 名列表 |
 | 护栏命中 | is_error + 规则名 + 匹配片段 |
 | `approve` 的 id 不存在 | CLI 报错 + 现有 pending id 列表 |
-| pending 目录不可写 | 抛错，工具转 is_error |
+| pending 目录不可写 | 包成 `SkillStoreError`，工具转 is_error、CLI 转错误面板 |
+| skills 目录不可写（如跨机器带过来的 settings 指向 `/Users/...`） | 同上——真机验收踩到过，原始 `OSError` 会崩掉整个会话 |
 | skills_path 未配置 | is_error（该 agent 无 skill 目录） |
 
 ## 5. 测试计划
@@ -173,3 +174,4 @@ skill_manage(action, skill_name, content?, old_text?, new_text?)
 3. **版本号回落 git SHA 需要 skill 目录在 git 仓库内**——不在仓库内时 `version` 留空，catalog 不显示版本。
 4. **`allowed_tools` 声明但不强制**——强制需要在工具激活集里按 skill 上下文动态收窄，那是 T1 激活集的下一步演进，本期只记录声明。
 5. **生命周期字段无自动迁移**——`stale`/`archived` 只能手写或由未来的 Curator 写。
+6. **模型自身是护栏之外的一层**——真机验收让模型写含 `cat ~/.ssh/id_rsa` 的 skill 时，它自己先拒绝了，护栏没被触发。两层独立：模型可能被绕过，护栏是确定性的兜底。

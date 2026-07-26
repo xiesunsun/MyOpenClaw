@@ -190,3 +190,34 @@ class SkillStoreTests(unittest.TestCase):
             )
 
             self.assertTrue(outcome.applied)
+
+
+class SkillStoreIoErrorTests(unittest.TestCase):
+    def test_unwritable_skills_path_becomes_store_error(self) -> None:
+        # 全局配置指向不可写路径（如跨机器带过来的 /Users/... ）时，
+        # 原始 OSError 会一路冒到 CLI 顶层把会话崩掉
+        store = SkillStore(
+            skills_path=Path("/proc/nonexistent-skills"),
+            pending_dir=Path("/proc/nonexistent-pending"),
+            write_approval=False,
+        )
+
+        with self.assertRaises(SkillStoreError):
+            store.submit(
+                SkillWriteRequest(
+                    action="create", skill_name="demo", content=_SKILL_BODY
+                )
+            )
+
+    def test_unwritable_pending_dir_becomes_store_error(self) -> None:
+        store = SkillStore(
+            skills_path=Path("/proc/nonexistent-skills"),
+            pending_dir=Path("/proc/nonexistent-pending"),
+        )
+
+        with self.assertRaises(SkillStoreError):
+            store.submit(
+                SkillWriteRequest(
+                    action="create", skill_name="demo", content=_SKILL_BODY
+                )
+            )
