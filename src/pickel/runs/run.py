@@ -17,7 +17,6 @@ from pickel.hooks.events import UserPromptSubmitEvent
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers import create_llm_provider
 from pickel.providers.base import Provider
-from pickel.runs.events import RuntimeEventHandler
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import ModelSelection
 from pickel.tools.base import BaseTool, ToolExecutionContext
@@ -34,6 +33,7 @@ from pickel.tools.shell import ShellSessionManager
 if TYPE_CHECKING:
     from pickel.app.boot import Boot
     from pickel.config.app_config import AppConfig
+    from pickel.runs.event_bus import EventBus
     from pickel.runs.strategy.base import ExecutionStrategy
 
 
@@ -139,7 +139,7 @@ class Run:
         *,
         session: Session,
         user_text: str,
-        event_handler: RuntimeEventHandler | None = None,
+        bus: EventBus | None = None,
     ) -> AssistantMessage:
         """turn 边界：UserPromptSubmit hook → 写 user → strategy.execute。"""
         if session.agent_id != self.agent.agent_id:
@@ -171,7 +171,7 @@ class Run:
         return await self.strategy.execute(
             run=self,
             session=session,
-            event_handler=event_handler,
+            bus=bus,
             initial_hook_feedback=(
                 [HookFeedback(source_event="UserPromptSubmit", text=decision.feedback_text)]
                 if decision.feedback_text

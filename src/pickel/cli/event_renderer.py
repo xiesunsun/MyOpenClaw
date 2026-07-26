@@ -7,7 +7,8 @@ from rich.text import Text
 # Task 8 后改为基于 AssistantMessage/ToolResultMessage 渲染。
 from pickel.conversations.message import ToolCallBatch
 from pickel.conversations.metadata import MessageMetadata
-from pickel.runs import RuntimeEvent, RuntimeEventType
+# 仍用旧扁平事件；Task 7 把 CLI 切到 EventBus + tagged union 后此 import 消失。
+from pickel.runs.events import RuntimeEvent, RuntimeEventType
 from pickel.tools.base import ToolExecutionResult
 
 

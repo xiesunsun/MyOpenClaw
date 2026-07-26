@@ -18,9 +18,8 @@ from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
-from pickel.runs import (
-    RuntimeEventHandler,
-)
+# 仍用旧扁平事件的 handler 签名；Task 7 把 CLI 切到 EventBus 后此 import 消失。
+from pickel.runs.events import RuntimeEventHandler
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
 from pickel.runs.turn_usage import last_turn_usage, session_usage
