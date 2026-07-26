@@ -1,4 +1,4 @@
-"""事件渲染：新事件类型下终端输出不变。"""
+"""事件渲染：分派器把事件转成无边框排版（E3），不再画 Panel。"""
 
 from __future__ import annotations
 
@@ -27,15 +27,6 @@ def _render(event) -> str:
     return console.export_text()
 
 
-def _panel_body_lines(text: str) -> list[str]:
-    """剥掉 Panel 边框，返回内容行（去两端留白）。"""
-    return [
-        line[1:-1].strip()
-        for line in text.splitlines()
-        if line.startswith("│") and line.endswith("│")
-    ]
-
-
 def _cached_usage() -> TurnUsage:
     return TurnUsage(
         steps=2,
@@ -47,13 +38,14 @@ def _cached_usage() -> TurnUsage:
     )
 
 
-def test_step_started_显示步数():
+def test_step_started_不再上屏():
+    """无边框排版下 `Step N` 行是噪音（E3 分派表：StepStarted 只收尾流式行）。"""
     text = _render(StepStarted(envelope=EventEnvelope(step_index=2)))
 
-    assert "Step 2" in text
+    assert text.strip() == ""
 
 
-def test_tool_call_started_显示名称与参数():
+def test_tool_call_started_显示_tool_行与_running():
     text = _render(
         ToolCallStarted(
             tool_call=ToolCall(id="c1", name="echo", arguments={"text": "hi"}),
@@ -61,8 +53,10 @@ def test_tool_call_started_显示名称与参数():
         )
     )
 
-    assert "echo" in text
+    assert "⏺ echo" in text
+    assert "text='hi'" in text
     assert "running" in text
+    assert "╭" not in text
 
 
 def test_tool_call_completed_成功显示_ok():
@@ -101,8 +95,8 @@ def test_assistant_message_显示正文与用量_footer():
 
     assert "hello world" in text
     assert "anthropic / claude-jupiter-v1-p" in text
-    assert "100" in text
-    assert "20" in text
+    assert "100→20" in text
+    assert "╭" not in text
 
 
 def test_footer_用量口径是实际输入而非裸_input_tokens():
@@ -113,18 +107,17 @@ def test_footer_用量口径是实际输入而非裸_input_tokens():
     """
     text = _render(AssistantMessageEvent(text="hi", usage=_cached_usage()))
 
-    assert "in 8300" in text
-    assert "in 100" not in text
+    assert "8.3k→20" in text
+    assert "100→20" not in text
 
 
 def test_footer_格式逐字锁定():
-    """布局与结构在 E1 不许变：model 行 + `in X · out Y · Z.Zs`。"""
+    """布局与结构在 E3 锁定：单行右对齐 `{label} · {in}→{out} · {Z.Z}s`。"""
     text = _render(AssistantMessageEvent(text="hi", usage=_cached_usage()))
 
-    assert _panel_body_lines(text)[-2:] == [
-        "anthropic / claude-jupiter-v1-p",
-        "in 8300 · out 20 · 1.5s",
-    ]
+    last_line = [line for line in text.splitlines() if line.strip()][-1]
+    assert last_line.strip() == "anthropic / claude-jupiter-v1-p · 8.3k→20 · 1.5s"
+    assert last_line.startswith(" ")  # 右对齐
 
 
 def test_assistant_message_无用量时不崩():
@@ -133,7 +126,20 @@ def test_assistant_message_无用量时不崩():
     assert "hello" in text
 
 
+def test_assistant_message_无用量时_footer_退到_fallback_label():
+    """E2 遗留修复：usage=None 时 footer 只显示注入的 fallback label。"""
+    console = Console(width=100, record=True, force_terminal=False)
+    renderer = ChatEventRenderer(
+        console, fallback_model_label="google/gemini / gemini-3-flash-preview"
+    )
+    asyncio.run(renderer.handle_event(AssistantMessageEvent(text="hello")))
+    text = console.export_text()
+
+    assert "hello" in text
+    assert "google/gemini / gemini-3-flash-preview" in text
+
+
 def test_turn_级事件不产生输出():
-    """E1 阶段 turn_started/completed 只进 trace，不上屏。"""
+    """turn_started/completed 只进 trace，不上屏。"""
     assert _render(TurnStarted(user_text="hi")).strip() == ""
     assert _render(TurnCompleted(usage=TurnUsage(steps=1))).strip() == ""
