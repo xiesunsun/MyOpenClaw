@@ -85,6 +85,20 @@ Run.tool_bus
 
 `Run.reload` 把旧 run 的 bus 引用传给新 run，只重算激活集，不触碰注册表。
 
+**`Run.open(tools=[...])` 保留为便捷路径。** 现有 6 个测试文件（`tests/runs/test_runner.py`、`test_events.py`、`test_react_checkpoint.py`、`test_react_observability_metadata.py`、`tests/config/test_environ.py`、`tests/hooks/test_lifecycle_hooks.py`）用它直接注入工具列表。语义定为「给定一组工具，等价于建一个只含它们的临时 bus + 全允许激活集」：
+
+```python
+if tool_bus is None:
+    tool_bus = ToolBus()
+    for t in (tools or []):
+        tool_bus.register(t, source=ToolSource.BUILTIN)
+    activation = ToolActivation(allowed=frozenset(tool_bus.list_names()))
+else:
+    activation = ToolActivation(allowed=frozenset(agent.tool_ids))
+```
+
+`tools=` 与 `tool_bus=` 同时给出时 `tool_bus` 优先。这样测试零改动，生产路径走注入。
+
 ---
 
 ## 3. 组件与接口
@@ -119,6 +133,7 @@ class ToolBus:
     def set_enabled(self, name: str, enabled: bool) -> None: ...
     def get(self, name: str) -> ToolEntry: ...          # KeyError if unknown
     def list(self, *, source: ToolSource | None = None) -> list[ToolEntry]: ...
+    def list_names(self, *, source: ToolSource | None = None) -> list[str]: ...
     def snapshot(self, activation: ToolActivation) -> ToolSnapshot: ...
 ```
 
@@ -138,7 +153,9 @@ extension 收敛为本地 stdio MCP server（见调研结论），因此与 MCP 
 
 **因此 `ToolEntry.name` 是全链路的唯一工具标识**：`agent.yaml` 白名单、`ToolSnapshot.definitions()` 给模型的 `ToolDefinition.name`、模型回传的 `tool_call.name`、`ToolSnapshot.find()` 的查找键，全部用它，而非 `tool.spec.name`。内置工具二者恰好相等，非内置工具不等 —— 实施时不可混用。
 
-### 3.3 `tools/activation.py`（新）
+### 3.3 激活集与快照（同在 `tools/bus.py`）
+
+`ToolEntry` / `ToolActivation` / `ToolSnapshot` / `ToolBus` 是一体的，任何一个变动都牵连其余，放同一模块；分文件只会引入 `bus ↔ activation` 的循环导入。
 
 ```python
 @dataclass(frozen=True)
@@ -158,11 +175,12 @@ class ToolSnapshot:
 
     entries: tuple[ToolEntry, ...]
 
-    def definitions(self) -> list[ToolDefinition]: ...   # 给 prepare
     def find(self, name: str) -> BaseTool | None: ...    # 给 react
     @property
     def names(self) -> tuple[str, ...]: ...
 ```
+
+快照**不**提供 `definitions()` —— `ToolDefinition` 属 `context` 层，让 `tools` 层反向依赖它会把分层拧反。转换留在 `prepare.resolve_tools` 里，快照只暴露 `entries` 与 `find`。
 
 `ToolBus.snapshot(activation)` 的计算：
 
@@ -269,8 +287,7 @@ turn 开始（ReActStrategy.execute）
 
 | 文件 | 改动 |
 | --- | --- |
-| `tools/bus.py` | 新增：`ToolSource`、`ToolEntry`、`ToolBus`、`ToolNameConflictError` |
-| `tools/activation.py` | 新增：`ToolActivation`、`ToolSnapshot` |
+| `tools/bus.py` | 新增：`ToolSource`、`ToolEntry`、`ToolActivation`、`ToolSnapshot`、`ToolBus`、`ToolNameConflictError` |
 | `tools/services.py` | 新增：`ToolServices` |
 | `tools/registry.py` | 删除（`ToolRegistry` 无外部使用者，仅 `Run.open` 与 `tools/__init__` 导出） |
 | `tools/base.py` | `ToolExecutionContext`：`workspace_files` / `shell_session_manager: Any` → `services: ToolServices` |
