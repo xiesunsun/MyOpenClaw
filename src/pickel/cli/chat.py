@@ -23,6 +23,7 @@ from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
+from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.runs.event_bus import EventBus
@@ -35,6 +36,7 @@ from pickel.shared.model_config import ModelSelection
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
@@ -165,7 +167,7 @@ class ChatLoop:
             Text(f"Agent: {self.agent_id}", style="bold cyan"),
             Text("Config: ~/.pickel + project .pickel / agents", style="dim"),
             Text(
-                "/help  /model  /thinking  /agent  /new  /reload  /context  /session  /clear  /exit",
+                "/help  /model  /thinking  /agent  /new  /reload  /context  /session  /skills  /clear  /exit",
                 style="yellow",
             ),
         )
@@ -257,6 +259,7 @@ class ChatLoop:
             "/reload            Reload disk config/skills/agent (keep Environ and tool bus)\n"
             "/context           Show context usage (preview) and API usage\n"
             "/session           Show current session details\n"
+            "/skills            Review agent skill writes: pending | diff <id> | approve <id> | reject <id>\n"
             "/clear             Clear the screen and redraw the header\n"
             "/exit              Exit the chat loop"
         )
@@ -553,6 +556,9 @@ class ChatLoop:
         if command == "/session":
             self._render_session_summary()
             return True
+        if command == "/skills":
+            self._handle_skills_command(arg)
+            return True
         if command == "/clear":
             self.console.clear(home=True)
             self._render_header()
@@ -564,6 +570,58 @@ class ChatLoop:
 
         self._render_error_message(f"Unknown command: {user_input}. Try /help.")
         return True
+
+    def _handle_skills_command(self, arg: str | None) -> None:
+        store = getattr(self._run, "skill_store", None) if self._run else None
+        if store is None:
+            self._render_error_message("当前 agent 未配置 skills 目录")
+            return
+        parts = (arg or "pending").split(maxsplit=1)
+        action = parts[0].lower()
+        pending_id = parts[1].strip() if len(parts) > 1 else None
+
+        if action == "pending":
+            records = store.list_pending()
+            if not records:
+                self._render_system_message("没有待审的 skill 写入")
+                return
+            table = Table(title="Pending skill writes")
+            table.add_column("id")
+            table.add_column("action")
+            table.add_column("skill")
+            table.add_column("agent")
+            for record in records:
+                table.add_row(
+                    record.pending_id, record.action, record.skill_name, record.agent_id
+                )
+            self.console.print(table)
+            return
+
+        if pending_id is None:
+            self._render_error_message(f"用法：/skills {action} <id>")
+            return
+
+        try:
+            if action == "diff":
+                self._render_message(
+                    f"diff {pending_id}", Text(store.diff(pending_id)), style="cyan"
+                )
+                return
+            if action == "approve":
+                path = store.approve(pending_id)
+                self._render_system_message(f"已批准，写入 {path}（下一轮对话生效）")
+                return
+            if action == "reject":
+                store.reject(pending_id)
+                self._render_system_message(f"已拒绝 {pending_id}")
+                return
+        except SkillStoreError as exc:
+            self._render_error_message(str(exc))
+            return
+
+        self._render_error_message(
+            f"未知子命令：{action}。可用：pending / diff <id> / approve <id> / reject <id>"
+        )
 
     async def _render_context_command(self) -> None:
         """`/context` = ContextUsage 视图（设计 §7）。
