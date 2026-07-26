@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 
 import yaml
@@ -202,12 +204,33 @@ def compose_system_instruction_parts(
     )
 
 
-def format_skill_catalog(skills: list[SkillManifest]) -> str:
+def format_skill_catalog(
+    skills: list[SkillManifest], *, environ: Mapping[str, str] | None = None
+) -> str:
+    resolved_env = os.environ if environ is None else environ
     lines = ["Available skills:"]
     for skill in skills:
-        lines.append(format_skill_catalog_entry(skill))
+        # archived 完全不进 catalog：它的存在只对人有意义
+        if skill.status == "archived":
+            continue
+        lines.append(format_skill_catalog_entry(skill, environ=resolved_env))
     return "\n".join(lines)
 
 
-def format_skill_catalog_entry(skill: SkillManifest) -> str:
-    return f"- {skill.name}: {skill.description} (read {skill.skill_file.as_posix()})"
+def format_skill_catalog_entry(
+    skill: SkillManifest, *, environ: Mapping[str, str] | None = None
+) -> str:
+    resolved_env = os.environ if environ is None else environ
+    marks = []
+    if skill.version:
+        marks.append(f"v{skill.version}")
+    if skill.status == "stale":
+        marks.append("stale")
+    missing = [name for name in skill.required_env if not resolved_env.get(name)]
+    if missing:
+        marks.append(f"unavailable: needs {', '.join(missing)}")
+    suffix = f" ({'; '.join(marks)})" if marks else ""
+    return (
+        f"- {skill.name}: {skill.description} "
+        f"(read {skill.skill_file.as_posix()}){suffix}"
+    )

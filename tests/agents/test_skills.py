@@ -5,7 +5,9 @@ import textwrap
 import unittest
 
 from pickel.agents.skills import (
+    SkillManifest,
     SkillRegistry,
+    format_skill_catalog,
     compose_system_instruction,
     compose_system_instruction_parts,
 )
@@ -307,3 +309,58 @@ class SkillManifestFieldTests(unittest.TestCase):
             self.assertEqual("active", manifests[0].status)
             self.assertEqual("12", manifests[0].version)
             self.assertEqual((), manifests[0].required_env)
+
+
+class SkillCatalogFormattingTests(unittest.TestCase):
+    def _manifest(self, name: str, **kwargs) -> SkillManifest:
+        return SkillManifest(
+            name=name,
+            description=f"{name} does things.",
+            skill_dir=Path(f"/skills/{name}"),
+            skill_file=Path(f"/skills/{name}/SKILL.md"),
+            **kwargs,
+        )
+
+    def test_archived_skills_are_excluded(self) -> None:
+        catalog = format_skill_catalog(
+            [self._manifest("keep"), self._manifest("gone", status="archived")],
+            environ={},
+        )
+
+        self.assertIn("keep", catalog)
+        self.assertNotIn("gone", catalog)
+
+    def test_stale_skills_are_marked(self) -> None:
+        catalog = format_skill_catalog(
+            [self._manifest("old", status="stale")], environ={}
+        )
+
+        self.assertIn("stale", catalog)
+
+    def test_missing_required_env_is_marked_unavailable(self) -> None:
+        catalog = format_skill_catalog(
+            [self._manifest("imagegen", required_env=("GEMINI_API_KEY",))], environ={}
+        )
+
+        self.assertIn("unavailable", catalog)
+        self.assertIn("GEMINI_API_KEY", catalog)
+
+    def test_satisfied_required_env_is_not_marked(self) -> None:
+        catalog = format_skill_catalog(
+            [self._manifest("imagegen", required_env=("GEMINI_API_KEY",))],
+            environ={"GEMINI_API_KEY": "x"},
+        )
+
+        self.assertNotIn("unavailable", catalog)
+
+    def test_version_is_appended_when_present(self) -> None:
+        catalog = format_skill_catalog(
+            [self._manifest("v", version="1.2.0")], environ={}
+        )
+
+        self.assertIn("v1.2.0", catalog)
+
+    def test_plain_skill_entry_is_unchanged(self) -> None:
+        catalog = format_skill_catalog([self._manifest("plain")], environ={})
+
+        self.assertTrue(catalog.endswith("(read /skills/plain/SKILL.md)"))
