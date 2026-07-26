@@ -5,6 +5,12 @@
 
 from pickel.extensions_host.errors import ExtensionConfigError, ExtensionLoadError
 from pickel.extensions_host.host import ExtensionHost
+from pickel.extensions_host.loader import (
+    LoadResult,
+    load_extensions,
+    load_extensions_async,
+    teardown_extensions,
+)
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 
 __all__ = [
@@ -13,4 +19,8 @@ __all__ = [
     "ExtensionHost",
     "ExtensionLoadError",
     "ExtensionRegistry",
+    "LoadResult",
+    "load_extensions",
+    "load_extensions_async",
+    "teardown_extensions",
 ]
