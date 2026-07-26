@@ -36,6 +36,46 @@ class ToolEntry:
     enabled: bool = True
 
 
+@dataclass(frozen=True)
+class ToolActivation:
+    """一次 turn 的激活集计算输入。
+
+    allowed 是 agent.yaml 的 tools 白名单，人的授权、硬边界；
+    agent_disabled 是 agent 通过 tool_set_active 自我收窄的部分。
+    求交顺序保证 agent 只能收窄、永不扩张。
+    """
+
+    allowed: frozenset[str]
+    agent_disabled: frozenset[str] = frozenset()
+
+    def with_agent_disabled(self, names: Iterable[str]) -> ToolActivation:
+        return replace(self, agent_disabled=self.agent_disabled | frozenset(names))
+
+    def with_agent_enabled(self, names: Iterable[str]) -> ToolActivation:
+        return replace(self, agent_disabled=self.agent_disabled - frozenset(names))
+
+
+@dataclass(frozen=True)
+class ToolSnapshot:
+    """turn 内不可变的工具视图。prepare 与 react 的唯一来源。
+
+    不提供 definitions()：ToolDefinition 属 context 层，转换留在 prepare.resolve_tools，
+    避免 tools 层反向依赖 context 层。
+    """
+
+    entries: tuple[ToolEntry, ...]
+
+    def find(self, name: str) -> BaseTool | None:
+        for entry in self.entries:
+            if entry.name == name:
+                return entry.tool
+        return None
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(entry.name for entry in self.entries)
+
+
 _PREFIX_BY_SOURCE = {
     ToolSource.MCP: "mcp",
     ToolSource.EXTENSION: "ext",
@@ -125,6 +165,21 @@ class ToolBus:
 
     def list_names(self, *, source: ToolSource | None = None) -> list[str]:
         return [entry.name for entry in self.list(source=source)]
+
+    def snapshot(self, activation: ToolActivation) -> ToolSnapshot:
+        """按激活集三层求交，取本 turn 的不可变视图。"""
+        entries = tuple(
+            entry
+            for entry in self._entries.values()
+            if entry.enabled
+            and entry.name in activation.allowed
+            and entry.name not in activation.agent_disabled
+        )
+        return ToolSnapshot(entries=entries)
+
+    def missing_names(self, activation: ToolActivation) -> list[str]:
+        """白名单里存在、bus 中却没有的名字。调用方据此记 warning，不视为错误。"""
+        return sorted(name for name in activation.allowed if name not in self._entries)
 
 
 def bus_with(tools: Iterable[BaseTool]) -> ToolBus:

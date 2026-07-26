@@ -2,8 +2,10 @@ import unittest
 
 from pickel.tools.base import BaseTool, ToolSpec
 from pickel.tools.bus import (
+    ToolActivation,
     ToolBus,
     ToolNameConflictError,
+    ToolSnapshot,
     ToolSource,
 )
 
@@ -166,6 +168,87 @@ class ToolBusLifecycleTests(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             bus.set_enabled("missing_tool", False)
+
+
+class ToolActivationTests(unittest.TestCase):
+    def test_snapshot_intersects_allowlist_enabled_and_agent_disabled(self) -> None:
+        bus = ToolBus()
+        bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
+        bus.register(_stub_tool("write_file"), source=ToolSource.BUILTIN)
+        bus.register(_stub_tool("shell_exec"), source=ToolSource.BUILTIN)
+        bus.register(_stub_tool("echo"), source=ToolSource.BUILTIN)
+        bus.set_enabled("write_file", False)
+
+        activation = ToolActivation(
+            allowed=frozenset({"read_file", "write_file", "shell_exec"}),
+            agent_disabled=frozenset({"shell_exec"}),
+        )
+        snapshot = bus.snapshot(activation)
+
+        # write_file 被 bus 禁用、shell_exec 被 agent 关闭、echo 不在白名单
+        self.assertEqual(("read_file",), snapshot.names)
+
+    def test_agent_cannot_widen_beyond_allowlist(self) -> None:
+        bus = ToolBus()
+        bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
+        bus.register(_stub_tool("shell_exec"), source=ToolSource.BUILTIN)
+
+        activation = ToolActivation(allowed=frozenset({"read_file"}))
+        # agent 把白名单外的工具从 disabled 里移出，也拉不进来
+        activation = activation.with_agent_enabled(["shell_exec"])
+
+        self.assertEqual(("read_file",), bus.snapshot(activation).names)
+
+    def test_with_agent_disabled_returns_new_instance(self) -> None:
+        activation = ToolActivation(allowed=frozenset({"a", "b"}))
+
+        narrowed = activation.with_agent_disabled(["b"])
+
+        self.assertEqual(frozenset(), activation.agent_disabled)
+        self.assertEqual(frozenset({"b"}), narrowed.agent_disabled)
+
+    def test_allowlist_entry_missing_from_bus_is_skipped_not_raised(self) -> None:
+        bus = ToolBus()
+        bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
+
+        activation = ToolActivation(
+            allowed=frozenset({"read_file", "mcp__github__create_issue"})
+        )
+
+        self.assertEqual(("read_file",), bus.snapshot(activation).names)
+        self.assertEqual(["mcp__github__create_issue"], bus.missing_names(activation))
+
+
+class ToolSnapshotTests(unittest.TestCase):
+    def test_snapshot_is_immune_to_later_bus_changes(self) -> None:
+        bus = ToolBus()
+        bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
+        activation = ToolActivation(allowed=frozenset({"read_file", "write_file"}))
+        snapshot = bus.snapshot(activation)
+
+        bus.register(_stub_tool("write_file"), source=ToolSource.BUILTIN)
+        bus.set_enabled("read_file", False)
+        bus.unregister("read_file")
+
+        # 快照在 turn 内不可变：既看不到新注册的，也不受禁用与卸载影响
+        self.assertEqual(("read_file",), snapshot.names)
+        self.assertIsNotNone(snapshot.find("read_file"))
+
+    def test_find_returns_none_for_unknown_name(self) -> None:
+        bus = ToolBus()
+        snapshot = bus.snapshot(ToolActivation(allowed=frozenset()))
+
+        self.assertIsNone(snapshot.find("read_file"))
+
+    def test_find_uses_entry_name_not_spec_name(self) -> None:
+        bus = ToolBus()
+        bus.register(_stub_tool("create_issue"), source=ToolSource.MCP, origin="github")
+        activation = ToolActivation(allowed=frozenset({"mcp__github__create_issue"}))
+
+        snapshot = bus.snapshot(activation)
+
+        self.assertIsNotNone(snapshot.find("mcp__github__create_issue"))
+        self.assertIsNone(snapshot.find("create_issue"))
 
 
 if __name__ == "__main__":
