@@ -1692,7 +1692,18 @@ git commit -m "feat(events): JSONL trace sink，默认关且只写不读"
 - Consumes: 全部事件类型（Task 2、5）、`EventBus`（Task 3）、`JsonlTraceSink`/`trace_enabled`（Task 6）
 - Produces: `ChatEventRenderer(console).handle_event(event)` 消费 `RuntimeEventBase`；`ChatLoop.create_event_bus() -> EventBus`
 
-**行为约束：** E1 结束时终端输出与改动前**逐字节一致**。新排版属于 E3。本任务只换数据来源。
+**行为约束（2026-07-26 修订）：** E1 结束时终端的**布局与结构**与改动前一致——Panel 边框、Thinking/Tool/Assistant 三种框、footer 的行数与分隔符格式都不变。新排版属于 E3。
+
+**但 footer 的数字会变，这是设计意图，不是回归：**
+
+| | 改动前 | E1 之后 | 依据 |
+|---|---|---|---|
+| 输入规模 | 裸 `input_tokens` | `input + cache_read + cache_write` | 可观测性设计 §5.1 强制口径。实测裸 `input_tokens` 低估 250 倍 |
+| 统计范围 | 末条 assistant 消息 | 整轮合计（`last_turn_usage`） | 本计划 §4.1：footer 与 `/context` 统一到 `TurnUsage` 一个口径 |
+
+原先写的「逐字节一致」与 Task 5/7 指定的数据源自相矛盾——`last_turn_usage` + `actual_input_tokens` 必然改变数字。让 footer 继续用裸 `input_tokens` 会与 `/context` 显示的数字互相矛盾，那才是缺陷。
+
+**因此测试必须锁住新口径**：至少一条用例带非零 `cache_read_tokens`（否则 `input_tokens` 与 `actual_input_tokens` 恰好相等，断言分辨不出用的是哪个字段），且用完整 footer 字符串的 `assertEqual` 而非 substring `in`。
 
 **顺带消除的重复：** `event_renderer.py:113` 的 `_render_assistant_footer` 改为消费 `TurnUsage`，`chat.py:209` 的同名方法与 `chat.py:179` 的 `_render_assistant_message` 在 Task 7 保留（E3 才删）——但两者不得再各自拼装 `MessageMetadata`。
 
