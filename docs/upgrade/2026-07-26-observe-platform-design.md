@@ -93,7 +93,7 @@ class Turn:                      # 一条 user 消息到下一条 user 之前
 class SessionTrajectory:
     session_id: str; agent_id: str; cwd: str; title: str | None
     created_at: str; updated_at: str
-    turns: list[Turn]; compaction_indices: list[int]
+    turns: list[Turn]; compaction_steps: list[int]
     session_usage: dict; trace_available: bool
 ```
 
