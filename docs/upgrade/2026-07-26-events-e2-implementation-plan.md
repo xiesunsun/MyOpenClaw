@@ -1711,12 +1711,23 @@ Expected: FAIL——renderer 尚未处理 delta 事件
             task = asyncio.create_task(self.handle_user_input(user_input, bus=bus))
             try:
                 reply = await task
+                if self._session_service is not None:
+                    self._session_service.flush_new_entries(
+                        session=self.session,
+                        entries=[],
+                    )
             except KeyboardInterrupt:
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     pass
+                # 中断时 react 已补齐 tool_result 并落盘，这里再 flush 一次
+                if self._session_service is not None:
+                    self._session_service.flush_new_entries(
+                        session=self.session,
+                        entries=[],
+                    )
                 continue
             except asyncio.CancelledError:
                 continue
@@ -1726,6 +1737,10 @@ Expected: FAIL——renderer 尚未处理 delta 事件
             finally:
                 unsubscribe_renderer()
 ```
+
+**`flush_new_entries` 那两段不能漏**——改造前它在 `try` 里（`chat.py:638-642`），漏掉会静默丢失 session 落盘。中断分支也要 flush：react 在取消时补齐了 tool_result，那些 entry 需要落盘，否则下一轮从磁盘恢复的 session 仍有悬空 tool_call。
+
+顺带把 `except Exception as exc` 改成 `except Exception:`——`exc` 是未使用变量（ruff F841）。
 
 `import asyncio` 加到 `chat.py` 顶部（若无）。
 
