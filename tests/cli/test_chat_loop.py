@@ -386,42 +386,6 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("shell_status", rendered)  # metadata 不上屏
         self.assertNotIn("╭", rendered)  # 无 Panel
 
-    async def test_render_turn_output_replays_assistant_tool_batch(self) -> None:
-        agent = self._build_agent()
-        session = Session.create(agent_id="Pickle", session_id="session-1")
-        from pickel.conversations.agent_message import ToolResultMessage
-
-        session.append_tool_result(
-            ToolResultMessage(
-                tool_call_id="call-1",
-                tool_name="read_file",
-                content=[TextContent(text="hello world")],
-            )
-        )
-        console = Mock()
-        loop = ChatLoop(
-            agent=agent,
-            run=StubRun(),
-            session=session,
-            console=console,
-        )
-
-        loop.render_turn_output(
-            _text_assistant(
-                "final reply",
-                metadata=MessageMetadata(provider="google/gemini", model="gemini-3-flash-preview"),
-            ),
-            start_index=0,
-        )
-
-        printed = [call.args[0] for call in console.print.call_args_list]
-        self.assertTrue(any(isinstance(item, Text) and "read_file" in str(item) for item in printed))
-        titles = [getattr(item, "title", None) for item in printed]
-        self.assertIn("Assistant", titles)
-        tool_line = next(str(item) for item in printed if isinstance(item, Text))
-        self.assertIn("[read_file]", tool_line)
-        self.assertIn("hello world", tool_line)
-
     @patch("pickel.cli.chat.PromptToolkitInputReader")
     async def test_chat_loop_uses_prompt_toolkit_reader_by_default(self, prompt_reader_cls: Mock) -> None:
         prompt_reader = AsyncMock(return_value="hello")
@@ -436,8 +400,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         prompt_reader_cls.assert_called_once_with()
         prompt_reader.assert_called_once_with("You > ")
 
-    async def test_run_falls_back_to_render_final_reply_when_no_event_was_emitted(self) -> None:
-        console = Mock()
+    async def test_无事件的轮次不再有_fallback_渲染(self) -> None:
+        """E3：渲染唯一入口是事件订阅。不发事件的 Run 意味着 runtime 违约，
+        chat.py 不得替它把正文再画一遍（旧 fallback 已删）。"""
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["hello", "/exit"])
         loop = ChatLoop(
             agent=self._build_agent(),
@@ -449,11 +416,29 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await loop.run()
 
-        printed = [call.args[0] for call in console.print.call_args_list]
-        titles = [getattr(renderable, "title", None) for renderable in printed]
+        rendered = console.export_text()
+        self.assertNotIn("runtime reply", rendered)
+        self.assertIn("Session closed.", rendered)
 
-        self.assertEqual(["MyOpenClaw Chat", "Assistant", "System"], titles)
-        self.assertEqual("runtime reply", printed[1].renderable.markup)
+    async def test_footer_无用量时退到当前模型_label(self) -> None:
+        """E2 遗留：usage=None 时 footer 不再整体消失，显示当前模型。
+        label 从 ChatLoop.agent.model_config 注入（/model 切换后跟随更新）。"""
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120, record=True)
+        submitted_inputs = iter(["hello", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            run=StubRun(),  # 发 AssistantMessageEvent 且 usage=None
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        rendered = console.export_text()
+        self.assertIn("runtime reply", rendered)
+        self.assertIn("google/gemini / gemini-3-flash-preview", rendered)
 
     async def test_run_does_not_duplicate_final_reply_after_assistant_event(self) -> None:
         console = Mock()
@@ -713,11 +698,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         panels = [call.args[0] for call in console.print.call_args_list]
         titles = [getattr(panel, "title", None) for panel in panels]
+        # E3 无框排版：error 是 "✗ " 前缀的 Text，不再是红边 Panel
         errors = [
             panel
             for panel in panels
-            if getattr(panel, "title", None) == "System"
-            and getattr(panel, "border_style", None) == "red"
+            if isinstance(panel, Text) and str(panel).startswith("✗ ")
         ]
         deltas = [
             call

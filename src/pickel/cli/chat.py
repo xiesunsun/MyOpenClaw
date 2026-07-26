@@ -20,11 +20,10 @@ from pickel.extensions_host.loader import (
 )
 from pickel.conversations.session_storage_mapper import build_session_preview
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent
-from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
+from pickel.cli.render.message import render_error, render_header, render_system
 from pickel.runs.event_bus import EventBus
 from pickel.runs.measure import measure
 from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
@@ -32,9 +31,7 @@ from pickel.runs.run import Run
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
 from pickel.shared.model_config import ModelSelection
-from rich.console import Console, Group, RenderableType
-from rich.markdown import Markdown
-from rich.panel import Panel
+from rich.console import Console
 from rich.text import Text
 
 if TYPE_CHECKING:
@@ -132,21 +129,16 @@ class ChatLoop:
         否则渲染器会越积越多，第 N 轮的输出被打印 N 遍。
         trace sink 不在这里挂——它跟着 session 走，见 `_open_trace_sink`。
         """
-        renderer = ChatEventRenderer(self.console)
+        renderer = ChatEventRenderer(
+            self.console,
+            # usage=None 时 footer 退到这个 label；agent.model_config 在
+            # /model 切换时被 run 原地更新（run.py），每轮取即最新
+            fallback_model_label=(
+                f"{self.agent.model_config.provider} / {self.agent.model_config.model}"
+            ),
+        )
         unsubscribe = self._bus.subscribe(renderer.handle_event)
         return self._bus, renderer, unsubscribe
-
-    def render_turn_output(self, reply: AssistantMessage, *, start_index: int) -> None:
-        for entry in self.session.entries[start_index:]:
-            payload = entry.payload if isinstance(entry.payload, dict) else {}
-            if payload.get("role") == "tool":
-                tool_text = ""
-                for block in payload.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        tool_text = block.get("text") or tool_text
-                name = payload.get("tool_name") or "tool"
-                self.console.print(Text(f"[{name}] {tool_text[:200]}", style="dim"))
-        self._render_assistant_message(reply)
 
     async def _default_input_reader(self, prompt: str) -> str:
         if self._prompt_input_reader is None:
@@ -161,90 +153,19 @@ class ChatLoop:
         return state_count if state_count else self._fallback_message_count
 
     def _render_header(self) -> None:
-        body = Group(
-            Text(f"Agent: {self.agent_id}", style="bold cyan"),
-            Text("Config: ~/.pickel + project .pickel / agents", style="dim"),
-            Text(
-                "/help  /model  /thinking  /agent  /new  /reload  /context  /session  /clear  /exit",
-                style="yellow",
+        render_header(
+            self.console,
+            agent_id=self.agent_id,
+            commands_line=(
+                "/help  /model  /thinking  /agent  /new  /reload  /context  /session  /clear  /exit"
             ),
-        )
-        self.console.print(
-            Panel(
-                body,
-                title="MyOpenClaw Chat",
-                border_style="bright_blue",
-                expand=True,
-            )
         )
 
     def _render_system_message(self, text: str, *, style: str = "cyan") -> None:
-        self.console.print(
-            Panel(
-                Text(text),
-                title="System",
-                border_style=style,
-                expand=True,
-            )
-        )
+        render_system(self.console, text, style=style)
 
     def _render_error_message(self, text: str) -> None:
-        self._render_system_message(text, style="red")
-
-    def _render_message(self, title: str, content: RenderableType, *, style: str) -> None:
-        self.console.print(
-            Panel(
-                content,
-                title=title,
-                border_style=style,
-                expand=True,
-            )
-        )
-
-    def _render_assistant_message(self, reply: AssistantMessage) -> None:
-        text_parts = [
-            block.text
-            for block in reply.content
-            if isinstance(block, TextContent) and block.text
-        ]
-        body_text = chr(10).join(text_parts)
-        metadata = None
-        if reply.metadata is not None:
-            usage = reply.metadata.usage
-            metadata = MessageMetadata(
-                provider=reply.metadata.provider,
-                model=reply.metadata.model,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                total_tokens=usage.total_tokens if usage else None,
-                elapsed_ms=reply.metadata.elapsed_ms,
-                provider_finish_reason=reply.metadata.finish_reason,
-                provider_finish_message=reply.metadata.finish_message,
-                provider_response_id=reply.metadata.provider_response_id,
-                provider_model_version=reply.metadata.provider_model_version,
-            )
-        content: RenderableType = Markdown(body_text)
-        if metadata is not None:
-            content = Group(Markdown(body_text), self._render_assistant_footer(metadata))
-        self._render_message("Assistant", content, style="yellow")
-
-    def _render_tool_batch(self, batch) -> None:
-        return
-
-    def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
-        footer = Text(style="dim", justify="right")
-        footer.append(f"{metadata.provider} / {metadata.model}")
-        stats = []
-        if metadata.input_tokens is not None:
-            stats.append(f"in {metadata.input_tokens}")
-        if metadata.output_tokens is not None:
-            stats.append(f"out {metadata.output_tokens}")
-        if metadata.elapsed_ms is not None:
-            stats.append(f"{metadata.elapsed_ms / 1000:.1f}s")
-        if stats:
-            footer.append("\n")
-            footer.append(" · ".join(stats))
-        return footer
+        render_error(self.console, text)
 
     def _render_help(self) -> None:
         help_text = Text.from_markup(
@@ -260,7 +181,7 @@ class ChatLoop:
             "/clear             Clear the screen and redraw the header\n"
             "/exit              Exit the chat loop"
         )
-        self._render_message("System", help_text, style="cyan")
+        self.console.print(help_text)
 
     def _render_session_summary(self) -> None:
         preview = (
@@ -280,7 +201,7 @@ class ChatLoop:
                 ]
             ),
         )
-        self._render_message("System", summary, style="cyan")
+        self.console.print(summary)
 
     def _close_session(self) -> None:
         self._close_trace_sink()
@@ -619,7 +540,7 @@ class ChatLoop:
                 "Source: prepare preview · hooks skipped · recall skipped · no draft input"
             ),
         )
-        self._render_message("System", renderable, style="cyan")
+        self.console.print(renderable)
 
     async def run(self) -> None:
         # turn 中途的 KeyboardInterrupt 不经过下面任何 _close_session，
@@ -654,11 +575,10 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            bus, event_renderer, unsubscribe_renderer = self.create_event_bus()
-            start_index = len(self.session.entries)
+            bus, _event_renderer, unsubscribe_renderer = self.create_event_bus()
             task = asyncio.create_task(self.handle_user_input(user_input, bus=bus))
             try:
-                reply = await task
+                await task
                 if self._session_service is not None:
                     self._session_service.flush_new_entries(
                         session=self.session,
@@ -687,5 +607,5 @@ class ChatLoop:
 
             self._fallback_message_count += 1
             # last usage 由 /context 从 Session 派生（§11.8），不在此缓存
-            if not event_renderer.rendered_assistant_message:
-                self._render_assistant_message(reply)
+            # 渲染唯一入口是事件订阅（E3）：不发 AssistantMessageEvent 的
+            # Run 是 runtime 违约，这里不做 fallback 渲染

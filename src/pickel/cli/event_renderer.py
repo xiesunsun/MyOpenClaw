@@ -31,7 +31,6 @@ class ChatEventRenderer:
         # AssistantMessageEvent.usage=None 时事件里没有 model 信息，
         # footer 退到装配时注入的 label（E2 遗留修复，见计划决策 3）
         self._fallback_model_label = fallback_model_label
-        self.rendered_assistant_message = False
         self._stream = StreamRenderer(console)
         self._tool = ToolRenderer(console)
 
@@ -72,7 +71,6 @@ class ChatEventRenderer:
 
         if isinstance(event, AssistantMessageEvent):
             self._stream.end()
-            self.rendered_assistant_message = True
             render_assistant(
                 self.console,
                 text=event.text,
