@@ -109,7 +109,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)
 
         messages = _messages(session)
         call_ids = {
@@ -138,7 +138,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)
 
         results = [
             m for m in _messages(session) if isinstance(m, ToolResultMessage)
@@ -159,7 +159,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)
 
         interrupted = [e for e in events if isinstance(e, TurnInterrupted)]
         self.assertEqual(1, len(interrupted))
@@ -180,7 +180,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)
 
         self.assertFalse([e for e in events if isinstance(e, TurnCompleted)])
         self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
@@ -197,7 +197,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
 
         with self.assertRaises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=10)
         self.assertTrue(task.cancelled() or task.done())
 
 
