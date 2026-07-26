@@ -805,6 +805,101 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             titles,
         )
 
+    async def test_真实_run_流式_provider_trace_中_delta_先于_assistant_message_且_seq_连续(self) -> None:
+        """组装层集成（流式）：真 Run + 流式 fake provider + ChatLoop + trace sink。
+
+        tests/runs/test_react_streaming.py 只看 bus 上的事件对象，这条钉住
+        delta 事件穿过 ChatLoop 长命 bus 落进 trace 文件后的顺序与 seq。
+        """
+        from typing import AsyncIterator
+
+        from pickel.providers.stream import (
+            StreamCompleted,
+            StreamDelta,
+            TextDelta,
+            ThinkingDelta,
+            accumulate,
+        )
+
+        final_reply = AssistantMessage(
+            content=[TextContent(text="你好，世界")],
+            metadata=_model_metadata(),
+        )
+
+        class _StreamingProvider:
+            """产多个 delta 后以 StreamCompleted 收尾；generate 由 stream 实现。"""
+
+            async def stream(self, context) -> AsyncIterator[StreamDelta]:
+                yield ThinkingDelta(text="想一想")
+                yield TextDelta(text="你好")
+                yield TextDelta(text="，世")
+                yield TextDelta(text="界")
+                yield StreamCompleted(message=final_reply)
+
+            async def generate(self, context) -> AssistantMessage:
+                return await accumulate(self.stream(context))
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            agent = self._build_agent()
+            run = Run(
+                agent=agent,
+                provider=_StreamingProvider(),
+                tool_bus=(_bus := bus_with([])),
+                activation=ToolActivation(allowed=frozenset(_bus.list_names())),
+                context_assembler=ContextAssembler(),
+                lifecycle_hooks=NoopLifecycleHooks(),
+                session_service=None,
+                file_access_policy=None,
+                workspace_files=None,
+                shell_session_manager=ShellSessionManager(),
+                unit_window=5,
+                strategy=ReActStrategy(max_steps=4),
+            )
+            submitted_inputs = iter(["hello", "/exit"])
+            with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
+                loop = ChatLoop(
+                    agent=agent,
+                    run=run,
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+
+            trace_file = home / "traces" / "session-1.jsonl"
+            lines = trace_file.read_text(encoding="utf-8").splitlines()
+            # 逐行 json.loads 可读
+            records = [json.loads(line) for line in lines]
+
+        # delta 事件全部出现在 assistant_message 之前，且顺序与 provider 产出一致
+        kinds = [record["event_type"] for record in records]
+        self.assertEqual(
+            [
+                "turn_started",
+                "step_started",
+                "thinking_delta",
+                "text_delta",
+                "text_delta",
+                "text_delta",
+                "assistant_message",
+                "turn_completed",
+            ],
+            kinds,
+        )
+        last_delta = max(i for i, kind in enumerate(kinds) if kind.endswith("_delta"))
+        self.assertLess(last_delta, kinds.index("assistant_message"))
+        # 全事件 seq 连续（0..n-1）；seq 由 bus 按事件分配，
+        # 连续即证明 trace 行数与事件数一致——没有事件被 sink 吞掉
+        self.assertEqual(list(range(len(records))), [record["seq"] for record in records])
+        self.assertEqual(len(records), len(lines))
+        # delta 拼起来就是最终消息正文
+        self.assertEqual(
+            "你好，世界",
+            "".join(r["text"] for r in records if r["event_type"] == "text_delta"),
+        )
+        self.assertEqual("你好，世界", records[6]["text"])
+
     async def test_new_session_rebuilds_trace_sink_for_new_session_id(self) -> None:
         """/new 换了 session，trace 文件必须跟着换，否则两个 session 混在一个文件里。"""
         with TemporaryDirectory() as tmpdir:
