@@ -3,12 +3,14 @@ from __future__ import annotations
 import inspect
 import traceback
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pickel.app.boot import Boot
 from pickel.cli.context_renderer import ContextRenderer, ModelContextRenderer
-from pickel.context.model_context import SystemContent, ToolDefinition
+from pickel.config.app_config import AppConfig
+from pickel.config.loader import Config
 from pickel.context.observation import ContextObservation
+from pickel.context.prepare import prepare
 from pickel.conversations.service import SessionService
 from pickel.conversations.session_storage_mapper import build_session_preview
 from pickel.conversations.agent_message import AssistantMessage
@@ -22,10 +24,14 @@ from pickel.runs import (
 )
 from pickel.runs.context_usage import ContextUsageService
 from pickel.runs.run import Run
+from pickel.shared.model_config import ModelSelection
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+
+if TYPE_CHECKING:
+    from pickel.agents.agent import Agent
 
 
 class ChatLoop:
@@ -40,6 +46,8 @@ class ChatLoop:
         context_usage_service: ContextUsageService | None = None,
         context_renderer: ContextRenderer | None = None,
         session_service: SessionService | None = None,
+        boot: Boot | None = None,
+        app_config: AppConfig | None = None,
     ) -> None:
         self.agent = agent
         self.agent_id = agent_id or agent.agent_id
@@ -53,6 +61,8 @@ class ChatLoop:
         self._context_renderer = context_renderer or ContextRenderer()
         self._session_service = session_service
         self._session_closed = False
+        self._boot = boot
+        self._app_config = app_config or (boot.app_config if boot is not None else None)
 
     @classmethod
     def from_boot(
@@ -82,6 +92,8 @@ class ChatLoop:
             run=run,
             session=session,
             session_service=session_service,
+            boot=boot,
+            app_config=boot.app_config,
         )
 
     async def handle_user_input(
@@ -128,7 +140,10 @@ class ChatLoop:
         body = Group(
             Text(f"Agent: {self.agent_id}", style="bold cyan"),
             Text("Config: ~/.pickel + project .pickel / agents", style="dim"),
-            Text("/help  /context  /clear  /session  /exit", style="yellow"),
+            Text(
+                "/help  /model  /thinking  /agent  /new  /reload  /context  /session  /clear  /exit",
+                style="yellow",
+            ),
         )
         self.console.print(
             Panel(
@@ -192,7 +207,6 @@ class ChatLoop:
     def _render_tool_batch(self, batch) -> None:
         return
 
-
     def _render_assistant_footer(self, metadata: MessageMetadata) -> Text:
         footer = Text(style="dim", justify="right")
         footer.append(f"{metadata.provider} / {metadata.model}")
@@ -211,11 +225,16 @@ class ChatLoop:
     def _render_help(self) -> None:
         help_text = Text.from_markup(
             "[bold]Available commands[/bold]\n"
-            "/help    Show this help message\n"
-            "/context Show current context usage summary\n"
-            "/clear   Clear the screen and redraw the header\n"
-            "/session Show current session details\n"
-            "/exit    Exit the chat loop"
+            "/help              Show this help message\n"
+            "/model [p/m]       List or set provider/model (Environ)\n"
+            "/thinking <level>  Set thinking level in Environ\n"
+            "/agent [id]        List agents or switch (new empty Session)\n"
+            "/new               New empty Session, same agent\n"
+            "/reload            Reload disk config/skills/agent (keep Environ)\n"
+            "/context           Show current ModelContext observation\n"
+            "/session           Show current session details\n"
+            "/clear             Clear the screen and redraw the header\n"
+            "/exit              Exit the chat loop"
         )
         self._render_message("System", help_text, style="cyan")
 
@@ -246,10 +265,215 @@ class ChatLoop:
             self._session_service.close(session=self.session)
         self._session_closed = True
 
+    def _list_available_models(self) -> list[str]:
+        """从 app_config.providers 列出 provider/model。"""
+        if self._app_config is None:
+            return []
+        lines: list[str] = []
+        for provider_id in sorted(self._app_config.providers):
+            catalog = self._app_config.providers[provider_id]
+            for model_id in sorted(catalog.models):
+                lines.append(f"{provider_id}/{model_id}")
+        return lines
+
+    def _parse_model_arg(self, arg: str) -> ModelSelection:
+        """解析 provider/model；provider 可含斜杠，按已知 providers 前缀匹配。"""
+        if self._app_config is None:
+            raise ValueError("AppConfig 未提供，无法解析 model")
+        providers = self._app_config.providers
+        # 长前缀优先，避免短 id 误匹配
+        for provider_id in sorted(providers, key=len, reverse=True):
+            prefix = f"{provider_id}/"
+            if arg.startswith(prefix):
+                model = arg[len(prefix) :]
+                if model in providers[provider_id].models:
+                    return ModelSelection(provider=provider_id, model=model)
+                raise KeyError(
+                    f"Unknown model '{model}' for provider '{provider_id}'"
+                )
+        # 仅 model 名且全局唯一
+        matches: list[ModelSelection] = []
+        for provider_id, catalog in providers.items():
+            if arg in catalog.models:
+                matches.append(ModelSelection(provider=provider_id, model=arg))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            opts = ", ".join(f"{m.provider}/{m.model}" for m in matches)
+            raise ValueError(f"model '{arg}' 不唯一，请指定 provider/model：{opts}")
+        raise KeyError(f"Unknown model selection: {arg}")
+
+    def _handle_model_command(self, arg: str | None) -> None:
+        if self._run is None:
+            self._render_error_message("Run 未提供")
+            return
+        if self._app_config is None:
+            self._render_error_message("AppConfig 未提供，无法使用 /model")
+            return
+        if not arg:
+            lines = self._list_available_models()
+            if not lines:
+                self._render_system_message("无可用模型。")
+                return
+            current = (
+                f"{self._run.agent.model_config.provider}/"
+                f"{self._run.agent.model_config.model}"
+            )
+            body = "Available models:\n" + "\n".join(lines) + f"\n\nCurrent: {current}"
+            self._render_system_message(body)
+            return
+        try:
+            selection = self._parse_model_arg(arg)
+            self._run.environ.llm = selection
+            self._run.apply_environ_model(self._app_config)
+            self._render_system_message(
+                f"Model set to {selection.provider}/{selection.model}"
+            )
+        except (KeyError, ValueError) as exc:
+            self._render_error_message(str(exc))
+
+    def _handle_thinking_command(self, arg: str | None) -> None:
+        if self._run is None:
+            self._render_error_message("Run 未提供")
+            return
+        if self._app_config is None:
+            self._render_error_message("AppConfig 未提供，无法使用 /thinking")
+            return
+        if not arg:
+            current = self._run.environ.provider_options.get("thinking")
+            self._render_system_message(
+                f"thinking: {current if current is not None else '(unset)'}\n"
+                "Usage: /thinking <level>"
+            )
+            return
+        level = arg.strip()
+        self._run.environ.provider_options["thinking"] = level
+        self._run.apply_environ_model(self._app_config)
+        self._render_system_message(f"thinking set to {level}")
+
+    def _handle_agent_command(self, arg: str | None) -> None:
+        if self._app_config is None or self._boot is None:
+            self._render_error_message("Boot/AppConfig 未提供，无法使用 /agent")
+            return
+        if not arg:
+            agent_ids = sorted(self._app_config.agents)
+            if not agent_ids:
+                self._render_system_message("无可用 agent。")
+                return
+            lines = [f"{i}. {aid}" for i, aid in enumerate(agent_ids, start=1)]
+            body = (
+                "Available agents:\n"
+                + "\n".join(lines)
+                + f"\n\nCurrent: {self.agent_id}\n"
+                "use /agent <id>"
+            )
+            self._render_system_message(body)
+            return
+        agent_id = arg.strip()
+        if agent_id not in self._app_config.agents:
+            self._render_error_message(f"Unknown agent: {agent_id}")
+            return
+        try:
+            session_service = self._boot.build_session_service(agent_id=agent_id)
+            session = session_service.start(
+                agent_id=agent_id,
+                cwd=str(Path.cwd().resolve()),
+            )
+            agent, run = self._boot.build_run(
+                agent_id=agent_id,
+                session_service=session_service,
+            )
+            # 新 agent 不继承旧 Environ 的 model 覆盖（定义优先）；可后续 /model 改
+            self.agent = agent
+            self.agent_id = agent.agent_id
+            self._run = run
+            self.session = session
+            self._session_service = session_service
+            self._session_closed = False
+            self._fallback_message_count = 0
+            self._render_system_message(
+                f"Switched to {agent_id}, new session {session.session_id}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._render_error_message(f"切换 agent 失败: {exc}")
+
+    def _handle_new_command(self) -> None:
+        agent_id = self.agent_id
+        if self._session_service is not None:
+            session = self._session_service.start(
+                agent_id=agent_id,
+                cwd=str(Path.cwd().resolve()),
+            )
+        else:
+            session = Session.create(
+                agent_id=agent_id,
+                cwd=str(Path.cwd().resolve()),
+            )
+        self.session = session
+        self._session_closed = False
+        self._fallback_message_count = 0
+        self._render_system_message(
+            f"New session {session.session_id} (agent={agent_id})"
+        )
+
+    def _handle_reload_command(self) -> None:
+        if self._run is None:
+            self._render_error_message("Run 未提供")
+            return
+        try:
+            app_config = Config.load(cwd=Path.cwd())
+            boot = Boot.from_config(app_config)
+            # 保留旧 session_service（同库/同 session）；无则新建
+            session_service = self._session_service or boot.build_session_service(
+                agent_id=self.agent_id
+            )
+            agent, new_run = Run.reload(
+                boot=boot,
+                old_run=self._run,
+                agent_id=self.agent_id,
+                session_service=session_service,
+            )
+            self._boot = boot
+            self._app_config = app_config
+            self.agent = agent
+            self.agent_id = agent.agent_id
+            self._run = new_run
+            if self._session_service is None:
+                self._session_service = session_service
+            self._render_system_message(
+                "Reloaded skills, templates, settings, models, agent, auth. "
+                f"Session={self.session.session_id} agent={self.agent_id}. "
+                "Next turn uses new snapshot."
+            )
+        except Exception as exc:  # noqa: BLE001 — 失败保持旧快照
+            self._render_error_message(f"reload 失败，保持旧配置: {exc}")
+
     async def _handle_command(self, user_input: str) -> bool:
-        command = user_input.lower()
+        # 仅命令名小写；参数保留大小写（model id / agent id）
+        stripped = user_input.strip()
+        parts = stripped.split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else None
+        if arg == "":
+            arg = None
+
         if command == "/help":
             self._render_help()
+            return True
+        if command == "/model":
+            self._handle_model_command(arg)
+            return True
+        if command == "/thinking":
+            self._handle_thinking_command(arg)
+            return True
+        if command == "/agent":
+            self._handle_agent_command(arg)
+            return True
+        if command == "/new":
+            self._handle_new_command()
+            return True
+        if command == "/reload":
+            self._handle_reload_command()
             return True
         if command == "/context":
             await self._render_context_command()
@@ -279,27 +503,13 @@ class ChatLoop:
                 note="尚无 Run",
             )
         else:
-            system = SystemContent.from_text(self.agent.system_instruction or "")
-            tools = []
-            for tool in getattr(run, "tools", []) or []:
-                spec = getattr(tool, "spec", None)
-                if spec is None:
-                    continue
-                tools.append(
-                    ToolDefinition(
-                        name=spec.name,
-                        description=getattr(spec, "description", "") or "",
-                        input_schema=getattr(spec, "input_schema", {}) or {},
-                    )
-                )
-            # 不触发 Hook：hook_feedback 传空
+            # 与 ReAct 一致走 prepare；不触发 Hook
             try:
-                ctx = run.context_assembler.assemble(
-                    entries=self.session.active_path(),
-                    system=system,
-                    tools=tools,
+                ctx = prepare(
+                    run=run,
+                    session=self.session,
                     hook_feedback=[],
-                    unit_window=run.unit_window,
+                    unit_window=getattr(run, "unit_window", 5),
                 )
             except Exception as exc:  # 测试 mock / 不完整 run
                 observation = ContextObservation(

@@ -487,7 +487,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         rendered = console.export_text()
-        self.assertIn("/help  /context  /clear  /session  /exit", rendered)
+        self.assertIn("/model", rendered)
+        self.assertIn("/agent", rendered)
+        self.assertIn("/reload", rendered)
 
     async def test_context_command_renders_usage_summary(self) -> None:
         output = StringIO()

@@ -32,6 +32,7 @@ from pickel.tools.registry import ToolRegistry
 from pickel.tools.shell import ShellSessionManager
 
 if TYPE_CHECKING:
+    from pickel.app.boot import Boot
     from pickel.config.app_config import AppConfig
     from pickel.runs.strategy.base import ExecutionStrategy
 
@@ -111,6 +112,24 @@ class Run:
         )
         self.agent.model_config = model_config
         self.provider = create_llm_provider(model_config)
+
+    @classmethod
+    def reload(
+        cls,
+        *,
+        boot: "Boot",
+        old_run: Run,
+        agent_id: str,
+        session_service: SessionService | None = None,
+    ) -> tuple[Agent, Run]:
+        """磁盘资源热重载：重建 Run，保留 Environ 模型选择。"""
+        agent, new_run = boot.build_run(
+            agent_id=agent_id,
+            session_service=session_service,
+        )
+        new_run.environ = old_run.environ
+        new_run.apply_environ_model(boot.app_config)
+        return agent, new_run
 
     async def turn(
         self,
