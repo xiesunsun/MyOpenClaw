@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
@@ -22,6 +22,14 @@ from pickel.conversations.content_blocks import (
     ToolCallContent,
 )
 from pickel.providers.base import Provider
+from pickel.providers.stream import (
+    StreamCompleted,
+    StreamDelta,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallArgsDelta,
+    accumulate,
+)
 from pickel.shared.model_config import ModelConfig
 
 
@@ -55,14 +63,57 @@ class AnthropicProvider(Provider):
         )
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
-        response = await self._create_streaming_message(context)
-        return self._response_to_assistant_message(response)
+        # 由 stream() 实现：同一个 provider 不得有两份解析逻辑
+        return await accumulate(self.stream(context))
 
-    async def _create_streaming_message(self, context: ModelContext) -> Any:
+    async def stream(self, context: ModelContext) -> AsyncIterator[StreamDelta]:
+        # input_json_delta 事件不带 tool_call id，须由 content_block_start 记下
+        tool_call_ids: dict[int, str] = {}
+
         async with self.client.messages.stream(
             **self._build_create_params(context)
         ) as stream:
-            return await stream.get_final_message()
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+
+                if event_type == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    if getattr(block, "type", None) == "tool_use":
+                        index = getattr(event, "index", None)
+                        block_id = getattr(block, "id", None)
+                        if index is not None and block_id is not None:
+                            tool_call_ids[index] = str(block_id)
+                    continue
+
+                if event_type != "content_block_delta":
+                    continue
+
+                delta = getattr(event, "delta", None)
+                delta_type = getattr(delta, "type", None)
+
+                if delta_type == "text_delta":
+                    text = getattr(delta, "text", None)
+                    if text:
+                        yield TextDelta(text=str(text))
+                elif delta_type == "thinking_delta":
+                    thinking = getattr(delta, "thinking", None)
+                    if thinking:
+                        yield ThinkingDelta(text=str(thinking))
+                elif delta_type == "input_json_delta":
+                    partial = getattr(delta, "partial_json", None)
+                    if partial:
+                        yield ToolCallArgsDelta(
+                            tool_call_id=tool_call_ids.get(
+                                getattr(event, "index", -1), ""
+                            ),
+                            partial_json=str(partial),
+                        )
+                # signature_delta 不单独发：signature 由 SDK 累积进
+                # get_final_message()，自行拼装反而会漏
+
+            final = await stream.get_final_message()
+
+        yield StreamCompleted(message=self._response_to_assistant_message(final))
 
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         try:
