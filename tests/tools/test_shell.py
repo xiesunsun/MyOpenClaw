@@ -364,3 +364,65 @@ class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
                     shell.exec("echo nope")
             finally:
                 shell.terminate()
+
+
+class ForegroundInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_picks_up_completion_after_timeout(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                first = shell.exec("sleep 1; echo late-done", timeout_ms=200)
+                self.assertTrue(first.timed_out)
+
+                second = shell.wait_foreground(timeout_ms=3000)
+
+                self.assertEqual(ShellStatus.READY, second.shell_status)
+                self.assertIn("late-done", second.stdout)
+                self.assertFalse(shell.pending)
+            finally:
+                shell.terminate()
+
+    async def test_stdin_feeds_interactive_read(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                first = shell.exec("read -r line; echo got:$line", timeout_ms=300)
+                self.assertTrue(first.timed_out)
+
+                # write_stdin 的观察窗内命令可能已完成（READY）；
+                # 未完成（RUNNING）才继续 wait_foreground
+                final = shell.write_stdin("hello-stdin")
+                if final.shell_status is ShellStatus.RUNNING:
+                    final = shell.wait_foreground(timeout_ms=2000)
+
+                self.assertEqual(ShellStatus.READY, final.shell_status)
+                self.assertIn("got:hello-stdin", final.stdout)
+            finally:
+                shell.terminate()
+
+    async def test_interrupt_recovers_ready_session(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                first = shell.exec("sleep 60", timeout_ms=200)
+                self.assertTrue(first.timed_out)
+
+                result = shell.interrupt_foreground()
+
+                self.assertEqual(ShellStatus.READY, result.shell_status)
+                self.assertTrue(shell.is_alive())
+                self.assertFalse(shell.pending)
+                follow_up = shell.exec("echo alive-again")
+                self.assertIn("alive-again", follow_up.stdout)
+            finally:
+                shell.terminate()
+
+    async def test_wait_without_pending_is_error(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                shell.start()
+                with self.assertRaises(RuntimeError):
+                    shell.wait_foreground(timeout_ms=100)
+            finally:
+                shell.terminate()

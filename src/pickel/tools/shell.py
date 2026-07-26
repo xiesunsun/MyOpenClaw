@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 import os
@@ -51,6 +52,7 @@ class PtyShellProcess:
         self.shell_program = shell_program
         self._master_fd: int | None = None
         self._stderr_fd: int | None = None
+        self._stderr_child_fd: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
 
     def spawn(self, workspace_path: Path, env: dict[str, str] | None = None) -> None:
@@ -68,23 +70,39 @@ class PtyShellProcess:
                 shell_env.update(env)
             shell_env.setdefault("TERM", "dumb")
             shell_env["PS1"] = ""
+            shell_env["PS2"] = ""
             shell_env["PROMPT"] = ""
             shell_env["RPROMPT"] = ""
+            # marker 由 PROMPT_COMMAND 发射：bash 每回到顶层提示符必执行，
+            # 前台命令死于 SIGINT（bash 会丢弃当前列表剩余部分）时也不例外，
+            # 所以中断后依然能拿到 marker + 退出码。marker 为空时不发射，
+            # 发射后立即清空，杜绝启动噪声与空行触发的重复 marker。
+            shell_env["PROMPT_COMMAND"] = (
+                '__pickel_ec=$?; if [ -n "$__pickel_marker" ]; then '
+                "printf '%s\\037%s\\037%s\\n' "
+                '"$__pickel_marker" "$__pickel_ec" "$PWD"; fi; __pickel_marker='
+            )
 
+            # 命令 stderr 走独立管道（wrapper 里 2>&N 重定向）。
+            # bash 自身的 stderr 必须留在 tty：bash 用 stderr 判定控制终端，
+            # 接管道会让 job control 失效（前台命令不再有独立进程组）。
+            stderr_read, stderr_write = os.pipe()
+            os.set_blocking(stderr_read, False)
             self._process = subprocess.Popen(
                 self._spawn_command(),
                 stdin=slave_fd,
                 stdout=slave_fd,
-                stderr=subprocess.PIPE,
+                stderr=slave_fd,
                 cwd=str(workspace_path),
                 env=shell_env,
                 close_fds=True,
+                pass_fds=(stderr_write,),
                 start_new_session=True,
             )
             self._master_fd = master_fd
-            assert self._process.stderr is not None
-            self._stderr_fd = self._process.stderr.fileno()
-            os.set_blocking(self._stderr_fd, False)
+            self._stderr_fd = stderr_read
+            self._stderr_child_fd = stderr_write
+            os.close(stderr_write)
         finally:
             os.close(slave_fd)
 
@@ -168,7 +186,13 @@ class PtyShellProcess:
             except OSError:
                 pass
             self._master_fd = None
+        if self._stderr_fd is not None:
+            try:
+                os.close(self._stderr_fd)
+            except OSError:
+                pass
         self._stderr_fd = None
+        self._stderr_child_fd = None
         self._process = None
 
     def is_alive(self) -> bool:
@@ -350,6 +374,53 @@ class PersistentShell:
                     + buffer[-keep_tail:]
                 )
 
+    def wait_foreground(self, timeout_ms: int | None = None) -> ShellExecutionResult:
+        """续等 pending 前台命令，直到 marker 或再次超时。"""
+        marker = self._require_pending()
+        return self._read_until_marker(
+            marker,
+            timeout_ms=self.default_timeout_ms if timeout_ms is None else timeout_ms,
+        )
+
+    def write_stdin(self, text: str, *, newline: bool = True) -> ShellExecutionResult:
+        """向 pending 前台命令写入文本，返回短窗口内的增量输出。"""
+        self._require_pending()
+        self.process.write(text + ("\n" if newline else ""))
+        return self._read_pending_window(window_ms=300)
+
+    def interrupt_foreground(self, *, kill: bool = False) -> ShellExecutionResult:
+        """SIGINT（或 SIGKILL）前台进程组；shell 不可恢复时才弃会话。"""
+        marker = self._require_pending()
+        sig = signal.SIGKILL if kill else signal.SIGINT
+        self.process.signal_foreground(sig)
+        result = self._read_until_marker(marker, timeout_ms=2000)
+        if result.shell_status is ShellStatus.RUNNING and not kill:
+            # SIGINT 无效（命令捕获/忽略了），升级 SIGKILL 再试一轮
+            self.process.signal_foreground(signal.SIGKILL)
+            result = self._read_until_marker(marker, timeout_ms=2000)
+        if result.shell_status is ShellStatus.RUNNING:
+            # 前台杀不掉且 marker 不出 —— shell 已不可用，弃会话
+            self.terminate()
+            return ShellExecutionResult(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                status_message="Foreground command could not be stopped; shell terminated.",
+                exit_code=137,
+                cwd=self._last_cwd,
+                shell_status=ShellStatus.TERMINATED,
+            )
+        return result
+
+    def _require_pending(self) -> str:
+        if self._pending_marker is None:
+            raise RuntimeError("No foreground command is pending")
+        return self._pending_marker
+
+    def _read_pending_window(self, *, window_ms: int) -> ShellExecutionResult:
+        """短窗口增量读：可能读到 marker（命令因输入而结束），也可能只有增量输出。"""
+        marker = self._require_pending()
+        return self._read_until_marker(marker, timeout_ms=window_ms)
+
     def _finalize_output(self, output: str) -> tuple[str, bool, Path | None]:
         """结果档：超上限截中间保头尾，完整输出落盘给引用。"""
         limits = self._limits
@@ -370,13 +441,16 @@ class PersistentShell:
             path,
         )
 
-    @staticmethod
-    def _build_wrapped_command(command: str, marker: str) -> str:
-        return (
-            f"{command}\n"
-            "__pickel_exit_code=$?\n"
-            f"printf '%s\\037%s\\037%s\\n' '{marker}' \"$__pickel_exit_code\" \"$PWD\"\n"
-        )
+    def _build_wrapped_command(self, command: str, marker: str) -> str:
+        # 花括号组：整个复合命令先被 bash 解析完（stdin 队列被消费干净）再执行，
+        # 因此命令内部的 read 只会等待新输入，不会把后续行吃掉。
+        # 组内先放一个 : 兜住空命令/纯注释（否则 { } 空组是语法错误）。
+        # 组级 2>&N 把命令 stderr 送进独立管道（bash 自身 stderr 留在 tty）。
+        # marker 不在这里发射——由 PROMPT_COMMAND 发射（见 spawn），
+        # 否则前台命令死于 SIGINT 时 bash 丢弃列表剩余部分，marker 永不到达。
+        stderr_fd = getattr(self.process, "_stderr_child_fd", None)
+        redirect = f" 2>&{stderr_fd}" if stderr_fd is not None else ""
+        return f"__pickel_marker='{marker}'; {{ :\n{command}\n}}{redirect}\n"
 
 
 @dataclass
@@ -515,30 +589,178 @@ class ShellExecTool(BaseTool):
             )
         except RuntimeError as exc:
             return ToolExecutionResult(content=str(exc), is_error=True)
-        parts = [result.stdout] if result.stdout else []
-        if result.stderr:
-            parts.append(f"--- stderr ---\n{result.stderr}")
-        if result.status_message:
-            parts.append(f"[status] {result.status_message}")
         return ToolExecutionResult(
-            content="\n".join(parts),
+            content=_format_result_content(result),
             is_error=(
                 result.exit_code != 0
                 or result.shell_status not in (ShellStatus.READY, ShellStatus.RUNNING)
             ),
-            metadata={
-                "cwd": str(result.cwd),
-                "exit_code": result.exit_code,
-                "shell_status": result.shell_status,
-                "timed_out": result.timed_out,
-                "truncated": result.truncated,
-                "full_output_path": (
-                    str(result.full_output_path) if result.full_output_path else None
-                ),
-                "stderr_chars": len(result.stderr),
-                "created_new_shell": created_new_shell,
-            },
+            metadata=_result_metadata(result, created_new_shell=created_new_shell),
         )
+
+
+def _format_result_content(result: ShellExecutionResult) -> str:
+    parts = [result.stdout] if result.stdout else []
+    if result.stderr:
+        parts.append(f"--- stderr ---\n{result.stderr}")
+    if result.status_message:
+        parts.append(f"[status] {result.status_message}")
+    return "\n".join(parts)
+
+
+def _result_metadata(
+    result: ShellExecutionResult, **extra: Any
+) -> dict[str, Any]:
+    return {
+        "cwd": str(result.cwd),
+        "exit_code": result.exit_code,
+        "shell_status": result.shell_status,
+        "timed_out": result.timed_out,
+        "truncated": result.truncated,
+        "full_output_path": (
+            str(result.full_output_path) if result.full_output_path else None
+        ),
+        "stderr_chars": len(result.stderr),
+        **extra,
+    }
+
+
+def _foreground_result(result: ShellExecutionResult) -> ToolExecutionResult:
+    # 三件套的 is_error 只看 shell 是否被弃：非零退出码（如 SIGINT 的 130）
+    # 是被请求动作的正常结果，不是工具错误
+    return ToolExecutionResult(
+        content=_format_result_content(result) or "(no new output)",
+        is_error=result.shell_status is ShellStatus.TERMINATED,
+        metadata=_result_metadata(result),
+    )
+
+
+def _require_pending_shell(
+    manager: ShellSessionManager, session_id: str
+) -> ShellSession | None:
+    session = manager.get(session_id)
+    if session is None or not session.shell.pending:
+        return None
+    return session
+
+
+def _no_pending_result() -> ToolExecutionResult:
+    return ToolExecutionResult(
+        content="No foreground command is pending.", is_error=True
+    )
+
+
+class ShellWaitTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_wait",
+        description=(
+            "Keep waiting for the foreground command that previously timed out in shell_exec. "
+            "Returns new output since the last call."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "How long to wait this time, in milliseconds.",
+                },
+            },
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        session = _require_pending_shell(manager, context.session_id)
+        if session is None:
+            return _no_pending_result()
+        timeout_ms = arguments.get("timeout_ms")
+        result = await asyncio.to_thread(
+            session.shell.wait_foreground,
+            int(timeout_ms) if timeout_ms is not None else None,
+        )
+        return _foreground_result(result)
+
+
+class ShellStdinTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_stdin",
+        description=(
+            "Send text to the stdin of the foreground command still running in the session shell "
+            "(e.g. to answer an interactive prompt). Returns any output produced shortly after."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to write to the foreground command's stdin.",
+                },
+                "newline": {
+                    "type": "boolean",
+                    "description": "Append a trailing newline (submit the input). Default true.",
+                },
+            },
+            "required": ["text"],
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        session = _require_pending_shell(manager, context.session_id)
+        if session is None:
+            return _no_pending_result()
+        result = await asyncio.to_thread(
+            lambda: session.shell.write_stdin(
+                str(arguments["text"]),
+                newline=bool(arguments.get("newline", True)),
+            )
+        )
+        return _foreground_result(result)
+
+
+class ShellInterruptTool(BaseTool):
+    spec = ToolSpec(
+        name="shell_interrupt",
+        description=(
+            "Stop the foreground command still running in the session shell. "
+            "Sends SIGINT first (escalating to SIGKILL if needed); set kill=true to SIGKILL directly. "
+            "The shell session itself survives and stays usable."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kill": {
+                    "type": "boolean",
+                    "description": "Send SIGKILL immediately instead of SIGINT. Default false.",
+                },
+            },
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        manager = _require_shell_manager(context)
+        session = _require_pending_shell(manager, context.session_id)
+        if session is None:
+            return _no_pending_result()
+        result = await asyncio.to_thread(
+            lambda: session.shell.interrupt_foreground(
+                kill=bool(arguments.get("kill", False))
+            )
+        )
+        return _foreground_result(result)
 
 
 class ShellRestartTool(BaseTool):
