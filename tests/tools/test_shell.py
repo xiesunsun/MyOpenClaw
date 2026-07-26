@@ -18,6 +18,7 @@ from pickel.tools.shell import (
     ShellSessionManager,
     ShellStatus,
     ShellTasksTool,
+    _dangerous_command_reason,
 )
 
 
@@ -527,3 +528,94 @@ class BackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
             while time.monotonic() < deadline and task.status() == "running":
                 await asyncio.sleep(0.05)
             self.assertEqual("exited", task.status())
+
+
+class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def _exec(self, command: str) -> "ToolExecutionResult":
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            try:
+                return await tool.execute({"command": command}, context)
+            finally:
+                manager.close(context.session_id)
+
+    async def test_blocks_rm_rf_root_and_home(self) -> None:
+        for cmd in ("rm -rf /", "rm -fr /", "sudo rm -rf /*", "rm -rf ~", "rm -rf $HOME"):
+            result = await self._exec(cmd)
+            self.assertTrue(result.is_error, cmd)
+            self.assertIn("blocked", result.content.lower(), cmd)
+
+    async def test_blocks_mkfs_dd_forkbomb_chmod(self) -> None:
+        for cmd in (
+            "mkfs.ext4 /dev/sda1",
+            "dd if=/dev/zero of=/dev/sda",
+            ":(){ :|:& };:",
+            "chmod -R 777 /",
+        ):
+            result = await self._exec(cmd)
+            self.assertTrue(result.is_error, cmd)
+
+    async def test_allows_normal_rm_and_workspace_paths(self) -> None:
+        for cmd in ("rm -rf ./build", "rm -rf node_modules", "echo 'rm -rf /' 只是文本"):
+            result = await self._exec(cmd)
+            self.assertFalse(result.is_error, cmd)
+
+
+class _NoShellManager(ShellSessionManager):
+    """碰到任何会真正执行命令的路径就失败——危险命令测试绝不进 shell。"""
+
+    def get(self, session_id):  # type: ignore[override]
+        raise AssertionError("dangerous command reached the shell path")
+
+    def get_or_create(self, session_id, workspace_path):  # type: ignore[override]
+        raise AssertionError("dangerous command reached the shell path")
+
+    def start_background(self, session_id, workspace_path, command):  # type: ignore[override]
+        raise AssertionError("dangerous command reached the background path")
+
+
+class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
+    # 拦截判定测纯函数，零执行风险；漏拦时下面的工具级用例
+    # 会命中 _NoShellManager 的 AssertionError，同样不会执行任何命令。
+    def test_reason_blocks_rm_rf_root_and_home(self) -> None:
+        for cmd in ("rm -rf /", "rm -fr /", "sudo rm -rf /*", "rm -rf ~", "rm -rf $HOME"):
+            self.assertIsNotNone(_dangerous_command_reason(cmd), cmd)
+
+    def test_reason_blocks_mkfs_dd_forkbomb_chmod(self) -> None:
+        for cmd in (
+            "mkfs.ext4 /dev/sda1",
+            "dd if=/dev/zero of=/dev/sda",
+            ":(){ :|:& };:",
+            "chmod -R 777 /",
+        ):
+            self.assertIsNotNone(_dangerous_command_reason(cmd), cmd)
+
+    def test_reason_allows_normal_rm_and_quoted_text(self) -> None:
+        for cmd in ("rm -rf ./build", "rm -rf node_modules", "echo 'rm -rf /' 只是文本"):
+            self.assertIsNone(_dangerous_command_reason(cmd), cmd)
+
+    async def test_tool_blocks_before_touching_shell(self) -> None:
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), _NoShellManager())
+            for arguments in (
+                {"command": "rm -rf /"},
+                {"command": "rm -rf /", "background": True},
+            ):
+                result = await tool.execute(arguments, context)
+                self.assertTrue(result.is_error)
+                self.assertIn("blocked", result.content.lower())
+
+    async def test_tool_allows_harmless_rm_in_workspace(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            try:
+                await tool.execute({"command": "mkdir -p ./build"}, context)
+                result = await tool.execute({"command": "rm -rf ./build"}, context)
+                self.assertFalse(result.is_error)
+            finally:
+                manager.close(context.session_id)

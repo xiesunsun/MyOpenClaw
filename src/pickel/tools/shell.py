@@ -647,6 +647,17 @@ class ShellExecTool(BaseTool):
     ) -> ToolExecutionResult:
         manager = _require_shell_manager(context)
 
+        reason = _dangerous_command_reason(str(arguments["command"]))
+        if reason is not None:
+            return ToolExecutionResult(
+                content=(
+                    f"Command blocked ({reason}). "
+                    "If this is genuinely intended, ask the user to run it manually."
+                ),
+                is_error=True,
+                metadata={"blocked": True, "reason": reason},
+            )
+
         if arguments.get("background"):
             task = manager.start_background(
                 context.session_id, context.workspace_path, str(arguments["command"])
@@ -1046,6 +1057,36 @@ class ShellCloseTool(BaseTool):
                 "closed": True,
             },
         )
+
+
+# 危险命令静态拦截：挡「明显自杀」，不做 shell 解析级对抗（真防线在 S2 sandbox）
+_DANGEROUS_RULES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"(?:^|[;&|]\s*)(?:sudo\s+)?rm\s+(?:-\w+\s+)*-\w*[rR]\w*\s+"
+            r"(?:-\w+\s+)*(/|~|\$HOME)(?:/?\*)?\s*(?:$|[;&|])"
+        ),
+        "recursive delete of / or home",
+    ),
+    (re.compile(r"(?:^|[;&|]\s*)(?:sudo\s+)?mkfs(\.\w+)?\b"), "filesystem format"),
+    (re.compile(r"\bdd\b[^|;&]*\bof=/dev/"), "raw write to block device"),
+    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "fork bomb"),
+    (
+        re.compile(
+            r"(?:^|[;&|]\s*)(?:sudo\s+)?ch(?:mod|own)\s+(?:-\w+\s+)*-R\s+\S+\s+/\s*(?:$|[;&|])"
+        ),
+        "recursive chmod/chown on /",
+    ),
+]
+
+
+def _dangerous_command_reason(command: str) -> str | None:
+    # 引号内内容不参与匹配（echo 'rm -rf /' 不应命中）
+    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "''", command)
+    for pattern, reason in _DANGEROUS_RULES:
+        if pattern.search(stripped):
+            return reason
+    return None
 
 
 def _require_shell_manager(context: ToolExecutionContext) -> ShellSessionManager:
