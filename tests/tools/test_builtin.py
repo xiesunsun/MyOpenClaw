@@ -4,18 +4,20 @@ import unittest
 
 from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.catalog import builtin_tools
+from pickel.tools.catalog import builtin_tools, install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import WorkspacePathAccessPolicy
-from pickel.tools.registry import ToolRegistry
+from pickel.tools.bus import ToolBus
 
 
 class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
-    def test_builtin_tool_catalog_can_seed_registry(self) -> None:
-        registry = ToolRegistry(tools=builtin_tools())
+    def test_builtin_tool_catalog_can_seed_bus(self) -> None:
+        bus = ToolBus()
+        install_builtin_tools(bus)
 
-        tools = registry.resolve_many(
-            [
+        tools = [
+            bus.get(name).tool
+            for name in [
                 "echo",
                 "list_directory",
                 "glob_search",
@@ -28,7 +30,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "shell_restart",
                 "shell_close",
             ]
-        )
+        ]
 
         self.assertEqual(
             [
@@ -48,8 +50,9 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_builtin_read_tool_reads_relative_path_from_workspace(self) -> None:
-        registry = ToolRegistry(tools=builtin_tools())
-        read_tool = registry.resolve("read_file")
+        bus = ToolBus()
+        install_builtin_tools(bus)
+        read_tool = bus.get("read_file").tool
 
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

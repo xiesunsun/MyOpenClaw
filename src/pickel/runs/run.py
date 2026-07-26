@@ -108,15 +108,6 @@ class Run:
             recall_sources=list(recall_sources or []),
         )
 
-    @property
-    def tools(self) -> list[BaseTool]:
-        """兼容旧读法：按当前激活集算一份工具列表。
-
-        Task 6 之后 prepare / react 都走 TurnState 的快照，此 property 仅供尚未迁移的
-        调用点与旧测试使用，Task 9 删除。
-        """
-        return [entry.tool for entry in self.tool_bus.snapshot(self.activation).entries]
-
     # --- ActivationControl 协议：供 tool_set_active 收窄/恢复激活集 ---
 
     def allowed_names(self) -> frozenset[str]:

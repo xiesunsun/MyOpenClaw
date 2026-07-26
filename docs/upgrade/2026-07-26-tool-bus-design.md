@@ -126,7 +126,8 @@ class ToolBus:
     """进程级工具注册表。可变，跨 Run / session / reload 存活。"""
 
     def register(self, tool: BaseTool, *, source: ToolSource, version: str | None = None,
-                 origin: str | None = None) -> None: ...
+                 origin: str | None = None) -> str:
+        """返回加过命名空间前缀的最终名 —— 注册方（E1 / T2）需要它来记账与卸载。"""
     def unregister(self, name: str) -> None: ...
     def unregister_origin(self, source: ToolSource, origin: str) -> list[str]:
         """卸掉某个来源的全部工具，返回被卸的名字。T2 用于 MCP server 断开。"""
@@ -135,6 +136,12 @@ class ToolBus:
     def list(self, *, source: ToolSource | None = None) -> list[ToolEntry]: ...
     def list_names(self, *, source: ToolSource | None = None) -> list[str]: ...
     def snapshot(self, activation: ToolActivation) -> ToolSnapshot: ...
+    def missing_names(self, activation: ToolActivation) -> list[str]:
+        """白名单里有、bus 里没有的名字。供调用方发 warning 事件（见 §6）。"""
+
+
+def bus_with(tools: Iterable[BaseTool]) -> ToolBus:
+    """把一组工具全登记为 BUILTIN 的便捷构造。测试与 `Run.open(tools=...)` 用。"""
 ```
 
 `register` 的冲突规则：
@@ -159,7 +166,7 @@ class ToolBus:
 
 前缀由 bus 在 `register` 时按 `source` + `origin` 计算，结果写入 `ToolEntry.name`。工具自身的 `spec.name` 保持裸名不变（工具不需要知道自己被挂在什么命名空间下）。
 
-**因此 `ToolEntry.name` 是全链路的唯一工具标识**：`agent.yaml` 白名单、`ToolSnapshot.definitions()` 给模型的 `ToolDefinition.name`、模型回传的 `tool_call.name`、`ToolSnapshot.find()` 的查找键，全部用它，而非 `tool.spec.name`。内置工具二者恰好相等，非内置工具不等 —— 实施时不可混用。
+**因此 `ToolEntry.name` 是全链路的唯一工具标识**：`agent.yaml` 白名单、`resolve_tools` 给模型的 `ToolDefinition.name`、模型回传的 `tool_call.name`、`ToolSnapshot.find()` 的查找键，全部用它，而非 `tool.spec.name`。内置工具二者恰好相等，非内置工具不等 —— 实施时不可混用。
 
 ### 3.3 激活集与快照（同在 `tools/bus.py`）
 
@@ -174,6 +181,7 @@ class ToolActivation:
     agent_disabled: frozenset[str] = frozenset()   # agent 通过 tool_set_active 关闭的
 
     def with_agent_disabled(self, names: Iterable[str]) -> ToolActivation: ...
+    def with_agent_enabled(self, names: Iterable[str]) -> ToolActivation: ...
 ```
 
 ```python
@@ -209,13 +217,24 @@ if TYPE_CHECKING:                    # 运行期不导入，避免 base ↔ shel
     from pickel.tools.shell import ShellSessionManager
 
 
+class ActivationControl(Protocol):
+    """让工具收窄 / 恢复激活集的窄接口。实现方是 `Run`。"""
+
+    def allowed_names(self) -> frozenset[str]: ...
+    def disable_tools(self, names: Iterable[str]) -> None: ...
+    def enable_tools(self, names: Iterable[str]) -> None: ...
+
+
 @dataclass(frozen=True)
 class ToolServices:
     """进程内工具可用的运行期服务。"""
 
     workspace_files: "WorkspaceFileService | None" = None
     shell_sessions: "ShellSessionManager | None" = None
+    activation_control: ActivationControl | None = None
 ```
+
+`activation_control` 走窄协议而不是把 `Run` 塞进 context：`tool_set_active` 需要读白名单、改激活集，但工具层不该认识运行层。协议只暴露这三个方法，`Run` 恰好实现它们，工具侧对 `Run` 的其余部分一无所知。
 
 `ToolExecutionContext` 相应改为：
 
@@ -241,12 +260,14 @@ name: tool_set_active
 input: { disable?: string[], enable?: string[] }
 ```
 
-语义：把名字加入 / 移出 `TurnState` 的 `agent_disabled` 集合，**下一 turn 生效**（返回值明说这一点，避免模型以为立即生效后困惑）。`enable` 只能移出 `agent_disabled`，无法把白名单外的工具拉进来 —— 尝试时返回错误说明该工具未被授权。
+语义：把名字加入 / 移出激活集的 `agent_disabled` 集合，**下一 turn 生效**（返回值明说这一点，避免模型以为立即生效后困惑）。`enable` 只能移出 `agent_disabled`，无法把白名单外的工具拉进来 —— 尝试时返回错误说明该工具未被授权。
 
-`agent_disabled` 需要跨 turn 存活，因此它是 `Run.activation` 的一部分（会话级），而非 `TurnState` 的字段；`TurnState` 只持有本 turn 的快照。写入方式：
+`agent_disabled` 需要跨 turn 存活，因此它是 `Run.activation` 的一部分（会话级），而非 `TurnState` 的字段；`TurnState` 只持有本 turn 的快照。写入不直连 `Run`，而是经 `ToolServices.activation_control` 这个窄协议（§3.4）：
 
 ```python
-run.activation = run.activation.with_agent_disabled(names)
+control = context.services.activation_control      # 实际是 Run
+allowed = control.allowed_names()                  # 硬边界，enable 越界即报错
+control.disable_tools(names)                       # Run 内部：activation = activation.with_agent_disabled(names)
 ```
 
 `Run` 上只有 `activation` 这一个激活状态字段，不额外持有 `agent_disabled` 集合 —— 避免两处状态需要同步。
@@ -277,12 +298,12 @@ turn 开始（ReActStrategy.execute）
    turn.tool_snapshot = run.tool_bus.snapshot(run.activation)      ← 唯一快照点
    │
    ├─ step 1..N:
-   │     prepare(run=run, turn=turn)
-   │        └─ resolve_tools → turn.tool_snapshot.definitions()    ← 不再读 run.tools
+   │     prepare(run=run, turn=turn, snapshot=turn.tool_snapshot)
+   │        └─ resolve_tools(snapshot=...) → [ToolDefinition]      ← 不再读 run.tools
    │     provider.generate(...)
    │     _execute_tool_call
    │        └─ turn.tool_snapshot.find(tool_call.name)             ← 不再遍历 run.tools
-   │     （tool_set_active 只写 run.agent_disabled，本 turn 快照不动）
+   │     （tool_set_active 只写 run.activation，本 turn 快照不动）
    │
    turn 结束
 
@@ -298,7 +319,7 @@ turn 开始（ReActStrategy.execute）
 | 文件 | 改动 |
 | --- | --- |
 | `tools/bus.py` | 新增：`ToolSource`、`ToolEntry`、`ToolActivation`、`ToolSnapshot`、`ToolBus`、`ToolNameConflictError` |
-| `tools/services.py` | 新增：`ToolServices` |
+| `tools/services.py` | 新增：`ToolServices`、`ActivationControl` 协议 |
 | `tools/registry.py` | 删除（`ToolRegistry` 无外部使用者，仅 `Run.open` 与 `tools/__init__` 导出） |
 | `tools/base.py` | `ToolExecutionContext`：`workspace_files` / `shell_session_manager: Any` → `services: ToolServices` |
 | `tools/catalog.py` | 增 `install_builtin_tools(bus)` |
@@ -306,7 +327,7 @@ turn 开始（ReActStrategy.execute）
 | `tools/file_tools.py` | `_require_workspace_files` 改读 `context.services.workspace_files` |
 | `tools/shell.py` | `_require_shell_manager` 改读 `context.services.shell_sessions` |
 | `tools/__init__.py` | 导出调整 |
-| `runs/run.py` | `tools: list[BaseTool]` → `tool_bus: ToolBus` + `activation: ToolActivation`（`agent_disabled` 在 activation 内）；`open()` 接受 `tool_bus` 注入而非自建；`get_tool_execution_context` 组装 `ToolServices`；`reload` 传递 bus |
+| `runs/run.py` | `tools: list[BaseTool]` → `tool_bus: ToolBus` + `activation: ToolActivation`（`agent_disabled` 在 activation 内）；`open()` 接受 `tool_bus` 注入（仅给 `tools=` 时退回 `bus_with` 的私有 bus，测试便捷路径）；实现 `ActivationControl` 三方法；`get_tool_execution_context` 组装 `ToolServices(..., activation_control=self)`；`reload` 传递 bus 并按新白名单重算 activation |
 | `runs/turn_state.py` | `TurnState` 增 `tool_snapshot: ToolSnapshot \| None = None` |
 | `runs/strategy/react.py` | turn 开始取快照存入 `turn.tool_snapshot`；`_execute_tool_call` 改用 `turn.tool_snapshot.find(tool_call.name)`；调 prepare 时传 `snapshot=turn.tool_snapshot` |
 | `context/prepare.py` | `resolve_tools(*, run)` → `resolve_tools(*, snapshot: ToolSnapshot)`；`prepare()` 增 `snapshot` 关键字参数（不传整个 `TurnState`，prepare 只需要快照） |
@@ -337,7 +358,7 @@ turn 开始（ReActStrategy.execute）
 | --- | --- |
 | `ToolBus` | register / unregister / unregister_origin / set_enabled / list(source=…)；同 source 同 origin 覆盖；跨 source 同名冲突抛错 |
 | 激活集 | 三层求交；白名单外的名字被 `agent_disabled` 忽略；enable 无法越过白名单；bus 缺失的白名单项被跳过 |
-| 快照不变性 | turn 内改 bus（register / set_enabled）不影响已取快照；`definitions()` 与 `find()` 对同一 entry 一致 |
+| 快照不变性 | turn 内改 bus（register / set_enabled）不影响已取快照；`entries` 与 `find()` 对同一 entry 一致 |
 | turn 边界语义 | `tool_set_active` 在 step 3 调用 → 本 turn 后续 step 的 `prepare` 输出不变；下一 turn 的快照生效 |
 | `ToolServices` | 现有 file / shell 工具测试改造后仍通过（回归） |
 | bus 跨 reload | `Run.reload` 后 bus 是同一实例；已注册的非 builtin 条目仍在（用假条目模拟 T2） |

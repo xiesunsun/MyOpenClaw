@@ -83,7 +83,7 @@ Task 9  删除 ToolRegistry 与兼容层       （依赖全部）
   - `ToolBus.list_names(*, source: ToolSource | None = None) -> list[str]`
   - `bus_with(tools: Iterable[BaseTool]) -> ToolBus`（模块级函数）—— 用一组工具建一个私有 bus，全部登记为 `BUILTIN`。`Run.open` 的 `tools=` 便捷路径与直接构造 `Run(...)` 的测试共用它，避免同一段样板重复五遍。Task 2 之后配合 `ToolActivation(allowed=frozenset(bus.list_names()))` 使用。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/tools/test_bus.py`：
 
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
@@ -270,7 +270,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 
 Expected: 全部 ERROR / FAIL，`ModuleNotFoundError: No module named 'pickel.tools.bus'`
 
-- [ ] **Step 3: 实现 `src/pickel/tools/bus.py`**
+- [x] **Step 3: 实现 `src/pickel/tools/bus.py`**
 
 ```python
 """工具总线：进程级注册表 + turn 级激活集与快照。"""
@@ -414,7 +414,7 @@ def bus_with(tools: Iterable[BaseTool]) -> ToolBus:
 
 顶部 import 增加 `from collections.abc import Iterable`（Task 2 也需要它）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
@@ -422,7 +422,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 
 Expected: PASS（全部通过）
 
-- [ ] **Step 5: 确认全量不退化**
+- [x] **Step 5: 确认全量不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -430,7 +430,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pickel/tools/bus.py tests/tools/test_bus.py
@@ -457,7 +457,7 @@ git commit -m "feat(tools): ToolBus 注册表与来源分层"
   - `ToolBus.snapshot(activation: ToolActivation) -> ToolSnapshot`
   - `ToolBus.missing_names(activation: ToolActivation) -> list[str]`（白名单里 bus 没有的名字，供调用方记 warning）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 追加到 `tests/tools/test_bus.py`（`ToolBusLifecycleTests` 之后、`if __name__` 之前）：
 
@@ -555,7 +555,7 @@ from pickel.tools.bus import (
 )
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
@@ -563,7 +563,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 
 Expected: FAIL，`ImportError: cannot import name 'ToolActivation'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `ToolEntry` 之后、`qualified_name` 之前插入（`Iterable` 已在 Task 1 导入）：
 
@@ -627,7 +627,7 @@ class ToolSnapshot:
         return sorted(name for name in activation.allowed if name not in self._entries)
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
@@ -635,7 +635,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_bus.py -q
 
 Expected: PASS（全部通过）
 
-- [ ] **Step 5: 确认全量不退化**
+- [x] **Step 5: 确认全量不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -643,7 +643,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pickel/tools/bus.py tests/tools/test_bus.py
@@ -669,7 +669,7 @@ git commit -m "feat(tools): 激活集三层求交与 turn 快照"
   - `ToolServices(workspace_files: WorkspaceFileService | None = None, shell_sessions: ShellSessionManager | None = None)` — frozen dataclass
   - `ToolExecutionContext(agent_id: str, session_id: str, workspace_path: Path, services: ToolServices)`，`services` 默认 `ToolServices()`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/tools/test_base.py` 末尾（`if __name__` 之前）追加：
 
@@ -703,7 +703,7 @@ class ToolServicesTests(unittest.TestCase):
         self.assertEqual("fake-shell", context.services.shell_sessions)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_base.py -q
@@ -711,7 +711,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_base.py -q
 
 Expected: FAIL，`ModuleNotFoundError: No module named 'pickel.tools.services'`
 
-- [ ] **Step 3: 实现 `src/pickel/tools/services.py`**
+- [x] **Step 3: 实现 `src/pickel/tools/services.py`**
 
 ```python
 """工具运行期服务容器。
@@ -738,7 +738,7 @@ class ToolServices:
     shell_sessions: "ShellSessionManager | None" = None
 ```
 
-- [ ] **Step 4: 改 `ToolExecutionContext`**
+- [x] **Step 4: 改 `ToolExecutionContext`**
 
 `src/pickel/tools/base.py`，把
 
@@ -765,7 +765,7 @@ class ToolExecutionContext:
 
 顶部 import 增加 `from pickel.tools.services import ToolServices`（`services.py` 不导入 `base`，无循环）。若 `Any` 因此不再被使用，从 `typing` import 里去掉。
 
-- [ ] **Step 5: 改两个 helper**
+- [x] **Step 5: 改两个 helper**
 
 `src/pickel/tools/file_tools.py` 的 `_require_workspace_files`：
 
@@ -785,7 +785,7 @@ def _require_shell_manager(context: ToolExecutionContext) -> ShellSessionManager
     return manager
 ```
 
-- [ ] **Step 6: 改 `Run.get_tool_execution_context`**
+- [x] **Step 6: 改 `Run.get_tool_execution_context`**
 
 `src/pickel/runs/run.py`：
 
@@ -804,7 +804,7 @@ def _require_shell_manager(context: ToolExecutionContext) -> ShellSessionManager
 
 顶部 import 增加 `from pickel.tools.services import ToolServices`。
 
-- [ ] **Step 7: 回归改造调用点**
+- [x] **Step 7: 回归改造调用点**
 
 找出全部旧关键字用法：
 
@@ -827,7 +827,7 @@ grep -rn "workspace_files=\|shell_session_manager=" src/ tests/ | grep -v __pyca
 
 并在该测试文件顶部加 `from pickel.tools.services import ToolServices`。`<X>` / `<Y>` 为 `None` 时可整段省略（有默认值）。注意 `WorkspaceFileService(workspace_root=..., access_policy=...)` 自身的 `workspace_root=` 关键字不要误改。
 
-- [ ] **Step 8: 跑测试确认通过**
+- [x] **Step 8: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/ -q 2>&1 | tail -5
@@ -841,7 +841,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/pickel/tools/services.py src/pickel/tools/base.py src/pickel/tools/file_tools.py \
@@ -886,7 +886,7 @@ git commit -m "refactor(tools): ToolExecutionContext 的 Any 字段收敛为 Too
   - `Run.tools` 兼容 property（Task 9 删除）
   - `Run.reload` 透传 bus
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/runs/test_runner.py` 末尾追加。本文件已有 `StubProvider`（line 34）与 `DelayEchoTool`（line 58，`spec.name == "echo"`），无 agent 构造 helper —— 照 line 113 的样子显式构造 `Agent`：
 
@@ -986,7 +986,7 @@ from pickel.tools.bus import ToolActivation, ToolSource, bus_with
     )
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/runs/test_runner.py -q
@@ -994,7 +994,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/runs/test_runner.py -q
 
 Expected: FAIL，`AttributeError: 'Run' object has no attribute 'tool_bus'`
 
-- [ ] **Step 3: 改 `Run` 的字段**
+- [x] **Step 3: 改 `Run` 的字段**
 
 `src/pickel/runs/run.py`，`Run` dataclass 里把
 
@@ -1015,7 +1015,7 @@ Expected: FAIL，`AttributeError: 'Run' object has no attribute 'tool_bus'`
 from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 ```
 
-- [ ] **Step 4: 改 `Run.open` 的工具解析段**
+- [x] **Step 4: 改 `Run.open` 的工具解析段**
 
 把
 
@@ -1041,7 +1041,7 @@ from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 
 `open()` 签名：删除 `tool_registry: ToolRegistry | None = None`，增加 `tool_bus: ToolBus | None = None`；`tools: list[BaseTool] | None = None` 保留。构造 `cls(...)` 时把 `tools=resolved_tools` 换成 `tool_bus=resolved_bus, activation=activation`。
 
-- [ ] **Step 5: 加兼容 property**
+- [x] **Step 5: 加兼容 property**
 
 `Run` 类内追加（Task 9 删除）：
 
@@ -1056,7 +1056,7 @@ from pickel.tools.bus import ToolActivation, ToolBus, bus_with
         return [entry.tool for entry in self.tool_bus.snapshot(self.activation).entries]
 ```
 
-- [ ] **Step 6: 改 `Run.reload` 透传 bus**
+- [x] **Step 6: 改 `Run.reload` 透传 bus**
 
 `Run.reload` 里 `boot.build_run(...)` 之后、返回之前，加一行把旧 bus 交给新 run —— 但更干净的做法是让 `Boot` 持有 bus（Task 7）。本任务先在 `reload` 里显式保留：
 
@@ -1067,7 +1067,7 @@ from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 
 放在 `new_run.environ = old_run.environ` 之后。Task 7 让 `Boot` 注入 bus 后，这两行变成冗余保险，可保留（幂等）。
 
-- [ ] **Step 7: 改掉三处直接构造 `Run(...)` 的测试**
+- [x] **Step 7: 改掉三处直接构造 `Run(...)` 的测试**
 
 ```bash
 grep -rn "tools=" tests/runs/test_react_checkpoint.py tests/hooks/test_lifecycle_hooks.py tests/runs/test_runner.py | grep -v __pycache__
@@ -1077,7 +1077,7 @@ grep -rn "tools=" tests/runs/test_react_checkpoint.py tests/hooks/test_lifecycle
 
 走 `Run.open(...)` 或本地 `_run(...)` helper 的调用点不用动 —— `tools=` 便捷路径与已改的 helper 会接住。
 
-- [ ] **Step 8: 跑测试确认通过**
+- [x] **Step 8: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/runs/ tests/config/test_environ.py tests/hooks/ -q 2>&1 | tail -5
@@ -1097,7 +1097,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/pickel/runs/run.py tests/runs/test_runner.py tests/runs/test_react_checkpoint.py \
@@ -1118,7 +1118,7 @@ git commit -m "refactor(runs): Run 持有 ToolBus 与激活集，保留 tools= �
 - Consumes: `ToolSnapshot`（Task 2）、`Run.tool_bus` / `Run.activation`（Task 4）
 - Produces: `TurnState.tool_snapshot: ToolSnapshot | None = None`，在 `ReActStrategy.execute` 的 turn 开始处填充
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新建 `tests/runs/test_react_tool_snapshot.py`：
 
@@ -1168,7 +1168,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/runs/test_react_tool_snapshot.py -q
@@ -1176,7 +1176,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/runs/test_react_tool_sna
 
 Expected: FAIL，`TypeError: TurnState.__init__() got an unexpected keyword argument` 或 `AttributeError: 'TurnState' object has no attribute 'tool_snapshot'`
 
-- [ ] **Step 3: 给 `TurnState` 加字段**
+- [x] **Step 3: 给 `TurnState` 加字段**
 
 `src/pickel/runs/turn_state.py`，`TurnState` 内追加（放 `hook_feedback` 之后）：
 
@@ -1187,7 +1187,7 @@ Expected: FAIL，`TypeError: TurnState.__init__() got an unexpected keyword argu
 
 顶部 import 增加 `from pickel.tools.bus import ToolSnapshot`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/runs/test_react_tool_snapshot.py -q
@@ -1195,7 +1195,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/runs/test_react_tool_sna
 
 Expected: PASS（全部通过）
 
-- [ ] **Step 5: react 在 turn 开始取快照**
+- [x] **Step 5: react 在 turn 开始取快照**
 
 `src/pickel/runs/strategy/react.py`，`turn = TurnState()`（约 line 56）之后紧接一行：
 
@@ -1203,7 +1203,7 @@ Expected: PASS（全部通过）
         turn.tool_snapshot = run.tool_bus.snapshot(run.activation)
 ```
 
-- [ ] **Step 6: react 执行改用快照**
+- [x] **Step 6: react 执行改用快照**
 
 `_execute_tool_call` 里把
 
@@ -1223,7 +1223,7 @@ Expected: PASS（全部通过）
 
 `_execute_tool_call` 与其调用者（`_run_tool_call` 一类的包装方法）签名增加 `turn: TurnState` 关键字参数，从 `execute` 一路传下去。沿调用链把 `turn` 传到位；`turn.tool_snapshot` 为 `None` 时行为与「找不到工具」一致，返回现有的 `Tool 'x' is not available.` 错误结果。
 
-- [ ] **Step 7: 跑全量确认不退化**
+- [x] **Step 7: 跑全量确认不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -1233,7 +1233,7 @@ Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**
 
 若 `tests/runs/test_events.py`、`test_react_checkpoint.py` 出现新失败，检查 `turn` 是否漏传到某条调用路径。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/pickel/runs/turn_state.py src/pickel/runs/strategy/react.py tests/runs/test_react_tool_snapshot.py
@@ -1255,7 +1255,7 @@ git commit -m "feat(runs): turn 边界工具快照，react 执行改用快照查
   - `resolve_tools(*, snapshot: ToolSnapshot | None) -> list[ToolDefinition]`
   - `prepare(..., snapshot: ToolSnapshot | None = None) -> ModelContext`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/context/test_prepare.py` 是 pytest 函数式，追加：
 
@@ -1290,7 +1290,7 @@ def test_resolve_tools_returns_empty_for_missing_snapshot():
 
 并把 `prepare(...)` 调用加上 `snapshot=snapshot`；原断言 `[t.name for t in ctx.tools] == ["echo"]` 保持不变。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/context/test_prepare.py -q
@@ -1298,7 +1298,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/context/test_prepare.py 
 
 Expected: FAIL，`TypeError: resolve_tools() got an unexpected keyword argument 'snapshot'`
 
-- [ ] **Step 3: 改 `resolve_tools`**
+- [x] **Step 3: 改 `resolve_tools`**
 
 `src/pickel/context/prepare.py`：
 
@@ -1323,11 +1323,11 @@ def resolve_tools(*, snapshot: ToolSnapshot | None) -> list[ToolDefinition]:
 
 顶部 import 增加 `from pickel.tools.bus import ToolSnapshot`。
 
-- [ ] **Step 4: 改 `prepare` 签名与调用**
+- [x] **Step 4: 改 `prepare` 签名与调用**
 
 `prepare()` 增加关键字参数 `snapshot: ToolSnapshot | None = None`，函数体内 `tools = resolve_tools(run=run)` 改为 `tools = resolve_tools(snapshot=snapshot)`。
 
-- [ ] **Step 5: react 传 snapshot**
+- [x] **Step 5: react 传 snapshot**
 
 `src/pickel/runs/strategy/react.py` 里 `await prepare(...)`（约 line 72）的调用增加：
 
@@ -1335,7 +1335,7 @@ def resolve_tools(*, snapshot: ToolSnapshot | None) -> list[ToolDefinition]:
                 snapshot=turn.tool_snapshot,
 ```
 
-- [ ] **Step 6: 检查其他 prepare / resolve_tools 调用点**
+- [x] **Step 6: 检查其他 prepare / resolve_tools 调用点**
 
 ```bash
 grep -rn "resolve_tools\|prepare(" src/ tests/ | grep -v __pycache__ | grep -v "def prepare"
@@ -1343,7 +1343,7 @@ grep -rn "resolve_tools\|prepare(" src/ tests/ | grep -v __pycache__ | grep -v "
 
 对每个命中点确认是否需要传 `snapshot`。`/context` 预览路径（`cli/` 下）若调 prepare，需要同样从 bus 取一份快照传入 —— 用 `run.tool_bus.snapshot(run.activation)`。`tests/context/test_skills_hot_reload.py` 若用 `SimpleNamespace(..., tools=[])` 假 run 且只测 system 段，无需改动。
 
-- [ ] **Step 7: 跑全量确认不退化**
+- [x] **Step 7: 跑全量确认不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -1351,7 +1351,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/pickel/context/prepare.py src/pickel/runs/strategy/react.py tests/context/test_prepare.py
@@ -1377,7 +1377,7 @@ git commit -m "refactor(context): prepare 改用 turn 工具快照"
   - `Boot.__init__(app_config, tool_bus: ToolBus | None = None)`、`Boot.from_config(app_config, tool_bus=None)`
   - `Boot.tool_bus` 属性；`Boot.build_run` 透传
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新建 `tests/app/test_boot_tool_bus.py`：
 
@@ -1416,7 +1416,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/app/test_boot_tool_bus.py -q
@@ -1424,7 +1424,7 @@ uv run --with pytest --with pytest-asyncio pytest tests/app/test_boot_tool_bus.p
 
 Expected: FAIL，`ImportError: cannot import name 'install_builtin_tools'`
 
-- [ ] **Step 3: 实现 `install_builtin_tools`**
+- [x] **Step 3: 实现 `install_builtin_tools`**
 
 `src/pickel/tools/catalog.py` 末尾追加：
 
@@ -1437,7 +1437,7 @@ def install_builtin_tools(bus: ToolBus) -> None:
 
 顶部 import 增加 `from pickel.tools.bus import ToolBus, ToolSource`。
 
-- [ ] **Step 4: Boot 接受并透传 bus**
+- [x] **Step 4: Boot 接受并透传 bus**
 
 `src/pickel/app/boot.py`：
 
@@ -1465,7 +1465,7 @@ from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 ```
 
-- [ ] **Step 5: ChatApp 持有 bus 并在 /reload 复用**
+- [x] **Step 5: ChatApp 持有 bus 并在 /reload 复用**
 
 `src/pickel/cli/chat.py`：
 
@@ -1479,7 +1479,7 @@ from pickel.tools.catalog import install_builtin_tools
 - 若 `self._tool_bus` 为 `None`（未传 boot 的路径），reload 后回填 `self._tool_bus = boot.tool_bus`
 - `/reload` 帮助文本（约 line 232）改为 `"/reload            Reload disk config/skills/agent (keep Environ and tool bus)\n"`
 
-- [ ] **Step 6: 追加 reload 复用测试**
+- [x] **Step 6: 追加 reload 复用测试**
 
 在 `tests/app/test_boot_tool_bus.py` 追加：
 
@@ -1505,7 +1505,7 @@ class BootToolBusTests(unittest.TestCase):
 
 用 `SimpleNamespace()` 而非真 `AppConfig`：`AppConfig` 有 4 个必填字段（`default_agent` / `default_llm` / `providers` / `agents`），而 `Boot.__init__` 只把 `app_config` 存下来、不校验 —— 这两个用例只关心 bus 的装配与复用。文件顶部加 `from types import SimpleNamespace`。
 
-- [ ] **Step 7: 跑全量确认不退化**
+- [x] **Step 7: 跑全量确认不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -1513,7 +1513,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 8: 手动验收 —— bus 真的跨 reload 存活**
+- [x] **Step 8: 手动验收 —— bus 真的跨 reload 存活**
 
 ```bash
 uv run pickel chat
@@ -1521,7 +1521,7 @@ uv run pickel chat
 
 在会话里输入 `/reload`，确认无异常、工具仍可用（例如让它 `read_file` 读 `README.md` 的前几行）。退出。
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/pickel/tools/catalog.py src/pickel/app/boot.py src/pickel/cli/chat.py tests/app/
@@ -1566,7 +1566,7 @@ class ActivationControl(Protocol):
 
 `Run` 实现这三个方法（改 `self.activation`），`get_tool_execution_context` 里传 `activation_control=self`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/tools/test_builtin.py` 追加：
 
@@ -1657,7 +1657,7 @@ class _FakeActivationControl:
         self.disabled -= set(names)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_builtin.py -q
@@ -1665,11 +1665,11 @@ uv run --with pytest --with pytest-asyncio pytest tests/tools/test_builtin.py -q
 
 Expected: FAIL，`ImportError: cannot import name 'tool_set_active'`
 
-- [ ] **Step 3: 加 `ActivationControl` 与 `ToolServices` 字段**
+- [x] **Step 3: 加 `ActivationControl` 与 `ToolServices` 字段**
 
 按本任务开头的代码改 `src/pickel/tools/services.py`（`Protocol` 从 `typing` 导入，`Iterable` 从 `collections.abc` 导入；`ActivationControl` 是运行期需要的真实名字，不放 `TYPE_CHECKING` 块内）。
 
-- [ ] **Step 4: `Run` 实现三个方法**
+- [x] **Step 4: `Run` 实现三个方法**
 
 `src/pickel/runs/run.py`，`Run` 类内追加：
 
@@ -1687,7 +1687,7 @@ Expected: FAIL，`ImportError: cannot import name 'tool_set_active'`
 
 `get_tool_execution_context` 的 `ToolServices(...)` 增加 `activation_control=self`。顶部 import 增加 `from collections.abc import Iterable`。
 
-- [ ] **Step 5: 实现 `tool_set_active`**
+- [x] **Step 5: 实现 `tool_set_active`**
 
 `src/pickel/tools/builtin.py` 追加：
 
@@ -1764,11 +1764,11 @@ async def tool_set_active(
 
 顶部 import 增加 `ToolExecutionResult`。
 
-- [ ] **Step 6: 加进 `builtin_tools()`**
+- [x] **Step 6: 加进 `builtin_tools()`**
 
 `src/pickel/tools/catalog.py` 的 `builtin_tools()` 返回列表里，`echo` 之后加 `tool_set_active`；顶部 import 相应增加。
 
-- [ ] **Step 7: 跑测试确认通过**
+- [x] **Step 7: 跑测试确认通过**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/tools/test_builtin.py tests/app/ -q
@@ -1782,7 +1782,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
 
 Expected: `18 failed, <N> passed, 1 skipped` —— **失败数必须仍是 18**，通过数只增不减
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/pickel/tools/builtin.py src/pickel/tools/catalog.py src/pickel/tools/services.py \
@@ -1800,7 +1800,7 @@ git commit -m "feat(tools): tool_set_active 让 agent 自我收窄激活集"
 - Modify: `src/pickel/runs/run.py`（删 `tools` 兼容 property）
 - Modify: `docs/upgrade/2026-07-26-tool-bus-design.md`（校对与实现一致）
 
-- [ ] **Step 1: 确认没有残留引用**
+- [x] **Step 1: 确认没有残留引用**
 
 ```bash
 grep -rn "ToolRegistry\|tools.registry\|tool_registry" src/ tests/ | grep -v __pycache__
@@ -1809,7 +1809,7 @@ grep -rn "run\.tools\|self\.tools\|\.tools\b" src/pickel/runs/ src/pickel/contex
 
 Expected: 第一条只剩 `src/pickel/tools/registry.py` 与 `tests/tools/test_registry.py` 自身、以及 `tools/__init__.py` 的导出；第二条不再有读 `run.tools` 的地方（`model_context.tools` / `request.tools` 是另一回事，保留）。
 
-- [ ] **Step 2: 删除文件与导出**
+- [x] **Step 2: 删除文件与导出**
 
 ```bash
 git rm src/pickel/tools/registry.py tests/tools/test_registry.py
@@ -1854,11 +1854,11 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 3: 删 `Run.tools` 兼容 property**
+- [x] **Step 3: 删 `Run.tools` 兼容 property**
 
 `src/pickel/runs/run.py` 删掉 Task 4 Step 5 加的 `tools` property。`Run.open` 的 `tools=` 参数**保留**（测试便捷路径，设计稿 2.4 已定）。
 
-- [ ] **Step 4: 跑全量确认不退化**
+- [x] **Step 4: 跑全量确认不退化**
 
 ```bash
 uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | tail -3
@@ -1874,7 +1874,7 @@ uv run --with pytest --with pytest-asyncio pytest -q 2>&1 | grep FAILED | sort >
 
 确认其中只有 `tests/tools/test_shell.py`（6 例）与 `tests/providers/`（12 例）。
 
-- [ ] **Step 5: 手动验收**
+- [x] **Step 5: 手动验收**
 
 ```bash
 uv run pickel chat
@@ -1885,14 +1885,14 @@ uv run pickel chat
 - 让它调用 `tool_set_active` 关掉 `shell_exec`，然后在**下一轮**要求它跑 shell 命令 —— 应报「工具不可用」
 - `/reload` 后确认工具仍在
 
-- [ ] **Step 6: 校对设计稿**
+- [x] **Step 6: 校对设计稿**
 
 按实际实现修订 `docs/upgrade/2026-07-26-tool-bus-design.md`：
 - 3.4 节 `ToolServices` 补上 `activation_control` 字段与 `ActivationControl` 协议（Task 8 引入，设计稿写时未有）
 - 3.5 节补上 `tool_set_active` 通过 `ActivationControl` 而非 `run` 直连的说明
 - 5 节改动清单补 `tools/services.py` 的 `ActivationControl`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A src/pickel/tools/ src/pickel/runs/run.py docs/upgrade/2026-07-26-tool-bus-design.md

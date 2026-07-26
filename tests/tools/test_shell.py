@@ -4,8 +4,8 @@ import unittest
 
 from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.catalog import builtin_tools
-from pickel.tools.registry import ToolRegistry
+from pickel.tools.catalog import builtin_tools, install_builtin_tools
+from pickel.tools.bus import ToolBus
 from pickel.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
@@ -18,9 +18,13 @@ from pickel.tools.shell import (
 
 class ShellToolTests(unittest.IsolatedAsyncioTestCase):
     def test_builtin_catalog_registers_shell_tools(self) -> None:
-        registry = ToolRegistry(tools=builtin_tools())
+        bus = ToolBus()
+        install_builtin_tools(bus)
 
-        tools = registry.resolve_many(["shell_exec", "shell_restart", "shell_close"])
+        tools = [
+            bus.get(name).tool
+            for name in ["shell_exec", "shell_restart", "shell_close"]
+        ]
 
         self.assertEqual(
             ["shell_exec", "shell_restart", "shell_close"],
