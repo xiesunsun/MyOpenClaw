@@ -11,6 +11,7 @@ from pickel.tools.file_tools import (
     ReplaceTool,
     WriteFileTool,
 )
+from pickel.tools.skill_manage import SkillManageTool
 from pickel.tools.shell import (
     ShellCloseTool,
     ShellExecTool,
@@ -45,6 +46,7 @@ def builtin_tools() -> list[BaseTool]:
         ShellKillTool(),
         ShellRestartTool(),
         ShellCloseTool(),
+        SkillManageTool(),
     ]
 
 

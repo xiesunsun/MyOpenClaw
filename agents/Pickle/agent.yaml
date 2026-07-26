@@ -16,6 +16,7 @@ tools:
   - shell_kill
   - shell_restart
   - shell_close
+  - skill_manage
 file_access_mode: full
 llm:
   provider: anthropic

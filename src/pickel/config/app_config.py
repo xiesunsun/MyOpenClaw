@@ -48,6 +48,11 @@ def _replace_env_var(match: re.Match[str]) -> str:
     return env_value
 
 
+class SkillSettings(BaseModel):
+    write_approval: bool = True
+    guard: bool = True
+
+
 class AppConfig(BaseModel):
     root: Path = Field(default_factory=Path.cwd, exclude=True)
     default_agent: str
@@ -65,6 +70,8 @@ class AppConfig(BaseModel):
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # 进程级沙箱（S2）：默认开，缺 bwrap 降级；strict 时缺依赖即拒绝
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    # skill 自管理（V1a）：写入默认待审、内容护栏默认开
+    skills: SkillSettings = Field(default_factory=SkillSettings)
     # auth.json 中 providers 级密钥；resolve_model_config 在模型缺字段时回填
     auth_providers: dict[str, dict[str, Any]] = Field(
         default_factory=dict, exclude=True

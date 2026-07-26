@@ -35,6 +35,7 @@ from pickel.tools.policy import (
 )
 from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 from pickel.tools.services import ToolServices
+from pickel.skills.store import SkillStore
 from pickel.tools.shell import ShellSessionManager
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ class Run:
     strategy: ExecutionStrategy
     environ: Environ = field(default_factory=Environ)
     recall_sources: list = field(default_factory=list)
+    skill_store: SkillStore | None = None
 
     @classmethod
     def open(
@@ -75,6 +77,7 @@ class Run:
         lifecycle_hooks: LifecycleHooks | None = None,
         file_access_policy: FileAccessPolicy | None = None,
         shell_session_manager: ShellSessionManager | None = None,
+        skill_store: SkillStore | None = None,
         provider: Provider | None = None,
         tools: list[BaseTool] | None = None,
         tool_bus: ToolBus | None = None,
@@ -108,6 +111,7 @@ class Run:
             file_access_policy=resolved_policy,
             workspace_files=workspace_files,
             shell_session_manager=shell_session_manager or ShellSessionManager(),
+            skill_store=skill_store,
             unit_window=unit_window,
             strategy=strategy or ReActStrategy(),
             environ=Environ(),
@@ -256,6 +260,7 @@ class Run:
                 workspace_files=self.workspace_files,
                 shell_sessions=self.shell_session_manager,
                 activation_control=self,
+                skill_store=self.skill_store,
             ),
         )
 

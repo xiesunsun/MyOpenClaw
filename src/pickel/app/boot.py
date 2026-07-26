@@ -11,6 +11,7 @@ from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.skills.store import SkillStore
 from pickel.shared.file_access import FileAccessMode
 from pickel.tools.bus import ToolBus
 from pickel.tools.sandbox import SandboxPolicy
@@ -129,6 +130,7 @@ class Boot:
     ) -> tuple[Agent, Run]:
         agent = self.resolve_agent(agent_id=agent_id)
         run = Run.open(
+            skill_store=self._build_skill_store(agent.agent_id),
             agent=agent,
             tool_bus=self.tool_bus,
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
@@ -142,6 +144,19 @@ class Boot:
             shell_session_manager=ShellSessionManager(sandbox=self.sandbox_policy),
         )
         return agent, run
+
+    def _build_skill_store(self, agent_id: str) -> SkillStore | None:
+        """没有 skills 目录的 agent 拿不到 store —— skill_manage 会据此报错。"""
+        skills_path = self._resolve_agent_skills_path(agent_id)
+        if skills_path is None:
+            return None
+        return SkillStore(
+            skills_path=skills_path,
+            pending_dir=home_dir() / "pending" / "skills",
+            write_approval=self.app_config.skills.write_approval,
+            guard=self.app_config.skills.guard,
+            agent_id=agent_id,
+        )
 
     def build_session_service(self, agent_id: str | None = None) -> SessionService:
         # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）

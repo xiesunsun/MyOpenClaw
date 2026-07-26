@@ -35,6 +35,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "shell_kill",
                 "shell_restart",
                 "shell_close",
+                "skill_manage",
             ]
         ]
 
@@ -57,6 +58,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "shell_kill",
                 "shell_restart",
                 "shell_close",
+                "skill_manage",
             ],
             [tool.spec.name for tool in tools],
         )
