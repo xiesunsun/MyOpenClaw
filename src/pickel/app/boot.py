@@ -19,7 +19,13 @@ from pickel.integrations.openviking.recall_adapter import OpenVikingRecall
 from pickel.integrations.openviking.session_recall import OpenVikingSessionRecallProvider
 from pickel.integrations.openviking.session_client import SyncHTTPOpenVikingSessionClient
 from pickel.integrations.openviking.session_message_mapper import SessionMessageMapper
-from pickel.conversations.session_sync import NoopSessionSync, SessionSync
+from pickel.conversations.session_sync import (
+    CompositeSessionSync,
+    NoopSessionSync,
+    SessionSync,
+)
+from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
+from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
@@ -32,21 +38,43 @@ from pickel.runs.run import Run
 class Boot:
     """Composition root：读配置，解析 Agent，构造 Run / SessionService。"""
 
-    def __init__(self, app_config: AppConfig, tool_bus: ToolBus | None = None) -> None:
+    def __init__(
+        self,
+        app_config: AppConfig,
+        tool_bus: ToolBus | None = None,
+        extensions: ExtensionRegistry | None = None,
+    ) -> None:
         self.app_config = app_config
         # bus 是进程级的：未注入时自建一个并装上内置工具
         if tool_bus is None:
             tool_bus = ToolBus()
             install_builtin_tools(tool_bus)
         self.tool_bus = tool_bus
+        self.extensions = extensions or ExtensionRegistry()
 
     @classmethod
     def from_config(
         cls,
         app_config: AppConfig,
         tool_bus: ToolBus | None = None,
+        extensions: ExtensionRegistry | None = None,
     ) -> "Boot":
-        return cls(app_config, tool_bus=tool_bus)
+        return cls(app_config, tool_bus=tool_bus, extensions=extensions)
+
+    # --- extension 贡献的按 agent 求值 ---
+
+    def _scope(self, agent_id: str | None) -> AgentScope:
+        resolved = agent_id or self.app_config.default_agent
+        return AgentScope(agent_id=resolved, app_config=self.app_config)
+
+    def resolve_recall_sources(self, agent_id: str | None = None) -> list:
+        return self.extensions.recall_sources(self._scope(agent_id))
+
+    def resolve_hook_handlers(self, agent_id: str | None = None) -> list:
+        return self.extensions.hook_handlers(self._scope(agent_id))
+
+    def resolve_session_syncs(self, agent_id: str | None = None) -> list:
+        return self.extensions.session_syncs(self._scope(agent_id))
 
     def resolve_agent(self, agent_id: str | None = None) -> Agent:
         resolved_agent_id = agent_id or self.app_config.default_agent
@@ -108,7 +136,11 @@ class Boot:
             session_service=session_service,
             context_assembler=ContextAssembler(),
             unit_window=self.app_config.context_cli_turn_window,
-            recall_sources=self._build_recall_sources(agent_id=agent.agent_id),
+            recall_sources=self.resolve_recall_sources(agent.agent_id)
+            + self._build_recall_sources(agent_id=agent.agent_id),
+            lifecycle_hooks=LifecycleHooks(
+                handlers=self.resolve_hook_handlers(agent.agent_id)
+            ),
         )
         return agent, run
 
@@ -140,11 +172,11 @@ class Boot:
         db_path = sessions_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         repository = SQLiteSessionRepository(db_path)
-        session_sync = self._build_session_sync(
-            agent_id=agent_id,
-            db_path=db_path,
-        )
-        return SessionService(repository, session_sync)
+        syncs = list(self.resolve_session_syncs(agent_id))
+        legacy_sync = self._build_session_sync(agent_id=agent_id, db_path=db_path)
+        if not isinstance(legacy_sync, NoopSessionSync):
+            syncs.append(legacy_sync)
+        return SessionService(repository, CompositeSessionSync(syncs))
 
     def _build_session_sync(
         self,

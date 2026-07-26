@@ -10,7 +10,7 @@ from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
 from pickel.conversations.service import SessionService
 from pickel.context.assembler import ContextAssembler
-from pickel.conversations.session_sync import NoopSessionSync
+from pickel.conversations.session_sync import CompositeSessionSync, NoopSessionSync
 from pickel.integrations.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
@@ -283,7 +283,8 @@ class BootTests(unittest.TestCase):
                 pickel_home / "sessions.db",
                 service._repository.db_path,
             )
-            self.assertIsInstance(service._session_sync, NoopSessionSync)
+            self.assertIsInstance(service._session_sync, CompositeSessionSync)
+            self.assertEqual([], service._session_sync._syncs)
 
     def test_build_session_service_wires_openviking_sync_when_enabled(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -328,7 +329,9 @@ class BootTests(unittest.TestCase):
                 agent_id="Pickle"
             )
 
-            self.assertIsInstance(service._session_sync, OpenVikingSessionSync)
+            self.assertIsInstance(service._session_sync, CompositeSessionSync)
+            self.assertEqual(1, len(service._session_sync._syncs))
+            self.assertIsInstance(service._session_sync._syncs[0], OpenVikingSessionSync)
 
 
 if __name__ == "__main__":
