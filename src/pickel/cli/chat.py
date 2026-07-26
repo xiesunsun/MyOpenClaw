@@ -62,6 +62,8 @@ class ChatLoop:
         self._session_closed = False
         self._boot = boot
         self._app_config = app_config or (boot.app_config if boot is not None else None)
+        # 进程级工具总线：跨 /reload 存活，由 Boot 持有的那一个
+        self._tool_bus = boot.tool_bus if boot is not None else None
 
     @classmethod
     def from_boot(
@@ -229,7 +231,7 @@ class ChatLoop:
             "/thinking <level>  Set thinking level in Environ\n"
             "/agent [id]        List agents or switch (new empty Session)\n"
             "/new               New empty Session, same agent\n"
-            "/reload            Reload disk config/skills/agent (keep Environ)\n"
+            "/reload            Reload disk config/skills/agent (keep Environ and tool bus)\n"
             "/context           Show context usage (preview) and API usage\n"
             "/session           Show current session details\n"
             "/clear             Clear the screen and redraw the header\n"
@@ -421,7 +423,9 @@ class ChatLoop:
             return
         try:
             app_config = Config.load(cwd=Path.cwd())
-            boot = Boot.from_config(app_config)
+            # 复用同一个进程级 bus：reload 不该杀掉非内置来源的工具
+            # （E1 的 extension、T2 的 MCP 子进程）
+            boot = Boot.from_config(app_config, tool_bus=self._tool_bus)
             # 保留旧 session_service（同库/同 session）；无则新建
             session_service = self._session_service or boot.build_session_service(
                 agent_id=self.agent_id
@@ -434,6 +438,7 @@ class ChatLoop:
             )
             self._boot = boot
             self._app_config = app_config
+            self._tool_bus = boot.tool_bus
             self.agent = agent
             self.agent_id = agent.agent_id
             self._run = new_run

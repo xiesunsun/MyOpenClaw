@@ -26,6 +26,8 @@ from pickel.integrations.openviking.session_sync import (
 )
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.shared.file_access import FileAccessMode
+from pickel.tools.bus import ToolBus
+from pickel.tools.catalog import install_builtin_tools
 from pickel.runs import ReActStrategy
 from pickel.runs.run import Run
 
@@ -33,12 +35,21 @@ from pickel.runs.run import Run
 class Boot:
     """Composition root：读配置，解析 Agent，构造 Run / SessionService。"""
 
-    def __init__(self, app_config: AppConfig) -> None:
+    def __init__(self, app_config: AppConfig, tool_bus: ToolBus | None = None) -> None:
         self.app_config = app_config
+        # bus 是进程级的：未注入时自建一个并装上内置工具
+        if tool_bus is None:
+            tool_bus = ToolBus()
+            install_builtin_tools(tool_bus)
+        self.tool_bus = tool_bus
 
     @classmethod
-    def from_config(cls, app_config: AppConfig) -> "Boot":
-        return cls(app_config)
+    def from_config(
+        cls,
+        app_config: AppConfig,
+        tool_bus: ToolBus | None = None,
+    ) -> "Boot":
+        return cls(app_config, tool_bus=tool_bus)
 
     def resolve_agent(self, agent_id: str | None = None) -> Agent:
         resolved_agent_id = agent_id or self.app_config.default_agent
@@ -95,6 +106,7 @@ class Boot:
         agent = self.resolve_agent(agent_id=agent_id)
         run = Run.open(
             agent=agent,
+            tool_bus=self.tool_bus,
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
             session_service=session_service,
             context_assembler=ContextAssembler(),
