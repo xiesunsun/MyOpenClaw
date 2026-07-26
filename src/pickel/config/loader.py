@@ -98,6 +98,18 @@ class Config:
         else:
             merged.pop("openviking", None)
 
+        # settings 的 extensions.<name> 与 auth.json 的 extensions.<name> 深合并，auth 优先
+        extensions: dict[str, Any] = dict(merged.get("extensions") or {})
+        auth_extensions = global_auth.get("extensions") or {}
+        if isinstance(auth_extensions, dict):
+            for name, auth_section in auth_extensions.items():
+                if isinstance(auth_section, dict):
+                    extensions[name] = deep_merge(
+                        extensions.get(name) or {},
+                        auth_section,
+                    )
+        merged["extensions"] = extensions
+
         agents: dict[str, Any] = {}
         if isinstance(merged.get("agents"), dict):
             agents = deep_merge(agents, merged["agents"])

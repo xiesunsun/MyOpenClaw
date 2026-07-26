@@ -61,6 +61,9 @@ class AppConfig(BaseModel):
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
     openviking: OpenVikingConfig | None = None
+    # extension 的原始配置段：core 不认识任何 extension 的配置模型，
+    # 解析由 extension 自己做（ExtensionHost.config）
+    extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # auth.json 中 providers 级密钥；resolve_model_config 在模型缺字段时回填
     auth_providers: dict[str, dict[str, Any]] = Field(
         default_factory=dict, exclude=True
