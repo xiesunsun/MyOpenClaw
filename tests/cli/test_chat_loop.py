@@ -69,7 +69,13 @@ class StubRun:
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
         if bus is not None:
-            await bus.emit(AssistantMessageEvent(text="runtime reply"))
+            # 真 Run.turn 会填 session_id/turn_id，桩照做，否则 trace 路由测不出问题
+            await bus.emit(
+                AssistantMessageEvent(
+                    envelope=EventEnvelope(session_id=session.session_id),
+                    text="runtime reply",
+                )
+            )
         return reply
 
 
@@ -278,7 +284,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             console=console,
         )
 
-        bus, _ = loop.create_event_bus()
+        bus, _, _unsubscribe = loop.create_event_bus()
         result = await loop.handle_user_input("hello", bus=bus)
 
         titles = [call.args[0].title for call in console.print.call_args_list]
@@ -481,7 +487,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["assistant_message"], [e["event_type"] for e in events])
         self.assertIsNone(loop._trace_sink)
-        self.assertTrue(sink._handle.closed)
+        self.assertTrue(sink.closed)
 
     async def test_trace_sink_closes_when_turn_raises_keyboard_interrupt(self) -> None:
         """Ctrl-C 打断 turn 不经过 _close_session，句柄由 run() 的 finally 释放。"""
@@ -503,7 +509,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(KeyboardInterrupt):
                     await loop.run()
 
-        self.assertTrue(sink._handle.closed)
+        self.assertTrue(sink.closed)
 
     async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
@@ -516,6 +522,110 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(loop._trace_sink)
+
+    async def test_seq_stays_monotonic_across_turns_in_one_session(self) -> None:
+        """红线 4：seq 是 session 内全序的唯一来源。
+
+        每轮新建 EventBus 会让 seq 归零，同一 trace 文件里按 seq 排序就把多轮交错了。
+        """
+        with TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
+            submitted_inputs = iter(["one", "two", "three", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch("pickel.cli.chat.trace_path", return_value=trace_file),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+
+            seqs = [
+                json.loads(line)["seq"]
+                for line in trace_file.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual([0, 1, 2], seqs)
+
+    async def test_turn_renderer_is_unsubscribed_so_later_turns_render_once(self) -> None:
+        """bus 长命后，每轮的渲染器必须退订，否则第 N 轮打印 N 遍。"""
+        console = Mock()
+        submitted_inputs = iter(["one", "two", "three", "/exit"])
+        loop = ChatLoop(
+            agent=self._build_agent(),
+            run=StubRun(),
+            session=Session.create(agent_id="Pickle", session_id="session-1"),
+            console=console,
+            input_reader=lambda _: next(submitted_inputs),
+        )
+
+        await loop.run()
+
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(3, titles.count("Assistant"))
+
+    async def test_new_session_rebuilds_trace_sink_for_new_session_id(self) -> None:
+        """/new 换了 session，trace 文件必须跟着换，否则两个 session 混在一个文件里。"""
+        with TemporaryDirectory() as tmpdir:
+            traces = Path(tmpdir)
+            submitted_inputs = iter(["hello", "/new", "hello", "/exit"])
+            with (
+                patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+                patch(
+                    "pickel.cli.chat.trace_path",
+                    side_effect=lambda session_id: traces / f"{session_id}.jsonl",
+                ),
+            ):
+                loop = ChatLoop(
+                    agent=self._build_agent(),
+                    run=StubRun(),
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+                new_session_id = loop.session.session_id
+
+            written = sorted(path.name for path in traces.glob("*.jsonl"))
+            first = json.loads(
+                (traces / "session-1.jsonl").read_text(encoding="utf-8").strip()
+            )
+            second = json.loads(
+                (traces / f"{new_session_id}.jsonl").read_text(encoding="utf-8").strip()
+            )
+
+        self.assertNotEqual("session-1", new_session_id)
+        self.assertEqual(2, len(written))
+        self.assertEqual("session-1", first["session_id"])
+        self.assertEqual(new_session_id, second["session_id"])
+
+    async def test_trace_open_failure_does_not_break_startup(self) -> None:
+        """可观测性组件不得弄挂主流程：traces 目录不可写时降级而非崩。"""
+        console = Mock()
+        submitted_inputs = iter(["hello", "/exit"])
+        with (
+            patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
+            patch(
+                "pickel.cli.chat.JsonlTraceSink",
+                side_effect=PermissionError("Permission denied: ~/.pickel/traces"),
+            ),
+        ):
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=StubRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=console,
+                input_reader=lambda _: next(submitted_inputs),
+            )
+            await loop.run()
+
+        self.assertIsNone(loop._trace_sink)
+        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        self.assertEqual(1, titles.count("Assistant"))
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()

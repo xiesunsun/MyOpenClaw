@@ -27,6 +27,26 @@ def _render(event) -> str:
     return console.export_text()
 
 
+def _panel_body_lines(text: str) -> list[str]:
+    """剥掉 Panel 边框，返回内容行（去两端留白）。"""
+    return [
+        line[1:-1].strip()
+        for line in text.splitlines()
+        if line.startswith("│") and line.endswith("│")
+    ]
+
+
+def _cached_usage() -> TurnUsage:
+    return TurnUsage(
+        steps=2,
+        input_tokens=100,
+        cache_read_tokens=8200,
+        output_tokens=20,
+        elapsed_ms=1500,
+        model_label="anthropic / claude-jupiter-v1-p",
+    )
+
+
 def test_step_started_显示步数():
     text = _render(StepStarted(envelope=EventEnvelope(step_index=2)))
 
@@ -83,6 +103,28 @@ def test_assistant_message_显示正文与用量_footer():
     assert "anthropic / claude-jupiter-v1-p" in text
     assert "100" in text
     assert "20" in text
+
+
+def test_footer_用量口径是实际输入而非裸_input_tokens():
+    """O1 §5.1：in = input + cache_read + cache_write。
+
+    上面那条用例 cache_read=0，`input_tokens` 与 `actual_input_tokens` 恰好相等，
+    分辨不出读的是哪个字段；这里让两者不同。
+    """
+    text = _render(AssistantMessageEvent(text="hi", usage=_cached_usage()))
+
+    assert "in 8300" in text
+    assert "in 100" not in text
+
+
+def test_footer_格式逐字锁定():
+    """布局与结构在 E1 不许变：model 行 + `in X · out Y · Z.Zs`。"""
+    text = _render(AssistantMessageEvent(text="hi", usage=_cached_usage()))
+
+    assert _panel_body_lines(text)[-2:] == [
+        "anthropic / claude-jupiter-v1-p",
+        "in 8300 · out 20 · 1.5s",
+    ]
 
 
 def test_assistant_message_无用量时不崩():

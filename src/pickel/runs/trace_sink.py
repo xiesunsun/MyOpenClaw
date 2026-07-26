@@ -40,6 +40,10 @@ class JsonlTraceSink:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handle: TextIO = self._path.open("a", encoding="utf-8")
 
+    @property
+    def closed(self) -> bool:
+        return self._handle.closed
+
     def __call__(self, event: RuntimeEventBase) -> None:
         self._handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
         self._handle.flush()
