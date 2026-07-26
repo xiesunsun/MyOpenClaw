@@ -265,3 +265,41 @@ class NormalizeOutputTests(unittest.TestCase):
         from pickel.tools.shell import _normalize_output
 
         self.assertEqual("a\nb", _normalize_output("a\r\nb\r\n"))
+
+
+class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_output_truncates_and_writes_full_file(self) -> None:
+        from pickel.tools.shell import OutputLimits
+
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            out_dir = workspace / ".pickel" / "shell-output" / "s1"
+            shell = PersistentShell(
+                workspace_path=workspace,
+                output_dir=out_dir,
+                limits=OutputLimits(
+                    raw_max_chars=100_000, result_max_chars=200, head_chars=120, tail_chars=50
+                ),
+            )
+            try:
+                result = shell.exec("seq 1 500")
+            finally:
+                shell.terminate()
+
+            self.assertTrue(result.truncated)
+            self.assertIn("truncated", result.stdout)
+            self.assertIsNotNone(result.full_output_path)
+            full = result.full_output_path.read_text(encoding="utf-8")
+            self.assertIn("500", full)
+            self.assertLess(len(result.stdout), 400)
+
+    async def test_short_output_not_truncated(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                result = shell.exec("echo short")
+            finally:
+                shell.terminate()
+
+        self.assertFalse(result.truncated)
+        self.assertIsNone(result.full_output_path)

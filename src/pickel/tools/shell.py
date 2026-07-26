@@ -25,6 +25,14 @@ class ShellStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class OutputLimits:
+    raw_max_chars: int = 2 * 1024 * 1024   # 采集缓冲上限，超过丢中间
+    result_max_chars: int = 30_000          # 注入结果上限
+    head_chars: int = 20_000
+    tail_chars: int = 8_000
+
+
+@dataclass(frozen=True)
 class ShellExecutionResult:
     stdout: str
     stderr: str
@@ -33,6 +41,7 @@ class ShellExecutionResult:
     shell_status: ShellStatus
     timed_out: bool = False
     truncated: bool = False
+    full_output_path: Path | None = None
 
 
 class PtyShellProcess:
@@ -157,12 +166,17 @@ class PersistentShell:
         workspace_path: Path,
         process: PtyShellProcess | None = None,
         default_timeout_ms: int = 120000,
+        output_dir: Path | None = None,
+        limits: OutputLimits | None = None,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
         self.process = process or PtyShellProcess()
         self.default_timeout_ms = default_timeout_ms
         self._last_cwd = self.workspace_path
         self._running = False
+        self._output_dir = output_dir
+        self._limits = limits or OutputLimits()
+        self._output_seq = 0
 
     @property
     def cwd(self) -> Path:
@@ -209,17 +223,24 @@ class PersistentShell:
 
         while True:
             if not self.is_alive():
+                stdout, truncated, full_path = self._finalize_output(
+                    _normalize_output(buffer)
+                )
                 return ShellExecutionResult(
-                    stdout=_normalize_output(buffer),
+                    stdout=stdout,
                     stderr="Shell terminated unexpectedly.",
                     exit_code=1,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TERMINATED,
+                    truncated=truncated,
+                    full_output_path=full_path,
                 )
 
             marker_match = _find_marker(buffer, marker)
             if marker_match is not None:
-                output = _normalize_output(buffer[:marker_match.start()])
+                output, truncated, full_path = self._finalize_output(
+                    _normalize_output(buffer[:marker_match.start()])
+                )
                 exit_code = int(marker_match.group("exit_code"))
                 cwd = Path(marker_match.group("cwd"))
                 self._last_cwd = cwd
@@ -229,24 +250,59 @@ class PersistentShell:
                     exit_code=exit_code,
                     cwd=cwd,
                     shell_status=ShellStatus.READY,
+                    truncated=truncated,
+                    full_output_path=full_path,
                 )
 
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
                 self.process.interrupt()
                 self.terminate()
+                stdout, truncated, full_path = self._finalize_output(
+                    _normalize_output(buffer)
+                )
                 return ShellExecutionResult(
-                    stdout=_normalize_output(buffer),
+                    stdout=stdout,
                     stderr="Shell command timed out.",
                     exit_code=124,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TIMED_OUT,
                     timed_out=True,
+                    truncated=truncated,
+                    full_output_path=full_path,
                 )
 
             chunk = self.process.read_chunk(timeout_ms=min(remaining_ms, 100))
             if chunk:
                 buffer += chunk
+            if len(buffer) > self._limits.raw_max_chars:
+                keep_head = self._limits.raw_max_chars // 2
+                keep_tail = self._limits.raw_max_chars // 4
+                buffer = (
+                    buffer[:keep_head]
+                    + "\n... [raw output dropped] ...\n"
+                    + buffer[-keep_tail:]
+                )
+
+    def _finalize_output(self, output: str) -> tuple[str, bool, Path | None]:
+        """结果档：超上限截中间保头尾，完整输出落盘给引用。"""
+        limits = self._limits
+        if len(output) <= limits.result_max_chars:
+            return output, False, None
+        path: Path | None = None
+        if self._output_dir is not None:
+            self._output_dir.mkdir(parents=True, exist_ok=True)
+            self._output_seq += 1
+            path = self._output_dir / f"{int(time.time())}-{self._output_seq}.log"
+            path.write_text(output, encoding="utf-8")
+        omitted = len(output) - limits.head_chars - limits.tail_chars
+        ref = f", full output: {path}" if path is not None else ""
+        middle = f"\n... [truncated {omitted} chars{ref}] ...\n"
+        return (
+            output[: limits.head_chars] + middle + output[-limits.tail_chars :],
+            True,
+            path,
+        )
 
     @staticmethod
     def _build_wrapped_command(command: str, marker: str) -> str:
@@ -288,6 +344,8 @@ class ShellSessionManager:
                 shell=PersistentShell(
                     workspace_path=workspace_path.resolve(),
                     process=PtyShellProcess(shell_program=self.shell_program),
+                    output_dir=workspace_path.resolve()
+                    / ".pickel" / "shell-output" / session_id,
                 ),
                 created_at=now,
                 last_used_at=now,
@@ -306,6 +364,8 @@ class ShellSessionManager:
             shell=PersistentShell(
                 workspace_path=workspace_path.resolve(),
                 process=PtyShellProcess(shell_program=self.shell_program),
+                output_dir=workspace_path.resolve()
+                / ".pickel" / "shell-output" / session_id,
             ),
             created_at=time.time(),
             last_used_at=time.time(),
@@ -396,6 +456,9 @@ class ShellExecTool(BaseTool):
                 "shell_status": result.shell_status,
                 "timed_out": result.timed_out,
                 "truncated": result.truncated,
+                "full_output_path": (
+                    str(result.full_output_path) if result.full_output_path else None
+                ),
                 "created_new_shell": created_new_shell,
             },
         )
