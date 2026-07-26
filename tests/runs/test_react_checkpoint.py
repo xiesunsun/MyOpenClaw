@@ -14,6 +14,7 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
 from pickel.shared.model_config import ModelConfig
@@ -82,10 +83,12 @@ class ReactCheckpointTests(unittest.TestCase):
             ]
         )
         spy = SpySessionService()
+        bus = bus_with([EchoTool()])
         run = Run(
             agent=self._agent(),
             provider=provider,  # type: ignore[arg-type]
-            tools=[EchoTool()],
+            tool_bus=bus,
+            activation=ToolActivation(allowed=frozenset(bus.list_names())),
             context_assembler=ContextAssembler(),
             lifecycle_hooks=NoopLifecycleHooks(),
             session_service=spy,  # type: ignore[arg-type]

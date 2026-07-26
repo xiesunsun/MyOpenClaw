@@ -10,6 +10,7 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.hooks.lifecycle import NoopLifecycleHooks
 from pickel.providers.base import Provider
+from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs import ReActStrategy, Run, RuntimeEventType
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
@@ -61,7 +62,8 @@ def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: R
     return Run(
         agent=agent,
         provider=provider,
-        tools=tools,
+        tool_bus=(_bus := bus_with(tools)),
+        activation=ToolActivation(allowed=frozenset(_bus.list_names())),
         context_assembler=ContextAssembler(),
         lifecycle_hooks=NoopLifecycleHooks(),
         session_service=None,

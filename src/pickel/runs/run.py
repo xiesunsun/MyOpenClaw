@@ -21,14 +21,13 @@ from pickel.runs.events import RuntimeEventHandler
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import ModelSelection
 from pickel.tools.base import BaseTool, ToolExecutionContext
-from pickel.tools.catalog import builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import (
     FileAccessPolicy,
     FullAccessPathPolicy,
     WorkspacePathAccessPolicy,
 )
-from pickel.tools.registry import ToolRegistry
+from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 from pickel.tools.services import ToolServices
 from pickel.tools.shell import ShellSessionManager
 
@@ -44,7 +43,8 @@ class Run:
 
     agent: Agent
     provider: Provider
-    tools: list[BaseTool]
+    tool_bus: ToolBus
+    activation: ToolActivation
     context_assembler: ContextAssembler
     lifecycle_hooks: LifecycleHooks
     session_service: SessionService | None
@@ -70,18 +70,20 @@ class Run:
         shell_session_manager: ShellSessionManager | None = None,
         provider: Provider | None = None,
         tools: list[BaseTool] | None = None,
-        tool_registry: ToolRegistry | None = None,
+        tool_bus: ToolBus | None = None,
         recall_sources: list | None = None,
     ) -> Run:
         """解析 provider/tools/workspace，组装 Run。"""
         from pickel.runs.strategy.react import ReActStrategy
 
         resolved_provider = provider or create_llm_provider(agent.model_config)
-        if tools is None:
-            registry = tool_registry or ToolRegistry(tools=builtin_tools())
-            resolved_tools = registry.resolve_many(agent.tool_ids)
+        # tool_bus 优先；只给 tools 时建一个私有 bus 并全量允许（测试便捷路径）
+        if tool_bus is not None:
+            resolved_bus = tool_bus
+            activation = ToolActivation(allowed=frozenset(agent.tool_ids))
         else:
-            resolved_tools = list(tools)
+            resolved_bus = bus_with(tools or [])
+            activation = ToolActivation(allowed=frozenset(resolved_bus.list_names()))
 
         resolved_policy = file_access_policy or cls._policy_for_mode(agent.file_access_mode)
         workspace_files = WorkspaceFileService(
@@ -91,7 +93,8 @@ class Run:
         return cls(
             agent=agent,
             provider=resolved_provider,
-            tools=resolved_tools,
+            tool_bus=resolved_bus,
+            activation=activation,
             context_assembler=context_assembler or ContextAssembler(),
             lifecycle_hooks=lifecycle_hooks or NoopLifecycleHooks(),
             session_service=session_service,
@@ -103,6 +106,15 @@ class Run:
             environ=Environ(),
             recall_sources=list(recall_sources or []),
         )
+
+    @property
+    def tools(self) -> list[BaseTool]:
+        """兼容旧读法：按当前激活集算一份工具列表。
+
+        Task 6 之后 prepare / react 都走 TurnState 的快照，此 property 仅供尚未迁移的
+        调用点与旧测试使用，Task 9 删除。
+        """
+        return [entry.tool for entry in self.tool_bus.snapshot(self.activation).entries]
 
     def apply_environ_model(self, app_config: AppConfig) -> None:
         """按 Environ 叠层重新 resolve model，更新 agent.model_config 与 provider。"""
@@ -132,6 +144,9 @@ class Run:
             session_service=session_service,
         )
         new_run.environ = old_run.environ
+        # bus 是进程级的：reload 不该丢掉非内置来源的工具（T2 的 MCP 子进程等）
+        new_run.tool_bus = old_run.tool_bus
+        new_run.activation = ToolActivation(allowed=frozenset(agent.tool_ids))
         new_run.apply_environ_model(boot.app_config)
         return agent, new_run
 

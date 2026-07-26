@@ -17,6 +17,7 @@ from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.bus import ToolActivation, ToolSource, bus_with
 from pickel.tools.policy import FullAccessPathPolicy
 from pickel.tools.shell import ShellSessionManager
 
@@ -85,6 +86,21 @@ class DelayEchoTool(BaseTool):
         )
 
 
+class _OtherTool(BaseTool):
+    spec = ToolSpec(
+        name="other",
+        description="Other tool",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, object],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        return ToolExecutionResult(content="other")
+
+
 def _run(
     *,
     agent: Agent,
@@ -93,10 +109,12 @@ def _run(
     unit_window: int = 5,
     strategy: ReActStrategy | None = None,
 ) -> Run:
+    bus = bus_with(tools or [])
     return Run(
         agent=agent,
         provider=provider,
-        tools=tools or [],
+        tool_bus=bus,
+        activation=ToolActivation(allowed=frozenset(bus.list_names())),
         context_assembler=ContextAssembler(),
         lifecycle_hooks=NoopLifecycleHooks(),
         session_service=None,
@@ -426,6 +444,62 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             600.0,
             ReActStrategy._provider_timeout_seconds(run),
         )
+
+
+class RunToolBusTests(unittest.TestCase):
+    @staticmethod
+    def _agent(tool_ids: list[str]) -> Agent:
+        return Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+            ),
+            tool_ids=tool_ids,
+            file_access_mode="workspace",
+        )
+
+    def test_open_with_tools_builds_a_private_bus_allowing_all_of_them(self) -> None:
+        run = Run.open(
+            agent=self._agent(tool_ids=[]),
+            provider=StubProvider(),
+            tools=[DelayEchoTool()],
+        )
+
+        self.assertEqual(["echo"], run.tool_bus.list_names())
+        self.assertEqual(ToolSource.BUILTIN, run.tool_bus.get("echo").source)
+        # tools= 路径忽略 agent.tool_ids，全量允许给定的工具
+        self.assertEqual(frozenset({"echo"}), run.activation.allowed)
+
+    def test_open_with_bus_uses_agent_allowlist(self) -> None:
+        bus = bus_with([DelayEchoTool(), _OtherTool()])
+
+        run = Run.open(
+            agent=self._agent(tool_ids=["echo"]),
+            provider=StubProvider(),
+            tool_bus=bus,
+        )
+
+        self.assertIs(bus, run.tool_bus)
+        self.assertEqual(frozenset({"echo"}), run.activation.allowed)
+        # bus 里有 other，但白名单只给了 echo
+        self.assertEqual(("echo",), run.tool_bus.snapshot(run.activation).names)
+
+    def test_bus_wins_when_both_given(self) -> None:
+        bus = bus_with([DelayEchoTool()])
+
+        run = Run.open(
+            agent=self._agent(tool_ids=["echo"]),
+            provider=StubProvider(),
+            tool_bus=bus,
+            tools=[_OtherTool()],
+        )
+
+        self.assertIs(bus, run.tool_bus)
+        self.assertEqual(["echo"], run.tool_bus.list_names())
 
 
 if __name__ == "__main__":

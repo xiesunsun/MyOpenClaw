@@ -23,6 +23,7 @@ from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.hooks.decisions import BeforeRequestDecision
 from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
 from pickel.runs.usage_anchor import context_fingerprint, resolve_anchor
@@ -78,7 +79,8 @@ def _run(provider, hooks=None) -> Run:
     return Run(
         agent=_agent(),
         provider=provider,  # type: ignore[arg-type]
-        tools=[],
+        tool_bus=(_bus := bus_with([])),
+        activation=ToolActivation(allowed=frozenset(_bus.list_names())),
         context_assembler=ContextAssembler(),
         lifecycle_hooks=hooks or NoopLifecycleHooks(),
         session_service=None,

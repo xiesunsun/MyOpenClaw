@@ -184,6 +184,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
         from pickel.runs.strategy.react import ReActStrategy
         from pickel.shared.model_config import ModelConfig
         from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+        from pickel.tools.bus import ToolActivation, bus_with
 
         class FakeProvider:
             def __init__(self):
@@ -225,10 +226,12 @@ class ReactHookIntegrationTests(unittest.TestCase):
         session.append_user(UserMessage(content=[TextContent(text="hi")]))
         from pickel.tools.shell import ShellSessionManager
 
+        bus = bus_with([tool])
         run = Run(
             agent=agent,
             provider=FakeProvider(),  # type: ignore[arg-type]
-            tools=[tool],
+            tool_bus=bus,
+            activation=ToolActivation(allowed=frozenset(bus.list_names())),
             context_assembler=ContextAssembler(),
             lifecycle_hooks=LifecycleHooks(handlers=[DenyAllTools()]),
             session_service=None,
