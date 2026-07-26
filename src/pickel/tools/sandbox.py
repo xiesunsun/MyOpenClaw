@@ -10,10 +10,17 @@ from dataclasses import dataclass
 import fnmatch
 import logging
 from pathlib import Path
+import shutil
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+_BWRAP = "bwrap"
+
+
+class SandboxUnavailableError(RuntimeError):
+    pass
 
 # 凭据形状的环境变量名（大小写不敏感）；命中即从 shell 环境剥离
 _CREDENTIAL_ENV_PATTERNS = (
@@ -97,3 +104,76 @@ class SandboxPolicy:
         return any(
             fnmatch.fnmatchcase(upper, pattern) for pattern in _CREDENTIAL_ENV_PATTERNS
         )
+
+    def self_protect_paths(self, workspace: Path) -> tuple[Path, ...]:
+        """拒写自身：配置目录、agent 定义、pickel 代码。写掩盖、读放行。"""
+        import pickel
+
+        package_root = Path(pickel.__file__).resolve().parent
+        candidates = [
+            self.pickel_home,
+            self.project_root / ".pickel",
+            self.project_root / "agents",
+            package_root,
+        ]
+        seen: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if resolved.exists() and resolved not in seen:
+                seen.append(resolved)
+        return tuple(seen)
+
+    def wrap_command(
+        self, command: list[str], *, workspace: Path
+    ) -> tuple[list[str], bool]:
+        """把命令包进 bwrap。返回 (最终命令, 是否沙箱化)。"""
+        if not self.enabled:
+            return list(command), False
+        if shutil.which(_BWRAP) is None:
+            if self.strict:
+                raise SandboxUnavailableError(
+                    "bubblewrap (bwrap) is not installed and sandbox.strict is on"
+                )
+            logger.warning(
+                "bubblewrap (bwrap) not found; running shell without sandbox. "
+                "Credential env vars are still stripped."
+            )
+            return list(command), False
+
+        workspace = workspace.resolve()
+        argv = [
+            _BWRAP,
+            "--die-with-parent",
+            # --new-session 必需：缺它 bwrap 内 bash 的 job control 失效，
+            # 超时探测与 shell_interrupt 依赖的前台进程组就不存在了
+            "--new-session",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--bind", "/tmp", "/tmp",
+            "--bind", str(workspace), str(workspace),
+        ]
+        for path in self.allow_write:
+            resolved = path.resolve()
+            if resolved.exists():
+                argv += ["--bind", str(resolved), str(resolved)]
+        # 顺序要紧：self-protect 在 workspace bind 之后，才能把它盖回只读
+        for path in self.self_protect_paths(workspace):
+            argv += ["--ro-bind", str(path), str(path)]
+        for path in self._deny_read_paths():
+            argv += ["--tmpfs", str(path)]
+        argv.append("--")
+        argv.extend(command)
+        return argv, True
+
+    def _deny_read_paths(self) -> tuple[Path, ...]:
+        home = self.pickel_home.expanduser().parent
+        candidates = [self.pickel_home]
+        candidates += [home / name for name in _DEFAULT_DENY_READ_HOME_DIRS]
+        candidates += list(self.deny_read)
+        seen: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if resolved.exists() and resolved not in seen:
+                seen.append(resolved)
+        return tuple(seen)
