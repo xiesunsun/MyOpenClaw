@@ -71,7 +71,13 @@
 
 **Interfaces:**
 - Consumes: `AssistantMessage`（`pickel.conversations.agent_message`）
-- Produces: `StreamDelta` 基类；`TextDelta(text: str)`；`ThinkingDelta(text: str)`；`ToolCallArgsDelta(tool_call_id: str, partial_json: str)`；`StreamCompleted(message: AssistantMessage)`；`async def accumulate(stream: AsyncIterator[StreamDelta]) -> AssistantMessage`
+- Produces（**以 Task 1 实际落地为准**，与下方 Step 3 的初稿代码有出入）：四个扁平 frozen dataclass `TextDelta(text: str)` / `ThinkingDelta(text: str)` / `ToolCallArgsDelta(tool_call_id: str, partial_json: str)` / `StreamCompleted(message: AssistantMessage)`，字段全部必填；类型别名 `StreamDelta = TextDelta | ThinkingDelta | ToolCallArgsDelta | StreamCompleted`（与 `conversations/content_blocks.py:43-46` 的 `ContentBlock` 同构）；`async def accumulate(stream) -> AssistantMessage`
+
+**审阅期修订的三点，后续任务必须按实际实现来：**
+
+1. **`StreamDelta` 是 union 别名，不是基类。** `isinstance(x, StreamDelta)` 可用（Python 3.12 实测），但 `case StreamDelta()` 的结构化模式匹配**不可用**（`TypeError: called match pattern must be a class`）——UI 渲染器要分派只能 `case TextDelta() | ThinkingDelta() | ...` 列具体类。这与仓库既有的 `ContentBlock` 约束相同。
+2. **`accumulate()` 会关闭上游 async generator**（`contextlib.aclosing`），同时兼容纯 `AsyncIterator`。所以 `stream()` 标注成 `AsyncIterator[StreamDelta]` 是合法的——它的实现体含 `yield`，实际返回 async generator，而 `AsyncGenerator` 是 `AsyncIterator` 的子类型。下面 Task 2/3 的标注不必改。
+3. 字段无默认值，构造时必须给全。
 
 **为什么最后一个 delta 携带完整消息：** Python 的 async generator 不能有返回值（PEP 525），所以完成信号必须走 yield。`accumulate()` 消费到 `StreamCompleted` 取它的 message——这样 `generate()` 可以完全由 `stream()` 实现而不必自己拼装增量。
 
