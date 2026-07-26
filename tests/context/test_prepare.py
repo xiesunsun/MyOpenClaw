@@ -20,6 +20,7 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.bus import ToolActivation, ToolBus, ToolSource, bus_with
 
 
 class _EchoTool(BaseTool):
@@ -53,12 +54,17 @@ def _agent(**kwargs) -> Agent:
     return Agent(**defaults)
 
 
-def _run(*, agent: Agent | None = None, tools=None, unit_window: int = 5):
+def _run(*, agent: Agent | None = None, unit_window: int = 5):
     return SimpleNamespace(
         agent=agent or _agent(),
-        tools=tools if tools is not None else [_EchoTool()],
         unit_window=unit_window,
     )
+
+
+def _snapshot(*tools):
+    """建一份只含给定工具的快照；不传则默认 _EchoTool。"""
+    bus = bus_with(list(tools) or [_EchoTool()])
+    return bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
 
 
 def test_prepare_system_history_feedback_tools():
@@ -88,6 +94,7 @@ def test_prepare_system_history_feedback_tools():
             session=session,
             hook_feedback=feedback,
             unit_window=2,
+            snapshot=_snapshot(),
         )
     )
 
@@ -226,3 +233,22 @@ def test_prepare_recall_receives_current_user_text_from_session():
         )
     )
     assert seen == ["query-me"]
+
+
+def test_resolve_tools_uses_entry_name_over_spec_name():
+    from pickel.context.prepare import resolve_tools
+
+    bus = ToolBus()
+    bus.register(_EchoTool(), source=ToolSource.MCP, origin="github")
+    snapshot = bus.snapshot(ToolActivation(allowed=frozenset({"mcp__github__echo"})))
+
+    definitions = resolve_tools(snapshot=snapshot)
+
+    assert [d.name for d in definitions] == ["mcp__github__echo"]
+    assert definitions[0].description == "Echo text"
+
+
+def test_resolve_tools_returns_empty_for_missing_snapshot():
+    from pickel.context.prepare import resolve_tools
+
+    assert resolve_tools(snapshot=None) == []

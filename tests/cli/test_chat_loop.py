@@ -20,6 +20,7 @@ from pickel.runs import RuntimeEvent, RuntimeEventType
 from pickel.conversations.message import ToolCall
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.bus import ToolActivation, bus_with
 from rich.console import Console
 from rich.text import Text
 
@@ -167,7 +168,8 @@ class StubContextRun:
     def __init__(self, agent: Agent) -> None:
         self.agent = agent
         self.provider = Mock()
-        self.tools = []
+        self.tool_bus = bus_with([])
+        self.activation = ToolActivation(allowed=frozenset())
         self.unit_window = 5
         self.context_assembler = Mock()
         self.strategy = Mock()

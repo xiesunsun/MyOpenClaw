@@ -516,6 +516,8 @@ class ChatLoop:
                     unit_window=run.unit_window,
                     # §7.3：预览不得执行 recall（含远程 OV）
                     recall_sources=[],
+                    # 预览按当前激活集现取一份快照（不在 turn 内，无缓存一致性顾虑）
+                    snapshot=run.tool_bus.snapshot(run.activation),
                 )
                 model_config = run.agent.model_config
                 usage = await measure(

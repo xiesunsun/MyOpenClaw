@@ -80,6 +80,7 @@ class ReActStrategy(ExecutionStrategy):
                 hook_feedback=turn.hook_feedback_for_current_step(),
                 unit_window=run.unit_window,
                 recall_sources=run.recall_sources,
+                snapshot=turn.tool_snapshot,
             )
             # 指纹取 prepare 输出（hook 前）：/context 预览不跑 hook，
             # 记 hook 后的 Request 会让有 hook 时锚永远失效。

@@ -18,6 +18,7 @@ from pickel.context.model_context import (
 )
 from pickel.context.projection import project_messages
 from pickel.context.recall import Recall
+from pickel.tools.bus import ToolSnapshot
 from pickel.context.window import apply_window
 from pickel.conversations.agent_message import AgentMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
@@ -107,15 +108,21 @@ def resolve_feedback(
     return append_hook_feedback(messages, hook_feedback or [])
 
 
-def resolve_tools(*, run: Any) -> list[ToolDefinition]:
-    """run.tools → ToolDefinition 列表。"""
+def resolve_tools(*, snapshot: ToolSnapshot | None) -> list[ToolDefinition]:
+    """工具快照 → ToolDefinition 列表。
+
+    name 取 ToolEntry.name（含命名空间前缀），不是 tool.spec.name ——
+    模型看到的名字必须与快照查找键一致。
+    """
+    if snapshot is None:
+        return []
     return [
         ToolDefinition(
-            name=tool.spec.name,
-            description=tool.spec.description,
-            input_schema=tool.spec.input_schema,
+            name=entry.name,
+            description=entry.tool.spec.description,
+            input_schema=entry.tool.spec.input_schema,
         )
-        for tool in run.tools
+        for entry in snapshot.entries
     ]
 
 
@@ -127,8 +134,13 @@ async def prepare(
     unit_window: int | None = None,
     recall_sources: Sequence[Recall] | None = None,
     current_user_text: str = "",
+    snapshot: ToolSnapshot | None = None,
 ) -> ModelContext:
-    """组装一次模型调用入参（ModelContext / Request）。"""
+    """组装一次模型调用入参（ModelContext / Request）。
+
+    snapshot 由调用方在 turn 开始时取一次（见 TurnState.tool_snapshot），
+    turn 内所有 step 共用同一份，保住 prompt cache 与上下文一致性。
+    """
     window = run.unit_window if unit_window is None else unit_window
     system = resolve_system(run=run)
     messages = resolve_history(session=session, unit_window=window)
@@ -140,5 +152,5 @@ async def prepare(
         current_user_text=current_user_text,
     )
     messages = resolve_feedback(messages=messages, hook_feedback=hook_feedback)
-    tools = resolve_tools(run=run)
+    tools = resolve_tools(snapshot=snapshot)
     return ModelContext(system=system, messages=messages, tools=tools)
