@@ -46,6 +46,7 @@ from pickel.runs.runtime_events import (
     ToolCallArgsDeltaEvent,
     ToolCallCompleted,
     ToolCallStarted,
+    TurnInterrupted,
 )
 from pickel.runs.turn_usage import last_turn_usage
 from pickel.runs.usage_anchor import context_fingerprint
@@ -189,96 +190,117 @@ class ReActStrategy(ExecutionStrategy):
             batch_id = uuid4().hex
             batch_outcomes: list[dict] = []
             # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
-            for call_index, tool_call in enumerate(tool_calls):
+            try:
+                for call_index, tool_call in enumerate(tool_calls):
+                    await self._emit(
+                        bus,
+                        ToolCallStarted(
+                            envelope=envelope(step_index),
+                            tool_call=self._event_tool_call(tool_call),
+                            batch_id=batch_id,
+                            call_index=call_index,
+                            total_calls=len(tool_calls),
+                        ),
+                    )
+                    pre = await run.lifecycle_hooks.pre_tool_use(
+                        PreToolUseEvent(
+                            session_id=session.session_id,
+                            turn_id=turn.turn_id,
+                            step_index=step_index,
+                            tool_name=tool_call.name,
+                            tool_call_id=tool_call.id,
+                            arguments=dict(tool_call.arguments),
+                        )
+                    )
+                    if pre.action == "deny":
+                        reason = pre.reason or "工具调用被 Hook 拒绝"
+                        result = ToolExecutionResult(content=reason, is_error=True)
+                    else:
+                        args = (
+                            dict(pre.updated_arguments)
+                            if pre.updated_arguments is not None
+                            else dict(tool_call.arguments)
+                        )
+                        # 用可能更新后的参数执行
+                        exec_call = ToolCallContent(
+                            id=tool_call.id,
+                            name=tool_call.name,
+                            arguments=args,
+                            thought_signature=tool_call.thought_signature,
+                        )
+                        result = await self._execute_tool_call(
+                            run=run,
+                            session=session,
+                            tool_call=exec_call,
+                            snapshot=turn.tool_snapshot,
+                        )
+                    result_entry = session.append_tool_result(
+                        ToolResultMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_call.name,
+                            content=[TextContent(text=result.content)],
+                            is_error=result.is_error,
+                        )
+                    )
+                    self._flush_entry(run, session, result_entry)
+                    step.completed_tool_call_ids.append(tool_call.id)
+                    batch_outcomes.append(
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "is_error": result.is_error,
+                            "content": result.content,
+                        }
+                    )
+                    await self._emit(
+                        bus,
+                        ToolCallCompleted(
+                            envelope=envelope(step_index),
+                            tool_call=self._event_tool_call(tool_call),
+                            tool_result=replace(result, metadata=dict(result.metadata)),
+                            batch_id=batch_id,
+                            call_index=call_index,
+                            total_calls=len(tool_calls),
+                        ),
+                    )
+                    post = await run.lifecycle_hooks.post_tool_use(
+                        PostToolUseEvent(
+                            session_id=session.session_id,
+                            turn_id=turn.turn_id,
+                            step_index=step_index,
+                            tool_name=tool_call.name,
+                            tool_call_id=tool_call.id,
+                            arguments=dict(tool_call.arguments),
+                            result_content=result.content,
+                            is_error=result.is_error,
+                        )
+                    )
+                    if post.feedback_text:
+                        fb = HookFeedback(
+                            source_event="PostToolUse", text=post.feedback_text
+                        )
+                        turn.step_hook_feedback.append(fb)
+                        turn.hook_feedback.append(fb)
+            except asyncio.CancelledError:
+                # 中断时补齐未完成的 tool_result：session 里留下悬空的
+                # tool_call 会让下一轮请求被 provider 直接拒绝
+                # （Anthropic 与 Gemini 都要求 tool_use 与 tool_result 配对）。
+                self._complete_pending_tool_calls(
+                    run=run,
+                    session=session,
+                    step=step,
+                    tool_calls=tool_calls,
+                )
                 await self._emit(
                     bus,
-                    ToolCallStarted(
+                    TurnInterrupted(
                         envelope=envelope(step_index),
-                        tool_call=self._event_tool_call(tool_call),
-                        batch_id=batch_id,
-                        call_index=call_index,
-                        total_calls=len(tool_calls),
+                        at_step=step_index,
+                        partial_text=self._assistant_text(assistant),
                     ),
                 )
-                pre = await run.lifecycle_hooks.pre_tool_use(
-                    PreToolUseEvent(
-                        session_id=session.session_id,
-                        turn_id=turn.turn_id,
-                        step_index=step_index,
-                        tool_name=tool_call.name,
-                        tool_call_id=tool_call.id,
-                        arguments=dict(tool_call.arguments),
-                    )
-                )
-                if pre.action == "deny":
-                    reason = pre.reason or "工具调用被 Hook 拒绝"
-                    result = ToolExecutionResult(content=reason, is_error=True)
-                else:
-                    args = (
-                        dict(pre.updated_arguments)
-                        if pre.updated_arguments is not None
-                        else dict(tool_call.arguments)
-                    )
-                    # 用可能更新后的参数执行
-                    exec_call = ToolCallContent(
-                        id=tool_call.id,
-                        name=tool_call.name,
-                        arguments=args,
-                        thought_signature=tool_call.thought_signature,
-                    )
-                    result = await self._execute_tool_call(
-                        run=run,
-                        session=session,
-                        tool_call=exec_call,
-                        snapshot=turn.tool_snapshot,
-                    )
-                result_entry = session.append_tool_result(
-                    ToolResultMessage(
-                        tool_call_id=tool_call.id,
-                        tool_name=tool_call.name,
-                        content=[TextContent(text=result.content)],
-                        is_error=result.is_error,
-                    )
-                )
-                self._flush_entry(run, session, result_entry)
-                step.completed_tool_call_ids.append(tool_call.id)
-                batch_outcomes.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "tool_name": tool_call.name,
-                        "is_error": result.is_error,
-                        "content": result.content,
-                    }
-                )
-                await self._emit(
-                    bus,
-                    ToolCallCompleted(
-                        envelope=envelope(step_index),
-                        tool_call=self._event_tool_call(tool_call),
-                        tool_result=replace(result, metadata=dict(result.metadata)),
-                        batch_id=batch_id,
-                        call_index=call_index,
-                        total_calls=len(tool_calls),
-                    ),
-                )
-                post = await run.lifecycle_hooks.post_tool_use(
-                    PostToolUseEvent(
-                        session_id=session.session_id,
-                        turn_id=turn.turn_id,
-                        step_index=step_index,
-                        tool_name=tool_call.name,
-                        tool_call_id=tool_call.id,
-                        arguments=dict(tool_call.arguments),
-                        result_content=result.content,
-                        is_error=result.is_error,
-                    )
-                )
-                if post.feedback_text:
-                    fb = HookFeedback(
-                        source_event="PostToolUse", text=post.feedback_text
-                    )
-                    turn.step_hook_feedback.append(fb)
-                    turn.hook_feedback.append(fb)
+                # CancelledError 继承 BaseException，吞掉会破坏 asyncio 取消机制
+                raise
 
             batch_decision = await run.lifecycle_hooks.post_tool_batch(
                 PostToolBatchEvent(
@@ -317,6 +339,29 @@ class ReActStrategy(ExecutionStrategy):
             ),
         )
         return max_msg
+
+    def _complete_pending_tool_calls(
+        self,
+        *,
+        run: Run,
+        session: Session,
+        step,
+        tool_calls: list[ToolCallContent],
+    ) -> None:
+        """给已落盘但未完成的 tool_call 补一条中断标记的 tool_result。"""
+        completed = set(step.completed_tool_call_ids)
+        for tool_call in tool_calls:
+            if tool_call.id in completed:
+                continue
+            entry = session.append_tool_result(
+                ToolResultMessage(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    content=[TextContent(text="工具执行被用户中断")],
+                    is_error=True,
+                )
+            )
+            self._flush_entry(run, session, entry)
 
     def _flush_entry(self, run: Run, session: Session, entry) -> None:
         if run.session_service is None:

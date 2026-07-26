@@ -126,6 +126,7 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
         events = await self._collect(_StreamingProvider())
         deltas = [e for e in events if isinstance(e, TextDeltaEvent)]
 
+        self.assertTrue(deltas)
         for event in deltas:
             self.assertEqual("s1", event.envelope.session_id)
             self.assertTrue(event.envelope.turn_id)
