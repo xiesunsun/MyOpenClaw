@@ -452,7 +452,7 @@ class ShellCloseTool(BaseTool):
 
 
 def _require_shell_manager(context: ToolExecutionContext) -> ShellSessionManager:
-    manager = context.shell_session_manager
+    manager = context.services.shell_sessions
     if manager is None:
         raise RuntimeError("A shell session manager is required for shell tools")
     return manager

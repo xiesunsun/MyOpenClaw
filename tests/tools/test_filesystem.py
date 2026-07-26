@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
@@ -26,11 +27,12 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=WorkspacePathAccessPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=WorkspacePathAccessPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 
@@ -56,11 +58,12 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=WorkspacePathAccessPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=WorkspacePathAccessPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 
@@ -88,8 +91,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=workspace_files,
-                    shell_session_manager=None,
+                    services=ToolServices(workspace_files=workspace_files),
                 ),
             )
             replace_result = await replace_tool.execute(
@@ -102,8 +104,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=workspace_files,
-                    shell_session_manager=None,
+                    services=ToolServices(workspace_files=workspace_files),
                 ),
             )
 
@@ -130,11 +131,12 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=WorkspacePathAccessPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=WorkspacePathAccessPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 
@@ -154,11 +156,12 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=FullAccessPathPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=FullAccessPathPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 

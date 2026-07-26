@@ -29,6 +29,7 @@ from pickel.tools.policy import (
     WorkspacePathAccessPolicy,
 )
 from pickel.tools.registry import ToolRegistry
+from pickel.tools.services import ToolServices
 from pickel.tools.shell import ShellSessionManager
 
 if TYPE_CHECKING:
@@ -184,8 +185,10 @@ class Run:
             agent_id=self.agent.agent_id,
             session_id=session_id,
             workspace_path=self.agent.workspace,
-            workspace_files=self.workspace_files,
-            shell_session_manager=self.shell_session_manager,
+            services=ToolServices(
+                workspace_files=self.workspace_files,
+                shell_sessions=self.shell_session_manager,
+            ),
         )
 
     @staticmethod

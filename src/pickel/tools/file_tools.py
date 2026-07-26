@@ -9,9 +9,9 @@ from pickel.tools.file_service import WorkspaceFileService
 
 
 def _require_workspace_files(context: ToolExecutionContext) -> WorkspaceFileService:
-    if context.workspace_files is None:
+    if context.services.workspace_files is None:
         raise RuntimeError("A workspace file service is required for file tools")
-    return context.workspace_files
+    return context.services.workspace_files
 
 
 def _truncate_text(text: str, max_chars: int | None) -> tuple[str, bool]:

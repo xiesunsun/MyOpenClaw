@@ -30,8 +30,6 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
-                workspace_files=None,
-                shell_session_manager=None,
             ),
         )
 
@@ -66,25 +64,40 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path("/tmp/pickle"),
-                workspace_files=None,
-                shell_session_manager=None,
             ),
         )
 
         self.assertEqual("ping:Pickle", result.content)
         self.assertEqual({"seen": True}, result.metadata)
 
-    def test_tool_execution_context_exposes_runtime_dependencies(self) -> None:
+
+class ToolServicesTests(unittest.TestCase):
+    def test_context_defaults_to_empty_services(self) -> None:
+        from pickel.tools.services import ToolServices
+
         context = ToolExecutionContext(
             agent_id="Pickle",
             session_id="session-1",
             workspace_path=Path("/tmp/pickle"),
-            workspace_files="workspace-files",
-            shell_session_manager="shell-manager",
         )
 
-        self.assertEqual("workspace-files", context.workspace_files)
-        self.assertEqual("shell-manager", context.shell_session_manager)
+        self.assertIsInstance(context.services, ToolServices)
+        self.assertIsNone(context.services.workspace_files)
+        self.assertIsNone(context.services.shell_sessions)
+
+    def test_services_carries_injected_dependencies(self) -> None:
+        from pickel.tools.services import ToolServices
+
+        services = ToolServices(workspace_files="fake-files", shell_sessions="fake-shell")
+        context = ToolExecutionContext(
+            agent_id="Pickle",
+            session_id="session-1",
+            workspace_path=Path("/tmp/pickle"),
+            services=services,
+        )
+
+        self.assertEqual("fake-files", context.services.workspace_files)
+        self.assertEqual("fake-shell", context.services.shell_sessions)
 
 
 if __name__ == "__main__":

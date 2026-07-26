@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Union
 import inspect
 
+from pickel.tools.services import ToolServices
+
 
 ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
 ToolFunction = Callable[[dict[str, Any], "ToolExecutionContext"], ToolFunctionResult]
@@ -23,8 +25,7 @@ class ToolExecutionContext:
     agent_id: str
     session_id: str
     workspace_path: Path
-    workspace_files: Any = None
-    shell_session_manager: Any = None
+    services: ToolServices = field(default_factory=ToolServices)
 
 
 @dataclass

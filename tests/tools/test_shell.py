@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.catalog import builtin_tools
 from pickel.tools.registry import ToolRegistry
@@ -52,8 +53,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             first = await exec_tool.execute({"command": "cd nested"}, context)
@@ -78,8 +78,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             await exec_tool.execute({"command": "cd nested"}, context)
@@ -102,8 +101,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             await exec_tool.execute({"command": "pwd"}, context)
@@ -123,8 +121,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             result = await exec_tool.execute({"command": "printf 'hello'"}, context)
@@ -146,8 +143,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             result = await exec_tool.execute({"command": "python -c \"print('a' * 5000, end='')\""}, context)
@@ -167,8 +163,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             failed = await exec_tool.execute({"command": "false"}, context)
@@ -189,8 +184,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             timed_out = await exec_tool.execute(
@@ -214,8 +208,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=workspace,
-                workspace_files=None,
-                shell_session_manager=manager,
+                services=ToolServices(shell_sessions=manager),
             )
 
             result = await exec_tool.execute(

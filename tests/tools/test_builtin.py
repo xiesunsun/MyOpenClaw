@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.catalog import builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
@@ -60,11 +61,12 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                     agent_id="Pickle",
                     session_id="session-1",
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=WorkspacePathAccessPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=WorkspacePathAccessPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 
