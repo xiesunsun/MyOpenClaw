@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import AssistantMessage
+from pickel.providers.stream import StreamCompleted, StreamDelta
 
 if TYPE_CHECKING:
     from pickel.shared.model_config import ModelConfig
@@ -20,6 +21,15 @@ class Provider(ABC):
     async def generate(self, context: ModelContext) -> AssistantMessage:
         """消费 ModelContext，返回统一 AssistantMessage。"""
         raise NotImplementedError
+
+    async def stream(self, context: ModelContext) -> AsyncIterator[StreamDelta]:
+        """产出增量；默认实现不流式，一次性给出完整结果。
+
+        覆写此方法即可获得真流式。覆写者必须让自己的 generate()
+        由自己的 stream() 实现（`accumulate(self.stream(ctx))`），
+        否则同一个 provider 会有两份解析逻辑，迟早漂移。
+        """
+        yield StreamCompleted(message=await self.generate(context))
 
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         """统计上下文 token；失败返回 None。"""
