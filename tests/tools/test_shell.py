@@ -231,3 +231,37 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _context(workspace: Path, manager: ShellSessionManager) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        agent_id="Pickle",
+        session_id="session-1",
+        workspace_path=workspace,
+        services=ToolServices(shell_sessions=manager),
+    )
+
+
+class NormalizeOutputTests(unittest.TestCase):
+    def test_strips_csi_color_sequences(self) -> None:
+        from pickel.tools.shell import _normalize_output
+
+        raw = "\x1b[01;34mdir\x1b[0m\nplain"
+        self.assertEqual("dir\nplain", _normalize_output(raw))
+
+    def test_strips_osc_title_sequences(self) -> None:
+        from pickel.tools.shell import _normalize_output
+
+        raw = "\x1b]0;window-title\x07hello"
+        self.assertEqual("hello", _normalize_output(raw))
+
+    def test_strips_private_mode_sequences(self) -> None:
+        from pickel.tools.shell import _normalize_output
+
+        raw = "\x1b[?25lhello\x1b[?25h"
+        self.assertEqual("hello", _normalize_output(raw))
+
+    def test_plain_text_untouched(self) -> None:
+        from pickel.tools.shell import _normalize_output
+
+        self.assertEqual("a\nb", _normalize_output("a\r\nb\r\n"))

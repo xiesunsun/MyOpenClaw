@@ -468,6 +468,11 @@ def _find_marker(buffer: str, marker: str) -> re.Match[str] | None:
     return pattern.search(buffer)
 
 
+# CSI（\x1b[...字母）与 OSC（\x1b]...BEL 或 \x1b]...ST）序列
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+
 def _normalize_output(output: str) -> str:
-    normalized = output.replace("\r", "")
+    normalized = _ANSI_RE.sub("", output)
+    normalized = normalized.replace("\r", "")
     return normalized.rstrip("\n")
