@@ -100,3 +100,4 @@ pickle_workspace/
 # Claude Code worktrees
 # ------------------------------
 .claude/worktrees/
+.pickel/
