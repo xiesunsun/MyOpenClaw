@@ -205,7 +205,7 @@ Anthropic 的 thinking 块带 `signature`，下一轮回传时必须原样附上
 **默认关闭。** 工具参数与文件内容会进入 trace，默认开启是隐私问题。
 
 - 位置：`~/.pickel/traces/<session_id>.jsonl`
-- 开启：`settings.json` 的 `trace.enabled`（默认 `false`），环境变量 `PICKEL_TRACE=1` 覆盖之
+- 开启：`settings.json` 的 `trace_enabled`（默认 `false`），环境变量 `PICKEL_TRACE=1` 覆盖之。扁平键名与既有的 `react_max_steps` / `context_cli_turn_window` 风格一致，走 `loader.py` 的 `_BUILTIN_DEFAULTS` + `AppConfig` 字段这条既有路径
 - 格式：一行一个事件的 `to_dict()`
 
 ### 8.1 与「真源唯一」红线的关系
