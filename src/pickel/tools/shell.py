@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.sandbox import SandboxPolicy
 
 
 class ShellStatus(StrEnum):
@@ -49,8 +50,14 @@ class ShellExecutionResult:
 
 
 class PtyShellProcess:
-    def __init__(self, shell_program: str = "/bin/bash") -> None:
+    def __init__(
+        self,
+        shell_program: str = "/bin/bash",
+        sandbox: SandboxPolicy | None = None,
+    ) -> None:
         self.shell_program = shell_program
+        self.sandbox = sandbox
+        self.sandboxed = False
         self._master_fd: int | None = None
         self._stderr_fd: int | None = None
         self._stderr_child_fd: int | None = None
@@ -84,13 +91,22 @@ class PtyShellProcess:
                 '"$__pickel_marker" "$__pickel_ec" "$PWD"; fi; __pickel_marker='
             )
 
+            if self.sandbox is not None:
+                shell_env = self.sandbox.filter_env(shell_env)
+
+            spawn_argv = self._spawn_command()
+            if self.sandbox is not None:
+                spawn_argv, self.sandboxed = self.sandbox.wrap_command(
+                    spawn_argv, workspace=workspace_path
+                )
+
             # 命令 stderr 走独立管道（wrapper 里 2>&N 重定向）。
             # bash 自身的 stderr 必须留在 tty：bash 用 stderr 判定控制终端，
             # 接管道会让 job control 失效（前台命令不再有独立进程组）。
             stderr_read, stderr_write = os.pipe()
             os.set_blocking(stderr_read, False)
             self._process = subprocess.Popen(
-                self._spawn_command(),
+                spawn_argv,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -229,9 +245,10 @@ class PersistentShell:
         default_timeout_ms: int = 120000,
         output_dir: Path | None = None,
         limits: OutputLimits | None = None,
+        sandbox: SandboxPolicy | None = None,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
-        self.process = process or PtyShellProcess()
+        self.process = process or PtyShellProcess(sandbox=sandbox)
         self.default_timeout_ms = default_timeout_ms
         self._last_cwd = self.workspace_path
         self._running = False
@@ -474,6 +491,7 @@ class BackgroundTask:
         workspace_path: Path,
         shell_program: str,
         limits: OutputLimits | None = None,
+        sandbox: SandboxPolicy | None = None,
     ) -> None:
         self.task_id = task_id
         self.command = command
@@ -481,7 +499,9 @@ class BackgroundTask:
         self._limits = limits or OutputLimits()
         self._lock = threading.Lock()
         self._buffer = ""
-        self._process = PtyShellProcess(shell_program=shell_program)
+        self._process = PtyShellProcess(
+            shell_program=shell_program, sandbox=sandbox
+        )
         self._process.spawn(workspace_path)
         self._process.write(self.command + "\nexit $?\n")
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -525,8 +545,13 @@ class BackgroundTask:
 
 
 class ShellSessionManager:
-    def __init__(self, shell_program: str = "/bin/bash") -> None:
+    def __init__(
+        self,
+        shell_program: str = "/bin/bash",
+        sandbox: SandboxPolicy | None = None,
+    ) -> None:
         self.shell_program = shell_program
+        self.sandbox = sandbox
         self._sessions: dict[str, ShellSession] = {}
         self._background: dict[str, dict[str, BackgroundTask]] = {}
 
@@ -542,6 +567,7 @@ class ShellSessionManager:
             command=command,
             workspace_path=workspace_path.resolve(),
             shell_program=self.shell_program,
+            sandbox=self.sandbox,
         )
         self._background.setdefault(session_id, {})[task.task_id] = task
         return task
@@ -571,7 +597,11 @@ class ShellSessionManager:
                 workspace_path=workspace_path.resolve(),
                 shell=PersistentShell(
                     workspace_path=workspace_path.resolve(),
-                    process=PtyShellProcess(shell_program=self.shell_program),
+                    process=PtyShellProcess(
+
+                        shell_program=self.shell_program, sandbox=self.sandbox
+
+                    ),
                     output_dir=workspace_path.resolve()
                     / ".pickel" / "shell-output" / session_id,
                 ),
@@ -591,7 +621,11 @@ class ShellSessionManager:
             workspace_path=workspace_path.resolve(),
             shell=PersistentShell(
                 workspace_path=workspace_path.resolve(),
-                process=PtyShellProcess(shell_program=self.shell_program),
+                process=PtyShellProcess(
+
+                    shell_program=self.shell_program, sandbox=self.sandbox
+
+                ),
                 output_dir=workspace_path.resolve()
                 / ".pickel" / "shell-output" / session_id,
             ),
