@@ -9,6 +9,16 @@ from pickel.agents.skills import (
     compose_system_instruction,
     compose_system_instruction_parts,
 )
+from pickel.context.templates_loader import load_templates
+
+# 与包内默认 skills_guidance.md（rstrip 后）字节一致
+_DEFAULT_SKILLS_GUIDANCE = """You have access to filesystem-based skills.
+
+Skills are modular capabilities discovered from metadata at startup. The catalog below only includes each skill's name, description, and location. Their full instructions are not loaded yet.
+
+When a request matches a skill, first read that skill's SKILL.md from disk before following it. Only read additional files or execute bundled scripts if that skill's instructions reference them and they are necessary for the current task.
+
+Load skills progressively. Do not read every skill up front or assume a skill applies unless its description matches the task."""
 
 
 class SkillRegistryTests(unittest.TestCase):
@@ -81,7 +91,12 @@ class SkillRegistryTests(unittest.TestCase):
             )
 
             manifests = SkillRegistry.discover(root)
-            instruction = compose_system_instruction("You are Pickle.", manifests)
+            # 显式传入包默认文案，避免本机 ~/.pickel/templates 覆盖影响断言
+            instruction = compose_system_instruction(
+                "You are Pickle.",
+                manifests,
+                skills_guidance=_DEFAULT_SKILLS_GUIDANCE,
+            )
 
         self.assertIn("You are Pickle.", instruction)
         self.assertIn("You have access to filesystem-based skills.", instruction)
@@ -107,12 +122,72 @@ class SkillRegistryTests(unittest.TestCase):
             )
 
             manifests = SkillRegistry.discover(root)
-            parts = compose_system_instruction_parts("You are Pickle.", manifests)
+            parts = compose_system_instruction_parts(
+                "You are Pickle.",
+                manifests,
+                skills_guidance=_DEFAULT_SKILLS_GUIDANCE,
+            )
 
         self.assertEqual("You are Pickle.", parts.base_instruction)
-        self.assertIn("filesystem-based skills", parts.skills_guidance)
+        self.assertEqual(_DEFAULT_SKILLS_GUIDANCE, parts.skills_guidance)
         self.assertIn("Available skills:", parts.skills_catalog)
         self.assertIn("excel: Analyze spreadsheets.", parts.full_instruction)
+
+    def test_compose_default_skills_guidance_matches_package_template(self) -> None:
+        """无覆盖 home 时，默认 compose 的 guidance 与包内模板一致。"""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "excel"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: excel
+                    description: Analyze spreadsheets.
+                    ---
+                    """
+                ),
+                encoding="utf-8",
+            )
+            manifests = SkillRegistry.discover(root)
+            package_default = load_templates(
+                home=Path("/nonexistent-pickel-home-for-test")
+            )["skills_guidance"]
+            parts = compose_system_instruction_parts(
+                "You are Pickle.",
+                manifests,
+                skills_guidance=package_default,
+            )
+
+        self.assertEqual(_DEFAULT_SKILLS_GUIDANCE, package_default)
+        self.assertEqual(_DEFAULT_SKILLS_GUIDANCE, parts.skills_guidance)
+
+    def test_compose_accepts_explicit_skills_guidance_override(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "excel"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: excel
+                    description: Analyze spreadsheets.
+                    ---
+                    """
+                ),
+                encoding="utf-8",
+            )
+            manifests = SkillRegistry.discover(root)
+            parts = compose_system_instruction_parts(
+                "You are Pickle.",
+                manifests,
+                skills_guidance="custom guidance text",
+            )
+
+        self.assertEqual("custom guidance text", parts.skills_guidance)
+        self.assertIn("custom guidance text", parts.full_instruction)
 
     def test_repo_local_skills_use_uppercase_entrypoints_and_trigger_descriptions(self) -> None:
         root = Path(__file__).resolve().parents[2] / ".agent" / "skills"

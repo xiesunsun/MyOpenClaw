@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from pickel.context.templates_loader import load_templates
+
 
 @dataclass(frozen=True)
 class SkillManifest:
@@ -117,26 +119,30 @@ class SkillRegistry:
         return metadata if isinstance(metadata, dict) else None
 
 
-SKILL_USAGE_GUIDANCE = """You have access to filesystem-based skills.
-
-Skills are modular capabilities discovered from metadata at startup. The catalog below only includes each skill's name, description, and location. Their full instructions are not loaded yet.
-
-When a request matches a skill, first read that skill's SKILL.md from disk before following it. Only read additional files or execute bundled scripts if that skill's instructions reference them and they are necessary for the current task.
-
-Load skills progressively. Do not read every skill up front or assume a skill applies unless its description matches the task."""
-
-
 def compose_system_instruction(
     behavior_instruction: str,
     skills: list[SkillManifest],
+    *,
+    skills_guidance: str | None = None,
 ) -> str:
-    return compose_system_instruction_parts(behavior_instruction, skills).full_instruction
+    return compose_system_instruction_parts(
+        behavior_instruction,
+        skills,
+        skills_guidance=skills_guidance,
+    ).full_instruction
 
 
 def compose_system_instruction_parts(
     behavior_instruction: str,
     skills: list[SkillManifest],
+    *,
+    skills_guidance: str | None = None,
 ) -> SystemInstructionParts:
+    """组装 system instruction 分段。
+
+    skills 非空时，skills_guidance 默认取 load_templates() 的 skills_guidance；
+    也可由调用方显式传入以覆盖（便于测试与 prepare 管道注入）。
+    """
     base_instruction = behavior_instruction.strip()
     if not skills:
         return SystemInstructionParts(
@@ -144,9 +150,11 @@ def compose_system_instruction_parts(
             skills_guidance="",
             skills_catalog="",
         )
+    if skills_guidance is None:
+        skills_guidance = load_templates()["skills_guidance"]
     return SystemInstructionParts(
         base_instruction=base_instruction,
-        skills_guidance=SKILL_USAGE_GUIDANCE,
+        skills_guidance=skills_guidance,
         skills_catalog=format_skill_catalog(skills),
     )
 
