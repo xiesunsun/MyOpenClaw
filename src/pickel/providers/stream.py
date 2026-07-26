@@ -59,11 +59,16 @@ async def accumulate(stream: AsyncIterable[StreamDelta]) -> AssistantMessage:
     纯 AsyncIterator（只有 __aiter__/__anext__）同样接受：它没有需要关闭的
     资源，不该因为缺 aclose() 就被拒绝，更不该让 aclosing 的 AttributeError
     盖掉「流里没有 StreamCompleted」这个真正的错误。
+
+    aclose 检查针对 __aiter__() 派生出的迭代器而非外层对象：AsyncIterable
+    允许 __aiter__ 返回新的 async generator，此时外层没有 aclose，但派生的
+    生成器必须有人关。
     """
-    if hasattr(stream, "aclose"):
-        async with aclosing(stream):  # type: ignore[type-var]
-            return await _consume(stream)
-    return await _consume(stream)
+    iterator = stream.__aiter__()
+    if hasattr(iterator, "aclose"):
+        async with aclosing(iterator):  # type: ignore[type-var]
+            return await _consume(iterator)
+    return await _consume(iterator)
 
 
 async def _consume(stream: AsyncIterable[StreamDelta]) -> AssistantMessage:

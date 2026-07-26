@@ -110,6 +110,35 @@ def test_accumulate_关闭上游生成器():
     assert closed == ["cleanup"]
 
 
+def test_accumulate_关闭__aiter__派生的迭代器():
+    """AsyncIterable 允许 __aiter__ 返回新生成器；外层没有 aclose 时，
+    提前退出也必须关掉这个派生的生成器。
+
+    在事件循环内部采样 closed：asyncio.run 收尾的 shutdown_asyncgens()
+    会补跑泄漏生成器的 finally，事后断言会假性通过。
+    """
+    closed: list[str] = []
+
+    class _DerivedIterable:
+        """外层无 aclose，__aiter__ 每次派生一个新的 async generator。"""
+
+        def __aiter__(self) -> AsyncGenerator[StreamDelta, None]:
+            return self._gen()
+
+        async def _gen(self) -> AsyncGenerator[StreamDelta, None]:
+            try:
+                yield StreamCompleted(message=_message())
+                yield TextDelta(text="never reached")
+            finally:
+                closed.append("cleanup")
+
+    async def _run() -> list[str]:
+        await accumulate(_DerivedIterable())
+        return list(closed)
+
+    assert asyncio.run(_run()) == ["cleanup"]
+
+
 def test_accumulate_接受没有_aclose_的纯_iterator():
     """纯 AsyncIterator 无资源可关，不该因为缺 aclose() 被拒。"""
     message = _message("plain")
