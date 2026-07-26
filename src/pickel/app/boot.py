@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pickel.agents.agent import Agent
 from pickel.agents.behavior_loader import BehaviorLoader
-from pickel.agents.skills import SkillManifest, SkillRegistry
+from pickel.agents.skills import SkillRegistry
 from pickel.conversations.service import SessionService
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import sessions_db_path
@@ -44,7 +44,9 @@ class Boot:
         agent_config = self.app_config.get_agent_config(resolved_agent_id)
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
         file_access_mode = self.app_config.resolve_file_access_mode(resolved_agent_id)
-        skills = self._resolve_agent_skills(resolved_agent_id)
+        skills_path = self._resolve_agent_skills_path(resolved_agent_id)
+        # 初始列表；prepare 在 skills_path 非空时会每 turn re-discover
+        skills = SkillRegistry.discover(skills_path)
 
         return Agent(
             agent_id=resolved_agent_id,
@@ -55,13 +57,15 @@ class Boot:
             tool_ids=list(agent_config.tools),
             file_access_mode=file_access_mode.value,
             skills=skills,
+            skills_path=skills_path,
         )
 
-    def _resolve_agent_skills(self, agent_id: str) -> list[SkillManifest]:
+    def _resolve_agent_skills_path(self, agent_id: str) -> Path | None:
+        """解析并校验 skills 目录路径；不在此冻结 discover 结果。"""
         agent_config = self.app_config.get_agent_config(agent_id)
         skills_path = self.app_config.resolve_skills_path(agent_id)
         if skills_path is None:
-            return []
+            return None
         if (
             skills_path.exists()
             and self.app_config.resolve_file_access_mode(agent_id)
@@ -72,7 +76,7 @@ class Boot:
                 f"Skills path '{skills_path}' is outside workspace '{agent_config.workspace_path}' "
                 "and requires file_access_mode: full"
             )
-        return SkillRegistry.discover(skills_path)
+        return skills_path
 
     @staticmethod
     def _is_within_workspace(path: Path, workspace_path: Path) -> bool:

@@ -74,6 +74,7 @@ class BootTests(unittest.TestCase):
             self.assertEqual("You are Pickle.", agent.behavior_instruction)
             self.assertEqual(["echo"], agent.tool_ids)
             self.assertEqual(1, len(agent.skills))
+            self.assertEqual(root / ".agent" / "skills", agent.skills_path)
             self.assertIn("Available skills:", agent.system_instruction)
             self.assertIn("excel: Analyze spreadsheets.", agent.system_instruction)
 

@@ -11,7 +11,9 @@ from pickel.context.models import (
     SessionRecallSnippet,
     UserTurn,
 )
+from pickel.context.prepare import prepare
 from pickel.context.projection import project_messages
+from pickel.context.recall import Recall
 from pickel.context.service import ConversationContextService
 from pickel.context.session_recall import (
     NoopSessionRecallProvider,
@@ -27,6 +29,7 @@ __all__ = [
     "HookFeedback",
     "ModelContext",
     "NoopSessionRecallProvider",
+    "Recall",
     "SessionRecallProvider",
     "SessionRecallResult",
     "SessionRecallSnippet",
@@ -38,6 +41,7 @@ __all__ = [
     "apply_window",
     "build_session_recall_message",
     "group_message_units",
+    "prepare",
     "project_messages",
     "render_session_recall",
 ]

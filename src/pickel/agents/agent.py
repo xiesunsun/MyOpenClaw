@@ -20,6 +20,8 @@ class Agent:
     tool_ids: list[str]
     file_access_mode: str = "workspace"
     skills: list[SkillManifest] = field(default_factory=list)
+    # prepare 时若非空则每次 re-discover；否则用 skills 缓存
+    skills_path: Path | None = None
 
     @property
     def system_instruction(self) -> str:

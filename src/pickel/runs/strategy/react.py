@@ -9,7 +9,7 @@ from numbers import Real
 from uuid import uuid4
 
 from pickel.context.hook_feedback import HookFeedback
-from pickel.context.model_context import SystemContent, ToolDefinition
+from pickel.context.prepare import prepare
 from pickel.hooks.events import (
     PostToolBatchEvent,
     PostToolUseEvent,
@@ -53,16 +53,6 @@ class ReActStrategy(ExecutionStrategy):
             turn.hook_feedback.extend(initial_hook_feedback)
         last_assistant: AssistantMessage | None = None
 
-        system = SystemContent.from_text(run.agent.system_instruction or "")
-        tools = [
-            ToolDefinition(
-                name=tool.spec.name,
-                description=tool.spec.description,
-                input_schema=tool.spec.input_schema,
-            )
-            for tool in run.tools
-        ]
-
         for step_index in range(1, self.max_steps + 1):
             step = turn.begin_step(step_index)
             await self._emit_event(
@@ -73,10 +63,9 @@ class ReActStrategy(ExecutionStrategy):
                 ),
             )
 
-            model_context = run.context_assembler.assemble(
-                entries=session.active_path(),
-                system=system,
-                tools=tools,
+            model_context = prepare(
+                run=run,
+                session=session,
                 hook_feedback=turn.hook_feedback_for_current_step(),
                 unit_window=run.unit_window,
             )
