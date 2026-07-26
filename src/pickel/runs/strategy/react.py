@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import aclosing, nullcontext
 from dataclasses import replace
 from numbers import Real
 from uuid import uuid4
@@ -27,6 +28,12 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.message import ToolCall
 from pickel.conversations.session import Session
+from pickel.providers.stream import (
+    StreamCompleted,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallArgsDelta,
+)
 from pickel.runs.run import Run
 from pickel.runs.estimator import request_char_count
 from pickel.runs.event_bus import EventBus
@@ -34,6 +41,9 @@ from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
     StepStarted,
+    TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ToolCallArgsDeltaEvent,
     ToolCallCompleted,
     ToolCallStarted,
 )
@@ -126,9 +136,12 @@ class ReActStrategy(ExecutionStrategy):
                 )
 
             start = time.perf_counter()
-            assistant = await self._generate_with_optional_timeout(
+            assistant = await self._generate_streaming(
                 run=run,
                 context=model_context,
+                bus=bus,
+                envelope=envelope,
+                step_index=step_index,
             )
             elapsed_ms = round((time.perf_counter() - start) * 1000)
             assistant = self._ensure_metadata(
@@ -310,14 +323,75 @@ class ReActStrategy(ExecutionStrategy):
             return
         run.session_service.flush_new_entries(session=session, entries=[entry])
 
-    async def _generate_with_optional_timeout(self, *, run: Run, context):
+    async def _generate_streaming(
+        self,
+        *,
+        run: Run,
+        context,
+        bus: EventBus | None,
+        envelope,
+        step_index: int,
+    ) -> AssistantMessage:
+        """消费 provider.stream，把增量转成事件，返回最终消息。
+
+        超时语义与改造前一致：包住整个消费过程的总时长，
+        不是两次 delta 之间的间隔。
+        """
         timeout_seconds = self._provider_timeout_seconds(run)
-        if timeout_seconds is None:
-            return await run.provider.generate(context)
-        return await asyncio.wait_for(
-            run.provider.generate(context),
-            timeout=timeout_seconds,
+        coro = self._consume_stream(
+            run=run,
+            context=context,
+            bus=bus,
+            envelope=envelope,
+            step_index=step_index,
         )
+        if timeout_seconds is None:
+            return await coro
+        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+
+    async def _consume_stream(
+        self,
+        *,
+        run: Run,
+        context,
+        bus: EventBus | None,
+        envelope,
+        step_index: int,
+    ) -> AssistantMessage:
+        """取到 StreamCompleted 就返回；上游生成器显式关闭。
+
+        `async for` 里 return/break 不会关闭上游 async generator——它的
+        finally 要等 GC 或事件循环 shutdown 才跑，上游握着 provider 的
+        HTTP 流时这就是连接泄漏。与 providers.stream.accumulate 同一做法：
+        对带 aclose() 的迭代器用 aclosing 显式收尾（超时取消时同样收尾），
+        纯 AsyncIterator 没有要关的资源，直接消费。
+        """
+        iterator = run.provider.stream(context).__aiter__()
+        closer = (
+            aclosing(iterator) if hasattr(iterator, "aclose") else nullcontext()
+        )
+        async with closer:
+            async for delta in iterator:
+                if isinstance(delta, StreamCompleted):
+                    return delta.message
+                event = self._delta_to_event(delta, envelope(step_index))
+                if event is not None:
+                    await self._emit(bus, event)
+        raise ValueError("provider.stream 未以 StreamCompleted 收尾")
+
+    @staticmethod
+    def _delta_to_event(delta, envelope_value):
+        if isinstance(delta, TextDelta):
+            return TextDeltaEvent(envelope=envelope_value, text=delta.text)
+        if isinstance(delta, ThinkingDelta):
+            return ThinkingDeltaEvent(envelope=envelope_value, text=delta.text)
+        if isinstance(delta, ToolCallArgsDelta):
+            return ToolCallArgsDeltaEvent(
+                envelope=envelope_value,
+                tool_call_id=delta.tool_call_id,
+                partial_json=delta.partial_json,
+            )
+        return None
 
     @staticmethod
     def _provider_timeout_seconds(run: Run) -> float | None:

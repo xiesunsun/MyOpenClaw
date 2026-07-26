@@ -14,6 +14,7 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.providers.base import Provider
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
@@ -22,10 +23,14 @@ from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResul
 from pickel.tools.shell import ShellSessionManager
 
 
-class FakeProvider:
+class FakeProvider(Provider):
     def __init__(self, responses: list[AssistantMessage]) -> None:
         self.responses = list(responses)
         self.calls = 0
+
+    @classmethod
+    def from_config(cls, config: ModelConfig) -> "FakeProvider":
+        raise NotImplementedError
 
     async def generate(self, context):
         idx = min(self.calls, len(self.responses) - 1)
