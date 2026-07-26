@@ -242,3 +242,40 @@ def test_turn_marker_count_mismatch_skips_turn_enhancement():
 
     assert trajectory.turns[0].started_at is None
     assert trajectory.turns[0].failed is None
+
+
+def test_out_of_order_results_pair_by_id():
+    """两个 call 的结果乱序到达:必须按 id 配对,按序配对会错位。"""
+    session = Session.create(agent_id="Pickle")
+    session.append_user(_user("hi"))
+    session.append_assistant(
+        _assistant(
+            blocks=[
+                ToolCallContent(id="c1", name="tool_a", arguments={}),
+                ToolCallContent(id="c2", name="tool_b", arguments={}),
+            ],
+            text=None,
+        )
+    )
+    session.append_tool_result(
+        ToolResultMessage(
+            tool_call_id="c2",
+            tool_name="tool_b",
+            content=[TextContent(text="结果B")],
+        )
+    )
+    session.append_tool_result(
+        ToolResultMessage(
+            tool_call_id="c1",
+            tool_name="tool_a",
+            content=[TextContent(text="结果A")],
+        )
+    )
+
+    trajectory = collect_trajectory(session)
+
+    executions = trajectory.turns[0].steps[0].tool_executions
+    by_id = {execution.tool_call_id: execution for execution in executions}
+    assert by_id["c1"].result_preview == "结果A"
+    assert by_id["c2"].result_preview == "结果B"
+    assert not any(execution.orphan for execution in executions)
