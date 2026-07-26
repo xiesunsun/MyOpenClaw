@@ -1,7 +1,7 @@
 """prepare：模型请求组装的唯一编排入口。
 
 阶段顺序：system → history → recalls → feedback → tools。
-不调用 before_request（P2）。
+before_request 由 ReAct 在 prepare 之后、generate 之前调用。
 """
 
 from __future__ import annotations

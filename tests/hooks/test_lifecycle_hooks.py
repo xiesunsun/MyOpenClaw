@@ -1,13 +1,20 @@
 import asyncio
 import unittest
 
+from pickel.context.model_context import ModelContext, SystemContent
 from pickel.hooks.decisions import (
+    BeforeRequestDecision,
     PreToolUseDecision,
     UserPromptSubmitDecision,
+    merge_before_request_decisions,
     merge_pre_tool_decisions,
     merge_user_prompt_decisions,
 )
-from pickel.hooks.events import PreToolUseEvent, UserPromptSubmitEvent
+from pickel.hooks.events import (
+    BeforeRequestEvent,
+    PreToolUseEvent,
+    UserPromptSubmitEvent,
+)
 from pickel.hooks.lifecycle import LifecycleHooks
 
 
@@ -45,6 +52,19 @@ class MergeRulesTests(unittest.TestCase):
         )
         self.assertEqual({"a": 2, "b": 3}, d.updated_arguments)
 
+    def test_before_request_last_context_wins_and_feedback_merges(self) -> None:
+        ctx1 = ModelContext(system=SystemContent.from_text("a"), messages=[])
+        ctx2 = ModelContext(system=SystemContent.from_text("b"), messages=[])
+        d = merge_before_request_decisions(
+            [
+                BeforeRequestDecision(model_context=ctx1, feedback_text="f1"),
+                BeforeRequestDecision(model_context=None, feedback_text="f2"),
+                BeforeRequestDecision(model_context=ctx2, feedback_text=None),
+            ]
+        )
+        self.assertIs(ctx2, d.model_context)
+        self.assertEqual("f1\nf2", d.feedback_text)
+
 
 class Handler:
     def __init__(self, **responses):
@@ -66,6 +86,10 @@ class Handler:
     async def post_tool_batch(self, event):
         self.calls.append(("post_tool_batch", len(event.outcomes)))
         return self.responses.get("post_tool_batch")
+
+    async def before_request(self, event):
+        self.calls.append(("before_request", event.step_index))
+        return self.responses.get("before_request")
 
     async def turn_end(self, event):
         self.calls.append(("turn_end", event.reason))
@@ -112,6 +136,28 @@ class LifecycleHooksTests(unittest.TestCase):
             hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
         )
         self.assertEqual("block", d.action)
+
+    def test_before_request_handler_can_replace_system(self) -> None:
+        original = ModelContext(
+            system=SystemContent.from_text("original"),
+            messages=[],
+        )
+        replaced = ModelContext(
+            system=SystemContent.from_text("patched-by-hook"),
+            messages=[],
+        )
+        hooks = LifecycleHooks(
+            handlers=[
+                Handler(before_request=BeforeRequestDecision(model_context=replaced))
+            ]
+        )
+        d = asyncio.run(
+            hooks.before_request(
+                BeforeRequestEvent(session_id="s1", model_context=original)
+            )
+        )
+        self.assertIs(replaced, d.model_context)
+        self.assertEqual("patched-by-hook", d.model_context.system.as_text())
 
 
 if __name__ == "__main__":

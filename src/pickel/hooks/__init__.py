@@ -1,4 +1,5 @@
 from pickel.hooks.decisions import (
+    BeforeRequestDecision,
     PostToolBatchDecision,
     PostToolUseDecision,
     PreToolUseDecision,
@@ -6,6 +7,7 @@ from pickel.hooks.decisions import (
     UserPromptSubmitDecision,
 )
 from pickel.hooks.events import (
+    BeforeRequestEvent,
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
@@ -22,9 +24,11 @@ __all__ = [
     "PostToolUseEvent",
     "PostToolBatchEvent",
     "TurnEndEvent",
+    "BeforeRequestEvent",
     "UserPromptSubmitDecision",
     "PreToolUseDecision",
     "PostToolUseDecision",
     "PostToolBatchDecision",
     "TurnEndDecision",
+    "BeforeRequestDecision",
 ]

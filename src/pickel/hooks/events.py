@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from pickel.context.model_context import ModelContext
 
 
 def _now() -> datetime:
@@ -50,3 +53,10 @@ class PostToolBatchEvent(HookEventBase):
 @dataclass(frozen=True)
 class TurnEndEvent(HookEventBase):
     reason: str = "completed"
+
+
+@dataclass(frozen=True)
+class BeforeRequestEvent(HookEventBase):
+    """prepare 之后、provider.generate 之前；含拟发送 ModelContext 引用。"""
+
+    model_context: ModelContext | None = None

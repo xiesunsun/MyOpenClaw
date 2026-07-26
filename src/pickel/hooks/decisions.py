@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from pickel.context.model_context import ModelContext
 
 
 @dataclass
@@ -35,6 +38,14 @@ class PostToolBatchDecision:
 class TurnEndDecision:
     """观察者；无控制动作。"""
     pass
+
+
+@dataclass
+class BeforeRequestDecision:
+    """可选替换拟发送 ModelContext；feedback 文本可合并。"""
+
+    model_context: ModelContext | None = None
+    feedback_text: str | None = None
 
 
 def merge_user_prompt_decisions(
@@ -94,3 +105,17 @@ def merge_pre_tool_decisions(
 def merge_feedback_texts(texts: list[str | None]) -> str | None:
     parts = [t for t in texts if t]
     return "\n".join(parts) if parts else None
+
+
+def merge_before_request_decisions(
+    decisions: list[BeforeRequestDecision],
+) -> BeforeRequestDecision:
+    """model_context：最后一个非 None 覆盖；feedback 文本拼接。"""
+    if not decisions:
+        return BeforeRequestDecision()
+    model_context = None
+    for d in decisions:
+        if d.model_context is not None:
+            model_context = d.model_context
+    feedback = merge_feedback_texts([d.feedback_text for d in decisions])
+    return BeforeRequestDecision(model_context=model_context, feedback_text=feedback)

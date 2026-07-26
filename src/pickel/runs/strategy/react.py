@@ -8,9 +8,12 @@ import time
 from numbers import Real
 from uuid import uuid4
 
+from pickel.context.assembler import append_hook_feedback
 from pickel.context.hook_feedback import HookFeedback
+from pickel.context.model_context import ModelContext
 from pickel.context.prepare import prepare
 from pickel.hooks.events import (
+    BeforeRequestEvent,
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
@@ -69,6 +72,31 @@ class ReActStrategy(ExecutionStrategy):
                 hook_feedback=turn.hook_feedback_for_current_step(),
                 unit_window=run.unit_window,
             )
+            # before_request：可替换 context；feedback 并入当前请求消息
+            before = await run.lifecycle_hooks.before_request(
+                BeforeRequestEvent(
+                    session_id=session.session_id,
+                    turn_id=turn.turn_id,
+                    step_index=step_index,
+                    model_context=model_context,
+                )
+            )
+            if before.model_context is not None:
+                model_context = before.model_context
+            if before.feedback_text:
+                model_context = ModelContext(
+                    system=model_context.system,
+                    messages=append_hook_feedback(
+                        model_context.messages,
+                        [
+                            HookFeedback(
+                                source_event="BeforeRequest",
+                                text=before.feedback_text,
+                            )
+                        ],
+                    ),
+                    tools=model_context.tools,
+                )
 
             start = time.perf_counter()
             assistant = await self._generate_with_optional_timeout(

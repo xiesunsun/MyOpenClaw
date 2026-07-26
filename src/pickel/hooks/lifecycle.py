@@ -6,16 +6,19 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from pickel.hooks.decisions import (
+    BeforeRequestDecision,
     PostToolBatchDecision,
     PostToolUseDecision,
     PreToolUseDecision,
     TurnEndDecision,
     UserPromptSubmitDecision,
+    merge_before_request_decisions,
     merge_feedback_texts,
     merge_pre_tool_decisions,
     merge_user_prompt_decisions,
 )
 from pickel.hooks.events import (
+    BeforeRequestEvent,
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
@@ -33,6 +36,9 @@ class HookHandler(Protocol):
     async def post_tool_batch(
         self, event: PostToolBatchEvent
     ) -> PostToolBatchDecision | None: ...
+    async def before_request(
+        self, event: BeforeRequestEvent
+    ) -> BeforeRequestDecision | None: ...
     async def turn_end(self, event: TurnEndEvent) -> TurnEndDecision | None: ...
 
 
@@ -87,6 +93,15 @@ class LifecycleHooks:
             if isinstance(result, PostToolBatchDecision):
                 texts.append(result.feedback_text)
         return PostToolBatchDecision(feedback_text=merge_feedback_texts(texts))
+
+    async def before_request(self, event: BeforeRequestEvent) -> BeforeRequestDecision:
+        """prepare 后、generate 前。合并：最后非 None model_context 覆盖；feedback 拼接。"""
+        decisions: list[BeforeRequestDecision] = []
+        for handler in self.handlers:
+            result = await _call(handler, "before_request", event)
+            if isinstance(result, BeforeRequestDecision):
+                decisions.append(result)
+        return merge_before_request_decisions(decisions)
 
     async def turn_end(self, event: TurnEndEvent) -> TurnEndDecision:
         for handler in self.handlers:
