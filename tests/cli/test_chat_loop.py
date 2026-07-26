@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import unittest
@@ -508,14 +509,30 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(loop._trace_sink)
         self.assertTrue(sink.closed)
 
-    async def test_trace_sink_closes_when_turn_raises_keyboard_interrupt(self) -> None:
-        """Ctrl-C 打断 turn 不经过 _close_session，句柄由 run() 的 finally 释放。"""
+    async def test_keyboard_interrupt_cancels_turn_and_loop_continues(self) -> None:
+        """Ctrl-C 只中断当前 turn，循环继续；sink 在 /exit 关会话时释放。
+
+        KeyboardInterrupt 若从 task 协程内部抛出，会经 Task.__step 直接砸进
+        事件循环把测试进程杀掉——真实 Ctrl-C 抵达的是 `_loop` 的 `await task`
+        点，故用「异常已设置的 Future」模拟这条到达路径。
+        """
+
+        def interrupt_at_await(coro):
+            coro.close()  # turn 未启动就被打断
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(KeyboardInterrupt())
+            return future
+
         with TemporaryDirectory() as tmpdir:
             trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
-            submitted_inputs = iter(["hello"])
+            submitted_inputs = iter(["hello", "/exit"])
             with (
                 patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
                 patch("pickel.cli.chat.trace_path", return_value=trace_file),
+                patch(
+                    "pickel.cli.chat.asyncio.create_task",
+                    side_effect=interrupt_at_await,
+                ),
             ):
                 loop = ChatLoop(
                     agent=self._build_agent(),
@@ -525,8 +542,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                     input_reader=lambda _: next(submitted_inputs),
                 )
                 sink = loop._trace_sink
-                with self.assertRaises(KeyboardInterrupt):
-                    await loop.run()
+                # 新语义：turn 内 Ctrl-C 不再冒出 run()，而是取消本轮后回到输入
+                await loop.run()
 
         self.assertTrue(sink.closed)
 
