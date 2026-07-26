@@ -42,12 +42,14 @@ class ShellExecutionResult:
     timed_out: bool = False
     truncated: bool = False
     full_output_path: Path | None = None
+    status_message: str = ""
 
 
 class PtyShellProcess:
     def __init__(self, shell_program: str = "/bin/bash") -> None:
         self.shell_program = shell_program
         self._master_fd: int | None = None
+        self._stderr_fd: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
 
     def spawn(self, workspace_path: Path, env: dict[str, str] | None = None) -> None:
@@ -72,13 +74,16 @@ class PtyShellProcess:
                 self._spawn_command(),
                 stdin=slave_fd,
                 stdout=slave_fd,
-                stderr=slave_fd,
+                stderr=subprocess.PIPE,
                 cwd=str(workspace_path),
                 env=shell_env,
                 close_fds=True,
                 start_new_session=True,
             )
             self._master_fd = master_fd
+            assert self._process.stderr is not None
+            self._stderr_fd = self._process.stderr.fileno()
+            os.set_blocking(self._stderr_fd, False)
         finally:
             os.close(slave_fd)
 
@@ -89,17 +94,24 @@ class PtyShellProcess:
             raise RuntimeError("Shell process is not started")
         os.write(self._master_fd, data.encode("utf-8"))
 
-    def read_chunk(self, timeout_ms: int) -> str:
-        if self._master_fd is None:
-            return ""
-        ready, _, _ = select.select([self._master_fd], [], [], timeout_ms / 1000)
-        if not ready:
-            return ""
-        try:
-            chunk = os.read(self._master_fd, 4096)
-        except OSError:
-            return ""
-        return chunk.decode("utf-8", errors="replace")
+    def read_chunks(self, timeout_ms: int) -> tuple[str, str]:
+        """同时读 pty（stdout）与 stderr pipe，返回 (stdout, stderr) 增量。"""
+        fds = [fd for fd in (self._master_fd, self._stderr_fd) if fd is not None]
+        if not fds:
+            return "", ""
+        ready, _, _ = select.select(fds, [], [], timeout_ms / 1000)
+        out = err = ""
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                continue
+            text = chunk.decode("utf-8", errors="replace")
+            if fd == self._master_fd:
+                out += text
+            else:
+                err += text
+        return out, err
 
     def interrupt(self) -> None:
         if not self.is_alive() or self._process is None:
@@ -133,6 +145,7 @@ class PtyShellProcess:
             except OSError:
                 pass
             self._master_fd = None
+        self._stderr_fd = None
         self._process = None
 
     def is_alive(self) -> bool:
@@ -143,8 +156,8 @@ class PtyShellProcess:
             return
         deadline = time.monotonic() + 0.05
         while time.monotonic() < deadline:
-            chunk = self.read_chunk(timeout_ms=10)
-            if not chunk:
+            out, err = self.read_chunks(timeout_ms=10)
+            if not out and not err:
                 break
 
     def _spawn_command(self) -> list[str]:
@@ -199,7 +212,8 @@ class PersistentShell:
         if not self.is_alive():
             return ShellExecutionResult(
                 stdout="",
-                stderr="Shell is not running.",
+                stderr="",
+                status_message="Shell is not running.",
                 exit_code=1,
                 cwd=self._last_cwd,
                 shell_status=ShellStatus.TERMINATED,
@@ -219,6 +233,7 @@ class PersistentShell:
 
     def _read_until_marker(self, marker: str, *, timeout_ms: int) -> ShellExecutionResult:
         buffer = ""
+        err_buffer = ""
         deadline = time.monotonic() + (timeout_ms / 1000)
 
         while True:
@@ -228,7 +243,8 @@ class PersistentShell:
                 )
                 return ShellExecutionResult(
                     stdout=stdout,
-                    stderr="Shell terminated unexpectedly.",
+                    stderr=_normalize_output(err_buffer),
+                    status_message="Shell terminated unexpectedly.",
                     exit_code=1,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TERMINATED,
@@ -238,6 +254,9 @@ class PersistentShell:
 
             marker_match = _find_marker(buffer, marker)
             if marker_match is not None:
+                # 命令已结束；stderr pipe 可能还有残余，短窗口 drain 一次
+                _, late_err = self.process.read_chunks(timeout_ms=50)
+                err_buffer += late_err
                 output, truncated, full_path = self._finalize_output(
                     _normalize_output(buffer[:marker_match.start()])
                 )
@@ -246,7 +265,7 @@ class PersistentShell:
                 self._last_cwd = cwd
                 return ShellExecutionResult(
                     stdout=output,
-                    stderr="",
+                    stderr=_normalize_output(err_buffer),
                     exit_code=exit_code,
                     cwd=cwd,
                     shell_status=ShellStatus.READY,
@@ -263,7 +282,8 @@ class PersistentShell:
                 )
                 return ShellExecutionResult(
                     stdout=stdout,
-                    stderr="Shell command timed out.",
+                    stderr=_normalize_output(err_buffer),
+                    status_message="Shell command timed out.",
                     exit_code=124,
                     cwd=self._last_cwd,
                     shell_status=ShellStatus.TIMED_OUT,
@@ -272,9 +292,13 @@ class PersistentShell:
                     full_output_path=full_path,
                 )
 
-            chunk = self.process.read_chunk(timeout_ms=min(remaining_ms, 100))
-            if chunk:
-                buffer += chunk
+            out_chunk, err_chunk = self.process.read_chunks(
+                timeout_ms=min(remaining_ms, 100)
+            )
+            if out_chunk:
+                buffer += out_chunk
+            if err_chunk:
+                err_buffer += err_chunk
             if len(buffer) > self._limits.raw_max_chars:
                 keep_head = self._limits.raw_max_chars // 2
                 keep_tail = self._limits.raw_max_chars // 4
@@ -446,9 +470,13 @@ class ShellExecTool(BaseTool):
             str(arguments["command"]),
             timeout_ms=int(timeout_ms) if timeout_ms is not None else None,
         )
-        content = result.stdout or result.stderr
+        parts = [result.stdout] if result.stdout else []
+        if result.stderr:
+            parts.append(f"--- stderr ---\n{result.stderr}")
+        if result.status_message:
+            parts.append(f"[status] {result.status_message}")
         return ToolExecutionResult(
-            content=content,
+            content="\n".join(parts),
             is_error=result.exit_code != 0 or result.shell_status != ShellStatus.READY,
             metadata={
                 "cwd": str(result.cwd),
@@ -459,6 +487,7 @@ class ShellExecTool(BaseTool):
                 "full_output_path": (
                     str(result.full_output_path) if result.full_output_path else None
                 ),
+                "stderr_chars": len(result.stderr),
                 "created_new_shell": created_new_shell,
             },
         )

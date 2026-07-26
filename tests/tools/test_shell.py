@@ -197,7 +197,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(timed_out.is_error)
-        self.assertEqual("Shell command timed out.", timed_out.content)
+        self.assertEqual("[status] Shell command timed out.", timed_out.content)
         self.assertEqual(124, timed_out.metadata["exit_code"])
         self.assertEqual(True, timed_out.metadata["timed_out"])
         self.assertEqual("timed_out", timed_out.metadata["shell_status"])
@@ -303,3 +303,33 @@ class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.truncated)
         self.assertIsNone(result.full_output_path)
+
+
+class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stderr_is_separated_from_stdout(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                result = shell.exec("echo out-line; echo err-line >&2")
+            finally:
+                shell.terminate()
+
+        self.assertIn("out-line", result.stdout)
+        self.assertNotIn("err-line", result.stdout)
+        self.assertIn("err-line", result.stderr)
+
+    async def test_tool_content_appends_stderr_block(self) -> None:
+        manager = ShellSessionManager()
+        tool = ShellExecTool()
+        with TemporaryDirectory() as tmpdir:
+            context = _context(Path(tmpdir), manager)
+            try:
+                result = await tool.execute(
+                    {"command": "echo ok; echo bad >&2"}, context
+                )
+            finally:
+                manager.close(context.session_id)
+
+        self.assertIn("ok", result.content)
+        self.assertIn("--- stderr ---", result.content)
+        self.assertIn("bad", result.content)
