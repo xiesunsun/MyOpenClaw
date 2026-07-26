@@ -6,6 +6,7 @@ before_request 由 ReAct 在 prepare 之后、generate 之前调用。
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Sequence
 
 from pickel.context.assembler import append_hook_feedback
@@ -22,6 +23,8 @@ from pickel.tools.bus import ToolSnapshot
 from pickel.context.window import apply_window
 from pickel.conversations.agent_message import AgentMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_system(*, run: Any) -> SystemContent:
@@ -89,13 +92,20 @@ async def resolve_recalls(
     text = current_user_text or extract_current_user_text(session)
     result = list(messages)
     for source in recall_sources:
-        result.extend(
-            await source.provide(
+        try:
+            provided = await source.provide(
                 run=run,
                 session=session,
                 current_user_text=text,
             )
-        )
+        except Exception:
+            # recall 是旁路能力：单源失败不该打断 turn
+            logger.exception(
+                "Recall source %s failed",
+                type(source).__name__,
+            )
+            continue
+        result.extend(provided)
     return result
 
 

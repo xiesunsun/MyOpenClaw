@@ -252,3 +252,29 @@ def test_resolve_tools_returns_empty_for_missing_snapshot():
     from pickel.context.prepare import resolve_tools
 
     assert resolve_tools(snapshot=None) == []
+
+
+def test_failing_recall_source_does_not_break_the_turn():
+    class _BoomRecall:
+        async def provide(self, *, run, session, current_user_text=""):
+            raise RuntimeError("recall exploded")
+
+    class _HealthyRecall:
+        async def provide(self, *, run, session, current_user_text=""):
+            return [UserMessage(content=[TextContent(text="recalled")])]
+
+    session = Session.create(agent_id="Pickle")
+    session.append_user(UserMessage(content=[TextContent(text="hi")]))
+
+    messages = asyncio.run(
+        resolve_recalls(
+            messages=[],
+            run=_run(),
+            session=session,
+            recall_sources=[_BoomRecall(), _HealthyRecall()],
+        )
+    )
+
+    # 坏的被跳过，好的仍然生效
+    assert len(messages) == 1
+    assert messages[0].content[0].text == "recalled"
