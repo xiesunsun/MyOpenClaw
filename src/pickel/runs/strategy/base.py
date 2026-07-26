@@ -20,7 +20,7 @@ class ExecutionStrategy(ABC):
         self,
         run: Run,
         session: Session,
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
         turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
     ) -> AssistantMessage:

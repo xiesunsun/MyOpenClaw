@@ -5,7 +5,11 @@ from pathlib import Path
 from pickel.agents.agent import Agent
 from pickel.context.assembler import ContextAssembler
 from pickel.context.model_context import ModelContext
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ModelResponseMetadata,
+    ModelUsage,
+)
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.hooks.lifecycle import NoopLifecycleHooks
@@ -39,6 +43,35 @@ class StubProvider(Provider):
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
         return self.responses.pop(0)
+
+
+class AlwaysToolCallProvider(Provider):
+    """永远返回 tool_call，用于逼 ReAct 跑到 max_steps。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @classmethod
+    def from_config(cls, config: ModelConfig) -> "AlwaysToolCallProvider":
+        raise NotImplementedError
+
+    async def generate(self, context: ModelContext) -> AssistantMessage:
+        self.calls += 1
+        return AssistantMessage(
+            content=[
+                ToolCallContent(
+                    id=f"call-{self.calls}",
+                    name="echo",
+                    arguments={"text": "again"},
+                )
+            ],
+            metadata=ModelResponseMetadata(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+                elapsed_ms=100,
+                usage=ModelUsage(input_tokens=100, output_tokens=10),
+            ),
+        )
 
 
 class DelayEchoTool(BaseTool):
@@ -142,9 +175,13 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         batch_id = step_events[1].batch_id
         self.assertTrue(batch_id)
         self.assertEqual(batch_id, step_events[2].batch_id)
+        self.assertEqual(batch_id, step_events[3].batch_id)
+        self.assertEqual(batch_id, step_events[4].batch_id)
         self.assertEqual(0, step_events[1].call_index)
+        self.assertEqual(0, step_events[2].call_index)
         self.assertEqual("slow", step_events[2].tool_result.content)
         self.assertEqual(1, step_events[3].call_index)
+        self.assertEqual(1, step_events[4].call_index)
         self.assertEqual("fast", step_events[4].tool_result.content)
         self.assertEqual("done", step_events[6].text)
 
@@ -243,6 +280,67 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         turn_ids = {e.envelope.turn_id for e in events}
         self.assertEqual(1, len(turn_ids))
         self.assertTrue(next(iter(turn_ids)))
+
+        # 显式 turn_id：Task 5 的 turn 级事件靠它与 step 事件共享同一个 id
+        explicit_run = _run(
+            agent=agent,
+            provider=StubProvider(
+                responses=[AssistantMessage(content=[TextContent(text="done")])]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=4),
+        )
+        explicit_session = Session.create(agent_id="Pickle", session_id="session-2")
+        explicit_bus = EventBus()
+        explicit_events = []
+        explicit_bus.subscribe(lambda event: explicit_events.append(event))
+
+        await explicit_run.strategy.execute(
+            run=explicit_run,
+            session=explicit_session,
+            bus=explicit_bus,
+            turn_id="T-1",
+        )
+
+        self.assertTrue(explicit_events)
+        self.assertEqual({"T-1"}, {e.envelope.turn_id for e in explicit_events})
+
+    async def test_max_steps_事件的_usage_不重复计入合成消息(self) -> None:
+        """max_msg 复用最后一次 generate 的 metadata，落盘后再求值会数两遍。"""
+        agent = Agent(
+            agent_id="Pickle",
+            workspace_path=Path("/tmp/pickle"),
+            behavior_path=Path("/tmp/pickle/AGENT.md"),
+            behavior_instruction="You are Pickle.",
+            model_config=ModelConfig(
+                provider="google/gemini",
+                model="gemini-3-flash-preview",
+            ),
+            tool_ids=["echo"],
+        )
+        provider = AlwaysToolCallProvider()
+        run = _run(
+            agent=agent,
+            provider=provider,
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        session = Session.create(agent_id="Pickle", session_id="session-1")
+        bus = EventBus()
+        events = []
+        bus.subscribe(lambda event: events.append(event))
+
+        await run.turn(session=session, user_text="hello", bus=bus)
+
+        self.assertEqual(2, provider.calls)
+        final = [e for e in events if isinstance(e, AssistantMessageEvent)][-1]
+        self.assertEqual(
+            "Reached the maximum number of reasoning steps.", final.text
+        )
+        # 真实 generate 只发生了 2 次，合成的 max_msg 不得让合计变成 3
+        self.assertEqual(provider.calls, final.usage.steps)
+        self.assertEqual(200, final.usage.input_tokens)
+        self.assertEqual(20, final.usage.output_tokens)
 
 
 def _without_turn_events(events):

@@ -281,6 +281,9 @@ class ReActStrategy(ExecutionStrategy):
                 turn.hook_feedback.append(fb)
 
         # max steps
+        # 必须在 append 之前求值：max_msg 复用 last_assistant.metadata（同一份 usage），
+        # 落盘后 last_turn_usage 会把最后一次 generate 的用量数第二遍。
+        max_steps_usage = last_turn_usage(session)
         max_msg = AssistantMessage(
             content=[
                 TextContent(text="Reached the maximum number of reasoning steps.")
@@ -294,7 +297,7 @@ class ReActStrategy(ExecutionStrategy):
             AssistantMessageEvent(
                 envelope=envelope(self.max_steps),
                 text="Reached the maximum number of reasoning steps.",
-                usage=last_turn_usage(session),
+                usage=max_steps_usage,
             ),
         )
         return max_msg
