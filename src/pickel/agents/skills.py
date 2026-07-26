@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 import yaml
 
 from pickel.context.templates_loader import load_templates
+
+logger = logging.getLogger(__name__)
+
+_VALID_STATUSES = ("active", "stale", "archived")
 
 
 @dataclass(frozen=True)
@@ -14,6 +19,10 @@ class SkillManifest:
     description: str
     skill_dir: Path
     skill_file: Path
+    version: str = ""
+    status: str = "active"
+    required_env: tuple[str, ...] = ()
+    allowed_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,12 +103,46 @@ class SkillRegistry:
         if not isinstance(description, str) or not description.strip():
             return None
 
+        status = metadata.get("status", "active")
+        if status not in _VALID_STATUSES:
+            logger.warning(
+                "Skill '%s': unknown status %r; falling back to 'active'", name, status
+            )
+            status = "active"
+
         return SkillManifest(
             name=name.strip(),
             description=description.strip(),
             skill_dir=skill_file.parent.resolve(),
             skill_file=skill_file.resolve(),
+            version=cls._coerce_str(metadata.get("version")),
+            status=status,
+            required_env=cls._coerce_str_tuple(
+                metadata.get("required_env"), name, "required_env"
+            ),
+            allowed_tools=cls._coerce_str_tuple(
+                metadata.get("allowed_tools"), name, "allowed_tools"
+            ),
         )
+
+    @staticmethod
+    def _coerce_str(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _coerce_str_tuple(
+        cls, value: object, skill_name: str, field: str
+    ) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, list):
+            logger.warning(
+                "Skill '%s': %s must be a list; ignoring %r", skill_name, field, value
+            )
+            return ()
+        return tuple(str(item).strip() for item in value if str(item).strip())
 
     @staticmethod
     def _load_frontmatter(skill_file: Path) -> dict[str, object] | None:

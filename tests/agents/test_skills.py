@@ -250,3 +250,60 @@ class SkillRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillManifestFieldTests(unittest.TestCase):
+    def _write_skill(self, root: Path, name: str, frontmatter: str) -> Path:
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\n{frontmatter}\n---\n\n# {name}\n", encoding="utf-8"
+        )
+        return skill_dir
+
+    def test_new_fields_are_parsed(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_skill(
+                root,
+                "imagegen",
+                "name: imagegen\ndescription: Generate images.\n"
+                "version: 1.2.0\nstatus: stale\n"
+                "required_env: [GEMINI_API_KEY]\nallowed_tools: [shell_exec]",
+            )
+
+            manifest = SkillRegistry.discover(root)[0]
+
+            self.assertEqual("1.2.0", manifest.version)
+            self.assertEqual("stale", manifest.status)
+            self.assertEqual(("GEMINI_API_KEY",), manifest.required_env)
+            self.assertEqual(("shell_exec",), manifest.allowed_tools)
+
+    def test_missing_fields_fall_back_to_defaults(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_skill(root, "plain", "name: plain\ndescription: Plain skill.")
+
+            manifest = SkillRegistry.discover(root)[0]
+
+            self.assertEqual("", manifest.version)
+            self.assertEqual("active", manifest.status)
+            self.assertEqual((), manifest.required_env)
+            self.assertEqual((), manifest.allowed_tools)
+
+    def test_bad_values_fall_back_without_dropping_the_skill(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_skill(
+                root,
+                "weird",
+                "name: weird\ndescription: Weird values.\n"
+                "status: bogus\nversion: 12\nrequired_env: notalist",
+            )
+
+            manifests = SkillRegistry.discover(root)
+
+            self.assertEqual(1, len(manifests))
+            self.assertEqual("active", manifests[0].status)
+            self.assertEqual("12", manifests[0].version)
+            self.assertEqual((), manifests[0].required_env)
