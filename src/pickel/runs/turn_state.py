@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pickel.context.hook_feedback import HookFeedback
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.bus import ToolSnapshot
 
 
 @dataclass
@@ -27,6 +28,8 @@ class TurnState:
     current_user_entry_id: str | None = None
     current_step: StepState | None = None
     hook_feedback: list[HookFeedback] = field(default_factory=list)
+    # 本 turn 的工具快照：turn 开始时取一次，turn 内不变
+    tool_snapshot: ToolSnapshot | None = None
     final_assistant_entry_id: str | None = None
     # 本 step 新增反馈（Assembler 只注入这份）
     step_hook_feedback: list[HookFeedback] = field(default_factory=list)

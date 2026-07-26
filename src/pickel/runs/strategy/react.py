@@ -36,6 +36,7 @@ from pickel.runs.usage_anchor import context_fingerprint
 from pickel.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
 from pickel.runs.turn_state import ToolExecutionOutcome, TurnState
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.bus import ToolSnapshot
 
 
 class ReActStrategy(ExecutionStrategy):
@@ -54,6 +55,10 @@ class ReActStrategy(ExecutionStrategy):
         initial_hook_feedback: list[HookFeedback] | None = None,
     ) -> AssistantMessage:
         turn = TurnState()
+        # turn 边界快照：整个 turn 的所有 step 共用同一份工具集。
+        # 每 step 重取会让 prompt cache 每 step 失效，也可能让模型看到的定义
+        # 与执行时找到的工具对象不一致。
+        turn.tool_snapshot = run.tool_bus.snapshot(run.activation)
         if initial_hook_feedback:
             turn.step_hook_feedback.extend(initial_hook_feedback)
             turn.hook_feedback.extend(initial_hook_feedback)
@@ -207,7 +212,10 @@ class ReActStrategy(ExecutionStrategy):
                         thought_signature=tool_call.thought_signature,
                     )
                     result = await self._execute_tool_call(
-                        run=run, session=session, tool_call=exec_call
+                        run=run,
+                        session=session,
+                        tool_call=exec_call,
+                        snapshot=turn.tool_snapshot,
                     )
                 result_entry = session.append_tool_result(
                     ToolResultMessage(
@@ -334,6 +342,7 @@ class ReActStrategy(ExecutionStrategy):
         run: Run,
         session: Session,
         event_handler: RuntimeEventHandler | None,
+        snapshot: ToolSnapshot | None = None,
     ) -> list[ToolExecutionOutcome]:
         total_calls = len(tool_calls)
         runtime_calls = [
@@ -407,8 +416,11 @@ class ReActStrategy(ExecutionStrategy):
         tool_call: ToolCallContent,
         run: Run,
         session: Session,
+        snapshot: ToolSnapshot | None = None,
     ) -> ToolExecutionOutcome:
-        result = await self._execute_tool_call(run=run, session=session, tool_call=tool_call)
+        result = await self._execute_tool_call(
+            run=run, session=session, tool_call=tool_call, snapshot=snapshot
+        )
         return ToolExecutionOutcome(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -423,11 +435,10 @@ class ReActStrategy(ExecutionStrategy):
         run: Run,
         session: Session,
         tool_call: ToolCallContent,
+        snapshot: ToolSnapshot | None,
     ) -> ToolExecutionResult:
-        tool = next(
-            (candidate for candidate in run.tools if candidate.spec.name == tool_call.name),
-            None,
-        )
+        # 按 ToolEntry.name 查找：模型看到的名字（含命名空间前缀）就是查找键
+        tool = snapshot.find(tool_call.name) if snapshot is not None else None
         if tool is None:
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' is not available.",
