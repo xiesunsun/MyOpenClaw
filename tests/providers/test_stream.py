@@ -29,6 +29,21 @@ async def _gen(deltas: list[StreamDelta]) -> AsyncGenerator[StreamDelta, None]:
         yield delta
 
 
+class _PlainIterator:
+    """只有 __aiter__/__anext__ 的异步迭代器——没有 aclose()。"""
+
+    def __init__(self, deltas: list[StreamDelta]) -> None:
+        self._remaining = list(deltas)
+
+    def __aiter__(self) -> _PlainIterator:
+        return self
+
+    async def __anext__(self) -> StreamDelta:
+        if not self._remaining:
+            raise StopAsyncIteration
+        return self._remaining.pop(0)
+
+
 def test_四种_delta_都是_StreamDelta():
     assert isinstance(TextDelta(text="a"), StreamDelta)
     assert isinstance(ThinkingDelta(text="a"), StreamDelta)
@@ -95,6 +110,20 @@ def test_accumulate_关闭上游生成器():
     assert closed == ["cleanup"]
 
 
+def test_accumulate_接受没有_aclose_的纯_iterator():
+    """纯 AsyncIterator 无资源可关，不该因为缺 aclose() 被拒。"""
+    message = _message("plain")
+    stream = _PlainIterator([TextDelta(text="p"), StreamCompleted(message=message)])
+
+    assert asyncio.run(accumulate(stream)) is message
+
+
+def test_纯_iterator_无_completed_仍报_ValueError():
+    """缺 aclose() 不得把「流里没有 StreamCompleted」盖成 AttributeError。"""
+    with pytest.raises(ValueError, match="StreamCompleted"):
+        asyncio.run(accumulate(_PlainIterator([TextDelta(text="a")])))
+
+
 def test_stream_源码不出现_SDK_名字():
     """源码文本级检查：本模块自己不提 provider SDK。
 
@@ -112,7 +141,11 @@ def test_stream_源码不出现_SDK_名字():
 
 
 def test_stream_源码不出现_UI_库名字():
-    """纯值对象模块不得碰渲染层。"""
+    """源码文本级检查：本模块自己不碰渲染层。
+
+    同样不是导入图级隔离——`import pickel.providers.stream` 会经由包的
+    eager import 把 rich 一并拉进内存。
+    """
     from pathlib import Path
 
     import pickel.providers.stream as module
