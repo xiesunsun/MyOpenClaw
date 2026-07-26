@@ -125,3 +125,30 @@ def test_无订阅者时_emit_仍分配_seq():
     second = asyncio.run(bus.emit(StepStarted()))
 
     assert (first.envelope.seq, second.envelope.seq) == (0, 1)
+
+
+def test_退订同一绑定方法的其中一次订阅不影响顺序与另一次():
+    """绑定方法两次取值 == 成立；退订必须按订阅时的身份（token），
+
+    而非按 == 匹配删除，否则会删错槽位、打乱剩余订阅者的调用顺序。
+    """
+    bus = EventBus()
+    call_order: list[str] = []
+
+    class Renderer:
+        def handle(self, event) -> None:
+            call_order.append("renderer")
+
+    renderer = Renderer()
+
+    def other(event) -> None:
+        call_order.append("other")
+
+    bus.subscribe(renderer.handle)
+    bus.subscribe(other)
+    unsubscribe_second_renderer_sub = bus.subscribe(renderer.handle)
+
+    unsubscribe_second_renderer_sub()
+    asyncio.run(bus.emit(StepStarted()))
+
+    assert call_order == ["renderer", "other"]
