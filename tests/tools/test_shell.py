@@ -195,12 +195,17 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 {"command": "sleep 1", "timeout_ms": 50},
                 context,
             )
+            # 新语义：超时不杀会话，前台命令仍在跑
+            session = manager.get("session-1")
+            self.assertTrue(session.shell.is_alive())
+            self.assertTrue(session.shell.pending)
+            manager.close("session-1")
 
         self.assertTrue(timed_out.is_error)
-        self.assertEqual("[status] Shell command timed out.", timed_out.content)
+        self.assertIn("timed out and is still running", timed_out.content)
         self.assertEqual(124, timed_out.metadata["exit_code"])
         self.assertEqual(True, timed_out.metadata["timed_out"])
-        self.assertEqual("timed_out", timed_out.metadata["shell_status"])
+        self.assertEqual("running", timed_out.metadata["shell_status"])
 
     async def test_shell_exec_rejects_non_positive_timeout_override(self) -> None:
         manager = ShellSessionManager()
@@ -333,3 +338,29 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ok", result.content)
         self.assertIn("--- stderr ---", result.content)
         self.assertIn("bad", result.content)
+
+
+class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_returns_partial_output_and_keeps_session(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                result = shell.exec("echo before-sleep; sleep 30", timeout_ms=500)
+
+                self.assertTrue(result.timed_out)
+                self.assertEqual(ShellStatus.RUNNING, result.shell_status)
+                self.assertIn("before-sleep", result.stdout)
+                self.assertTrue(shell.is_alive())      # 会话没被杀
+                self.assertTrue(shell.pending)
+            finally:
+                shell.terminate()
+
+    async def test_exec_while_pending_raises(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = PersistentShell(workspace_path=Path(tmpdir))
+            try:
+                shell.exec("sleep 30", timeout_ms=300)
+                with self.assertRaises(RuntimeError):
+                    shell.exec("echo nope")
+            finally:
+                shell.terminate()

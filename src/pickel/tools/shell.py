@@ -19,6 +19,7 @@ from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResul
 
 class ShellStatus(StrEnum):
     READY = "ready"
+    RUNNING = "running"          # 前台命令仍在执行（超时后 pending）
     TERMINATED = "terminated"
     TIMED_OUT = "timed_out"
     ERROR = "error"
@@ -113,6 +114,28 @@ class PtyShellProcess:
                 err += text
         return out, err
 
+    def foreground_pgid(self) -> int | None:
+        """pty 前台进程组；等于 shell 自身（没有前台命令）时返回 None。"""
+        if self._master_fd is None or self._process is None:
+            return None
+        try:
+            pgid = os.tcgetpgrp(self._master_fd)
+        except OSError:
+            return None
+        if pgid <= 0 or pgid == self._process.pid:
+            return None
+        return pgid
+
+    def signal_foreground(self, sig: signal.Signals) -> bool:
+        pgid = self.foreground_pgid()
+        if pgid is None:
+            return False
+        try:
+            os.killpg(pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+
     def interrupt(self) -> None:
         if not self.is_alive() or self._process is None:
             return
@@ -190,10 +213,16 @@ class PersistentShell:
         self._output_dir = output_dir
         self._limits = limits or OutputLimits()
         self._output_seq = 0
+        self._pending_marker: str | None = None
 
     @property
     def cwd(self) -> Path:
         return self._last_cwd
+
+    @property
+    def pending(self) -> bool:
+        """前台命令是否仍未结束（超时后可用三件套续处理）。"""
+        return self._pending_marker is not None
 
     def start(self) -> None:
         self.process.spawn(self.workspace_path)
@@ -203,10 +232,16 @@ class PersistentShell:
 
     def terminate(self) -> None:
         self.process.terminate()
+        self._pending_marker = None
 
     def exec(self, command: str, timeout_ms: int | None = None) -> ShellExecutionResult:
         if self._running:
             raise RuntimeError("The shell is already executing a command")
+        if self.pending:
+            raise RuntimeError(
+                "A foreground command is still running; "
+                "use shell_wait / shell_stdin / shell_interrupt first"
+            )
 
         self.start()
         if not self.is_alive():
@@ -222,6 +257,7 @@ class PersistentShell:
         marker = f"__MYOPENCLAW_DONE_{uuid4().hex}__"
         wrapped_command = self._build_wrapped_command(command, marker)
         self._running = True
+        self._pending_marker = marker
         try:
             self.process.write(wrapped_command)
             return self._read_until_marker(
@@ -238,6 +274,7 @@ class PersistentShell:
 
         while True:
             if not self.is_alive():
+                self._pending_marker = None
                 stdout, truncated, full_path = self._finalize_output(
                     _normalize_output(buffer)
                 )
@@ -254,6 +291,7 @@ class PersistentShell:
 
             marker_match = _find_marker(buffer, marker)
             if marker_match is not None:
+                self._pending_marker = None
                 # 命令已结束；stderr pipe 可能还有残余，短窗口 drain 一次
                 _, late_err = self.process.read_chunks(timeout_ms=50)
                 err_buffer += late_err
@@ -275,18 +313,22 @@ class PersistentShell:
 
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
-                self.process.interrupt()
-                self.terminate()
+                # 超时不杀任何进程：命令继续在前台跑，会话进 pending，
+                # agent 可用 shell_wait / shell_stdin / shell_interrupt 续处理
                 stdout, truncated, full_path = self._finalize_output(
                     _normalize_output(buffer)
                 )
                 return ShellExecutionResult(
                     stdout=stdout,
                     stderr=_normalize_output(err_buffer),
-                    status_message="Shell command timed out.",
+                    status_message=(
+                        "Command timed out and is still running in the foreground. "
+                        "Use shell_wait to keep waiting, shell_stdin to send input, "
+                        "or shell_interrupt to stop it."
+                    ),
                     exit_code=124,
                     cwd=self._last_cwd,
-                    shell_status=ShellStatus.TIMED_OUT,
+                    shell_status=ShellStatus.RUNNING,
                     timed_out=True,
                     truncated=truncated,
                     full_output_path=full_path,
@@ -466,10 +508,13 @@ class ShellExecTool(BaseTool):
                 },
             )
 
-        result = session.shell.exec(
-            str(arguments["command"]),
-            timeout_ms=int(timeout_ms) if timeout_ms is not None else None,
-        )
+        try:
+            result = session.shell.exec(
+                str(arguments["command"]),
+                timeout_ms=int(timeout_ms) if timeout_ms is not None else None,
+            )
+        except RuntimeError as exc:
+            return ToolExecutionResult(content=str(exc), is_error=True)
         parts = [result.stdout] if result.stdout else []
         if result.stderr:
             parts.append(f"--- stderr ---\n{result.stderr}")
@@ -477,7 +522,10 @@ class ShellExecTool(BaseTool):
             parts.append(f"[status] {result.status_message}")
         return ToolExecutionResult(
             content="\n".join(parts),
-            is_error=result.exit_code != 0 or result.shell_status != ShellStatus.READY,
+            is_error=(
+                result.exit_code != 0
+                or result.shell_status not in (ShellStatus.READY, ShellStatus.RUNNING)
+            ),
             metadata={
                 "cwd": str(result.cwd),
                 "exit_code": result.exit_code,
