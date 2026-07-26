@@ -7,8 +7,12 @@ from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
     StepStarted,
+    TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ToolCallArgsDeltaEvent,
     ToolCallCompleted,
     ToolCallStarted,
+    TurnInterrupted,
 )
 from pickel.runs.turn_usage import TurnUsage
 from pickel.tools.base import ToolExecutionResult
@@ -18,9 +22,27 @@ class ChatEventRenderer:
     def __init__(self, console: Console) -> None:
         self.console = console
         self.rendered_assistant_message = False
+        self._streaming = False
 
     async def handle_event(self, event: RuntimeEventBase) -> None:
+        if isinstance(event, (TextDeltaEvent, ThinkingDeltaEvent)):
+            self._streaming = True
+            self.console.print(event.text, end="", highlight=False, markup=False)
+            return
+
+        if isinstance(event, ToolCallArgsDeltaEvent):
+            # partial_json 拼完前不是合法 JSON，展示半截只会制造噪音
+            return
+
+        if isinstance(event, TurnInterrupted):
+            self._end_streaming()
+            self._render_message(
+                "System", Text("已中断本轮。"), style="yellow"
+            )
+            return
+
         if isinstance(event, StepStarted):
+            self._end_streaming()
             self._render_message(
                 "Thinking",
                 Text(f"Step {event.envelope.step_index}"),
@@ -29,6 +51,7 @@ class ChatEventRenderer:
             return
 
         if isinstance(event, ToolCallStarted) and event.tool_call is not None:
+            self._end_streaming()
             self._render_message(
                 "Tool",
                 self._render_tool_started(event.tool_call.name, event.tool_call.arguments),
@@ -48,6 +71,7 @@ class ChatEventRenderer:
             return
 
         if isinstance(event, AssistantMessageEvent):
+            self._end_streaming()
             self.rendered_assistant_message = True
             content: RenderableType = Markdown(event.text)
             if event.usage is not None:
@@ -55,6 +79,12 @@ class ChatEventRenderer:
                     Markdown(event.text), self._render_assistant_footer(event.usage)
                 )
             self._render_message("Assistant", content, style="yellow")
+
+    def _end_streaming(self) -> None:
+        """流式输出与框式输出之间补一个换行。"""
+        if self._streaming:
+            self.console.print()
+            self._streaming = False
 
     @classmethod
     def _render_tool_started(cls, name: str, arguments: dict[str, object]) -> Text:

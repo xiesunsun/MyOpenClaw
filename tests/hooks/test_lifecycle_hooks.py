@@ -180,15 +180,20 @@ class ReactHookIntegrationTests(unittest.TestCase):
         from pickel.conversations.content_blocks import TextContent, ToolCallContent
         from pickel.conversations.session import Session
         from pickel.hooks.lifecycle import LifecycleHooks
+        from pickel.providers.base import Provider
         from pickel.runs.run import Run
         from pickel.runs.strategy.react import ReActStrategy
         from pickel.shared.model_config import ModelConfig
         from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
         from pickel.tools.bus import ToolActivation, bus_with
 
-        class FakeProvider:
+        class FakeProvider(Provider):
             def __init__(self):
                 self.calls = 0
+
+            @classmethod
+            def from_config(cls, config: ModelConfig) -> "FakeProvider":
+                raise NotImplementedError
 
             async def generate(self, context):
                 self.calls += 1

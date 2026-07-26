@@ -25,6 +25,13 @@ class FakeAsyncMessageStream:
     def __init__(self, final_message) -> None:
         self.final_message = final_message
 
+    def __aiter__(self):
+        async def _no_events():
+            return
+            yield  # pragma: no cover
+
+        return _no_events()
+
     async def get_final_message(self):
         return self.final_message
 

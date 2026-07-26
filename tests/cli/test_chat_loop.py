@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import unittest
@@ -123,7 +124,13 @@ class ErrorRun:
         raise ValueError("boom")
 
 
-class InterruptRun:
+class RecordingRun:
+    """记录 turn 的开始与完成；被 cancel 掉的 turn 两个列表里都不会出现。"""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.completed: list[str] = []
+
     async def turn(
         self,
         *,
@@ -131,7 +138,50 @@ class InterruptRun:
         user_text: str,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        raise KeyboardInterrupt
+        self.started.append(user_text)
+        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        reply = _text_assistant("runtime reply")
+        session.append_assistant(reply)
+        self.completed.append(user_text)
+        return reply
+
+
+class _InterruptedTurnTask:
+    """真 task 的透明包装：首次 await 在 task 尚未运行前同步抛 KeyboardInterrupt。
+
+    KeyboardInterrupt 若从 task 协程内部抛出，会经 Task.__step 直接砸进
+    事件循环把测试进程杀掉——真实 Ctrl-C 抵达的是 `_loop` 的 `await task`
+    点，所以只能在 await 侧注入。cancel 与后续 await 全部转发给真 task，
+    因此 cancel 有真实可观察效果：漏掉 task.cancel()，被中断的 turn 会跑完。
+    """
+
+    def __init__(self, coro) -> None:
+        self.task = asyncio.get_running_loop().create_task(coro)
+        self.cancel_calls = 0
+        self._interrupted = False
+
+    def cancel(self) -> bool:
+        self.cancel_calls += 1
+        return self.task.cancel()
+
+    def __await__(self):
+        if not self._interrupted:
+            self._interrupted = True
+            raise KeyboardInterrupt
+        return self.task.__await__()
+
+
+def _interrupt_first_turn_at_await(created: list["_InterruptedTurnTask"]):
+    """create_task 替身：第一条 turn 换成注入 KI 的包装，其余照常建真 task。"""
+
+    def create_task(coro):
+        if created:
+            return asyncio.get_running_loop().create_task(coro)
+        wrapper = _InterruptedTurnTask(coro)
+        created.append(wrapper)
+        return wrapper
+
+    return create_task
 
 
 class StubToolRun:
@@ -508,27 +558,70 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(loop._trace_sink)
         self.assertTrue(sink.closed)
 
-    async def test_trace_sink_closes_when_turn_raises_keyboard_interrupt(self) -> None:
-        """Ctrl-C 打断 turn 不经过 _close_session，句柄由 run() 的 finally 释放。"""
+    async def test_keyboard_interrupt_cancels_turn_and_loop_continues(self) -> None:
+        """Ctrl-C 只中断当前 turn：cancel 本轮 task，循环继续吃后续输入。
+
+        注入方式见 _InterruptedTurnTask。三个语义各有断言：
+        中断轮被取消（cancel 被调、turn 未跑）、循环继续（下一条输入
+        照常跑完，`continue` 改 `return` 会让它消失）、sink 最终释放。
+        """
+        run = RecordingRun()
+        created: list[_InterruptedTurnTask] = []
+
         with TemporaryDirectory() as tmpdir:
             trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
-            submitted_inputs = iter(["hello"])
+            submitted_inputs = iter(["first", "second", "/exit"])
             with (
                 patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
                 patch("pickel.cli.chat.trace_path", return_value=trace_file),
+                patch(
+                    "pickel.cli.chat.asyncio.create_task",
+                    side_effect=_interrupt_first_turn_at_await(created),
+                ),
             ):
                 loop = ChatLoop(
                     agent=self._build_agent(),
-                    run=InterruptRun(),
+                    run=run,
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
                     console=Mock(),
                     input_reader=lambda _: next(submitted_inputs),
                 )
                 sink = loop._trace_sink
-                with self.assertRaises(KeyboardInterrupt):
-                    await loop.run()
+                # 新语义：turn 内 Ctrl-C 不再冒出 run()，而是取消本轮后回到输入
+                await loop.run()
 
+        # 中断轮被取消：cancel 被调，turn 从未跑起来
+        self.assertEqual(1, created[0].cancel_calls)
+        self.assertTrue(created[0].task.cancelled())
+        # 循环继续：第二条输入照常完成
+        self.assertEqual(["second"], run.started)
+        self.assertEqual(["second"], run.completed)
         self.assertTrue(sink.closed)
+
+    async def test_keyboard_interrupt_still_flushes_session_to_disk(self) -> None:
+        """中断分支必须 flush：react 取消时补齐的 tool_result 要落盘，
+        否则下一轮从磁盘恢复的 session 仍有悬空 tool_call。"""
+        session_service = FakeSessionService()
+        created: list[_InterruptedTurnTask] = []
+
+        submitted_inputs = iter(["first", "/exit"])
+        with patch(
+            "pickel.cli.chat.asyncio.create_task",
+            side_effect=_interrupt_first_turn_at_await(created),
+        ):
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=RecordingRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=Mock(),
+                input_reader=lambda _: next(submitted_inputs),
+                session_service=session_service,
+            )
+            await loop.run()
+
+        # 全程只有中断这一轮，唯一一次 flush 只能来自中断分支
+        self.assertEqual([[]], session_service.flush_calls)
+        self.assertTrue(session_service.closed)
 
     async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
@@ -711,6 +804,101 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ["MyOpenClaw Chat", "Thinking", "Tool", "Tool", "Thinking", "Assistant", "System"],
             titles,
         )
+
+    async def test_真实_run_流式_provider_trace_中_delta_先于_assistant_message_且_seq_连续(self) -> None:
+        """组装层集成（流式）：真 Run + 流式 fake provider + ChatLoop + trace sink。
+
+        tests/runs/test_react_streaming.py 只看 bus 上的事件对象，这条钉住
+        delta 事件穿过 ChatLoop 长命 bus 落进 trace 文件后的顺序与 seq。
+        """
+        from typing import AsyncIterator
+
+        from pickel.providers.stream import (
+            StreamCompleted,
+            StreamDelta,
+            TextDelta,
+            ThinkingDelta,
+            accumulate,
+        )
+
+        final_reply = AssistantMessage(
+            content=[TextContent(text="你好，世界")],
+            metadata=_model_metadata(),
+        )
+
+        class _StreamingProvider:
+            """产多个 delta 后以 StreamCompleted 收尾；generate 由 stream 实现。"""
+
+            async def stream(self, context) -> AsyncIterator[StreamDelta]:
+                yield ThinkingDelta(text="想一想")
+                yield TextDelta(text="你好")
+                yield TextDelta(text="，世")
+                yield TextDelta(text="界")
+                yield StreamCompleted(message=final_reply)
+
+            async def generate(self, context) -> AssistantMessage:
+                return await accumulate(self.stream(context))
+
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            agent = self._build_agent()
+            run = Run(
+                agent=agent,
+                provider=_StreamingProvider(),
+                tool_bus=(_bus := bus_with([])),
+                activation=ToolActivation(allowed=frozenset(_bus.list_names())),
+                context_assembler=ContextAssembler(),
+                lifecycle_hooks=NoopLifecycleHooks(),
+                session_service=None,
+                file_access_policy=None,
+                workspace_files=None,
+                shell_session_manager=ShellSessionManager(),
+                unit_window=5,
+                strategy=ReActStrategy(max_steps=4),
+            )
+            submitted_inputs = iter(["hello", "/exit"])
+            with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
+                loop = ChatLoop(
+                    agent=agent,
+                    run=run,
+                    session=Session.create(agent_id="Pickle", session_id="session-1"),
+                    console=Mock(),
+                    input_reader=lambda _: next(submitted_inputs),
+                )
+                await loop.run()
+
+            trace_file = home / "traces" / "session-1.jsonl"
+            lines = trace_file.read_text(encoding="utf-8").splitlines()
+            # 逐行 json.loads 可读
+            records = [json.loads(line) for line in lines]
+
+        # delta 事件全部出现在 assistant_message 之前，且顺序与 provider 产出一致
+        kinds = [record["event_type"] for record in records]
+        self.assertEqual(
+            [
+                "turn_started",
+                "step_started",
+                "thinking_delta",
+                "text_delta",
+                "text_delta",
+                "text_delta",
+                "assistant_message",
+                "turn_completed",
+            ],
+            kinds,
+        )
+        last_delta = max(i for i, kind in enumerate(kinds) if kind.endswith("_delta"))
+        self.assertLess(last_delta, kinds.index("assistant_message"))
+        # 全事件 seq 连续（0..n-1）；seq 由 bus 按事件分配，
+        # 连续即证明 trace 行数与事件数一致——没有事件被 sink 吞掉
+        self.assertEqual(list(range(len(records))), [record["seq"] for record in records])
+        self.assertEqual(len(records), len(lines))
+        # delta 拼起来就是最终消息正文
+        self.assertEqual(
+            "你好，世界",
+            "".join(r["text"] for r in records if r["event_type"] == "text_delta"),
+        )
+        self.assertEqual("你好，世界", records[6]["text"])
 
     async def test_new_session_rebuilds_trace_sink_for_new_session_id(self) -> None:
         """/new 换了 session，trace 文件必须跟着换，否则两个 session 混在一个文件里。"""

@@ -23,6 +23,7 @@ from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.hooks.decisions import BeforeRequestDecision
 from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.providers.base import Provider
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
@@ -31,10 +32,14 @@ from pickel.shared.model_config import ModelConfig
 from pickel.tools.shell import ShellSessionManager
 
 
-class RecordingProvider:
+class RecordingProvider(Provider):
     def __init__(self, reply: AssistantMessage) -> None:
         self.reply = reply
         self.contexts: list[ModelContext] = []
+
+    @classmethod
+    def from_config(cls, config: ModelConfig) -> "RecordingProvider":
+        raise NotImplementedError
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
         self.contexts.append(context)

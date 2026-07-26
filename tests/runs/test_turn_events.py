@@ -16,6 +16,7 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.hooks.lifecycle import NoopLifecycleHooks
+from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
@@ -24,10 +25,14 @@ from pickel.shared.model_config import ModelConfig
 from pickel.tools.shell import ShellSessionManager
 
 
-class _Provider:
+class _Provider(Provider):
     def __init__(self, reply=None, error=None):
         self.reply = reply
         self.error = error
+
+    @classmethod
+    def from_config(cls, config: ModelConfig) -> "_Provider":
+        raise NotImplementedError
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
         if self.error is not None:

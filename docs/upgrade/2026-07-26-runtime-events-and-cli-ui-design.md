@@ -157,14 +157,16 @@ async def generate(self, ctx: ModelContext) -> AssistantMessage: ...
 async def stream(self, ctx: ModelContext) -> AsyncIterator[StreamDelta]: ...
 ```
 
-**`generate()` 必须用 `stream()` 实现**：
+**同一个 provider 内不得有两份解析逻辑。** 两条独立路径必然漂移——非流式路径会悄悄少处理一种 block 类型，然后只在某个模型上出问题。
 
-```python
-async def generate(self, ctx):
-    return await accumulate(self.stream(ctx))
-```
+**实现形态（2026-07-26 修订，见 E2 实施计划开头）：** 原写「`generate()` 必须用 `stream()` 实现」，实际采用的是反向的默认实现 + 真流式 provider 的自约束：
 
-两条独立代码路径必然漂移——非流式路径会悄悄少处理一种 block 类型，然后只在某个模型上出问题。单一实现是唯一能长期维持一致的形态。
+| provider | `stream()` | `generate()` | 解析逻辑 |
+|---|---|---|---|
+| 基类默认 | 调 `generate()`，yield 一次 `StreamCompleted` | 子类实现 | 唯一（在 `generate` 里） |
+| 真流式（anthropic） | 覆写，翻译 SSE 事件 | `accumulate(self.stream(ctx))` | 唯一（在 `stream` 里） |
+
+改动理由：全仓有 8 个测试桩只实现了 `generate()`，强制子类只实现 `stream()` 会让它们全部要改，而它们测的都不是 streaming。上表同样满足「每个 provider 内解析唯一」这一真实意图。代价是基类有两个可覆写点，用一条「`generate()` 与 `accumulate(stream())` 逐字段相等」的契约测试守住。
 
 ### 6.1 StreamDelta
 
@@ -180,7 +182,12 @@ Anthropic 的 thinking 块带 `signature`，下一轮回传时必须原样附上
 
 ### 6.3 gemini
 
-换用 `aio.models.generate_content_stream`。gemini 的 thinking 与 tool_call 增量结构与 anthropic 不同，两个 provider 各自负责翻译到统一的 `StreamDelta`。
+**E2 不做真流式**（2026-07-26 修订）。gemini 走基类默认 `stream()`，行为与今天逐字节相同。两条理由：
+
+1. 本机没有真实 gemini key（测试一直用 `GEMINI_API_KEY=fake`），增量聚合无法真机验证
+2. `gemini.py:335` 的 `_extract_text` 用 `"\n".join(texts)` 拼接多个 text part。非流式通常只有 1 个 part，流式每个 chunk 一个 part——简单累积后再 join 会在每个 chunk 之间插入换行，产出与非流式不同的文本
+
+将来要做时换用 `aio.models.generate_content_stream`，并注意上面第 2 点：聚合必须拼接连续的 text part 而非累积后 join。
 
 ---
 

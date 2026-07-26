@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import traceback
@@ -655,14 +656,30 @@ class ChatLoop:
             self._fallback_message_count += 1
             bus, event_renderer, unsubscribe_renderer = self.create_event_bus()
             start_index = len(self.session.entries)
+            task = asyncio.create_task(self.handle_user_input(user_input, bus=bus))
             try:
-                reply = await self.handle_user_input(user_input, bus=bus)
+                reply = await task
                 if self._session_service is not None:
                     self._session_service.flush_new_entries(
                         session=self.session,
                         entries=[],
                     )
-            except Exception as exc:
+            except KeyboardInterrupt:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    pass
+                # 中断时 react 已补齐 tool_result 并落盘，这里再 flush 一次
+                if self._session_service is not None:
+                    self._session_service.flush_new_entries(
+                        session=self.session,
+                        entries=[],
+                    )
+                continue
+            except asyncio.CancelledError:
+                continue
+            except Exception:
                 self._render_error_message(traceback.format_exc().rstrip())
                 continue
             finally:

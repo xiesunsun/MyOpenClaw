@@ -9,7 +9,14 @@ from pathlib import Path
 import pickel.runs.trace_sink as trace_module
 from pickel.config.paths import home_dir
 from pickel.runs.event_bus import EventBus
-from pickel.runs.runtime_events import StepStarted, TurnStarted
+from pickel.runs.runtime_events import (
+    StepStarted,
+    TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ToolCallArgsDeltaEvent,
+    TurnInterrupted,
+    TurnStarted,
+)
 from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
 from pickel.shared.event_envelope import EventEnvelope
 
@@ -79,6 +86,48 @@ def test_落盘的_seq_与_bus_分配一致(tmp_path: Path):
 
     seqs = [json.loads(line)["seq"] for line in path.read_text().strip().splitlines()]
     assert seqs == [0, 1]
+
+
+def test_delta_事件写入_jsonl_后可_json_loads_读回(tmp_path: Path):
+    """Task 4 新增的 4 个事件类型都必须能落盘成合法 JSON。"""
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    bus = EventBus()
+    bus.subscribe(sink)
+
+    asyncio.run(_emit_deltas(bus))
+    sink.close()
+
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert [record["event_type"] for record in records] == [
+        "thinking_delta",
+        "text_delta",
+        "tool_call_args_delta",
+        "turn_interrupted",
+    ]
+    assert records[0]["text"] == "想"
+    assert records[1]["text"] == "你"
+    assert records[2]["tool_call_id"] == "call-1"
+    assert records[2]["partial_json"] == '{"text": "你'
+    assert records[3]["at_step"] == 1
+    assert records[3]["partial_text"] == "你"
+
+
+async def _emit_deltas(bus: EventBus) -> None:
+    envelope = EventEnvelope(session_id="s1", step_index=1)
+    await bus.emit(ThinkingDeltaEvent(envelope=envelope, text="想"))
+    await bus.emit(TextDeltaEvent(envelope=envelope, text="你"))
+    await bus.emit(
+        ToolCallArgsDeltaEvent(
+            envelope=envelope,
+            tool_call_id="call-1",
+            partial_json='{"text": "你',
+        )
+    )
+    await bus.emit(TurnInterrupted(envelope=envelope, at_step=1, partial_text="你"))
 
 
 def test_父目录不存在时自动创建(tmp_path: Path):
