@@ -56,6 +56,8 @@ class AppConfig(BaseModel):
     default_skills_path: Path | None = None
     react_max_steps: int = 8
     context_cli_turn_window: int = 5
+    # 事件 JSONL trace；默认关（含工具参数与文件内容）
+    trace_enabled: bool = False
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
     openviking: OpenVikingConfig | None = None
