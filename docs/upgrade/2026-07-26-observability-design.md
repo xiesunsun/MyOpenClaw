@@ -165,6 +165,22 @@ Anthropic 的 `input_tokens` **不含** `cache_read` / `cache_write`。任何把
 - UI 必须给出这个合计值，四个分项可并列展示但不得替代合计  
 - §6.1 的锚也必须用这个合计值，不能用裸 `input_tokens`
 
+**实测佐证**（2026-07-26，`claude-jupiter-v1-p`，同一份 system + 同一条 user 连发两次）：
+
+| | `input_tokens` | `cache_creation_input_tokens` | `cache_read_input_tokens` | 合计 |
+|---|---|---|---|---|
+| 第一次（写缓存） | 16 | 4002 | 0 | **4018** |
+| 第二次（命中缓存） | 16 | 0 | 4002 | **4018** |
+
+裸 `input_tokens` 两次都是 16，比真实输入低估 250 倍；合计值两次恒等。
+`ModelUsage` 读取的字段名 `cache_creation_input_tokens` / `cache_read_input_tokens`
+与真实响应一致（`src/pickel/providers/anthropic.py:304`）。
+
+**已知缺口（非 O1 范围）：** pickel 的 provider 从不发送 `cache_control`，
+因此在 pickel 内部 `cache_read_tokens` / `cache_write_tokens` 恒为 0。
+上述口径与锚的实现是正确的，但启用 prompt cache 之前无法被真实数据行使。
+启用缓存应作为独立议题（涉及断点放置策略），不在可观测性范围内。
+
 ---
 
 ## 6. measure 算法合同
@@ -178,9 +194,12 @@ Anthropic 的 `input_tokens` **不含** `cache_read` / `cache_write`。任何把
 
 | 档 | 条件 | total | 远程调用 | 标注 |
 |----|------|-------|----------|------|
-| **A 锚命中** | 有 last usage；其后无新消息；fingerprint 未变 | `anchor` | 0 | `measured` |
-| **B 锚 + 尾部** | 有 last usage；其后有新消息；fingerprint 未变 | `anchor + estimate(尾部消息)` | 0 | `estimated` |
-| **C 兜底** | 无锚或锚失效 | `count_context_tokens(request)` | 1 | `measured`；失败则纯本地估计并标 `estimated` |
+| **A 锚命中** | 有 last usage；其后无新消息；fingerprint 未变 | `anchor` | 0 | `measured（真实 usage 锚）` |
+| **B 锚 + 尾部** | 有 last usage；其后有新消息；fingerprint 未变 | `anchor + estimate(尾部消息)` | 0 | `measured + estimated（真实 usage 锚 + 尾部估计）` |
+| **C 兜底** | 无锚或锚失效 | `count_context_tokens(request)` | 1 | `counted（provider 计数）`；失败或空会话则纯本地估计并标 `estimated（本地估计）` |
+
+四档标注必须逐档区分：C 档的数字来自 provider 计数而非锚，标成「真实 usage 锚」会误导
+（`ContextRenderer.SOURCE_LABELS`，测试 `tests/cli/test_context_renderer.py`）。
 
 **anchor 定义：** active_path 上最近一条 `AssistantMessage.metadata.usage` 的
 `input_tokens + cache_read_tokens + cache_write_tokens`（见 §5.1，不得用裸 `input_tokens`）。

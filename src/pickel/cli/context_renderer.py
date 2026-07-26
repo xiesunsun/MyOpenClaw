@@ -13,6 +13,14 @@ class ContextRenderer:
 
     BAR_WIDTH = 32
 
+    #: total 的四档来源各自的标注（设计 §6.1）。counted 来自 provider 计数，与锚无关。
+    SOURCE_LABELS = {
+        "anchor": "measured（真实 usage 锚）",
+        "anchor_plus_tail": "measured + estimated（真实 usage 锚 + 尾部估计）",
+        "counted": "counted（provider 计数）",
+        "estimated": "estimated（本地估计）",
+    }
+
     def render(
         self,
         usage: ContextUsage | None,
@@ -53,7 +61,7 @@ class ContextRenderer:
             ),
             Text(self._bar(usage)),
             Text(
-                "measured（真实 usage 锚）" if usage.is_measured else "estimated（本地估计）",
+                self.SOURCE_LABELS.get(usage.total_source, "estimated（本地估计）"),
                 style="dim",
             ),
         )

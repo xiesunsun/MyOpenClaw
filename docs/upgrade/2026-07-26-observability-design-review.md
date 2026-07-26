@@ -146,3 +146,47 @@ Claude Code 那边：我们对齐的是它的分栏 UI 形态（§7.2 的来源�
 | 新增分栏（memory / MCP tools / 子 agent） | 兼容 —— 加一个 `SystemSection` 即可，measure 算法不变 |
 | `hook_injected_chars` / `context_fingerprint` | 兼容 —— `_metadata_from_dict` 走 `.get`，老 entry 读得动 |
 | **按 skill 精确计费归因** | **不兼容** —— 归一化分栏是估计，撑不住。真要精确得靠 provider 侧分段计量，属 §3.3 的不可得清单 |
+
+---
+
+## 四次修正：真实 provider 验证（2026-07-26）
+
+O1 合并后用内部模型 `claude-jupiter-v1-p` 跑真实端到端，验证三件 fake provider 覆盖不到的事。
+
+### 验证结果
+
+| 场景 | 期望 | 实测 |
+|------|------|------|
+| 空会话 | 零远程调用，`estimated` | ✅ 0 次 |
+| 一轮真实对话后 | 锚命中，零远程调用 | ✅ 0 次，`total=2490 = anchor(2419+71)` |
+| 切 model | 锚失效，恰好 1 次远程 count | ✅ 恰好 1 次 |
+| 全流程累计远程调用 | 1 | ✅ 1 |
+
+分栏归一化在真实数字下成立：261 + 65 + 2164 + 0 = 2490，与 total 恒等，无负值。
+
+### 发现 C：`counted` 档被误标为「真实 usage 锚」
+
+`ContextRenderer._render_header` 用 `is_measured` 二分（measured / estimated），
+而 `is_measured` 对 `anchor` 和 `counted` 都为真 —— 于是远程计数被标成「真实 usage 锚」。
+
+两者都是「测量值」不假，但来源不同：一个是上次调用的真实 usage，一个是 provider 的
+count_tokens 端点。在锚失效的场景（切模型、compaction 后）这个标注恰好在最需要区分时说反了。
+
+**处置**：改为四档逐档标注（`SOURCE_LABELS`），设计 §6.1 表格同步更新，
+新增 `tests/cli/test_context_renderer.py` 5 个测试锁住「counted 档不得出现『锚』字」。
+
+### 发现 D：cache 口径正确但在 pickel 内无法被行使
+
+直连 SDK 验证 §5.1 的口径（同一份 system 连发两次）：
+
+| | `input_tokens` | `cache_creation` | `cache_read` | 合计 |
+|---|---|---|---|---|
+| 写缓存 | 16 | 4002 | 0 | **4018** |
+| 命中缓存 | 16 | 0 | 4002 | **4018** |
+
+裸 `input_tokens` 低估 250 倍，合计值恒等 —— §5.1 的强制口径成立，
+`anthropic.py:304-305` 读的字段名与真实响应一致。
+
+**但**：pickel 的 provider 从不发送 `cache_control`，所以在 pickel 内部这两个字段恒为 0。
+锚的实现是对的，只是当前没有真实数据行使这条路径。启用 prompt cache 涉及断点放置策略，
+是独立议题，不在可观测性范围内。
