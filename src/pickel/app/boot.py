@@ -34,6 +34,8 @@ class Boot:
             install_builtin_tools(tool_bus)
         self.tool_bus = tool_bus
         self.extensions = extensions or ExtensionRegistry()
+        # CLI 装载入口回填 LoadResult，供 ChatLoop 在 /reload 时 teardown 旧 extension
+        self.extension_result = None
 
     @classmethod
     def from_config(

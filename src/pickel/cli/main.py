@@ -9,6 +9,9 @@ from pickel.app.boot import Boot
 from pickel.cli.chat import ChatLoop
 from pickel.config.loader import Config
 from pickel.conversations.service import SessionNotFoundError
+from pickel.extensions_host.loader import load_extensions
+from pickel.tools.bus import ToolBus
+from pickel.tools.catalog import install_builtin_tools
 
 app = typer.Typer(invoke_without_command=True)
 sessions_app = typer.Typer(invoke_without_command=True)
@@ -16,8 +19,17 @@ config_app = typer.Typer(help="配置相关命令")
 
 
 def _boot() -> Boot:
-    """唯一启动路径：分层 Config.load。"""
-    return Boot.from_config(Config.load(cwd=Path.cwd()))
+    """唯一启动路径：分层 Config.load + extension 装载。"""
+    app_config = Config.load(cwd=Path.cwd())
+    tool_bus = ToolBus()
+    install_builtin_tools(tool_bus)
+    result = load_extensions(tool_bus=tool_bus, app_config=app_config)
+    # 装载错误只警告、不阻止启动：一个坏 extension 不该弄挂 CLI
+    for error in result.errors:
+        typer.secho(f"Extension load error: {error}", fg=typer.colors.YELLOW, err=True)
+    boot = Boot.from_config(app_config, tool_bus=tool_bus, extensions=result.registry)
+    boot.extension_result = result
+    return boot
 
 
 def _run_chat(

@@ -12,6 +12,11 @@ from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.context.prepare import prepare
 from pickel.conversations.service import SessionService
+from pickel.extensions_host.loader import (
+    LoadResult,
+    load_extensions_async,
+    teardown_extensions,
+)
 from pickel.conversations.session_storage_mapper import build_session_preview
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextContent
@@ -66,6 +71,9 @@ class ChatLoop:
         self._app_config = app_config or (boot.app_config if boot is not None else None)
         # 进程级工具总线：跨 /reload 存活，由 Boot 持有的那一个
         self._tool_bus = boot.tool_bus if boot is not None else None
+        self._extension_result = (
+            getattr(boot, "extension_result", None) or LoadResult()
+        )
         # bus 与 ChatLoop 同生命周期，绝不每轮重建：seq 由 bus 单调分配，
         # 每轮换 bus 会让 seq 回到 0，同一 session 的事件按 seq 排序就交错了（红线 4）。
         self._bus = EventBus()
@@ -462,15 +470,29 @@ class ChatLoop:
             f"New session {session.session_id} (agent={agent_id})"
         )
 
-    def _handle_reload_command(self) -> None:
+    async def _handle_reload_command(self) -> None:
         if self._run is None:
             self._render_error_message("Run 未提供")
             return
         try:
             app_config = Config.load(cwd=Path.cwd())
             # 复用同一个进程级 bus：reload 不该杀掉非内置来源的工具
-            # （E1 的 extension、T2 的 MCP 子进程）
-            boot = Boot.from_config(app_config, tool_bus=self._tool_bus)
+            # （T2 的 MCP 子进程）；extension 则先卸后装，磁盘改动即时生效
+            extensions = None
+            if self._tool_bus is not None:
+                await teardown_extensions(
+                    self._extension_result, tool_bus=self._tool_bus
+                )
+                self._extension_result = await load_extensions_async(
+                    tool_bus=self._tool_bus,
+                    app_config=app_config,
+                )
+                for error in self._extension_result.errors:
+                    self._render_error_message(f"Extension load error: {error}")
+                extensions = self._extension_result.registry
+            boot = Boot.from_config(
+                app_config, tool_bus=self._tool_bus, extensions=extensions
+            )
             # 保留旧 session_service（同库/同 session）；无则新建
             session_service = self._session_service or boot.build_session_service(
                 agent_id=self.agent_id
@@ -522,7 +544,7 @@ class ChatLoop:
             self._handle_new_command()
             return True
         if command == "/reload":
-            self._handle_reload_command()
+            await self._handle_reload_command()
             return True
         if command == "/context":
             await self._render_context_command()
