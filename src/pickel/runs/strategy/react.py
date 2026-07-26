@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from dataclasses import replace
 from numbers import Real
@@ -27,14 +26,22 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.message import ToolCall
-from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.runs.run import Run
 from pickel.runs.estimator import request_char_count
-from pickel.runs.events import RuntimeEvent, RuntimeEventType
+from pickel.runs.event_bus import EventBus
+from pickel.runs.runtime_events import (
+    AssistantMessageEvent,
+    RuntimeEventBase,
+    StepStarted,
+    ToolCallCompleted,
+    ToolCallStarted,
+)
+from pickel.runs.turn_usage import last_turn_usage
 from pickel.runs.usage_anchor import context_fingerprint
-from pickel.runs.strategy.base import ExecutionStrategy, RuntimeEventHandler
-from pickel.runs.turn_state import ToolExecutionOutcome, TurnState
+from pickel.runs.strategy.base import ExecutionStrategy
+from pickel.runs.turn_state import TurnState
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolSnapshot
 
@@ -51,28 +58,30 @@ class ReActStrategy(ExecutionStrategy):
         self,
         run: Run,
         session: Session,
-        event_handler: RuntimeEventHandler | None = None,
+        bus: EventBus | None = None,
+        turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
     ) -> AssistantMessage:
-        turn = TurnState()
+        turn = TurnState() if turn_id is None else TurnState(turn_id=turn_id)
         # turn 边界快照：整个 turn 的所有 step 共用同一份工具集。
         # 每 step 重取会让 prompt cache 每 step 失效，也可能让模型看到的定义
         # 与执行时找到的工具对象不一致。
         turn.tool_snapshot = run.tool_bus.snapshot(run.activation)
+
+        def envelope(step_index: int | None = None) -> EventEnvelope:
+            return EventEnvelope(
+                session_id=session.session_id,
+                turn_id=turn.turn_id,
+                step_index=step_index,
+            )
+
         if initial_hook_feedback:
             turn.step_hook_feedback.extend(initial_hook_feedback)
             turn.hook_feedback.extend(initial_hook_feedback)
-        last_assistant: AssistantMessage | None = None
 
         for step_index in range(1, self.max_steps + 1):
             step = turn.begin_step(step_index)
-            await self._emit_event(
-                event_handler,
-                RuntimeEvent(
-                    event_type=RuntimeEventType.MODEL_STEP_STARTED,
-                    step_index=step_index,
-                ),
-            )
+            await self._emit(bus, StepStarted(envelope=envelope(step_index)))
 
             model_context = await prepare(
                 run=run,
@@ -131,7 +140,6 @@ class ReActStrategy(ExecutionStrategy):
                     request_char_count(model_context) - prepared_chars
                 ),
             )
-            last_assistant = assistant
 
             # checkpoint BEFORE tools
             entry = session.append_assistant(assistant)
@@ -145,13 +153,12 @@ class ReActStrategy(ExecutionStrategy):
             ]
             if not tool_calls:
                 text = self._assistant_text(assistant)
-                await self._emit_event(
-                    event_handler,
-                    RuntimeEvent(
-                        event_type=RuntimeEventType.ASSISTANT_MESSAGE,
-                        step_index=step_index,
+                await self._emit(
+                    bus,
+                    AssistantMessageEvent(
+                        envelope=envelope(step_index),
                         text=text,
-                        metadata=self._to_message_metadata(assistant),
+                        usage=last_turn_usage(session),
                     ),
                 )
                 turn.final_assistant_entry_id = entry.entry_id
@@ -170,20 +177,14 @@ class ReActStrategy(ExecutionStrategy):
             batch_outcomes: list[dict] = []
             # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
             for call_index, tool_call in enumerate(tool_calls):
-                runtime_call = ToolCall(
-                    id=tool_call.id,
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
-                )
-                await self._emit_event(
-                    event_handler,
-                    RuntimeEvent(
-                        event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                        step_index=step_index,
+                await self._emit(
+                    bus,
+                    ToolCallStarted(
+                        envelope=envelope(step_index),
+                        tool_call=self._event_tool_call(tool_call),
                         batch_id=batch_id,
                         call_index=call_index,
                         total_calls=len(tool_calls),
-                        tool_call=runtime_call,
                     ),
                 )
                 pre = await run.lifecycle_hooks.pre_tool_use(
@@ -236,20 +237,15 @@ class ReActStrategy(ExecutionStrategy):
                         "content": result.content,
                     }
                 )
-                await self._emit_event(
-                    event_handler,
-                    RuntimeEvent(
-                        event_type=(
-                            RuntimeEventType.TOOL_CALL_FAILED
-                            if result.is_error
-                            else RuntimeEventType.TOOL_CALL_COMPLETED
-                        ),
-                        step_index=step_index,
+                await self._emit(
+                    bus,
+                    ToolCallCompleted(
+                        envelope=envelope(step_index),
+                        tool_call=self._event_tool_call(tool_call),
+                        tool_result=replace(result, metadata=dict(result.metadata)),
                         batch_id=batch_id,
                         call_index=call_index,
                         total_calls=len(tool_calls),
-                        tool_call=runtime_call,
-                        tool_result=result,
                     ),
                 )
                 post = await run.lifecycle_hooks.post_tool_use(
@@ -287,21 +283,24 @@ class ReActStrategy(ExecutionStrategy):
                 turn.hook_feedback.append(fb)
 
         # max steps
+        # 合成消息不带 metadata：它不是一次模型调用，复用最后一次 generate 的
+        # metadata 会让 last_turn_usage / session_usage 把那次用量数第二遍
+        # （AssistantMessageEvent 与 TurnCompleted 就会对同一 turn 给出不同数字）。
+        # 无 metadata 的 assistant 由 resolve_anchor 当作可跳过的 trailing 消息，
+        # 锚仍落在最后一次真实调用上——见 usage_anchor.resolve_anchor。
         max_msg = AssistantMessage(
             content=[
                 TextContent(text="Reached the maximum number of reasoning steps.")
             ],
-            metadata=last_assistant.metadata if last_assistant else None,
         )
         entry = session.append_assistant(max_msg)
         self._flush_entry(run, session, entry)
-        await self._emit_event(
-            event_handler,
-            RuntimeEvent(
-                event_type=RuntimeEventType.ASSISTANT_MESSAGE,
-                step_index=self.max_steps,
+        await self._emit(
+            bus,
+            AssistantMessageEvent(
+                envelope=envelope(self.max_steps),
                 text="Reached the maximum number of reasoning steps.",
-                metadata=self._to_message_metadata(max_msg),
+                usage=last_turn_usage(session),
             ),
         )
         return max_msg
@@ -334,102 +333,6 @@ class ReActStrategy(ExecutionStrategy):
             return ReActStrategy.DEFAULT_PROVIDER_TIMEOUT_SECONDS
         return timeout_value
 
-    async def _execute_tool_batch(
-        self,
-        *,
-        batch_id: str,
-        step_index: int,
-        tool_calls: list[ToolCallContent],
-        run: Run,
-        session: Session,
-        event_handler: RuntimeEventHandler | None,
-        snapshot: ToolSnapshot | None = None,
-    ) -> list[ToolExecutionOutcome]:
-        total_calls = len(tool_calls)
-        runtime_calls = [
-            ToolCall(
-                id=call.id,
-                name=call.name,
-                arguments=call.arguments,
-            )
-            for call in tool_calls
-        ]
-        for call_index, tool_call in enumerate(runtime_calls):
-            await self._emit_event(
-                event_handler,
-                RuntimeEvent(
-                    event_type=RuntimeEventType.TOOL_CALL_STARTED,
-                    step_index=step_index,
-                    batch_id=batch_id,
-                    call_index=call_index,
-                    total_calls=total_calls,
-                    tool_call=tool_call,
-                ),
-            )
-
-        tasks = [
-            asyncio.create_task(
-                self._execute_one(
-                    call_index=call_index,
-                    tool_call=tool_call,
-                    run=run,
-                    session=session,
-                )
-            )
-            for call_index, tool_call in enumerate(tool_calls)
-        ]
-        outcomes: list[ToolExecutionOutcome] = []
-        try:
-            for completed in asyncio.as_completed(tasks):
-                outcome = await completed
-                outcomes.append(outcome)
-                runtime_call = ToolCall(
-                    id=outcome.tool_call_id,
-                    name=outcome.tool_name,
-                    arguments=outcome.arguments,
-                )
-                await self._emit_event(
-                    event_handler,
-                    RuntimeEvent(
-                        event_type=(
-                            RuntimeEventType.TOOL_CALL_FAILED
-                            if outcome.result.is_error
-                            else RuntimeEventType.TOOL_CALL_COMPLETED
-                        ),
-                        step_index=step_index,
-                        batch_id=batch_id,
-                        call_index=outcome.call_index,
-                        total_calls=total_calls,
-                        tool_call=runtime_call,
-                        tool_result=outcome.result,
-                    ),
-                )
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-        return outcomes
-
-    async def _execute_one(
-        self,
-        *,
-        call_index: int,
-        tool_call: ToolCallContent,
-        run: Run,
-        session: Session,
-        snapshot: ToolSnapshot | None = None,
-    ) -> ToolExecutionOutcome:
-        result = await self._execute_tool_call(
-            run=run, session=session, tool_call=tool_call, snapshot=snapshot
-        )
-        return ToolExecutionOutcome(
-            tool_call_id=tool_call.id,
-            tool_name=tool_call.name,
-            arguments=dict(tool_call.arguments),
-            result=result,
-            call_index=call_index,
-        )
-
     async def _execute_tool_call(
         self,
         *,
@@ -453,6 +356,20 @@ class ReActStrategy(ExecutionStrategy):
                 content=f"Tool '{tool_call.name}' failed: {exc}",
                 is_error=True,
             )
+
+    @staticmethod
+    def _event_tool_call(tool_call: ToolCallContent) -> ToolCall:
+        """事件用的 tool call 快照：arguments 必须是拷贝（红线 8）。
+
+        共享同一个 dict 就等于把执行参数交给订阅者：emit 之后本方法下面才取
+        `dict(tool_call.arguments)` 去执行、才构造 PreToolUse 事件，订阅者改一下
+        就能同时劫持工具执行与 hook 输入。每次 emit 都建新拷贝，事件之间也不串。
+        """
+        return ToolCall(
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=dict(tool_call.arguments),
+        )
 
     @staticmethod
     def _assistant_text(assistant: AssistantMessage) -> str:
@@ -493,31 +410,7 @@ class ReActStrategy(ExecutionStrategy):
         )
 
     @staticmethod
-    def _to_message_metadata(assistant: AssistantMessage) -> MessageMetadata | None:
-        meta = assistant.metadata
-        if meta is None:
-            return None
-        usage = meta.usage
-        return MessageMetadata(
-            provider=meta.provider,
-            model=meta.model,
-            input_tokens=usage.input_tokens if usage else None,
-            output_tokens=usage.output_tokens if usage else None,
-            total_tokens=usage.total_tokens if usage else None,
-            elapsed_ms=meta.elapsed_ms,
-            provider_finish_reason=meta.finish_reason,
-            provider_finish_message=meta.finish_message,
-            provider_response_id=meta.provider_response_id,
-            provider_model_version=meta.provider_model_version,
-        )
-
-    async def _emit_event(
-        self,
-        event_handler: RuntimeEventHandler | None,
-        event: RuntimeEvent,
-    ) -> None:
-        if event_handler is None:
+    async def _emit(bus: EventBus | None, event: RuntimeEventBase) -> None:
+        if bus is None:
             return
-        result = event_handler(event)
-        if inspect.isawaitable(result):
-            await result
+        await bus.emit(event)

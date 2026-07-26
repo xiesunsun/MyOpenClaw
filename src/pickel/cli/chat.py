@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -18,10 +19,9 @@ from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
-from pickel.runs import (
-    RuntimeEventHandler,
-)
+from pickel.runs.event_bus import EventBus
 from pickel.runs.measure import measure
+from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
 from pickel.runs.run import Run
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
@@ -33,6 +33,8 @@ from rich.text import Text
 
 if TYPE_CHECKING:
     from pickel.agents.agent import Agent
+
+logger = logging.getLogger(__name__)
 
 
 class ChatLoop:
@@ -64,6 +66,12 @@ class ChatLoop:
         self._app_config = app_config or (boot.app_config if boot is not None else None)
         # 进程级工具总线：跨 /reload 存活，由 Boot 持有的那一个
         self._tool_bus = boot.tool_bus if boot is not None else None
+        # bus 与 ChatLoop 同生命周期，绝不每轮重建：seq 由 bus 单调分配，
+        # 每轮换 bus 会让 seq 回到 0，同一 session 的事件按 seq 排序就交错了（红线 4）。
+        self._bus = EventBus()
+        self._trace_sink: JsonlTraceSink | None = None
+        self._unsubscribe_trace: Callable[[], None] | None = None
+        self._open_trace_sink()
 
     @classmethod
     def from_boot(
@@ -100,18 +108,24 @@ class ChatLoop:
     async def handle_user_input(
         self,
         text: str,
-        event_handler: RuntimeEventHandler | None = None,
+        bus: "EventBus | None" = None,
     ) -> AssistantMessage:
         if self._run is None:
             raise ValueError("Run 未提供")
         return await self._run.turn(
-            session=self.session,
-            user_text=text,
-            event_handler=event_handler,
+            session=self.session, user_text=text, bus=bus
         )
 
-    def create_event_handler(self) -> RuntimeEventHandler:
-        return ChatEventRenderer(self.console).handle_event
+    def create_event_bus(self) -> tuple[EventBus, ChatEventRenderer, Callable[[], None]]:
+        """把本轮的渲染器挂到长命 bus 上。
+
+        返回 (bus, renderer, unsubscribe)；调用方必须在 turn 结束后调 unsubscribe，
+        否则渲染器会越积越多，第 N 轮的输出被打印 N 遍。
+        trace sink 不在这里挂——它跟着 session 走，见 `_open_trace_sink`。
+        """
+        renderer = ChatEventRenderer(self.console)
+        unsubscribe = self._bus.subscribe(renderer.handle_event)
+        return self._bus, renderer, unsubscribe
 
     def render_turn_output(self, reply: AssistantMessage, *, start_index: int) -> None:
         for entry in self.session.entries[start_index:]:
@@ -260,11 +274,40 @@ class ChatLoop:
         self._render_message("System", summary, style="cyan")
 
     def _close_session(self) -> None:
+        self._close_trace_sink()
         if self._session_closed:
             return
         if self._session_service is not None:
             self._session_service.close(session=self.session)
         self._session_closed = True
+
+    def _open_trace_sink(self) -> None:
+        """按当前 session 建 trace sink 并挂上 bus；每次换 session 都要重调。
+
+        文件名绑的是 session_id，不重建的话 /agent、/new 之后新 session 的事件
+        会写进旧 session 的文件里。
+        """
+        self._close_trace_sink()
+        if not trace_enabled(
+            self._app_config.trace_enabled if self._app_config is not None else False
+        ):
+            return
+        try:
+            self._trace_sink = JsonlTraceSink(trace_path(self.session.session_id))
+        except OSError as exc:  # 可观测性组件不得弄挂主流程（红线 5）
+            self._trace_sink = None
+            logger.warning("trace 打开失败，本次运行禁用 trace: %s", exc)
+            return
+        self._unsubscribe_trace = self._bus.subscribe(self._trace_sink)
+
+    def _close_trace_sink(self) -> None:
+        """trace 文件句柄的唯一释放点；幂等，异常路径由 run() 的 finally 兜底。"""
+        if self._unsubscribe_trace is not None:
+            self._unsubscribe_trace()
+            self._unsubscribe_trace = None
+        if self._trace_sink is not None:
+            self._trace_sink.close()
+            self._trace_sink = None
 
     def _list_available_models(self) -> list[str]:
         """从 app_config.providers 列出 provider/model。"""
@@ -392,6 +435,7 @@ class ChatLoop:
             self._session_service = session_service
             self._session_closed = False
             self._fallback_message_count = 0
+            self._open_trace_sink()
             self._render_system_message(
                 f"Switched to {agent_id}, new session {session.session_id}"
             )
@@ -413,6 +457,7 @@ class ChatLoop:
         self.session = session
         self._session_closed = False
         self._fallback_message_count = 0
+        self._open_trace_sink()
         self._render_system_message(
             f"New session {session.session_id} (agent={agent_id})"
         )
@@ -554,7 +599,15 @@ class ChatLoop:
         self._render_message("System", renderable, style="cyan")
 
     async def run(self) -> None:
-        self._render_header()
+        # turn 中途的 KeyboardInterrupt 不经过下面任何 _close_session，
+        # 故 trace 句柄在此兜底释放；_render_header 也在保护范围内。
+        try:
+            self._render_header()
+            await self._loop()
+        finally:
+            self._close_trace_sink()
+
+    async def _loop(self) -> None:
         while True:
             try:
                 raw_user_input = self.input_reader("You > ")
@@ -578,13 +631,10 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            event_renderer = ChatEventRenderer(self.console)
+            bus, event_renderer, unsubscribe_renderer = self.create_event_bus()
             start_index = len(self.session.entries)
             try:
-                reply = await self.handle_user_input(
-                    user_input,
-                    event_handler=event_renderer.handle_event,
-                )
+                reply = await self.handle_user_input(user_input, bus=bus)
                 if self._session_service is not None:
                     self._session_service.flush_new_entries(
                         session=self.session,
@@ -593,6 +643,8 @@ class ChatLoop:
             except Exception as exc:
                 self._render_error_message(traceback.format_exc().rstrip())
                 continue
+            finally:
+                unsubscribe_renderer()
 
             self._fallback_message_count += 1
             # last usage 由 /context 从 Session 派生（§11.8），不在此缓存

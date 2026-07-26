@@ -81,8 +81,10 @@ def resolve_anchor(
 ) -> UsageAnchor | None:
     """取 active_path 上最近一条可用的 assistant usage 作为锚。
 
-    返回 None（锚失效）的情形：无 assistant / 无 usage / 其后有 compaction /
-    provider、model、system 或 tools 已变 / 旧 entry 无 fingerprint。
+    返回 None（锚失效）的情形：无 assistant / 最近一条模型返回无 usage /
+    其后有 compaction / provider、model、system 或 tools 已变 / 旧 entry 无
+    fingerprint。本地合成的 assistant（metadata 为 None）不算模型返回，按
+    trailing 消息跳过。
     """
     path = session.active_path()
     if not path:
@@ -102,7 +104,13 @@ def resolve_anchor(
         message = _message_from_entry(entry)
         if message is None:
             continue
-        if not isinstance(message, AssistantMessage):
+        if not isinstance(message, AssistantMessage) or message.metadata is None:
+            # 无 metadata 的 assistant 从来不是模型返回（真实回复一律经
+            # ReAct._ensure_metadata 补齐 metadata），只可能是本地合成的文本，
+            # 例如 max-steps 的「Reached the maximum...」。它既不携带 usage，
+            # 也不代表 provider/model/system/tools 发生过变化，故按普通 trailing
+            # 消息估计并继续向前找真正的锚——否则一次 max-steps 就会让锚永久失效，
+            # /context 每次都退回远程 count。
             trailing.insert(0, message)
             continue
 

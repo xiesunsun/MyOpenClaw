@@ -157,6 +157,55 @@ def test_anchor_collects_trailing_messages():
     assert isinstance(anchor.trailing_messages[0], UserMessage)
 
 
+def test_本地合成的assistant被当作trailing_锚仍取上一条真实调用():
+    """max-steps 的合成消息（无 metadata）不得让锚失效。
+
+    锚失效 → /context 每次都退回远程 count，是可观测性回归。
+    """
+    session, request = _session_with_reply()
+    session.append_assistant(
+        AssistantMessage(
+            content=[TextContent(text="Reached the maximum number of reasoning steps.")]
+        )
+    )
+
+    anchor = _resolve(session=session, request=request)
+
+    assert anchor is not None
+    assert anchor.input_tokens == 1000
+    assert anchor.output_tokens == 50
+    # 合成消息确实进了下一次请求，故按 trailing 估计而非丢弃
+    assert len(anchor.trailing_messages) == 1
+    assert isinstance(anchor.trailing_messages[0], AssistantMessage)
+
+
+def test_有metadata但无usage的assistant仍然整体失效():
+    """区分「本地合成」与「模型返回了但没给 usage」：后者保持保守失效。"""
+    request = _request()
+    session = Session.create(agent_id="Pickle")
+    session.append_user(UserMessage(content=[TextContent(text="hi")]))
+    session.append_assistant(
+        AssistantMessage(
+            content=[TextContent(text="first")],
+            metadata=_metadata(request=request),
+        )
+    )
+    session.append_assistant(
+        AssistantMessage(
+            content=[TextContent(text="no usage")],
+            metadata=ModelResponseMetadata(
+                provider=PROVIDER,
+                model=MODEL,
+                context_fingerprint=context_fingerprint(
+                    request, provider=PROVIDER, model=MODEL
+                ),
+            ),
+        )
+    )
+
+    assert _resolve(session=session, request=request) is None
+
+
 def test_anchor_uses_last_assistant_when_multiple_steps():
     request = _request()
     session = Session.create(agent_id="Pickle")

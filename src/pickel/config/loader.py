@@ -24,6 +24,7 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
     "default_file_access_mode": "workspace",
     "react_max_steps": 8,
     "context_cli_turn_window": 5,
+    "trace_enabled": False,
     "providers": {},
     "agents": {},
 }
