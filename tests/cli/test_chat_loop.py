@@ -124,7 +124,13 @@ class ErrorRun:
         raise ValueError("boom")
 
 
-class InterruptRun:
+class RecordingRun:
+    """记录 turn 的开始与完成；被 cancel 掉的 turn 两个列表里都不会出现。"""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.completed: list[str] = []
+
     async def turn(
         self,
         *,
@@ -132,7 +138,50 @@ class InterruptRun:
         user_text: str,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        raise KeyboardInterrupt
+        self.started.append(user_text)
+        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        reply = _text_assistant("runtime reply")
+        session.append_assistant(reply)
+        self.completed.append(user_text)
+        return reply
+
+
+class _InterruptedTurnTask:
+    """真 task 的透明包装：首次 await 在 task 尚未运行前同步抛 KeyboardInterrupt。
+
+    KeyboardInterrupt 若从 task 协程内部抛出，会经 Task.__step 直接砸进
+    事件循环把测试进程杀掉——真实 Ctrl-C 抵达的是 `_loop` 的 `await task`
+    点，所以只能在 await 侧注入。cancel 与后续 await 全部转发给真 task，
+    因此 cancel 有真实可观察效果：漏掉 task.cancel()，被中断的 turn 会跑完。
+    """
+
+    def __init__(self, coro) -> None:
+        self.task = asyncio.get_running_loop().create_task(coro)
+        self.cancel_calls = 0
+        self._interrupted = False
+
+    def cancel(self) -> bool:
+        self.cancel_calls += 1
+        return self.task.cancel()
+
+    def __await__(self):
+        if not self._interrupted:
+            self._interrupted = True
+            raise KeyboardInterrupt
+        return self.task.__await__()
+
+
+def _interrupt_first_turn_at_await(created: list["_InterruptedTurnTask"]):
+    """create_task 替身：第一条 turn 换成注入 KI 的包装，其余照常建真 task。"""
+
+    def create_task(coro):
+        if created:
+            return asyncio.get_running_loop().create_task(coro)
+        wrapper = _InterruptedTurnTask(coro)
+        created.append(wrapper)
+        return wrapper
+
+    return create_task
 
 
 class StubToolRun:
@@ -510,33 +559,29 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sink.closed)
 
     async def test_keyboard_interrupt_cancels_turn_and_loop_continues(self) -> None:
-        """Ctrl-C 只中断当前 turn，循环继续；sink 在 /exit 关会话时释放。
+        """Ctrl-C 只中断当前 turn：cancel 本轮 task，循环继续吃后续输入。
 
-        KeyboardInterrupt 若从 task 协程内部抛出，会经 Task.__step 直接砸进
-        事件循环把测试进程杀掉——真实 Ctrl-C 抵达的是 `_loop` 的 `await task`
-        点，故用「异常已设置的 Future」模拟这条到达路径。
+        注入方式见 _InterruptedTurnTask。三个语义各有断言：
+        中断轮被取消（cancel 被调、turn 未跑）、循环继续（下一条输入
+        照常跑完，`continue` 改 `return` 会让它消失）、sink 最终释放。
         """
-
-        def interrupt_at_await(coro):
-            coro.close()  # turn 未启动就被打断
-            future = asyncio.get_running_loop().create_future()
-            future.set_exception(KeyboardInterrupt())
-            return future
+        run = RecordingRun()
+        created: list[_InterruptedTurnTask] = []
 
         with TemporaryDirectory() as tmpdir:
             trace_file = Path(tmpdir) / "traces" / "session-1.jsonl"
-            submitted_inputs = iter(["hello", "/exit"])
+            submitted_inputs = iter(["first", "second", "/exit"])
             with (
                 patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
                 patch("pickel.cli.chat.trace_path", return_value=trace_file),
                 patch(
                     "pickel.cli.chat.asyncio.create_task",
-                    side_effect=interrupt_at_await,
+                    side_effect=_interrupt_first_turn_at_await(created),
                 ),
             ):
                 loop = ChatLoop(
                     agent=self._build_agent(),
-                    run=InterruptRun(),
+                    run=run,
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
                     console=Mock(),
                     input_reader=lambda _: next(submitted_inputs),
@@ -545,7 +590,38 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 # 新语义：turn 内 Ctrl-C 不再冒出 run()，而是取消本轮后回到输入
                 await loop.run()
 
+        # 中断轮被取消：cancel 被调，turn 从未跑起来
+        self.assertEqual(1, created[0].cancel_calls)
+        self.assertTrue(created[0].task.cancelled())
+        # 循环继续：第二条输入照常完成
+        self.assertEqual(["second"], run.started)
+        self.assertEqual(["second"], run.completed)
         self.assertTrue(sink.closed)
+
+    async def test_keyboard_interrupt_still_flushes_session_to_disk(self) -> None:
+        """中断分支必须 flush：react 取消时补齐的 tool_result 要落盘，
+        否则下一轮从磁盘恢复的 session 仍有悬空 tool_call。"""
+        session_service = FakeSessionService()
+        created: list[_InterruptedTurnTask] = []
+
+        submitted_inputs = iter(["first", "/exit"])
+        with patch(
+            "pickel.cli.chat.asyncio.create_task",
+            side_effect=_interrupt_first_turn_at_await(created),
+        ):
+            loop = ChatLoop(
+                agent=self._build_agent(),
+                run=RecordingRun(),
+                session=Session.create(agent_id="Pickle", session_id="session-1"),
+                console=Mock(),
+                input_reader=lambda _: next(submitted_inputs),
+                session_service=session_service,
+            )
+            await loop.run()
+
+        # 全程只有中断这一轮，唯一一次 flush 只能来自中断分支
+        self.assertEqual([[]], session_service.flush_calls)
+        self.assertTrue(session_service.closed)
 
     async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
