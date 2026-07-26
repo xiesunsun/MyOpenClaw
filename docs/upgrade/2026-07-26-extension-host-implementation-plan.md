@@ -18,6 +18,8 @@
 - 装载失败必须隔离：记错、跳过、其余继续，**不阻止 CLI 启动**。
 - 每个任务结束时 `git commit`。
 
+**OpenViking 生产服务（联调基线，2026-07-26 部署）**：endpoint `https://openviking.sunxie.me`，凭证在 `~/code/openviking/.env`（勿入库）；实测 API 契约表在 `~/code/openviking/README.md` 末尾——响应统一信封（业务数据在 `result` 里）、`commit` 异步需轮询 `tasks/{task_id}`、429 是配额常态需退避重试、`/messages` 与 `/messages/batch` 结构不同。**E1 范围内不改客户端代码**（验收=行为不变，走 SDK）；对真实服务的联调与契约修正是 E1 完成后的独立任务，以 README 表为准。
+
 ---
 
 ## 文件地图（目标）
@@ -408,7 +410,7 @@ Expected: FAIL，`AttributeError: 'AppConfig' object has no attribute 'extension
 
 - [ ] **Step 4: loader 通用合并**
 
-`src/pickel/config/loader.py`，在现有 openviking 专段（约 line 88-98）**之后**插入：
+`src/pickel/config/loader.py`，在现有 openviking 专段（约 line 89-99）**之后**插入：
 
 ```python
         # settings 的 extensions.<name> 与 auth.json 的 extensions.<name> 深合并，auth 优先

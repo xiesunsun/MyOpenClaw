@@ -186,7 +186,7 @@ core 不校验 extension 的配置内容，只做 `expand_env_vars`（沿用现�
 
 ### 密钥从 auth.json 来
 
-现状 `config/loader.py:88-98` 对 openviking 有一段专门逻辑：settings 里的 `openviking`（策略）与 `auth.json` 里的 `openviking`（`user_key` 等密钥）深合并，auth 优先。`migrate.py` 也按「策略进 settings、密钥进 auth」拆分。
+现状 `config/loader.py:89-99` 对 openviking 有一段专门逻辑：settings 里的 `openviking`（策略）与 `auth.json` 里的 `openviking`（`user_key` 等密钥）深合并，auth 优先。`migrate.py` 也按「策略进 settings、密钥进 auth」拆分。
 
 extension 化后这段要通用化，而不是删掉 —— 否则 extension 的密钥只能写进 settings，与既有的密钥分离约定相悖：
 
@@ -255,7 +255,7 @@ extension 化后这段要通用化，而不是删掉 —— 否则 extension 的
 | 1 | `SessionSync` Protocol + `NoopSessionSync` 从 `integrations/openviking/session_sync.py` 移到 `conversations/session_sync.py`；`conversations/service.py` 改 import |
 | 2 | `git mv src/pickel/integrations/openviking src/pickel/extensions/openviking`（13 文件 1061 行，内部 import 路径批量改） |
 | 3 | 新增 `extensions/openviking/__init__.py` 的 `setup(host)`，把 `boot._build_recall_sources` / `_build_session_sync` / `_build_session_recall_provider` / `_resolve_openviking_remote_agent_id` 四个方法的逻辑搬进去，改写为两个工厂函数 |
-| 4 | `app/boot.py` 删掉这四个方法与全部 openviking import（四个方法约 97 行 + 14 行 import，`boot.py` 从 220 行降到约 110 行） |
+| 4 | `app/boot.py` 删掉这四个方法与全部 openviking import（四个方法约 97 行 + 14 行 import，`boot.py` 从 232 行降到约 120 行） |
 | 5 | `config/app_config.py` 删 `openviking` 字段与 `from pickel.integrations.openviking.config import OpenVikingConfig` |
 | 6 | `OpenVikingConfig` 增 `agents: dict[str, OpenVikingAgentConfig]` 的兼容读取 —— 现状 `remote_agent_id` 既可能在 `openviking.agents.<id>`，也可能在 `agents.<id>.remote_agent_id`（`AgentConfig.remote_agent_id`）。后者是 core 的 agent 配置字段，**保留不动**，extension 通过 `AgentScope.app_config` 读它 |
 | 7 | `config/migrate.py` 增旧段折算 |
