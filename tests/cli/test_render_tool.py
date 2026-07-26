@@ -31,11 +31,15 @@ def test_非终端模式_running_与_ok_行都在且顺序正确():
         _call(), ToolExecutionResult(content="hi"), _T0 + timedelta(seconds=2.3)
     )
 
-    lines = console.export_text().splitlines()
+    text = console.export_text()
+    lines = text.splitlines()
     label_idx = next(i for i, line in enumerate(lines) if "⏺ echo" in line)
     running_idx = next(i for i, line in enumerate(lines) if "running…" in line)
     ok_idx = next(i for i, line in enumerate(lines) if "ok · hi" in line)
     assert label_idx < running_idx < ok_idx
+    # 非终端必须走「只追加」路径：label 不得被重打，也不得发 ANSI 上移
+    assert text.count("⏺ echo") == 1
+    assert "\x1b[2A" not in console.export_text(styles=True)
 
 
 def test_结果行缩进两格():
