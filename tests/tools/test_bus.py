@@ -253,3 +253,51 @@ class ToolSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WildcardActivationTests(unittest.TestCase):
+    def _bus_with_mcp_tools(self) -> ToolBus:
+        bus = ToolBus()
+        for tool_name in ("create_issue", "list_repos"):
+            bus.register(_stub_tool(tool_name), source=ToolSource.MCP, origin="github")
+        return bus
+
+    def test_snapshot_matches_wildcard_pattern(self) -> None:
+        bus = self._bus_with_mcp_tools()
+
+        snapshot = bus.snapshot(ToolActivation(allowed=frozenset({"mcp__github__*"})))
+
+        self.assertEqual(
+            {"mcp__github__create_issue", "mcp__github__list_repos"},
+            set(snapshot.names),
+        )
+
+    def test_snapshot_exact_names_still_work(self) -> None:
+        bus = self._bus_with_mcp_tools()
+
+        snapshot = bus.snapshot(
+            ToolActivation(allowed=frozenset({"mcp__github__create_issue"}))
+        )
+
+        self.assertEqual(("mcp__github__create_issue",), snapshot.names)
+
+    def test_agent_disabled_is_exact_and_beats_wildcard(self) -> None:
+        bus = self._bus_with_mcp_tools()
+
+        snapshot = bus.snapshot(
+            ToolActivation(
+                allowed=frozenset({"mcp__github__*"}),
+                agent_disabled=frozenset({"mcp__github__create_issue"}),
+            )
+        )
+
+        self.assertEqual(("mcp__github__list_repos",), snapshot.names)
+
+    def test_missing_names_wildcard_only_when_nothing_matches(self) -> None:
+        bus = self._bus_with_mcp_tools()
+
+        activation = ToolActivation(
+            allowed=frozenset({"mcp__github__*", "mcp__jira__*", "read_file"})
+        )
+
+        self.assertEqual(["mcp__jira__*", "read_file"], bus.missing_names(activation))

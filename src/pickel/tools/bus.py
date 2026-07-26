@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import fnmatch
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -99,6 +100,14 @@ def qualified_name(spec_name: str, source: ToolSource, origin: str | None) -> st
     return f"{_PREFIX_BY_SOURCE[source]}__{origin}__{spec_name}"
 
 
+def _activation_allows(name: str, allowed: frozenset[str]) -> bool:
+    if name in allowed:
+        return True
+    return any(
+        "*" in pattern and fnmatch.fnmatchcase(name, pattern) for pattern in allowed
+    )
+
+
 class ToolBus:
     """进程级工具注册表。可变，跨 Run / session / reload 存活。"""
 
@@ -172,14 +181,26 @@ class ToolBus:
             entry
             for entry in self._entries.values()
             if entry.enabled
-            and entry.name in activation.allowed
+            and _activation_allows(entry.name, activation.allowed)
             and entry.name not in activation.agent_disabled
         )
         return ToolSnapshot(entries=entries)
 
     def missing_names(self, activation: ToolActivation) -> list[str]:
-        """白名单里存在、bus 中却没有的名字。调用方据此记 warning，不视为错误。"""
-        return sorted(name for name in activation.allowed if name not in self._entries)
+        """白名单里存在、bus 中却没有的名字。调用方据此记 warning，不视为错误。
+
+        通配模式（含 *）只有在 bus 里没有任何名字匹配它时才算 missing。
+        """
+        missing = []
+        for name in sorted(activation.allowed):
+            if "*" in name:
+                if not any(
+                    fnmatch.fnmatchcase(existing, name) for existing in self._entries
+                ):
+                    missing.append(name)
+            elif name not in self._entries:
+                missing.append(name)
+        return missing
 
 
 def bus_with(tools: Iterable[BaseTool]) -> ToolBus:
