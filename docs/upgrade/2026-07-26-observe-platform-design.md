@@ -153,7 +153,23 @@ pickel observe [--session ID]... [--out PATH] [--limit N]
 - HTML:step 内 details 展示「请求摘要 · trace · 非真源」。
 - 红线不变:digest 不含任何 system/messages/tools 正文;白名单测试继续锁死 SECRET 不泄露。
 
-## 10. 自评审记录
+## 10. run-diff 视图(2026-07-27 增补,用户批准)
+
+**问题**:归因的动词是 diff,平台只有 view——「同 query 不同表现」要人肉两窗口对比。
+**方案**:纯前端,复用数据岛,零合同变更。每个 turn 头部加「对比」按钮,选中任意两个 turn(跨会话允许)后弹出双列面板,逐维对比并高亮差异:
+
+| 维度 | 对比方式 |
+|------|----------|
+| query / 模型 / step 数 / finish_reason | 值不同即高亮 |
+| usage(actual_input 四分项 + output)/ 耗时 | 并列 + Δ |
+| context_fingerprint | 逐 step 位置比对,任一不同即高亮 |
+| digest system 分段 | 按段名对齐,chars 并列 + Δ;缺段标注 |
+| digest tools | 集合差(A 独有 / B 独有) |
+| 工具执行序列 | 名称序列并列,数量与集合差高亮 |
+
+选择逻辑:第一次点选 A,第二次选 B 并展示;已满两个再点则重新从 A 开始。digest 任一侧缺失时该组行显示「无 digest(trace 未开)」。
+
+## 11. 自评审记录
 
 - 占位符：无 TBD/TODO。
 - 一致性：trace 白名单与红线 5 的解释已在 §2.2 写明边界（只取时序与终态，不取对话/用量）；与 trace_sink「只写不读」的冲突以**新增独立 reader 且白名单**的方式解决，trace_sink 本身不加读接口。
