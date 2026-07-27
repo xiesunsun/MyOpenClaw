@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.text import Text
 
 from pickel.runs.turn_usage import TurnUsage
@@ -71,7 +70,9 @@ def render_assistant(
     usage: TurnUsage | None,
     fallback_model_label: str | None,
 ) -> None:
-    console.print(Markdown(text))
+    """非流式定稿：白字正文 + footer（不解析 Markdown，避免双份与终端 MD 上限问题）。"""
+    if text:
+        console.print(text, highlight=False, markup=False)
     footer = format_footer(usage, fallback_model_label)
     if footer is not None:
         # justify 必须给 print：Text(justify=...) 只在块内对齐，

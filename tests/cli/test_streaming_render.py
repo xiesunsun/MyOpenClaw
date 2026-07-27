@@ -38,7 +38,8 @@ def test_文本增量按顺序出现():
     assert "你好呀" in text
 
 
-def test_增量之后仍渲染完整_assistant_正文():
+def test_settle_后正文一份且有_footer():
+    """同文预览 + 定稿：非终端只补 footer，正文不双份。"""
     text = _render(
         [
             TextDeltaEvent(text="你好"),
@@ -52,6 +53,7 @@ def test_增量之后仍渲染完整_assistant_正文():
         ]
     )
 
+    assert text.count("你好") == 1
     assert "anthropic / claude-jupiter-v1-p · 100→20 · 1.5s" in text
     assert "╭" not in text
 
@@ -76,7 +78,8 @@ def test_工具参数增量不上屏():
 @pytest.mark.parametrize(
     ("event", "next_line_marker"),
     [
-        (AssistantMessageEvent(text="最终回复"), "最终回复"),
+        # 有流式预览时 settle 只补 footer，不再重打正文
+        (AssistantMessageEvent(text="最终回复"), None),
         (StepStarted(envelope=EventEnvelope(step_index=1)), None),
         (
             ToolCallStarted(
@@ -92,19 +95,17 @@ def test_工具参数增量不上屏():
     ids=["assistant_message", "step_started", "tool_call_started"],
 )
 def test_渲染事件前流式输出必须收尾换行(event, next_line_marker):
-    """E2 守护的等价新口径：任一渲染事件到来前必须收尾流式行
-    （stream.end()），否则正文/工具行粘在流式文字同一行：
-    `流式预览⏺ echo …` 或 `流式预览最终回复`。"""
+    """流式行须先收尾换行，不得与后续工具行粘在同一行。"""
     text = _render([TextDeltaEvent(text="流式预览"), event])
 
     lines = text.splitlines()
     idx = next(i for i, line in enumerate(lines) if "流式预览" in line)
-    # 流式文字行独占一行：不含 ⏺，正文/工具行另起行
     assert lines[idx].strip() == "流式预览"
     assert "⏺" not in lines[idx]
     if next_line_marker is None:
-        # StepStarted 不再上屏，但仍应 stream.end()：其后无粘行
-        assert text == "流式预览\n"
+        assert "最终回复" not in text or isinstance(event, StepStarted)
+        # 流式正文只一份
+        assert text.count("流式预览") == 1
     else:
         assert any(next_line_marker in line for line in lines[idx + 1 :])
 
@@ -116,7 +117,7 @@ def test_中断显示提示():
 
 
 def test_无_delta_时渲染正文与_footer():
-    """非流式 provider 走这条路径：正文 Markdown 无框 + 单行 footer。"""
+    """非流式 provider：白字正文 + 单行 footer。"""
     text = _render(
         [
             AssistantMessageEvent(

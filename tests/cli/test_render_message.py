@@ -130,7 +130,7 @@ def test_render_header_三行无框():
     assert "╭" not in text
 
 
-def test_render_assistant_markdown_加_footer_无框():
+def test_render_assistant_白字加_footer_无框_不解析_md():
     console = _console()
     usage = TurnUsage(
         steps=1, input_tokens=100, output_tokens=20,
@@ -140,7 +140,7 @@ def test_render_assistant_markdown_加_footer_无框():
     render_assistant(console, text="# 标题\n\n正文", usage=usage, fallback_model_label=None)
 
     text = console.export_text()
-    assert "标题" in text
+    assert "# 标题" in text  # 不解析 Markdown，字面输出
     assert "正文" in text
     assert "anthropic / m · 100→20 · 1.5s" in text
     assert "╭" not in text

@@ -38,18 +38,15 @@ from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolActivation, bus_with
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.text import Text
 
 
-def _markdown_replies(console: Mock, text: str) -> list[Markdown]:
-    """事件渲染出的 assistant 正文（无边框 Markdown）；用于数渲染次数。"""
+def _assistant_body_prints(console: Mock, text: str) -> list:
+    """事件渲染出的 assistant 白字正文次数（不再使用 Markdown）。"""
     return [
         call.args[0]
         for call in console.print.call_args_list
-        if call.args
-        and isinstance(call.args[0], Markdown)
-        and call.args[0].markup == text
+        if call.args and call.args[0] == text
     ]
 
 
@@ -377,7 +374,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⏺ read_file", rendered)
         self.assertIn("path=", rendered)
         self.assertIn("running", rendered)
-        self.assertIn("ok · file content", rendered)
+        self.assertIn("ok", rendered)
+        self.assertIn("out", rendered)
+        self.assertIn("file content", rendered)
         self.assertIn("final reply", rendered)
         self.assertIn("google/gemini / gemini-3-flash-preview · 11→7", rendered)
         # 工具行先于最终正文
@@ -519,24 +518,25 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         rendered = console.export_text()
         self.assertNotIn("╭", rendered)
         self.assertIn("⏺ echo", rendered)
-        self.assertIn("ok · hi", rendered)
+        self.assertIn("ok", rendered)
+        self.assertIn("out", rendered)
+        self.assertIn("hi", rendered)
         self.assertIn("· 思考中……", rendered)
         self.assertIn("done", rendered)
         # 两步合计：input 100+100=200、output 10+10=20、elapsed 100+100ms=0.2s
         self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
-        # 顺序：工具行 < 结果行 < 思考行 < footer
-        self.assertLess(rendered.index("⏺ echo"), rendered.index("ok · hi"))
-        self.assertLess(rendered.index("ok · hi"), rendered.index("· 思考中……"))
+        # 顺序：工具行 < ok < 思考行 < footer；正文 settle 后一份
+        self.assertLess(rendered.index("⏺ echo"), rendered.index("ok"))
+        self.assertLess(rendered.index("ok"), rendered.index("· 思考中……"))
         self.assertLess(
             rendered.index("· 思考中……"),
             rendered.index("google/gemini / gemini-3-flash-preview · 200→20"),
         )
-        # 流式预览行（do+ne）与工具行不粘连：思考行之后有独立的流式文字
-        streaming_lines = [
-            line for line in rendered.splitlines() if line.strip() == "done"
-        ]
-        self.assertTrue(streaming_lines, "流式预览与 Markdown 正文各占独立行")
-
+        self.assertEqual(
+            1,
+            sum(1 for line in rendered.splitlines() if line.strip() == "done"),
+            "settle 后最终正文只一份",
+        )
     async def test_run_does_not_duplicate_final_reply_after_assistant_event(self) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
@@ -551,7 +551,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
-        self.assertEqual(1, len(_markdown_replies(console, "runtime reply")))
+        self.assertEqual(1, len(_assistant_body_prints(console, "runtime reply")))
         # chat.py 的 fallback（Panel "Assistant"）不得再画一遍
         self.assertEqual(0, titles.count("Assistant"))
         self.assertNotIn("You", titles)
@@ -777,7 +777,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await loop.run()
 
-        self.assertEqual(3, len(_markdown_replies(console, "runtime reply")))
+        self.assertEqual(3, len(_assistant_body_prints(console, "runtime reply")))
 
     async def test_失败轮也退订渲染器_后续轮次不翻倍(self) -> None:
         """异常路径的退订只由 finally 保证，挪出去就是「一轮失败后越印越多」。"""
@@ -909,7 +909,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = console.export_text()
         self.assertIn("⏺ echo", rendered)
-        self.assertIn("ok · hi", rendered)
+        self.assertIn("ok", rendered)
+        self.assertIn("out", rendered)
+        self.assertIn("hi", rendered)
         self.assertIn("done", rendered)
         self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
         # 工具行先于最终正文；Step 行不再上屏
@@ -1068,7 +1070,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             await loop.run()
 
         self.assertIsNone(loop._trace_sink)
-        self.assertEqual(1, len(_markdown_replies(console, "runtime reply")))
+        self.assertEqual(1, len(_assistant_body_prints(console, "runtime reply")))
 
     async def test_help_lists_context_command(self) -> None:
         output = StringIO()

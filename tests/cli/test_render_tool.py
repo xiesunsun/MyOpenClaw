@@ -1,4 +1,4 @@
-"""render/tool：工具行原地更新（E3 Task 3）。"""
+"""render/tool：名与 args 同行，子行 · 左对齐。"""
 
 from __future__ import annotations
 
@@ -14,15 +14,30 @@ from pickel.tools.base import ToolExecutionResult
 _T0 = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _console() -> Console:
-    return Console(width=100, record=True, force_terminal=False)
+def _console(**kwargs) -> Console:
+    return Console(width=100, record=True, force_terminal=False, **kwargs)
 
 
-def _call(call_id: str = "c1") -> ToolCall:
-    return ToolCall(id=call_id, name="echo", arguments={"text": "hi"})
+def _call(call_id: str = "c1", **kwargs) -> ToolCall:
+    name = kwargs.pop("name", "echo")
+    arguments = kwargs.pop("arguments", {"text": "hi"})
+    return ToolCall(id=call_id, name=name, arguments=arguments)
 
 
-def test_非终端模式_running_与_ok_行都在且顺序正确():
+def test_started_名与_args_同一行_running_用点对齐():
+    console = _console()
+    renderer = ToolRenderer(console)
+
+    renderer.on_started(_call(), _T0)
+    lines = console.export_text().splitlines()
+
+    assert lines[0].startswith("⏺ echo")
+    assert "text=" in lines[0]
+    assert "args" not in lines[0]
+    assert lines[1] == "· running"
+
+
+def test_completed_点号_ok与_out_名只一次():
     console = _console()
     renderer = ToolRenderer(console)
 
@@ -32,29 +47,15 @@ def test_非终端模式_running_与_ok_行都在且顺序正确():
     )
 
     text = console.export_text()
-    lines = text.splitlines()
-    label_idx = next(i for i, line in enumerate(lines) if "⏺ echo" in line)
-    running_idx = next(i for i, line in enumerate(lines) if "running…" in line)
-    ok_idx = next(i for i, line in enumerate(lines) if "ok · hi" in line)
-    assert label_idx < running_idx < ok_idx
-    # 非终端必须走「只追加」路径：label 不得被重打，也不得发 ANSI 上移
     assert text.count("⏺ echo") == 1
-    assert "\x1b[2A" not in console.export_text(styles=True)
-
-
-def test_结果行缩进两格():
-    console = _console()
-    renderer = ToolRenderer(console)
-
-    renderer.on_started(_call(), _T0)
-    renderer.on_completed(
-        _call(), ToolExecutionResult(content="hi"), _T0 + timedelta(seconds=2.3)
-    )
-
-    ok_line = next(
-        line for line in console.export_text().splitlines() if "ok · hi" in line
-    )
-    assert ok_line.startswith("  ok")
+    assert "· ok" in text
+    assert "· out  hi" in text
+    assert "(2.3s)" in text
+    lines = text.splitlines()
+    assert lines[0].startswith("⏺ echo")
+    assert lines[1] == "· running"
+    assert lines[2].startswith("· ok")
+    assert lines[3].startswith("· out")
 
 
 def test_failed_分支():
@@ -69,19 +70,8 @@ def test_failed_分支():
     )
 
     text = console.export_text()
-    assert "failed · boom" in text
-
-
-def test_耗时配对显示():
-    console = _console()
-    renderer = ToolRenderer(console)
-
-    renderer.on_started(_call(), _T0)
-    renderer.on_completed(
-        _call(), ToolExecutionResult(content="hi"), _T0 + timedelta(seconds=2.3)
-    )
-
-    assert "(2.3s)" in console.export_text()
+    assert "· failed" in text
+    assert "boom" in text
 
 
 def test_间隔不足_100ms_不显示耗时():
@@ -94,12 +84,12 @@ def test_间隔不足_100ms_不显示耗时():
     )
 
     ok_line = next(
-        line for line in console.export_text().splitlines() if "ok · hi" in line
+        line for line in console.export_text().splitlines() if line.startswith("· ok")
     )
     assert "(" not in ok_line
 
 
-def test_配不上_started_直接打完整两行不炸():
+def test_配不上_started_补头再打结果():
     console = _console()
     renderer = ToolRenderer(console)
 
@@ -109,15 +99,40 @@ def test_配不上_started_直接打完整两行不炸():
 
     text = console.export_text()
     assert "⏺ echo" in text
-    assert "ok · hi" in text
-    # 没有 started 就没有耗时
-    assert "s)" not in text
+    assert "· ok" in text
+    assert "hi" in text
 
 
-def test_结果摘要沿用截断规则_压缩空白并截到_180():
+def test_空结果标明_empty():
     console = _console()
     renderer = ToolRenderer(console)
-    long_content = "word  \n\t spaced " + "x" * 500
+
+    renderer.on_started(_call(), _T0)
+    renderer.on_completed(
+        _call(), ToolExecutionResult(content=""), _T0 + timedelta(seconds=1)
+    )
+
+    assert "· out  (empty)" in console.export_text()
+
+
+def test_长_content_同行摘要():
+    console = _console()
+    renderer = ToolRenderer(console)
+    body = "line1\n" + ("x" * 200)
+    call = _call(arguments={"path": "a.py", "content": body})
+
+    renderer.on_started(call, _T0)
+    head = console.export_text().splitlines()[0]
+
+    assert head.startswith("⏺ echo")
+    assert "path=" in head
+    assert f"content=<{len(body)} chars>" in head
+
+
+def test_长结果多行折叠():
+    console = _console()
+    renderer = ToolRenderer(console)
+    long_content = "\n".join(f"row{i}" for i in range(20))
 
     renderer.on_started(_call(), _T0)
     renderer.on_completed(
@@ -125,27 +140,11 @@ def test_结果摘要沿用截断规则_压缩空白并截到_180():
     )
 
     text = console.export_text()
-    assert "word spaced" in text
-    assert "..." in text
-    assert "x" * 200 not in text
+    assert "· out  row0" in text
+    assert "… +" in text
 
 
-def test_工具行截断到宽度内保证单行():
-    console = Console(width=40, record=True, force_terminal=False)
-    renderer = ToolRenderer(console)
-    call = ToolCall(
-        id="c1", name="echo", arguments={"text": "a" * 200}
-    )
-
-    renderer.on_started(call, _T0)
-
-    lines = console.export_text().splitlines()
-    label_lines = [line for line in lines if "⏺" in line]
-    assert len(label_lines) == 1
-    assert len(label_lines[0]) <= 40
-
-
-def test_终端模式_ANSI_原地更新且导出文本含结果行():
+def test_终端模式也只追加不擦屏():
     buffer = io.StringIO()
     console = Console(
         width=100, record=True, force_terminal=True, file=buffer
@@ -157,21 +156,7 @@ def test_终端模式_ANSI_原地更新且导出文本含结果行():
         _call(), ToolExecutionResult(content="hi"), _T0 + timedelta(seconds=2.3)
     )
 
-    raw = buffer.getvalue()
-    assert "\x1b[2A" in raw  # 光标上移两行
+    assert "\x1b[1A" not in buffer.getvalue()
     text = console.export_text()
-    assert "ok · hi" in text
-    assert "(2.3s)" in text
-
-
-def test_终端模式_配不上_started_不发_ANSI():
-    buffer = io.StringIO()
-    console = Console(
-        width=100, record=True, force_terminal=True, file=buffer
-    )
-    renderer = ToolRenderer(console)
-
-    renderer.on_completed(_call("orphan"), ToolExecutionResult(content="hi"), _T0)
-
-    assert "\x1b[2A" not in buffer.getvalue()
-    assert "ok · hi" in console.export_text()
+    assert text.count("⏺ echo") == 1
+    assert "· ok" in text

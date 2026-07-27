@@ -1,12 +1,12 @@
-"""事件 → 渲染分派器（E3）。
+"""事件 → 渲染分派器（E3.1 块模型）。
 
-实际渲染在 `cli/render/`（stream / tool / message 三模块），本类只做
-事件到模块的分派。所有渲染信息只来自事件——不读 Run/Session/trace。
+实际渲染在 `cli/render/`（stream / tool / message），本类只做分派。
+所有渲染信息只来自事件——不读 Run/Session/trace。
 """
 
 from rich.console import Console
 
-from pickel.cli.render.message import render_assistant, render_interrupted
+from pickel.cli.render.message import render_interrupted
 from pickel.cli.render.stream import StreamRenderer
 from pickel.cli.render.tool import ToolRenderer
 from pickel.runs.runtime_events import (
@@ -29,7 +29,7 @@ class ChatEventRenderer:
     ) -> None:
         self.console = console
         # AssistantMessageEvent.usage=None 时事件里没有 model 信息，
-        # footer 退到装配时注入的 label（E2 遗留修复，见计划决策 3）
+        # footer 退到装配时注入的 label（E2 遗留修复）
         self._fallback_model_label = fallback_model_label
         self._stream = StreamRenderer(console)
         self._tool = ToolRenderer(console)
@@ -48,7 +48,7 @@ class ChatEventRenderer:
             return
 
         if isinstance(event, StepStarted):
-            # 无边框排版下 Step N 行是噪音，不上屏；只收尾流式行
+            # 无边框：Step 行不上屏；预览提交为历史
             self._stream.end()
             return
 
@@ -70,10 +70,8 @@ class ChatEventRenderer:
             return
 
         if isinstance(event, AssistantMessageEvent):
-            self._stream.end()
-            render_assistant(
-                self.console,
-                text=event.text,
-                usage=event.usage,
-                fallback_model_label=self._fallback_model_label,
+            self._stream.settle(
+                event.text,
+                event.usage,
+                self._fallback_model_label,
             )

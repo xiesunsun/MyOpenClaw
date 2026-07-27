@@ -103,3 +103,41 @@ def test_end_后再来增量重新开一段():
 
     text = console.export_text()
     assert text.count("· 思考中……") == 2
+
+
+def test_settle_同文预览只补_footer():
+    from pickel.runs.turn_usage import TurnUsage
+
+    console, renderer = _make()
+    renderer.on_text("你好")
+    renderer.settle(
+        "你好",
+        TurnUsage(
+            steps=1,
+            input_tokens=10,
+            output_tokens=2,
+            elapsed_ms=1000,
+            model_label="m",
+        ),
+        None,
+    )
+    text = console.export_text()
+    assert text.count("你好") == 1
+    assert "m · 10→2 · 1.0s" in text
+
+
+def test_end_后预览不参与_settle_需重打正文():
+    """中间 step 已 end：settle 视为无当前预览，白字打定稿 + footer。"""
+    from pickel.runs.turn_usage import TurnUsage
+
+    console, renderer = _make()
+    renderer.on_text("中间话")
+    renderer.end()
+    renderer.settle(
+        "最终回复",
+        TurnUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
+        None,
+    )
+    text = console.export_text()
+    assert "中间话" in text
+    assert "最终回复" in text

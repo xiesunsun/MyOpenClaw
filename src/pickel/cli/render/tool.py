@@ -1,11 +1,13 @@
-"""工具行渲染：⏺ 行 + 原地 running → ok（E3 设计稿 §9.1/§12）。
+"""工具块渲染：started 展示调用，completed 追加结果（只追加、不擦屏）。
 
-不用 rich Live：started 打两行（label 行 + running… 行），completed 时
-若 console 是终端则 ANSI 光标上移两行清除重写；非终端（测试 record、
-管道）降级为直接追加结果行。
+版式（与 · 思考中 同级左对齐）：
+  ⏺ shell_exec  command='date "..."'
+  · running
+  · ok  (0.2s)
+  · out  Mon Jul 27 ...
 
-耗时不加 runtime 字段：按 tool_call_id 配对两个信封 occurred_at 相减；
-配不上（乱序/丢失 started）就直接打完整两行、不显示耗时。
+tool_call_started   → 名与 args 同一行 + · running
+tool_call_completed → · ok|failed + · out
 """
 
 from __future__ import annotations
@@ -13,26 +15,26 @@ from __future__ import annotations
 from datetime import datetime
 
 from rich.console import Console
-from rich.control import Control
-from rich.segment import ControlType
-from rich.text import Text
 
 from pickel.conversations.message import ToolCall
 from pickel.tools.base import ToolExecutionResult
 
 _DURATION_MIN_SECONDS = 0.1
+_ARG_VALUE_LIMIT = 120
+_ARG_INLINE_LIMIT = 160
+_RESULT_MAX_LINES = 5
+_RESULT_MAX_CHARS = 400
+_PRIORITY_KEYS = ("command", "path", "pattern", "file_path", "query", "text")
 
 
 class ToolRenderer:
     def __init__(self, console: Console) -> None:
         self.console = console
-        self._started: dict[str, tuple[datetime, Text]] = {}
+        self._started_at: dict[str, datetime] = {}
 
     def on_started(self, tool_call: ToolCall, occurred_at: datetime) -> None:
-        label = self._label_line(tool_call)
-        self._started[tool_call.id] = (occurred_at, label)
-        self.console.print(label)
-        self.console.print(Text("  running…", style="dim"))
+        self._started_at[tool_call.id] = occurred_at
+        self._print_plain(self._format_started_block(tool_call))
 
     def on_completed(
         self,
@@ -40,68 +42,107 @@ class ToolRenderer:
         tool_result: ToolExecutionResult,
         occurred_at: datetime,
     ) -> None:
-        record = self._started.pop(tool_call.id, None)
-        if record is None:
-            # 乱序/丢失 started：直接打完整两行，不显示耗时
-            self.console.print(self._label_line(tool_call))
-            self.console.print(self._status_line(tool_result, elapsed=None))
-            return
+        started_at = self._started_at.pop(tool_call.id, None)
+        elapsed: float | None = None
+        if started_at is not None:
+            elapsed = (occurred_at - started_at).total_seconds()
+            if elapsed < _DURATION_MIN_SECONDS:
+                elapsed = None
 
-        started_at, label = record
-        elapsed = (occurred_at - started_at).total_seconds()
-        status = self._status_line(
-            tool_result,
-            elapsed=elapsed if elapsed >= _DURATION_MIN_SECONDS else None,
-        )
+        if started_at is None:
+            self._print_plain(self._format_started_block(tool_call, running=False))
+        self._print_plain(self._format_status_and_out(tool_result, elapsed))
 
-        if self.console.is_terminal:
-            # 光标上移两行，清掉 label 行重打，再清掉 running… 行打状态行
-            self.console.control(
-                Control((ControlType.CURSOR_UP, 2), (ControlType.ERASE_IN_LINE, 2))
-            )
-            self.console.print(label)
-            self.console.control(Control((ControlType.ERASE_IN_LINE, 2)))
-            self.console.print(status)
+    def _print_plain(self, body: str) -> None:
+        self.console.print(body, highlight=False, markup=False, end="")
+
+    def _format_started_block(
+        self, tool_call: ToolCall, *, running: bool = True
+    ) -> str:
+        args = _format_args_inline(tool_call.arguments)
+        if args:
+            head = f"⏺ {tool_call.name}  {args}"
         else:
-            self.console.print(status)
+            head = f"⏺ {tool_call.name}"
+        # 超宽时截断到 console 宽，保证单行
+        width = max(20, self.console.width)
+        if len(head) > width:
+            head = head[: width - 1] + "…"
+        lines = [head]
+        if running:
+            lines.append("· running")
+        return "\n".join(lines) + "\n"
 
-    def _label_line(self, tool_call: ToolCall) -> Text:
-        """`⏺ name  args摘要`，整行截到 console 宽度内保证单行。"""
-        summary = self._format_args(tool_call.arguments)
-        raw = f"⏺ {tool_call.name}  {summary}" if summary else f"⏺ {tool_call.name}"
-        label = Text(raw, no_wrap=True)
-        label.truncate(self.console.width, overflow="ellipsis")
-        return label
-
-    @staticmethod
-    def _status_line(tool_result: ToolExecutionResult, *, elapsed: float | None) -> Text:
+    def _format_status_and_out(
+        self, tool_result: ToolExecutionResult, elapsed: float | None
+    ) -> str:
         status = "failed" if tool_result.is_error else "ok"
-        line = Text("  ")
-        line.append(status, style="red" if tool_result.is_error else "green")
-        summary = _truncate_content(tool_result.content) if tool_result.content else ""
-        if summary:
-            line.append(f" · {summary}")
+        head = f"· {status}"
         if elapsed is not None:
-            line.append(f" ({elapsed:.1f}s)", style="dim")
-        return line
+            head += f"  ({elapsed:.1f}s)"
+        lines = [head]
+        lines.extend(self._format_out_lines(tool_result))
+        return "\n".join(lines) + "\n"
 
-    @staticmethod
-    def _format_args(arguments: dict[str, object]) -> str:
-        """args 摘要；截断规则沿用 event_renderer._format_tool_label。"""
-        parts: list[str] = []
-        for key, value in arguments.items():
-            rendered = repr(value)
-            if key == "content":
-                rendered = f"<{len(str(value))} chars>"
-            elif len(rendered) > 100:
-                rendered = f"{rendered[:97]}..."
-            parts.append(f"{key}={rendered}")
-        return ", ".join(parts)
+    def _format_out_lines(self, tool_result: ToolExecutionResult) -> list[str]:
+        content = tool_result.content or ""
+        if not content:
+            return ["· out  (empty)"]
+        raw_lines = content.splitlines() or [content]
+        total_chars = len(content)
+        if (
+            len(raw_lines) <= _RESULT_MAX_LINES
+            and total_chars <= _RESULT_MAX_CHARS
+        ):
+            lines = [f"· out  {raw_lines[0]}"]
+            for line in raw_lines[1:]:
+                lines.append(f"·      {line}")
+            return lines
+
+        first = raw_lines[0]
+        if len(first) > _RESULT_MAX_CHARS:
+            first = first[: _RESULT_MAX_CHARS - 3] + "..."
+        shown = [first] + raw_lines[1:_RESULT_MAX_LINES]
+        rest_lines = max(0, len(raw_lines) - _RESULT_MAX_LINES)
+        lines = [f"· out  {shown[0]}"]
+        for line in shown[1:]:
+            lines.append(f"·      {line}")
+        if rest_lines > 0:
+            lines.append(f"·      … +{rest_lines} lines / {total_chars} chars")
+        else:
+            lines.append(f"·      … / {total_chars} chars")
+        return lines
 
 
-def _truncate_content(content: str, limit: int = 180) -> str:
-    """结果摘要；规则沿用 event_renderer._truncate_content。"""
-    normalized = " ".join(content.split())
-    if len(normalized) <= limit:
-        return normalized
-    return f"{normalized[:limit - 3]}..."
+def _format_args_inline(arguments: dict[str, object]) -> str:
+    if not arguments:
+        return ""
+    parts: list[str] = []
+    for key, value in _ordered_items(arguments):
+        parts.append(_fold_value_inline(key, value))
+    joined = "  ".join(parts)
+    if len(joined) > _ARG_INLINE_LIMIT:
+        return joined[: _ARG_INLINE_LIMIT - 1] + "…"
+    return joined
+
+
+def _ordered_items(arguments: dict[str, object]) -> list[tuple[str, object]]:
+    ordered: list[str] = []
+    for key in _PRIORITY_KEYS:
+        if key in arguments:
+            ordered.append(key)
+    for key in sorted(k for k in arguments if k not in ordered):
+        ordered.append(key)
+    return [(key, arguments[key]) for key in ordered]
+
+
+def _fold_value_inline(key: str, value: object) -> str:
+    if key == "content" or (
+        isinstance(value, str) and len(value) > _ARG_VALUE_LIMIT
+    ):
+        text = value if isinstance(value, str) else str(value)
+        return f"{key}=<{len(text)} chars>"
+    rendered = repr(value)
+    if len(rendered) > _ARG_VALUE_LIMIT:
+        return f"{key}=<{len(str(value))} chars>"
+    return f"{key}={rendered}"
