@@ -221,6 +221,32 @@ class ToolCallArgsDeltaEvent(RuntimeEventBase):
 
 
 @dataclass(frozen=True)
+class RequestDigestEvent(RuntimeEventBase):
+    """本次 generate 实际发出的 Request 摘要(O4,显式非真源)。
+
+    红线:只含长度/名称/条数,不得携带 system、messages、tools 的正文——
+    trace 观测侧的白名单以此为前提。
+    """
+
+    EVENT_TYPE: ClassVar[str] = "request_digest"
+
+    system_sections: list[dict[str, Any]] = field(default_factory=list)
+    tool_names: list[str] = field(default_factory=list)
+    message_count: int = 0
+    request_chars: int = 0
+    hook_injected_chars: int = 0
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "system_sections": [dict(s) for s in self.system_sections],
+            "tool_names": list(self.tool_names),
+            "message_count": self.message_count,
+            "request_chars": self.request_chars,
+            "hook_injected_chars": self.hook_injected_chars,
+        }
+
+
+@dataclass(frozen=True)
 class TurnInterrupted(RuntimeEventBase):
     """用户中断；partial_text 是已生成但未完成的正文。"""
 

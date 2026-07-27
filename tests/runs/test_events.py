@@ -19,6 +19,7 @@ from pickel.runs import ReActStrategy, Run
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
+    RequestDigestEvent,
     StepStarted,
     ToolCallCompleted,
     ToolCallStarted,
@@ -213,28 +214,30 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [
                 StepStarted,
+                RequestDigestEvent,
                 ToolCallStarted,
                 ToolCallCompleted,
                 ToolCallStarted,
                 ToolCallCompleted,
                 StepStarted,
+                RequestDigestEvent,
                 AssistantMessageEvent,
             ],
             [type(event) for event in _without_turn_events(events)],
         )
         step_events = _without_turn_events(events)
-        batch_id = step_events[1].batch_id
+        batch_id = step_events[2].batch_id
         self.assertTrue(batch_id)
-        self.assertEqual(batch_id, step_events[2].batch_id)
         self.assertEqual(batch_id, step_events[3].batch_id)
         self.assertEqual(batch_id, step_events[4].batch_id)
-        self.assertEqual(0, step_events[1].call_index)
+        self.assertEqual(batch_id, step_events[5].batch_id)
         self.assertEqual(0, step_events[2].call_index)
-        self.assertEqual("slow", step_events[2].tool_result.content)
-        self.assertEqual(1, step_events[3].call_index)
+        self.assertEqual(0, step_events[3].call_index)
+        self.assertEqual("slow", step_events[3].tool_result.content)
         self.assertEqual(1, step_events[4].call_index)
-        self.assertEqual("fast", step_events[4].tool_result.content)
-        self.assertEqual("done", step_events[6].text)
+        self.assertEqual(1, step_events[5].call_index)
+        self.assertEqual("fast", step_events[5].tool_result.content)
+        self.assertEqual("done", step_events[8].text)
 
     async def test_runner_emits_completed_event_with_is_error_for_failing_call(self) -> None:
         agent = Agent(

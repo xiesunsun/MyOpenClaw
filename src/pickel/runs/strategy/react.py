@@ -39,6 +39,7 @@ from pickel.runs.estimator import request_char_count
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
+    RequestDigestEvent,
     RuntimeEventBase,
     StepStarted,
     TextDeltaEvent,
@@ -136,6 +137,22 @@ class ReActStrategy(ExecutionStrategy):
                     tools=model_context.tools,
                 )
 
+            final_request_chars = request_char_count(model_context)
+            await self._emit(
+                bus,
+                RequestDigestEvent(
+                    envelope=envelope(step_index),
+                    system_sections=[
+                        {"name": section.name, "chars": len(section.text)}
+                        for section in model_context.system.sections
+                    ],
+                    tool_names=[tool.name for tool in model_context.tools],
+                    message_count=len(model_context.messages),
+                    request_chars=final_request_chars,
+                    hook_injected_chars=final_request_chars - prepared_chars,
+                ),
+            )
+
             start = time.perf_counter()
             assistant = await self._generate_streaming(
                 run=run,
@@ -150,9 +167,7 @@ class ReActStrategy(ExecutionStrategy):
                 assistant,
                 elapsed_ms,
                 context_fingerprint_value=prepared_fingerprint,
-                hook_injected_chars=(
-                    request_char_count(model_context) - prepared_chars
-                ),
+                hook_injected_chars=final_request_chars - prepared_chars,
             )
 
             # checkpoint BEFORE tools
