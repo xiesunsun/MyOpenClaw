@@ -88,3 +88,77 @@ def test_interrupted_marks_turn(tmp_path):
     enhancement = read_trace(trace_file)
 
     assert enhancement.turn_markers[0].interrupted is True
+
+
+def test_request_digests_grouped_by_turn(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    events = [
+        {"event_type": "turn_started", "seq": 0, "occurred_at": "2026-07-27T00:00:00+00:00", "user_text": "SECRET"},
+        {
+            "event_type": "request_digest",
+            "seq": 1,
+            "occurred_at": "2026-07-27T00:00:01+00:00",
+            "system_sections": [{"name": "behavior", "chars": 120}],
+            "tool_names": ["shell_exec"],
+            "message_count": 3,
+            "request_chars": 4500,
+            "hook_injected_chars": 0,
+        },
+        {
+            "event_type": "request_digest",
+            "seq": 2,
+            "occurred_at": "2026-07-27T00:00:02+00:00",
+            "system_sections": [{"name": "behavior", "chars": 120}],
+            "tool_names": ["shell_exec"],
+            "message_count": 5,
+            "request_chars": 5200,
+            "hook_injected_chars": 40,
+        },
+        {"event_type": "turn_started", "seq": 3, "occurred_at": "2026-07-27T00:01:00+00:00"},
+        {
+            "event_type": "request_digest",
+            "seq": 4,
+            "occurred_at": "2026-07-27T00:01:01+00:00",
+            "system_sections": [],
+            "tool_names": [],
+            "message_count": 7,
+            "request_chars": 6000,
+            "hook_injected_chars": 0,
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
+    )
+
+    enhancement = read_trace(trace_file)
+
+    assert len(enhancement.request_digests) == 2
+    first, second = enhancement.request_digests
+    assert len(first) == 2
+    assert first[0]["message_count"] == 3
+    assert first[1]["request_chars"] == 5200
+    assert first[1]["hook_injected_chars"] == 40
+    assert first[0]["tool_names"] == ["shell_exec"]
+    assert first[0]["system_sections"] == [{"name": "behavior", "chars": 120}]
+    assert len(second) == 1
+
+
+def test_request_digest_before_any_turn_is_dropped(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    events = [
+        {
+            "event_type": "request_digest",
+            "seq": 0,
+            "occurred_at": "2026-07-27T00:00:00+00:00",
+            "system_sections": [],
+            "tool_names": [],
+            "message_count": 1,
+            "request_chars": 100,
+            "hook_injected_chars": 0,
+        },
+    ]
+    trace_file.write_text(json.dumps(events[0]) + "\n", encoding="utf-8")
+
+    enhancement = read_trace(trace_file)
+
+    assert enhancement.request_digests == []

@@ -135,7 +135,25 @@ pickel observe [--session ID]... [--out PATH] [--limit N]
 | **V1** | model + collector + trace_reader + html_report + CLI，上述全部功能 |
 | V2（后话） | `--serve` 本地只读 server、diff 两次运行、per-skill 上下文分栏（复用 measure）、导出 JSON |
 
-## 9. 自评审记录
+## 9. O4 — RequestDigest(2026-07-27 增补,用户批准)
+
+**问题**:完整 wire Request 不落库(observability-design §3.3),观测平台看不到「当时发了什么样的请求」。
+**方案**:react 在 before_request hook 之后、generate 之前发 `request_digest` runtime 事件——**只含摘要,不含正文**:
+
+| 字段 | 内容 |
+|------|------|
+| `system_sections` | `[{name, chars}]` 每段名称与字符数(behavior / skills_guidance / skills_catalog) |
+| `tool_names` | 工具名列表(不含 description/schema) |
+| `message_count` | 请求消息条数 |
+| `request_chars` | hook 后整个 Request 的字符数(与 hook_injected_chars 同口径) |
+| `hook_injected_chars` | 本次 hook 改写量 |
+
+- 落盘走既有 JsonlTraceSink,开关即 `PICKEL_TRACE`(不新增开关);显式非真源。
+- trace_reader 白名单扩展:按 turn_started 分组收 digest 序列;collector 仅当 turn 数与组数、组内 digest 数与 step 数**都匹配**时按序回填 `Step.request_digest`,否则跳过(容错)。
+- HTML:step 内 details 展示「请求摘要 · trace · 非真源」。
+- 红线不变:digest 不含任何 system/messages/tools 正文;白名单测试继续锁死 SECRET 不泄露。
+
+## 10. 自评审记录
 
 - 占位符：无 TBD/TODO。
 - 一致性：trace 白名单与红线 5 的解释已在 §2.2 写明边界（只取时序与终态，不取对话/用量）；与 trace_sink「只写不读」的冲突以**新增独立 reader 且白名单**的方式解决，trace_sink 本身不加读接口。

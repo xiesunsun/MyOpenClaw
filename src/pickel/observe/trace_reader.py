@@ -33,6 +33,9 @@ class TurnMarker:
 class TraceEnhancement:
     tool_timings: dict[str, ToolTiming] = field(default_factory=dict)
     turn_markers: list[TurnMarker] = field(default_factory=list)
+    # 按 turn_started 分组的 request_digest 序列;digest 本身即摘要
+    # (长度/名称/条数),发射端(RequestDigestEvent)保证无正文。
+    request_digests: list[list[dict]] = field(default_factory=list)
 
 
 def read_trace(path: Path) -> TraceEnhancement | None:
@@ -76,10 +79,13 @@ def read_trace(path: Path) -> TraceEnhancement | None:
             }
         elif event_type == "turn_interrupted" and markers:
             markers[-1].interrupted = True
+        elif event_type == "request_digest" and markers:
+            markers[-1].digests.append(_digest_fields(event))
 
     return TraceEnhancement(
         tool_timings=timings,
         turn_markers=[builder.freeze() for builder in markers],
+        request_digests=[builder.digests for builder in markers],
     )
 
 
@@ -88,6 +94,7 @@ class _MarkerBuilder:
         self.started_at = started_at
         self.failed: dict[str, str] | None = None
         self.interrupted = False
+        self.digests: list[dict] = []
 
     def freeze(self) -> TurnMarker:
         return TurnMarker(
@@ -95,6 +102,28 @@ class _MarkerBuilder:
             failed=self.failed,
             interrupted=self.interrupted,
         )
+
+
+def _digest_fields(event: dict) -> dict:
+    """白名单提取 digest:只收数值与名称字段,逐项重建不透传原 dict。"""
+    sections = []
+    for section in event.get("system_sections") or []:
+        if isinstance(section, dict):
+            sections.append(
+                {
+                    "name": str(section.get("name") or ""),
+                    "chars": int(section.get("chars") or 0),
+                }
+            )
+    return {
+        "system_sections": sections,
+        "tool_names": [
+            str(name) for name in (event.get("tool_names") or [])
+        ],
+        "message_count": int(event.get("message_count") or 0),
+        "request_chars": int(event.get("request_chars") or 0),
+        "hook_injected_chars": int(event.get("hook_injected_chars") or 0),
+    }
 
 
 def _call_id(event: dict) -> str | None:

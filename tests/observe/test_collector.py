@@ -279,3 +279,66 @@ def test_out_of_order_results_pair_by_id():
     assert by_id["c1"].result_preview == "结果A"
     assert by_id["c2"].result_preview == "结果B"
     assert not any(execution.orphan for execution in executions)
+
+
+def test_request_digest_backfilled_per_step():
+    session = Session.create(agent_id="Pickle")
+    session.append_user(_user("hi"))
+    session.append_assistant(_assistant())
+    session.append_assistant(_assistant())
+
+    digest0 = {
+        "system_sections": [{"name": "behavior", "chars": 100}],
+        "tool_names": ["shell_exec"],
+        "message_count": 1,
+        "request_chars": 400,
+        "hook_injected_chars": 0,
+    }
+    digest1 = {**digest0, "message_count": 2, "request_chars": 900}
+    enhancement = SimpleNamespace(
+        tool_timings={},
+        turn_markers=[
+            SimpleNamespace(started_at=None, failed=None, interrupted=False)
+        ],
+        request_digests=[[digest0, digest1]],
+    )
+
+    trajectory = collect_trajectory(session, enhancement=enhancement)
+
+    steps = trajectory.turns[0].steps
+    assert steps[0].request_digest == digest0
+    assert steps[1].request_digest == digest1
+
+
+def test_request_digest_count_mismatch_skipped():
+    session = Session.create(agent_id="Pickle")
+    session.append_user(_user("hi"))
+    session.append_assistant(_assistant())
+    session.append_assistant(_assistant())
+
+    enhancement = SimpleNamespace(
+        tool_timings={},
+        turn_markers=[
+            SimpleNamespace(started_at=None, failed=None, interrupted=False)
+        ],
+        request_digests=[[{"message_count": 1}]],
+    )
+
+    trajectory = collect_trajectory(session, enhancement=enhancement)
+
+    assert all(
+        step.request_digest is None for step in trajectory.turns[0].steps
+    )
+
+
+def test_enhancement_without_request_digests_attr_tolerated():
+    """旧 TraceEnhancement(无 request_digests 属性)不应崩。"""
+    session = Session.create(agent_id="Pickle")
+    session.append_user(_user("hi"))
+    session.append_assistant(_assistant())
+
+    enhancement = SimpleNamespace(tool_timings={}, turn_markers=[])
+
+    trajectory = collect_trajectory(session, enhancement=enhancement)
+
+    assert trajectory.turns[0].steps[0].request_digest is None

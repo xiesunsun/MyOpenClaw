@@ -269,6 +269,22 @@ function toolCard(e) {
   </details>`;
 }
 
+function digestBlock(s) {
+  const d = s.request_digest;
+  if (!d) return "";
+  const sections = d.system_sections
+    .map(x => `${esc(x.name)} ${fmt(x.chars)} 字符`).join(" · ") || "（无 system）";
+  const tools = d.tool_names.length
+    ? d.tool_names.map(esc).join(", ") : "（无工具）";
+  return `<details class="tool">
+    <summary>请求摘要 <span class="badge trace">trace · 非真源</span></summary>
+    <pre>system: ${sections}
+tools (${d.tool_names.length}): ${tools}
+messages: ${d.message_count} 条 · 全文 ${fmt(d.request_chars)} 字符` +
+    (d.hook_injected_chars ? `\nhook 注入: ${fmt(d.hook_injected_chars)} 字符` : "") +
+    `</pre></details>`;
+}
+
 function stepBlock(s) {
   const badges =
     `<span class="badge">step ${s.index + 1}</span>` +
@@ -280,6 +296,7 @@ function stepBlock(s) {
     (s.thinking_chars ? `<span class="badge">思考 ${fmt(s.thinking_chars)} 字符</span>` : "") +
     (s.hook_injected_chars ? `<span class="badge">hook 注入 ${fmt(s.hook_injected_chars)} 字符</span>` : "");
   return `<div class="step"><div class="badges">${badges}</div>` +
+    digestBlock(s) +
     s.tool_executions.map(toolCard).join("") +
     (s.text ? `<div class="text">${esc(s.text)}</div>` : "") + `</div>`;
 }

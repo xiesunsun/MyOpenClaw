@@ -879,31 +879,33 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             [
                 "turn_started",
                 "step_started",
+                "request_digest",
                 "tool_call_started",
                 "tool_call_completed",
                 "step_started",
+                "request_digest",
                 "assistant_message",
                 "turn_completed",
             ],
             [record["event_type"] for record in records],
         )
-        self.assertEqual(list(range(7)), [record["seq"] for record in records])
+        self.assertEqual(list(range(9)), [record["seq"] for record in records])
         self.assertEqual({"session-1"}, {record["session_id"] for record in records})
         self.assertEqual(1, len({record["turn_id"] for record in records}))
         self.assertEqual(
-            {"text": "hi"}, records[2]["tool_call"]["arguments"]
+            {"text": "hi"}, records[3]["tool_call"]["arguments"]
         )
-        self.assertEqual("hi", records[3]["tool_result"]["content"])
-        self.assertEqual("done", records[5]["text"])
+        self.assertEqual("hi", records[4]["tool_result"]["content"])
+        self.assertEqual("done", records[7]["text"])
         # 同一 turn 的两个事件必须给出同一份 usage
         self.assertEqual(
             {"steps": 2, "input_tokens": 200, "output_tokens": 20},
             {
-                key: records[5]["usage"][key]
+                key: records[7]["usage"][key]
                 for key in ("steps", "input_tokens", "output_tokens")
             },
         )
-        self.assertEqual(records[5]["usage"], records[6]["usage"])
+        self.assertEqual(records[7]["usage"], records[8]["usage"])
 
         rendered = console.export_text()
         self.assertIn("⏺ echo", rendered)
@@ -987,6 +989,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             [
                 "turn_started",
                 "step_started",
+                "request_digest",
                 "thinking_delta",
                 "text_delta",
                 "text_delta",
@@ -1007,7 +1010,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             "你好，世界",
             "".join(r["text"] for r in records if r["event_type"] == "text_delta"),
         )
-        self.assertEqual("你好，世界", records[6]["text"])
+        self.assertEqual("你好，世界", records[7]["text"])
 
     async def test_new_session_rebuilds_trace_sink_for_new_session_id(self) -> None:
         """/new 换了 session，trace 文件必须跟着换，否则两个 session 混在一个文件里。"""

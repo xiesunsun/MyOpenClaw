@@ -258,9 +258,23 @@ def _apply_enhancement(
         else None
     )
 
+    digest_groups = getattr(enhancement, "request_digests", None)
+    if not (
+        isinstance(digest_groups, list) and len(digest_groups) == len(turns)
+    ):
+        digest_groups = None
+
     for turn_index, turn in enumerate(turns):
+        digests = (
+            digest_groups[turn_index]
+            if digest_groups is not None
+            and len(digest_groups[turn_index]) == len(turn.steps)
+            else None
+        )
         steps = []
         for step in turn.steps:
+            if digests is not None:
+                step = replace(step, request_digest=digests[step.index])
             executions = [
                 (
                     replace(

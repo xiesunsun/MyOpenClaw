@@ -39,6 +39,8 @@ class Step:
     elapsed_ms: int | None
     hook_injected_chars: int | None
     context_fingerprint: str | None
+    # trace 增强(O4):本次 generate 实发 Request 的摘要,非真源。
+    request_digest: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

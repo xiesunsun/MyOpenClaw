@@ -86,3 +86,14 @@ def test_script_close_tag_in_content_is_escaped():
 def test_empty_list_raises():
     with pytest.raises(ValueError):
         render_html([], generated_at="2026-07-26T01:00:00+00:00")
+
+
+def test_step_request_digest_rendered_in_template():
+    """模板 JS 须消费 request_digest 并有对应 UI(请求摘要)。"""
+    trajectory = _trajectory()
+    html = render_html([trajectory], generated_at="2026-07-27T00:00:00+00:00")
+
+    assert "s.request_digest" in html
+    assert "请求摘要" in html
+    data = _extract_data(html)
+    assert "request_digest" in data[0]["turns"][0]["steps"][0]
