@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from rich.console import Console
+from rich.text import Text
 
 from pickel.conversations.message import ToolCall
 from pickel.tools.base import ToolExecutionResult
@@ -51,10 +52,22 @@ class ToolRenderer:
 
         if started_at is None:
             self._print_plain(self._format_started_block(tool_call, running=False))
-        self._print_plain(self._format_status_and_out(tool_result, elapsed))
+        self._print_status_and_out(tool_result, elapsed)
 
     def _print_plain(self, body: str) -> None:
         self.console.print(body, highlight=False, markup=False, end="")
+
+    def _print_status_and_out(
+        self, tool_result: ToolExecutionResult, elapsed: float | None
+    ) -> None:
+        status = "failed" if tool_result.is_error else "ok"
+        head = Text("· ")
+        head.append(status, style="red" if tool_result.is_error else "green")
+        if elapsed is not None:
+            head.append(f"  ({elapsed:.1f}s)", style="dim")
+        self.console.print(head, highlight=False, markup=False)
+        out_body = "\n".join(self._format_out_lines(tool_result)) + "\n"
+        self._print_plain(out_body)
 
     def _format_started_block(
         self, tool_call: ToolCall, *, running: bool = True
@@ -71,17 +84,6 @@ class ToolRenderer:
         lines = [head]
         if running:
             lines.append("· running")
-        return "\n".join(lines) + "\n"
-
-    def _format_status_and_out(
-        self, tool_result: ToolExecutionResult, elapsed: float | None
-    ) -> str:
-        status = "failed" if tool_result.is_error else "ok"
-        head = f"· {status}"
-        if elapsed is not None:
-            head += f"  ({elapsed:.1f}s)"
-        lines = [head]
-        lines.extend(self._format_out_lines(tool_result))
         return "\n".join(lines) + "\n"
 
     def _format_out_lines(self, tool_result: ToolExecutionResult) -> list[str]:

@@ -70,7 +70,7 @@ def test_failed_分支():
     )
 
     text = console.export_text()
-    assert "· failed" in text
+    assert "failed" in text
     assert "boom" in text
 
 

@@ -126,6 +126,23 @@ def test_settle_同文预览只补_footer():
     assert "m · 10→2 · 1.0s" in text
 
 
+def test_settle_仅_thinking_仍打印最终正文():
+    """thinking 不算正文预览；定稿 text 必须上屏。"""
+    from pickel.runs.turn_usage import TurnUsage
+
+    console, renderer = _make()
+    renderer.on_thinking("内部推理")
+    renderer.settle(
+        "给用户的回复",
+        TurnUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
+        None,
+    )
+    text = console.export_text()
+    assert "内部推理" in text
+    assert "给用户的回复" in text
+    assert "m ·" in text
+
+
 def test_end_后预览不参与_settle_需重打正文():
     """中间 step 已 end：settle 视为无当前预览，白字打定稿 + footer。"""
     from pickel.runs.turn_usage import TurnUsage
