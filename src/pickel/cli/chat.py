@@ -19,8 +19,17 @@ from pickel.extensions_host.loader import (
     teardown_extensions,
 )
 from pickel.conversations.session_storage_mapper import build_session_preview
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    UserMessage,
+    agent_message_from_dict,
+)
+from pickel.conversations.content_blocks import ToolCallContent
 from pickel.conversations.session import Session
+from pickel.conversations.session_entry import (
+    ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
+)
 from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
@@ -557,13 +566,17 @@ class ChatLoop:
         last_turn = last_turn_usage(self.session)
         total = session_usage(self.session)
         run = self._run
+        turns, tool_calls, compactions = _session_context_stats(self.session)
 
         usage = None
         note = None
+        tool_defs = 0
         if run is None:
             note = "尚无 Run，无法组装上下文"
         else:
             try:
+                snapshot = run.tool_bus.snapshot(run.activation)
+                tool_defs = len(snapshot.entries)
                 request = await prepare(
                     run=run,
                     session=self.session,
@@ -572,7 +585,7 @@ class ChatLoop:
                     # §7.3：预览不得执行 recall（含远程 OV）
                     recall_sources=[],
                     # 预览按当前激活集现取一份快照（不在 turn 内，无缓存一致性顾虑）
-                    snapshot=run.tool_bus.snapshot(run.activation),
+                    snapshot=snapshot,
                 )
                 model_config = run.agent.model_config
                 usage = await measure(
@@ -600,6 +613,10 @@ class ChatLoop:
             source_line=(
                 "Source: prepare preview · hooks skipped · recall skipped · no draft input"
             ),
+            turns=turns,
+            tool_calls=tool_calls,
+            compactions=compactions,
+            tool_definitions=tool_defs,
         )
         self.console.print(renderable)
 
@@ -670,3 +687,29 @@ class ChatLoop:
             # last usage 由 /context 从 Session 派生（§11.8），不在此缓存
             # 渲染唯一入口是事件订阅（E3）：不发 AssistantMessageEvent 的
             # Run 是 runtime 违约，这里不做 fallback 渲染
+
+
+def _session_context_stats(session: Session) -> tuple[int, int, int]:
+    """从 Session active_path 统计 turns / tool_calls / compactions。"""
+    turns = 0
+    tool_calls = 0
+    compactions = 0
+    for entry in session.active_path():
+        if entry.entry_type == ENTRY_TYPE_COMPACTION:
+            compactions += 1
+            continue
+        if entry.entry_type != ENTRY_TYPE_MESSAGE:
+            continue
+        try:
+            message = agent_message_from_dict(entry.payload)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isinstance(message, UserMessage):
+            turns += 1
+        elif isinstance(message, AssistantMessage):
+            tool_calls += sum(
+                1
+                for block in message.content
+                if isinstance(block, ToolCallContent)
+            )
+    return turns, tool_calls, compactions

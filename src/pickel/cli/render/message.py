@@ -13,10 +13,13 @@ from pickel.runs.turn_usage import TurnUsage
 
 
 def abbrev_tokens(n: int) -> str:
-    """token 数 ≥1000 时以 k 缩写：180 → "180"，2437 → "2.4k"。"""
+    """token 数 ≥1000 时以 k 缩写：180 → "180"，2437 → "2.4k"，200000 → "200k"。"""
     if n < 1000:
         return str(n)
-    return f"{n / 1000:.1f}k"
+    value = n / 1000
+    if value == int(value):
+        return f"{int(value)}k"
+    return f"{value:.1f}k"
 
 
 def format_footer(

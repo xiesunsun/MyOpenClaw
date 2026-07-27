@@ -29,7 +29,7 @@ def test_abbrev_tokens_千以下原样():
 
 
 def test_abbrev_tokens_千及以上缩写():
-    assert abbrev_tokens(1000) == "1.0k"
+    assert abbrev_tokens(1000) == "1k"
     assert abbrev_tokens(2437) == "2.4k"
 
 

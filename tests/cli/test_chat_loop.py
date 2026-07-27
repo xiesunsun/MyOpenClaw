@@ -1136,9 +1136,10 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         rendered = console.export_text()
-        self.assertIn("Context Usage", rendered)
-        self.assertIn("By category", rendered)
+        self.assertIn("Context", rendered)
+        self.assertIn("System prompt", rendered)
         self.assertIn("tokens", rendered)
+        self.assertIn("◆", rendered)
         # §7.4：不再是 sections/messages/tools 的个数 dump
         self.assertNotIn("system_sections=", rendered)
 
@@ -1199,9 +1200,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = console.export_text()
         self.assertIn("Last turn", rendered)
-        # 实际输入 = 111 + 8000 + 0
-        self.assertIn("8,111", rendered)
-        self.assertIn("1,234", rendered)
+        # 实际输入 = 111 + 8000 + 0 → abbrev 8.1k；耗时 1.2s
+        self.assertIn("8.1k", rendered)
+        self.assertIn("1.2s", rendered)
 
     async def test_context_command_survives_prepare_failure(self) -> None:
         output = StringIO()
