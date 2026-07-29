@@ -2,53 +2,36 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pickel.app.boot import Boot
+from pickel.app.runtime import RuntimeConversation, RuntimeHost
 from pickel.cli.context_renderer import ContextRenderer
+from pickel.cli.slash import (
+    BUILTIN_SLASH_COMMANDS,
+    SlashCompleter,
+    parse_slash,
+)
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
-from pickel.context.prepare import prepare
 from pickel.conversations.service import SessionService
-from pickel.extensions_host.loader import (
-    LoadResult,
-    load_extensions_async,
-    teardown_extensions,
-)
-from pickel.conversations.session_storage_mapper import build_session_preview
-from pickel.conversations.agent_message import (
-    AssistantMessage,
-    UserMessage,
-    agent_message_from_dict,
-)
-from pickel.conversations.content_blocks import ToolCallContent
+from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.session import Session
-from pickel.conversations.session_entry import (
-    ENTRY_TYPE_COMPACTION,
-    ENTRY_TYPE_MESSAGE,
-)
 from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.cli.render.message import render_error, render_header, render_system
 from pickel.runs.event_bus import EventBus
-from pickel.runs.measure import measure
-from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
+from pickel.runs.trace_sink import JsonlTraceSink, trace_path
 from pickel.runs.run import Run
-from pickel.runs.turn_usage import last_turn_usage, session_usage
-from pickel.runs.usage_anchor import resolve_anchor
-from pickel.shared.model_config import ModelSelection
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
     from pickel.agents.agent import Agent
-
-logger = logging.getLogger(__name__)
 
 
 class ChatLoop:
@@ -65,30 +48,26 @@ class ChatLoop:
         boot: Boot | None = None,
         app_config: AppConfig | None = None,
     ) -> None:
-        self.agent = agent
-        self.agent_id = agent_id or agent.agent_id
-        self._run = run
-        self.session = session or Session.create(agent_id=self.agent_id)
+        resolved_agent_id = agent_id or agent.agent_id
+        resolved_session = session or Session.create(agent_id=resolved_agent_id)
         self.console = console or Console()
         self._prompt_input_reader: PromptToolkitInputReader | None = None
         self.input_reader = input_reader or self._default_input_reader
-        self._fallback_message_count = self._read_session_message_count()
         self._context_renderer = context_renderer or ContextRenderer()
-        self._session_service = session_service
-        self._session_closed = False
-        self._boot = boot
-        self._app_config = app_config or (boot.app_config if boot is not None else None)
-        # 进程级工具总线：跨 /reload 存活，由 Boot 持有的那一个
-        self._tool_bus = boot.tool_bus if boot is not None else None
-        self._extension_result = (
-            getattr(boot, "extension_result", None) or LoadResult()
+        self._host = RuntimeHost(boot) if boot is not None else None
+        self._conversation = RuntimeConversation(
+            agent=agent,
+            run=run,
+            session=resolved_session,
+            session_service=session_service,
+            app_config=app_config or (boot.app_config if boot is not None else None),
+            # 测试与嵌入方长期从 CLI 注入 trace 路径；能力本身仍归 Conversation。
+            trace_path_resolver=trace_path,
+            trace_sink_factory=JsonlTraceSink,
         )
-        # bus 与 ChatLoop 同生命周期，绝不每轮重建：seq 由 bus 单调分配，
-        # 每轮换 bus 会让 seq 回到 0，同一 session 的事件按 seq 排序就交错了（红线 4）。
-        self._bus = EventBus()
-        self._trace_sink: JsonlTraceSink | None = None
-        self._unsubscribe_trace: Callable[[], None] | None = None
-        self._open_trace_sink()
+        self._fallback_message_count = self._read_session_message_count()
+        self._slash_registry = BUILTIN_SLASH_COMMANDS
+        self._slash_completer = SlashCompleter(self._slash_registry, self)
 
     @classmethod
     def from_boot(
@@ -122,6 +101,58 @@ class ChatLoop:
             app_config=boot.app_config,
         )
 
+    # 兼容现有嵌入方的只读属性；状态真源只有 RuntimeConversation。
+    @property
+    def agent(self):
+        return self._conversation.agent
+
+    @property
+    def agent_id(self) -> str:
+        return self.agent.agent_id
+
+    @property
+    def session(self) -> Session:
+        return self._conversation.session
+
+    @property
+    def _run(self):
+        if hasattr(self, "_conversation"):
+            return self._conversation._run
+        return self.__dict__.get("_legacy_run")
+
+    @_run.setter
+    def _run(self, value) -> None:
+        if hasattr(self, "_conversation"):
+            self._conversation._run = value
+        else:
+            self.__dict__["_legacy_run"] = value
+
+    @property
+    def _session_service(self):
+        return self._conversation.session_service
+
+    @property
+    def _boot(self) -> Boot | None:
+        return self._host.boot if self._host is not None else None
+
+    @property
+    def _app_config(self) -> AppConfig | None:
+        if self._host is not None:
+            return self._host.app_config
+        return self._conversation.app_config
+
+    @property
+    def _tool_bus(self):
+        return self._boot.tool_bus if self._boot is not None else None
+
+    @property
+    def _bus(self) -> EventBus:
+        return self._conversation.event_bus
+
+    @property
+    def _trace_sink(self):
+        return self._conversation.trace_sink
+
     async def handle_user_input(
         self,
         text: str,
@@ -129,11 +160,18 @@ class ChatLoop:
     ) -> AssistantMessage:
         if self._run is None:
             raise ValueError("Run 未提供")
-        return await self._run.turn(
-            session=self.session, user_text=text, bus=bus
-        )
+        # bus 参数只为旧嵌入方兼容；正常路径始终使用 Conversation 自有 bus。
+        if bus is not None and bus is not self._conversation.event_bus:
+            return await self._run.turn(
+                session=self.session,
+                user_text=text,
+                bus=bus,
+            )
+        return await self._conversation.turn(text)
 
-    def create_event_bus(self) -> tuple[EventBus, ChatEventRenderer, Callable[[], None]]:
+    def create_event_bus(
+        self,
+    ) -> tuple[EventBus, ChatEventRenderer, Callable[[], None]]:
         """把本轮的渲染器挂到长命 bus 上。
 
         返回 (bus, renderer, unsubscribe)；调用方必须在 turn 结束后调 unsubscribe，
@@ -148,12 +186,16 @@ class ChatLoop:
                 f"{self.agent.model_config.provider} / {self.agent.model_config.model}"
             ),
         )
-        unsubscribe = self._bus.subscribe(renderer.handle_event)
-        return self._bus, renderer, unsubscribe
+        unsubscribe = self._conversation.subscribe(renderer.handle_event)
+        return self._conversation.event_bus, renderer, unsubscribe
 
     async def _default_input_reader(self, prompt: str) -> str:
         if self._prompt_input_reader is None:
             self._prompt_input_reader = PromptToolkitInputReader()
+            configured = self._prompt_input_reader.set_completer(self._slash_completer)
+            # AsyncMock 兼容：真实 reader 的装配方法是同步的。
+            if inspect.iscoroutine(configured):
+                configured.close()
         return await self._prompt_input_reader(prompt)
 
     def _read_session_message_count(self) -> int:
@@ -167,10 +209,7 @@ class ChatLoop:
         render_header(
             self.console,
             agent_id=self.agent_id,
-            commands_line=(
-                "/help  /model  /thinking  /agent  /new  /reload  /context  /session"
-                "  /skills  /clear  /exit"
-            ),
+            commands_line=self._slash_registry.command_line,
         )
 
     def _render_system_message(self, text: str, *, style: str = "cyan") -> None:
@@ -180,28 +219,16 @@ class ChatLoop:
         render_error(self.console, text)
 
     def _render_help(self) -> None:
-        help_text = Text.from_markup(
-            "[bold]Available commands[/bold]\n"
-            "/help              Show this help message\n"
-            "/model [p/m]       List or set provider/model (Environ)\n"
-            "/thinking <level>  Set thinking level in Environ\n"
-            "/agent [id]        List agents or switch (new empty Session)\n"
-            "/new               New empty Session, same agent\n"
-            "/reload            Reload disk config/skills/agent (keep Environ and tool bus)\n"
-            "/context           Show context usage (preview) and API usage\n"
-            "/session           Show current session details\n"
-            "/skills            Review agent skill writes: pending | diff <id> | approve <id> | reject <id>\n"
-            "/clear             Clear the screen and redraw the header\n"
-            "/exit              Exit the chat loop"
+        width = max(len(item.usage) for item in self._slash_registry.list()) + 2
+        lines = ["[bold]Available commands[/bold]"]
+        lines.extend(
+            f"{item.usage:<{width}}{item.summary}"
+            for item in self._slash_registry.list()
         )
-        self.console.print(help_text)
+        self.console.print(Text.from_markup("\n".join(lines)))
 
     def _render_session_summary(self) -> None:
-        preview = (
-            self._session_service.build_preview(session=self.session)
-            if self._session_service is not None
-            else build_session_preview(session=self.session)
-        )
+        preview = self._conversation.snapshot()
         summary = Text(
             "\n".join(
                 [
@@ -217,78 +244,22 @@ class ChatLoop:
         self.console.print(summary)
 
     def _close_session(self) -> None:
-        self._close_trace_sink()
-        if self._session_closed:
-            return
-        if self._session_service is not None:
-            self._session_service.close(session=self.session)
-        self._session_closed = True
-
-    def _open_trace_sink(self) -> None:
-        """按当前 session 建 trace sink 并挂上 bus；每次换 session 都要重调。
-
-        文件名绑的是 session_id，不重建的话 /agent、/new 之后新 session 的事件
-        会写进旧 session 的文件里。
-        """
-        self._close_trace_sink()
-        if not trace_enabled(
-            self._app_config.trace_enabled if self._app_config is not None else False
-        ):
-            return
-        try:
-            self._trace_sink = JsonlTraceSink(trace_path(self.session.session_id))
-        except OSError as exc:  # 可观测性组件不得弄挂主流程（红线 5）
-            self._trace_sink = None
-            logger.warning("trace 打开失败，本次运行禁用 trace: %s", exc)
-            return
-        self._unsubscribe_trace = self._bus.subscribe(self._trace_sink)
+        self._conversation.archive()
 
     def _close_trace_sink(self) -> None:
-        """trace 文件句柄的唯一释放点；幂等，异常路径由 run() 的 finally 兜底。"""
-        if self._unsubscribe_trace is not None:
-            self._unsubscribe_trace()
-            self._unsubscribe_trace = None
-        if self._trace_sink is not None:
-            self._trace_sink.close()
-            self._trace_sink = None
+        """兼容旧调用点；观察资源实际由 RuntimeConversation 持有。"""
+        self._conversation._close_trace()
 
     def _list_available_models(self) -> list[str]:
-        """从 app_config.providers 列出 provider/model。"""
+        if self._host is not None:
+            return [item.model_id for item in self._host.list_models()]
         if self._app_config is None:
             return []
-        lines: list[str] = []
-        for provider_id in sorted(self._app_config.providers):
-            catalog = self._app_config.providers[provider_id]
-            for model_id in sorted(catalog.models):
-                lines.append(f"{provider_id}/{model_id}")
-        return lines
-
-    def _parse_model_arg(self, arg: str) -> ModelSelection:
-        """解析 provider/model；provider 可含斜杠，按已知 providers 前缀匹配。"""
-        if self._app_config is None:
-            raise ValueError("AppConfig 未提供，无法解析 model")
-        providers = self._app_config.providers
-        # 长前缀优先，避免短 id 误匹配
-        for provider_id in sorted(providers, key=len, reverse=True):
-            prefix = f"{provider_id}/"
-            if arg.startswith(prefix):
-                model = arg[len(prefix) :]
-                if model in providers[provider_id].models:
-                    return ModelSelection(provider=provider_id, model=model)
-                raise KeyError(
-                    f"Unknown model '{model}' for provider '{provider_id}'"
-                )
-        # 仅 model 名且全局唯一
-        matches: list[ModelSelection] = []
-        for provider_id, catalog in providers.items():
-            if arg in catalog.models:
-                matches.append(ModelSelection(provider=provider_id, model=arg))
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            opts = ", ".join(f"{m.provider}/{m.model}" for m in matches)
-            raise ValueError(f"model '{arg}' 不唯一，请指定 provider/model：{opts}")
-        raise KeyError(f"Unknown model selection: {arg}")
+        return [
+            f"{provider}/{model}"
+            for provider in sorted(self._app_config.providers)
+            for model in sorted(self._app_config.providers[provider].models)
+        ]
 
     def _handle_model_command(self, arg: str | None) -> None:
         if self._run is None:
@@ -310,9 +281,7 @@ class ChatLoop:
             self._render_system_message(body)
             return
         try:
-            selection = self._parse_model_arg(arg)
-            self._run.environ.llm = selection
-            self._run.apply_environ_model(self._app_config)
+            selection = self._conversation.set_model(arg)
             self._render_system_message(
                 f"Model set to {selection.provider}/{selection.model}"
             )
@@ -334,16 +303,18 @@ class ChatLoop:
             )
             return
         level = arg.strip()
-        self._run.environ.provider_options["thinking"] = level
-        self._run.apply_environ_model(self._app_config)
-        self._render_system_message(f"thinking set to {level}")
+        try:
+            self._conversation.set_thinking(level)
+            self._render_system_message(f"thinking set to {level}")
+        except ValueError as exc:
+            self._render_error_message(str(exc))
 
     def _handle_agent_command(self, arg: str | None) -> None:
-        if self._app_config is None or self._boot is None:
+        if self._host is None:
             self._render_error_message("Boot/AppConfig 未提供，无法使用 /agent")
             return
         if not arg:
-            agent_ids = sorted(self._app_config.agents)
+            agent_ids = [item.agent_id for item in self._host.list_agents()]
             if not agent_ids:
                 self._render_system_message("无可用 agent。")
                 return
@@ -357,95 +328,60 @@ class ChatLoop:
             self._render_system_message(body)
             return
         agent_id = arg.strip()
-        if agent_id not in self._app_config.agents:
-            self._render_error_message(f"Unknown agent: {agent_id}")
-            return
         try:
-            session_service = self._boot.build_session_service(agent_id=agent_id)
-            session = session_service.start(
-                agent_id=agent_id,
-                cwd=str(Path.cwd().resolve()),
+            self._conversation = self._host.switch_agent(
+                self._conversation,
+                agent_id,
             )
-            agent, run = self._boot.build_run(
-                agent_id=agent_id,
-                session_service=session_service,
-            )
-            # 新 agent 不继承旧 Environ 的 model 覆盖（定义优先）；可后续 /model 改
-            self.agent = agent
-            self.agent_id = agent.agent_id
-            self._run = run
-            self.session = session
-            self._session_service = session_service
-            self._session_closed = False
             self._fallback_message_count = 0
-            self._open_trace_sink()
             self._render_system_message(
-                f"Switched to {agent_id}, new session {session.session_id}"
+                f"Switched to {agent_id}, new session {self.session.session_id}"
             )
         except Exception as exc:  # noqa: BLE001
             self._render_error_message(f"切换 agent 失败: {exc}")
 
     def _handle_new_command(self) -> None:
-        agent_id = self.agent_id
-        if self._session_service is not None:
-            session = self._session_service.start(
-                agent_id=agent_id,
-                cwd=str(Path.cwd().resolve()),
-            )
+        if self._host is not None:
+            self._conversation = self._host.new_session(self._conversation)
         else:
             session = Session.create(
-                agent_id=agent_id,
+                agent_id=self.agent_id,
                 cwd=str(Path.cwd().resolve()),
             )
-        self.session = session
-        self._session_closed = False
+            service = self._session_service
+            if service is not None:
+                session = service.start(
+                    agent_id=self.agent_id,
+                    cwd=str(Path.cwd().resolve()),
+                )
+            self._conversation.detach()
+            self._conversation = RuntimeConversation(
+                agent=self.agent,
+                run=self._run,
+                session=session,
+                session_service=service,
+                app_config=self._app_config,
+                trace_path_resolver=trace_path,
+            )
         self._fallback_message_count = 0
-        self._open_trace_sink()
         self._render_system_message(
-            f"New session {session.session_id} (agent={agent_id})"
+            f"New session {self.session.session_id} (agent={self.agent_id})"
         )
 
     async def _handle_reload_command(self) -> None:
-        if self._run is None:
+        if self._run is None or self._host is None:
             self._render_error_message("Run 未提供")
             return
         try:
             app_config = Config.load(cwd=Path.cwd())
-            # 复用同一个进程级 bus：reload 不该杀掉非内置来源的工具
-            # （T2 的 MCP 子进程）；extension 则先卸后装，磁盘改动即时生效
-            extensions = None
-            if self._tool_bus is not None:
-                await teardown_extensions(
-                    self._extension_result, tool_bus=self._tool_bus
-                )
-                self._extension_result = await load_extensions_async(
-                    tool_bus=self._tool_bus,
-                    app_config=app_config,
-                )
-                for error in self._extension_result.errors:
-                    self._render_error_message(f"Extension load error: {error}")
-                extensions = self._extension_result.registry
-            boot = Boot.from_config(
-                app_config, tool_bus=self._tool_bus, extensions=extensions
+            result = await self._host.reload(
+                self._conversation,
+                app_config=app_config,
+                boot_factory=Boot.from_config,
             )
-            # 保留旧 session_service（同库/同 session）；无则新建
-            session_service = self._session_service or boot.build_session_service(
-                agent_id=self.agent_id
-            )
-            agent, new_run = Run.reload(
-                boot=boot,
-                old_run=self._run,
-                agent_id=self.agent_id,
-                session_service=session_service,
-            )
-            self._boot = boot
-            self._app_config = app_config
-            self._tool_bus = boot.tool_bus
-            self.agent = agent
-            self.agent_id = agent.agent_id
-            self._run = new_run
-            if self._session_service is None:
-                self._session_service = session_service
+            self._conversation = result.conversation
+            for warning in result.warnings:
+                self._render_error_message(f"Extension load error: {warning}")
             self._render_system_message(
                 "Reloaded skills, templates, settings, models, agent, auth. "
                 f"Session={self.session.session_id} agent={self.agent_id}. "
@@ -455,71 +391,116 @@ class ChatLoop:
             self._render_error_message(f"reload 失败，保持旧配置: {exc}")
 
     async def _handle_command(self, user_input: str) -> bool:
-        # 仅命令名小写；参数保留大小写（model id / agent id）
-        stripped = user_input.strip()
-        parts = stripped.split(maxsplit=1)
-        command = parts[0].lower()
-        arg = parts[1].strip() if len(parts) > 1 else None
-        if arg == "":
-            arg = None
+        parsed = parse_slash(user_input)
+        command = self._slash_registry.get(parsed.name)
+        if command is None:
+            self._render_error_message(f"Unknown command: {user_input}. Try /help.")
+            return True
+        handler = getattr(self, command.handler)
+        outcome = handler(parsed.argument)
+        if inspect.isawaitable(outcome):
+            outcome = await outcome
+        return bool(outcome)
 
-        if command == "/help":
-            self._render_help()
-            return True
-        if command == "/model":
-            self._handle_model_command(arg)
-            return True
-        if command == "/thinking":
-            self._handle_thinking_command(arg)
-            return True
-        if command == "/agent":
-            self._handle_agent_command(arg)
-            return True
-        if command == "/new":
-            self._handle_new_command()
-            return True
-        if command == "/reload":
-            await self._handle_reload_command()
-            return True
-        if command == "/context":
-            await self._render_context_command()
-            return True
-        if command == "/session":
-            self._render_session_summary()
-            return True
-        if command == "/skills":
-            self._handle_skills_command(arg)
-            return True
-        if command == "/clear":
-            self.console.clear(home=True)
-            self._render_header()
-            return True
-        if command == "/exit":
-            self._close_session()
-            self._render_system_message("Session closed.")
-            return False
+    def complete(self, kind: str, argument: str) -> tuple[str, ...]:
+        """SlashCompleter 的动态真源。"""
+        if kind == "models":
+            return tuple(self._list_available_models())
+        if kind == "agents":
+            return (
+                tuple(item.agent_id for item in self._host.list_agents())
+                if self._host is not None
+                else ()
+            )
+        if kind == "thinking":
+            return ("off", "low", "medium", "high", "xhigh")
+        if kind == "tools":
+            try:
+                return tuple(item.name for item in self._conversation.list_tools())
+            except AttributeError:
+                return ()
+        if kind == "skills":
+            parts = argument.split()
+            if len(parts) <= 1 and not argument.endswith(" "):
+                return ("pending", "diff", "approve", "reject")
+            action = parts[0].lower() if parts else ""
+            if action in {"diff", "approve", "reject"}:
+                return tuple(
+                    item.pending_id for item in self._conversation.list_pending_skills()
+                )
+        return ()
 
-        self._render_error_message(f"Unknown command: {user_input}. Try /help.")
+    def _command_help(self, _arg: str | None) -> bool:
+        self._render_help()
         return True
 
+    def _command_model(self, arg: str | None) -> bool:
+        self._handle_model_command(arg)
+        return True
+
+    def _command_thinking(self, arg: str | None) -> bool:
+        self._handle_thinking_command(arg)
+        return True
+
+    def _command_agent(self, arg: str | None) -> bool:
+        self._handle_agent_command(arg)
+        return True
+
+    def _command_new(self, _arg: str | None) -> bool:
+        self._handle_new_command()
+        return True
+
+    async def _command_reload(self, _arg: str | None) -> bool:
+        await self._handle_reload_command()
+        return True
+
+    async def _command_context(self, _arg: str | None) -> bool:
+        await self._render_context_command()
+        return True
+
+    def _command_session(self, _arg: str | None) -> bool:
+        self._render_session_summary()
+        return True
+
+    def _command_skills(self, arg: str | None) -> bool:
+        self._handle_skills_command(arg)
+        return True
+
+    def _command_tools(self, arg: str | None) -> bool:
+        self._render_tools(arg)
+        return True
+
+    def _command_clear(self, _arg: str | None) -> bool:
+        self.console.clear(home=True)
+        self._render_header()
+        return True
+
+    def _command_exit(self, _arg: str | None) -> bool:
+        self._close_session()
+        self._render_system_message("Session closed.")
+        return False
+
     def _handle_skills_command(self, arg: str | None) -> None:
-        store = getattr(self._run, "skill_store", None) if self._run else None
-        if store is None:
-            self._render_error_message("当前 agent 未配置 skills 目录")
-            return
+        conversation = getattr(self, "_conversation", None)
+        store = getattr(self._run, "skill_store", None)
         parts = (arg or "pending").split(maxsplit=1)
         action = parts[0].lower()
         pending_id = parts[1].strip() if len(parts) > 1 else None
 
         if action == "pending":
-            records = store.list_pending()
+            records = (
+                conversation.list_pending_skills()
+                if conversation is not None
+                else tuple(store.list_pending()) if store is not None else ()
+            )
             if not records:
-                self._render_system_message("没有待审的 skill 写入")
+                if getattr(self._run, "skill_store", None) is None:
+                    self._render_error_message("当前 agent 未配置 skills 目录")
+                else:
+                    self._render_system_message("没有待审的 skill 写入")
                 return
             # box=None：E3 无边框排版，列对齐保留、框线不画
-            table = Table(
-                title="Pending skill writes", title_justify="left", box=None
-            )
+            table = Table(title="Pending skill writes", title_justify="left", box=None)
             table.add_column("id")
             table.add_column("action")
             table.add_column("skill")
@@ -536,16 +517,23 @@ class ChatLoop:
             return
 
         try:
+            result = (
+                conversation.apply_skill_action(action, pending_id)
+                if conversation is not None
+                else None
+            )
             if action == "diff":
                 self._render_system_message(f"diff {pending_id}")
-                self.console.print(Text(store.diff(pending_id)))
+                diff = result.diff if result is not None else store.diff(pending_id)
+                self.console.print(Text(diff or ""))
                 return
             if action == "approve":
-                path = store.approve(pending_id)
+                path = result.path if result is not None else store.approve(pending_id)
                 self._render_system_message(f"已批准，写入 {path}（下一轮对话生效）")
                 return
             if action == "reject":
-                store.reject(pending_id)
+                if result is None:
+                    store.reject(pending_id)
                 self._render_system_message(f"已拒绝 {pending_id}")
                 return
         except SkillStoreError as exc:
@@ -556,6 +544,26 @@ class ChatLoop:
             f"未知子命令：{action}。可用：pending / diff <id> / approve <id> / reject <id>"
         )
 
+    def _render_tools(self, filter_text: str | None) -> None:
+        try:
+            tools = self._conversation.list_tools()
+        except AttributeError:
+            self._render_error_message("当前 Run 不支持工具快照")
+            return
+        if filter_text:
+            needle = filter_text.lower()
+            tools = tuple(item for item in tools if needle in item.name.lower())
+        if not tools:
+            self._render_system_message("当前没有激活的工具。")
+            return
+        table = Table(title="Active tools", title_justify="left", box=None)
+        table.add_column("name")
+        table.add_column("source")
+        table.add_column("origin")
+        for item in tools:
+            table.add_row(item.name, item.source, item.origin or "-")
+        self.console.print(table)
+
     async def _render_context_command(self) -> None:
         """`/context` = ContextUsage 视图（设计 §7）。
 
@@ -563,60 +571,19 @@ class ChatLoop:
         外加从 Session 派生的真实 API usage。只读：不跑 hook、不执行 recall、
         不写 Session。
         """
-        last_turn = last_turn_usage(self.session)
-        total = session_usage(self.session)
-        run = self._run
-        turns, tool_calls, compactions = _session_context_stats(self.session)
-
-        usage = None
-        note = None
-        tool_defs = 0
-        if run is None:
-            note = "尚无 Run，无法组装上下文"
-        else:
-            try:
-                snapshot = run.tool_bus.snapshot(run.activation)
-                tool_defs = len(snapshot.entries)
-                request = await prepare(
-                    run=run,
-                    session=self.session,
-                    hook_feedback=[],
-                    unit_window=run.unit_window,
-                    # §7.3：预览不得执行 recall（含远程 OV）
-                    recall_sources=[],
-                    # 预览按当前激活集现取一份快照（不在 turn 内，无缓存一致性顾虑）
-                    snapshot=snapshot,
-                )
-                model_config = run.agent.model_config
-                usage = await measure(
-                    request=request,
-                    anchor=resolve_anchor(
-                        session=self.session,
-                        request=request,
-                        provider=model_config.provider,
-                        model=model_config.model,
-                    ),
-                    provider=run.provider,
-                    model_config=model_config,
-                )
-            except Exception as exc:  # 测试 mock / 不完整 run
-                note = f"组装失败: {exc}"
-
-        if last_turn is None and note is None:
-            note = "本会话尚未成功完成过模型调用（无 API usage）"
-
+        inspection = await self._conversation.inspect_context()
         renderable = self._context_renderer.render(
-            usage,
-            last_turn=last_turn,
-            session_total=total if total is not None and total.steps > 1 else None,
-            note=note,
+            inspection.usage,
+            last_turn=inspection.last_turn,
+            session_total=inspection.session_total,
+            note=inspection.note,
             source_line=(
                 "Source: prepare preview · hooks skipped · recall skipped · no draft input"
             ),
-            turns=turns,
-            tool_calls=tool_calls,
-            compactions=compactions,
-            tool_definitions=tool_defs,
+            turns=inspection.turns,
+            tool_calls=inspection.tool_calls,
+            compactions=inspection.compactions,
+            tool_definitions=inspection.tool_definitions,
         )
         self.console.print(renderable)
 
@@ -628,6 +595,8 @@ class ChatLoop:
             await self._loop()
         finally:
             self._close_trace_sink()
+            if self._host is not None:
+                await self._host.shutdown()
 
     async def _loop(self) -> None:
         while True:
@@ -657,11 +626,7 @@ class ChatLoop:
             task = asyncio.create_task(self.handle_user_input(user_input, bus=bus))
             try:
                 await task
-                if self._session_service is not None:
-                    self._session_service.flush_new_entries(
-                        session=self.session,
-                        entries=[],
-                    )
+                self._conversation.flush()
             except KeyboardInterrupt:
                 task.cancel()
                 try:
@@ -669,11 +634,7 @@ class ChatLoop:
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     pass
                 # 中断时 react 已补齐 tool_result 并落盘，这里再 flush 一次
-                if self._session_service is not None:
-                    self._session_service.flush_new_entries(
-                        session=self.session,
-                        entries=[],
-                    )
+                self._conversation.flush()
                 continue
             except asyncio.CancelledError:
                 continue
@@ -687,29 +648,3 @@ class ChatLoop:
             # last usage 由 /context 从 Session 派生（§11.8），不在此缓存
             # 渲染唯一入口是事件订阅（E3）：不发 AssistantMessageEvent 的
             # Run 是 runtime 违约，这里不做 fallback 渲染
-
-
-def _session_context_stats(session: Session) -> tuple[int, int, int]:
-    """从 Session active_path 统计 turns / tool_calls / compactions。"""
-    turns = 0
-    tool_calls = 0
-    compactions = 0
-    for entry in session.active_path():
-        if entry.entry_type == ENTRY_TYPE_COMPACTION:
-            compactions += 1
-            continue
-        if entry.entry_type != ENTRY_TYPE_MESSAGE:
-            continue
-        try:
-            message = agent_message_from_dict(entry.payload)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if isinstance(message, UserMessage):
-            turns += 1
-        elif isinstance(message, AssistantMessage):
-            tool_calls += sum(
-                1
-                for block in message.content
-                if isinstance(block, ToolCallContent)
-            )
-    return turns, tool_calls, compactions
