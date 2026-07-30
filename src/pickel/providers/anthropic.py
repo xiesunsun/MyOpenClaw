@@ -49,6 +49,7 @@ class AnthropicProvider(Provider):
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
+        self.cache_control = self._resolve_cache_control()
         self.client = self._build_client()
 
     @classmethod
@@ -136,15 +137,30 @@ class AnthropicProvider(Provider):
         return self._build_request_params(context)
 
     def _build_request_params(self, context: ModelContext) -> dict[str, Any]:
+        cache_control = getattr(self, "cache_control", None)
         params: dict[str, Any] = {
             "model": self.model,
             "messages": self._build_messages(context.messages),
         }
         system_text = context.system.as_text()
         if system_text:
-            params["system"] = system_text
+            params["system"] = (
+                [
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        # system 断点同时覆盖位于它之前的全部工具定义。
+                        "cache_control": dict(cache_control),
+                    }
+                ]
+                if cache_control is not None
+                else system_text
+            )
         if context.tools:
             params["tools"] = self._build_tools(context.tools)
+        if cache_control is not None:
+            # 顶层自动断点跟随多轮 messages 向前移动。
+            params["cache_control"] = dict(cache_control)
         thinking, output_config = self._build_thinking_config()
         if thinking is not None:
             params["thinking"] = thinking
@@ -276,6 +292,27 @@ class AnthropicProvider(Provider):
             {"type": "adaptive", "display": "summarized"},
             {"effort": effort},
         )
+
+    def _resolve_cache_control(self) -> dict[str, str] | None:
+        value = self.provider_options.get("cache_control")
+        if value is None or value is False:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("Anthropic provider_options.cache_control 必须是对象")
+        unknown = set(value) - {"type", "ttl"}
+        if unknown:
+            names = ", ".join(sorted(str(item) for item in unknown))
+            raise ValueError(f"Anthropic cache_control 包含未知字段: {names}")
+        cache_type = value.get("type")
+        if cache_type != "ephemeral":
+            raise ValueError("Anthropic cache_control.type 目前只支持 'ephemeral'")
+        ttl = value.get("ttl")
+        if ttl is not None and ttl not in {"5m", "1h"}:
+            raise ValueError("Anthropic cache_control.ttl 只支持 '5m' 或 '1h'")
+        result = {"type": "ephemeral"}
+        if ttl is not None:
+            result["ttl"] = str(ttl)
+        return result
 
     def _build_client(self) -> AsyncAnthropic:
         kwargs: dict[str, Any] = {}

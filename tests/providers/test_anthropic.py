@@ -331,6 +331,70 @@ class AnthropicProviderTests(unittest.TestCase):
         )
         self.assertIsNone(total)
 
+    def test_cache_control_marks_system_and_enables_automatic_caching(self) -> None:
+        provider = AnthropicProvider(
+            model="claude-test",
+            provider_options={
+                "cache_control": {
+                    "type": "ephemeral",
+                    "ttl": "5m",
+                }
+            },
+        )
+
+        params = provider._build_request_params(
+            ModelContext(
+                system=SystemContent.from_text("stable system"),
+                messages=[UserMessage(content=[TextContent(text="hello")])],
+                tools=[
+                    ToolDefinition(
+                        name="echo",
+                        description="Echo",
+                        input_schema={"type": "object"},
+                    )
+                ],
+            )
+        )
+
+        expected = {"type": "ephemeral", "ttl": "5m"}
+        self.assertEqual(expected, params["cache_control"])
+        self.assertEqual(
+            [
+                {
+                    "type": "text",
+                    "text": "stable system",
+                    "cache_control": expected,
+                }
+            ],
+            params["system"],
+        )
+        self.assertNotIn("cache_control", params["tools"][-1])
+
+    def test_cache_control_is_absent_by_default(self) -> None:
+        provider = AnthropicProvider(model="claude-test")
+
+        params = provider._build_request_params(
+            ModelContext(
+                system=SystemContent.from_text("system"),
+                messages=[UserMessage(content=[TextContent(text="hello")])],
+            )
+        )
+
+        self.assertNotIn("cache_control", params)
+        self.assertEqual("system", params["system"])
+
+    def test_cache_control_rejects_unsupported_ttl(self) -> None:
+        with self.assertRaisesRegex(ValueError, "5m.*1h"):
+            AnthropicProvider(
+                model="claude-test",
+                provider_options={
+                    "cache_control": {
+                        "type": "ephemeral",
+                        "ttl": "24h",
+                    }
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
