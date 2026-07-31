@@ -27,7 +27,14 @@ from pickel.hooks.events import (
     PostToolUseEvent,
     PreToolUseEvent,
 )
-from pickel.observe.records import ErrorInfo, ObservationIdentity, SpanTimer
+from pickel.observe.records import (
+    ErrorInfo,
+    ObservationIdentity,
+    RequestSnapshotRecord,
+    SpanTimer,
+    observation_requested,
+    record_request_snapshot,
+)
 from pickel.providers.stream import (
     StreamCompleted,
     TextDelta,
@@ -172,6 +179,24 @@ class ReActStrategy(ExecutionStrategy):
                     hook_injected_chars=final_request_chars - prepared_chars,
                 ),
             )
+
+            # 完整正文只在 full trace 下构造；standard 保持低开销摘要。
+            if observation_requested("request_snapshot"):
+                try:
+                    snapshot = run.provider.request_snapshot(model_context)
+                except Exception:
+                    # 可观测快照是派生数据，Provider 的观测实现不能阻断请求。
+                    snapshot = None
+                if snapshot is not None:
+                    record_request_snapshot(
+                        RequestSnapshotRecord(
+                            identity=identity,
+                            provider=str(snapshot.get("provider") or ""),
+                            model=str(snapshot.get("model") or ""),
+                            cache_order=tuple(snapshot.get("cache_order") or ()),
+                            request=dict(snapshot.get("request") or {}),
+                        )
+                    )
 
             start = time.perf_counter()
             provider_timer = SpanTimer(

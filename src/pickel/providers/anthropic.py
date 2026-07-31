@@ -126,6 +126,15 @@ class AnthropicProvider(Provider):
         input_tokens = getattr(response, "input_tokens", None)
         return int(input_tokens) if input_tokens is not None else None
 
+    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
+        """保留 wire 参数，并声明 Anthropic 实际用于缓存匹配的语义顺序。"""
+        return {
+            "provider": "anthropic",
+            "model": self.model,
+            "cache_order": ["tools", "system", "messages"],
+            "request": self._build_create_params(context),
+        }
+
     def _build_create_params(self, context: ModelContext) -> dict[str, Any]:
         params = self._build_request_params(context)
         params["max_tokens"] = self.max_output_tokens

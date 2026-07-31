@@ -331,6 +331,27 @@ def test_request_digest_count_mismatch_skipped():
     )
 
 
+def test_request_snapshot_backfilled_per_step():
+    session = Session.create(agent_id="Pickle")
+    session.append_user(_user("hi"))
+    session.append_assistant(_assistant())
+    snapshot = {
+        "provider": "anthropic",
+        "cache_order": ["tools", "system", "messages"],
+        "request": {"system": "full system", "messages": []},
+    }
+    enhancement = SimpleNamespace(
+        tool_timings={},
+        turn_markers=[SimpleNamespace(started_at=None, failed=None, interrupted=False)],
+        request_digests=[],
+        request_snapshots=[[snapshot]],
+    )
+
+    trajectory = collect_trajectory(session, enhancement=enhancement)
+
+    assert trajectory.turns[0].steps[0].request_snapshot == snapshot
+
+
 def test_enhancement_without_request_digests_attr_tolerated():
     """旧 TraceEnhancement(无 request_digests 属性)不应崩。"""
     session = Session.create(agent_id="Pickle")

@@ -36,6 +36,7 @@ class TraceEnhancement:
     # 按 turn_started 分组的 request_digest 序列;digest 本身即摘要
     # (长度/名称/条数),发射端(RequestDigestEvent)保证无正文。
     request_digests: list[list[dict]] = field(default_factory=list)
+    request_snapshots: list[list[dict]] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
 
 
@@ -66,6 +67,18 @@ def read_trace(path: Path) -> TraceEnhancement | None:
             span = dict(event["payload"])
             span["_turn_id"] = event.get("turn_id")
             spans.append(span)
+            continue
+
+        if event.get("record_type") == "request_snapshot" and isinstance(
+            event.get("payload"), dict
+        ):
+            turn_id = str(event.get("turn_id") or "")
+            marker = next(
+                (item for item in reversed(markers) if item.turn_id == turn_id),
+                None,
+            )
+            if marker is not None:
+                marker.snapshots.append(dict(event["payload"]))
             continue
 
         if event_type == "turn_started":
@@ -134,6 +147,7 @@ def read_trace(path: Path) -> TraceEnhancement | None:
         tool_timings=timings,
         turn_markers=[builder.freeze() for builder in markers],
         request_digests=[builder.digests for builder in markers],
+        request_snapshots=[builder.snapshots for builder in markers],
         metrics=_build_metrics(spans),
     )
 
@@ -233,6 +247,7 @@ class _MarkerBuilder:
         self.failed: dict[str, str] | None = None
         self.interrupted = False
         self.digests: list[dict] = []
+        self.snapshots: list[dict] = []
         self.duration_ms: int | None = None
         self.outcome: str | None = None
 

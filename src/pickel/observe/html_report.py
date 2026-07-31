@@ -108,6 +108,10 @@ section h3 { font-size: 15px; margin: 22px 0 10px; }
   margin: 6px 0 0; padding: 8px; background: var(--surface); border-radius: 6px;
   font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
 }
+.cache-order { display: flex; gap: 6px; align-items: stretch; margin: 8px 0; }
+.cache-stage { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.cache-stage b { display: block; font-size: 12px; }
+.cache-stage small { color: var(--text-3); }
 .final-wrap { padding: 10px 14px; border-top: 1px solid var(--border); }
 .fail-banner { padding: 8px 14px; background: var(--error-bg); color: var(--error); font-size: 13px; }
 .muted { color: var(--text-3); font-size: 12px; }
@@ -304,6 +308,42 @@ messages: ${d.message_count} 条 · 全文 ${fmt(d.request_chars)} 字符` +
     `</pre></details>`;
 }
 
+function requestSnapshotBlock(s) {
+  const snapshot = s.request_snapshot;
+  if (!snapshot?.request) return "";
+  const req = snapshot.request;
+  const order = snapshot.cache_order?.length
+    ? snapshot.cache_order : ["tools", "system", "messages"];
+  const count = kind => kind === "tools" ? (req.tools?.length || 0)
+    : kind === "messages" ? (req.messages?.length || 0)
+    : req.system ? (Array.isArray(req.system) ? req.system.length : 1) : 0;
+  const systemBreakpoint = Array.isArray(req.system) && req.system.some(x => x.cache_control);
+  const cacheHint = kind => {
+    if (kind === "tools" && systemBreakpoint)
+      return "被 system 断点覆盖";
+    if (kind === "system" && systemBreakpoint)
+      return "显式 cache breakpoint";
+    if (kind === "messages" && req.cache_control)
+      return "自动 breakpoint → 最后可缓存块";
+    if (req.cache_control)
+      return "自动缓存前缀";
+    return "未设置 cache breakpoint";
+  };
+  const stages = order.map((kind, i) => `<div class="cache-stage">
+    <b>${i + 1}. ${esc(kind)}</b><small>${fmt(count(kind))} 项 · ${cacheHint(kind)}</small>
+  </div>`).join("");
+  const params = Object.fromEntries(Object.entries(req)
+    .filter(([key]) => !["tools", "system", "messages"].includes(key)));
+  return `<details class="tool">
+    <summary>完整 Provider 请求 <span class="badge trace">full trace · 敏感正文</span></summary>
+    <div class="cache-order">${stages}</div>
+    <details class="tool"><summary>1 · tools</summary><pre>${esc(JSON.stringify(req.tools || [], null, 2))}</pre></details>
+    <details class="tool"><summary>2 · system</summary><pre>${esc(JSON.stringify(req.system || null, null, 2))}</pre></details>
+    <details class="tool"><summary>3 · messages</summary><pre>${esc(JSON.stringify(req.messages || [], null, 2))}</pre></details>
+    <details class="tool"><summary>其他请求参数</summary><pre>${esc(JSON.stringify(params, null, 2))}</pre></details>
+  </details>`;
+}
+
 function stepBlock(s) {
   const badges =
     `<span class="badge">step ${s.index + 1}</span>` +
@@ -316,6 +356,7 @@ function stepBlock(s) {
     (s.hook_injected_chars ? `<span class="badge">hook 注入 ${fmt(s.hook_injected_chars)} 字符</span>` : "");
   return `<div class="step"><div class="badges">${badges}</div>` +
     digestBlock(s) +
+    requestSnapshotBlock(s) +
     s.tool_executions.map(toolCard).join("") +
     (s.text ? `<div class="text">${esc(s.text)}</div>` : "") + `</div>`;
 }

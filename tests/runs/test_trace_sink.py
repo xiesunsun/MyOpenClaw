@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pickel.runs.trace_sink as trace_module
 from pickel.config.paths import home_dir
-from pickel.observe.records import ObservationIdentity, SpanRecord
+from pickel.observe.records import (
+    ObservationIdentity,
+    RequestSnapshotRecord,
+    SpanRecord,
+)
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     StepStarted,
@@ -159,6 +163,33 @@ def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
         "span",
     ]
     assert [record["trace_seq"] for record in records] == [0, 1]
+
+
+def test_完整请求快照只在_full_模式落盘(tmp_path: Path):
+    snapshot = RequestSnapshotRecord(
+        identity=ObservationIdentity(session_id="s1", turn_id="t1", step_index=1),
+        provider="anthropic",
+        model="claude-test",
+        cache_order=("tools", "system", "messages"),
+        request={"system": "SECRET", "messages": []},
+    )
+    standard_path = tmp_path / "standard.jsonl"
+    standard = JsonlTraceSink(standard_path)
+    assert standard.wants("request_snapshot") is False
+    standard.record(snapshot)
+    standard.close()
+    assert standard_path.read_text() == ""
+
+    full_path = tmp_path / "full.jsonl"
+    full = JsonlTraceSink(full_path, TraceOptions(mode="full"))
+    assert full.wants("request_snapshot") is True
+    full.record(snapshot)
+    full.close()
+
+    record = json.loads(full_path.read_text())
+    assert record["record_type"] == "request_snapshot"
+    assert record["payload"]["cache_order"] == ["tools", "system", "messages"]
+    assert record["payload"]["request"]["system"] == "SECRET"
 
 
 def test_超过文件上限后轮转(tmp_path: Path):

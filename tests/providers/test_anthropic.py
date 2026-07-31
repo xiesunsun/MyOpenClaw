@@ -370,6 +370,35 @@ class AnthropicProviderTests(unittest.TestCase):
         )
         self.assertNotIn("cache_control", params["tools"][-1])
 
+    def test_request_snapshot_preserves_wire_request_and_cache_order(self) -> None:
+        provider = AnthropicProvider(
+            model="claude-test",
+            max_output_tokens=2048,
+            provider_options={"cache_control": {"type": "ephemeral"}},
+        )
+        context = ModelContext(
+            system=SystemContent.from_text("stable system"),
+            messages=[UserMessage(content=[TextContent(text="full user message")])],
+            tools=[
+                ToolDefinition(
+                    name="echo",
+                    description="Echo",
+                    input_schema={"type": "object"},
+                )
+            ],
+        )
+
+        snapshot = provider.request_snapshot(context)
+
+        self.assertEqual(["tools", "system", "messages"], snapshot["cache_order"])
+        self.assertEqual(provider._build_create_params(context), snapshot["request"])
+        self.assertEqual(
+            "full user message",
+            snapshot["request"]["messages"][0]["content"][0]["text"],
+        )
+        self.assertEqual("stable system", snapshot["request"]["system"][0]["text"])
+        self.assertEqual("echo", snapshot["request"]["tools"][0]["name"])
+
     def test_cache_control_is_absent_by_default(self) -> None:
         provider = AnthropicProvider(model="claude-test")
 

@@ -100,7 +100,28 @@ class DiagnosticRecord:
         }
 
 
-ObservationRecord = SpanRecord | DiagnosticRecord
+@dataclass(frozen=True)
+class RequestSnapshotRecord:
+    """完整 Provider 请求快照；仅由 full trace 接收。"""
+
+    provider: str
+    model: str
+    request: dict[str, Any]
+    identity: ObservationIdentity = field(default_factory=ObservationIdentity)
+    cache_order: tuple[str, ...] = ()
+    occurred_at: datetime = field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "occurred_at": self.occurred_at.isoformat(),
+            "cache_order": list(self.cache_order),
+            "request": self.request,
+        }
+
+
+ObservationRecord = SpanRecord | DiagnosticRecord | RequestSnapshotRecord
 
 
 class Observer(Protocol):
@@ -112,6 +133,9 @@ class Observer(Protocol):
 class NoopObserver:
     def record(self, record: ObservationRecord) -> None:
         return None
+
+    def wants(self, capability: str) -> bool:
+        return False
 
 
 _NOOP_OBSERVER = NoopObserver()
@@ -125,6 +149,17 @@ _CURRENT_SPAN_ID: ContextVar[str | None] = ContextVar(
 
 def current_observer() -> Observer:
     return _CURRENT_OBSERVER.get()
+
+
+def observation_requested(capability: str) -> bool:
+    """询问 Observer 是否需要昂贵的可选数据；旧 Observer 默认不需要。"""
+    wants = getattr(current_observer(), "wants", None)
+    if not callable(wants):
+        return False
+    try:
+        return bool(wants(capability))
+    except Exception:
+        return False
 
 
 @contextmanager
@@ -198,6 +233,13 @@ class SpanTimer:
 
 
 def record_diagnostic(record: DiagnosticRecord) -> None:
+    try:
+        current_observer().record(record)
+    except Exception:
+        return
+
+
+def record_request_snapshot(record: RequestSnapshotRecord) -> None:
     try:
         current_observer().record(record)
     except Exception:

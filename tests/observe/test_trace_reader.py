@@ -193,6 +193,43 @@ def test_request_digest_before_any_turn_is_dropped(tmp_path):
     assert enhancement.request_digests == []
 
 
+def test_full_request_snapshots_grouped_by_turn(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    events = [
+        {
+            "record_type": "runtime_event",
+            "event_type": "turn_started",
+            "turn_id": "t1",
+            "occurred_at": "2026-07-31T00:00:00+00:00",
+        },
+        {
+            "record_type": "request_snapshot",
+            "turn_id": "t1",
+            "step_index": 1,
+            "payload": {
+                "provider": "anthropic",
+                "model": "claude-test",
+                "cache_order": ["tools", "system", "messages"],
+                "request": {
+                    "system": "FULL SYSTEM",
+                    "messages": [{"role": "user", "content": "FULL USER"}],
+                    "tools": [{"name": "echo"}],
+                },
+            },
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
+    )
+
+    enhancement = read_trace(trace_file)
+
+    snapshot = enhancement.request_snapshots[0][0]
+    assert snapshot["cache_order"] == ["tools", "system", "messages"]
+    assert snapshot["request"]["system"] == "FULL SYSTEM"
+    assert snapshot["request"]["messages"][0]["content"] == "FULL USER"
+
+
 def test_span_metrics_include_percentiles_success_and_tokens(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     spans = []

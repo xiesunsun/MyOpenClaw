@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import AssistantMessage
@@ -33,4 +33,8 @@ class Provider(ABC):
 
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         """统计上下文 token；失败返回 None。"""
+        return None
+
+    def request_snapshot(self, context: ModelContext) -> dict[str, Any] | None:
+        """返回实际 Provider 请求的可观测快照；不支持时返回 None。"""
         return None

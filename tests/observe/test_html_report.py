@@ -97,3 +97,12 @@ def test_step_request_digest_rendered_in_template():
     assert "请求摘要" in html
     data = _extract_data(html)
     assert "request_digest" in data[0]["turns"][0]["steps"][0]
+
+
+def test_full_request_snapshot_has_anthropic_cache_order_ui():
+    html = render_html([_trajectory()], generated_at="2026-07-31T00:00:00+00:00")
+
+    assert "s.request_snapshot" in html
+    assert "完整 Provider 请求" in html
+    assert '["tools", "system", "messages"]' in html
+    assert "自动 breakpoint" in html

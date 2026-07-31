@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pickel.config.paths import home_dir
-from pickel.observe.records import ObservationRecord, SpanRecord
+from pickel.observe.records import (
+    ObservationRecord,
+    RequestSnapshotRecord,
+    SpanRecord,
+)
 from pickel.runs.runtime_events import RuntimeEventBase
 
 logger = logging.getLogger(__name__)
@@ -183,8 +187,18 @@ class JsonlTraceSink:
     def record(self, observation: ObservationRecord) -> None:
         if self._closed:
             return
+        if (
+            isinstance(observation, RequestSnapshotRecord)
+            and self._options.mode != "full"
+        ):
+            return
         identity = observation.identity
-        record_type = "span" if isinstance(observation, SpanRecord) else "diagnostic"
+        if isinstance(observation, SpanRecord):
+            record_type = "span"
+        elif isinstance(observation, RequestSnapshotRecord):
+            record_type = "request_snapshot"
+        else:
+            record_type = "diagnostic"
         record = {
             "schema_version": self.SCHEMA_VERSION,
             "record_type": record_type,
@@ -195,6 +209,9 @@ class JsonlTraceSink:
             "payload": observation.to_dict(),
         }
         self._enqueue(record, low_priority=False)
+
+    def wants(self, capability: str) -> bool:
+        return self._options.mode == "full" and capability == "request_snapshot"
 
     def close(self) -> None:
         if self._closed:

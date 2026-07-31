@@ -41,6 +41,8 @@ class Step:
     context_fingerprint: str | None
     # trace 增强(O4):本次 generate 实发 Request 的摘要,非真源。
     request_digest: dict[str, Any] | None = None
+    # full trace 增强：Provider wire 请求正文与缓存语义顺序。
+    request_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
