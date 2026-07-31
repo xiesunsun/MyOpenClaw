@@ -43,6 +43,8 @@ class Step:
     request_digest: dict[str, Any] | None = None
     # full trace 增强：Provider wire 请求正文与缓存语义顺序。
     request_snapshot: dict[str, Any] | None = None
+    # Session 中的 ThinkingContent 正文；用于按 step 展示模型思考。
+    thinking: str = ""
 
 
 @dataclass(frozen=True)

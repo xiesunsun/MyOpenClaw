@@ -106,3 +106,13 @@ def test_full_request_snapshot_has_anthropic_cache_order_ui():
     assert "完整 Provider 请求" in html
     assert '["tools", "system", "messages"]' in html
     assert "自动 breakpoint" in html
+
+
+def test_thinking_cache_progression_and_final_dedup_are_rendered():
+    html = render_html([_trajectory()], generated_at="2026-07-31T00:00:00+00:00")
+
+    assert "s.thinking" in html
+    assert "模型思考" in html
+    assert "缓存前缀递进" in html
+    assert "previous.cache_read + previous.cache_write" in html
+    assert "s.text && !isFinal" in html

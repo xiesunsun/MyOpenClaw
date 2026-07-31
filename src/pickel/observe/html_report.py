@@ -54,7 +54,7 @@ body {
   display: flex; height: 100vh; overflow: hidden;
 }
 #sidebar {
-  width: 300px; min-width: 300px; border-right: 1px solid var(--border);
+  width: 272px; min-width: 272px; border-right: 1px solid var(--border);
   overflow-y: auto; background: var(--surface-2); padding: 12px;
 }
 #sidebar h1 { font-size: 16px; margin: 4px 8px 12px; }
@@ -67,7 +67,8 @@ body {
 .session-item.active { background: var(--surface); border-color: var(--accent); }
 .session-item .sid { font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-2); }
 .session-item .line2 { font-size: 12px; color: var(--text-3); }
-#main { flex: 1; overflow-y: auto; padding: 20px 28px; }
+#main { flex: 1; overflow-y: auto; padding: 24px 32px 60px; }
+#main > * { max-width: 1180px; margin-left: auto; margin-right: auto; }
 h2 { font-size: 18px; margin: 0 0 4px; }
 .sub { color: var(--text-3); font-size: 12px; margin-bottom: 16px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
@@ -88,8 +89,8 @@ section h3 { font-size: 15px; margin: 22px 0 10px; }
   padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18);
   font-variant-numeric: tabular-nums;
 }
-.turn { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 14px; overflow: hidden; }
-.turn-head { background: var(--surface-2); padding: 10px 14px; }
+.turn { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 18px; overflow: hidden; }
+.turn-head { background: var(--surface-2); padding: 12px 16px; }
 .turn-head .q { font-weight: 600; white-space: pre-wrap; }
 .turn-head .badges { margin-top: 4px; }
 .badge {
@@ -99,8 +100,17 @@ section h3 { font-size: 15px; margin: 22px 0 10px; }
 }
 .badge.err { color: var(--error); border-color: var(--error); background: var(--error-bg); }
 .badge.trace { border-style: dashed; }
-.step { padding: 10px 14px; border-top: 1px solid var(--border); }
-.step .text, .final { white-space: pre-wrap; word-break: break-word; }
+.steps { padding: 8px 14px 12px; border-top: 1px solid var(--border); }
+.step { border-left: 2px solid var(--border); margin: 8px 0; padding: 0 0 0 12px; }
+.step > summary { cursor: pointer; list-style: none; padding: 7px 0; }
+.step > summary::-webkit-details-marker { display: none; }
+.step > summary::before { content: "›"; display: inline-block; width: 15px; color: var(--text-3); }
+.step[open] > summary::before { content: "⌄"; }
+.step-body { padding: 0 0 8px 15px; }
+.step .text, .final, .thinking-text { white-space: pre-wrap; word-break: break-word; }
+.thinking { border-left: 3px solid var(--series-1); background: var(--surface-2); padding: 7px 10px; margin: 8px 0; border-radius: 0 7px 7px 0; }
+.thinking summary { cursor: pointer; color: var(--text-2); }
+.thinking-text { margin-top: 7px; color: var(--text-2); }
 .tool { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .tool.error { border-color: var(--error); background: var(--error-bg); }
 .tool summary { cursor: pointer; font-family: ui-monospace, monospace; font-size: 13px; }
@@ -112,12 +122,25 @@ section h3 { font-size: 15px; margin: 22px 0 10px; }
 .cache-stage { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .cache-stage b { display: block; font-size: 12px; }
 .cache-stage small { color: var(--text-3); }
-.final-wrap { padding: 10px 14px; border-top: 1px solid var(--border); }
+.cache-flow { display: flex; align-items: stretch; gap: 7px; overflow-x: auto; padding: 2px 2px 8px; }
+.cache-node { min-width: 180px; flex: 1; border: 1px solid var(--border); background: var(--surface-2); border-radius: 9px; padding: 9px 11px; }
+.cache-node .cache-title { font-weight: 600; }
+.cache-node .cache-prefix { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cache-node .cache-detail { color: var(--text-2); font-size: 12px; }
+.cache-node .cache-link { color: var(--text-3); font-size: 11px; margin-top: 5px; }
+.cache-arrow { align-self: center; color: var(--text-3); font-size: 18px; }
+.final-wrap { padding: 14px 16px 16px; border-top: 1px solid var(--border); }
+.final-wrap .muted { margin-bottom: 5px; }
 .fail-banner { padding: 8px 14px; background: var(--error-bg); color: var(--error); font-size: 13px; }
 .muted { color: var(--text-3); font-size: 12px; }
 svg text { fill: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }
 svg .grid { stroke: var(--border); stroke-width: 1; }
 svg .compaction { stroke: var(--text-3); stroke-width: 1.5; stroke-dasharray: 4 3; }
+@media (max-width: 760px) {
+  body { display: block; height: auto; overflow: auto; }
+  #sidebar { width: 100%; min-width: 0; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--border); }
+  #main { padding: 18px 14px 40px; overflow: visible; }
+}
 </style>
 </head>
 <body>
@@ -280,6 +303,34 @@ function bindChartTooltip(t) {
   });
 }
 
+function cacheFlow(t) {
+  const steps = [];
+  t.turns.forEach((turn, ti) => turn.steps.forEach((step, si) =>
+    steps.push({step, ti, si})));
+  if (!steps.some(x => x.step.usage.cache_read || x.step.usage.cache_write))
+    return `<p class="muted">Provider 未返回 cache token 数据</p>`;
+  return `<div class="cache-flow">` + steps.map((item, i) => {
+    const u = item.step.usage;
+    const prefix = u.cache_read + u.cache_write;
+    const previous = i ? steps[i - 1].step.usage : null;
+    const previousPrefix = previous ? previous.cache_read + previous.cache_write : 0;
+    const retained = previousPrefix ? Math.min(100, 100 * u.cache_read / previousPrefix) : null;
+    const relation = i === 0
+      ? `建立首个缓存前缀`
+      : previousPrefix
+        ? `读取上一步前缀 ${fmt(u.cache_read)} / ${fmt(previousPrefix)} · ` +
+          `${retained.toFixed(1)}%`
+        : `上一步没有可复用缓存`;
+    return (i ? `<div class="cache-arrow">→</div>` : "") +
+      `<div class="cache-node">
+        <div class="cache-title">Turn ${item.ti + 1} · Step ${item.si + 1}</div>
+        <div class="cache-prefix">${fmt(prefix)} <small>cached tok</small></div>
+        <div class="cache-detail">命中 ${fmt(u.cache_read)} · 新写 ${fmt(u.cache_write)} · 未缓存 ${fmt(u.input)}</div>
+        <div class="cache-link">${relation}</div>
+      </div>`;
+  }).join("") + `</div>`;
+}
+
 function toolCard(e) {
   const badges =
     (e.is_error ? `<span class="badge err">错误</span>` : "") +
@@ -344,7 +395,21 @@ function requestSnapshotBlock(s) {
   </details>`;
 }
 
-function stepBlock(s) {
+function thinkingBlock(s) {
+  if (!s.thinking) return "";
+  return `<details class="thinking">
+    <summary>模型思考 · ${fmt(s.thinking_chars)} 字符</summary>
+    <div class="thinking-text">${esc(s.thinking)}</div>
+  </details>`;
+}
+
+function stepBlock(s, isFinal) {
+  const activities = [
+    s.thinking ? "思考" : "",
+    s.tool_executions.length ? `${s.tool_executions.length} 个工具` : "",
+    s.text && !isFinal ? "中间输出" : "",
+    isFinal ? "生成最终回复" : "",
+  ].filter(Boolean).join(" · ") || "模型调用";
   const badges =
     `<span class="badge">step ${s.index + 1}</span>` +
     `<span class="badge">${esc(s.model_label)}</span>` +
@@ -354,11 +419,13 @@ function stepBlock(s) {
     `<span class="badge">${ms(s.elapsed_ms)}</span>` +
     (s.thinking_chars ? `<span class="badge">思考 ${fmt(s.thinking_chars)} 字符</span>` : "") +
     (s.hook_injected_chars ? `<span class="badge">hook 注入 ${fmt(s.hook_injected_chars)} 字符</span>` : "");
-  return `<div class="step"><div class="badges">${badges}</div>` +
-    digestBlock(s) +
-    requestSnapshotBlock(s) +
+  return `<details class="step"${s.tool_executions.length ? " open" : ""}>
+    <summary><b>${esc(activities)}</b> ${badges}</summary><div class="step-body">` +
+    thinkingBlock(s) +
     s.tool_executions.map(toolCard).join("") +
-    (s.text ? `<div class="text">${esc(s.text)}</div>` : "") + `</div>`;
+    (s.text && !isFinal ? `<div class="text">${esc(s.text)}</div>` : "") +
+    (s.request_snapshot ? requestSnapshotBlock(s) : digestBlock(s)) +
+    `</div></details>`;
 }
 
 function turnBlock(turn) {
@@ -377,7 +444,10 @@ function turnBlock(turn) {
     ? `<div class="fail-banner">turn 失败：${esc(turn.failed.error_type)} — ${esc(turn.failed.message)}</div>`
     : "";
   return `<div class="turn">${head}${fail}` +
-    turn.steps.map(stepBlock).join("") +
+    `<div class="steps"><div class="muted">执行过程</div>` +
+    turn.steps.map((step, index) => stepBlock(
+      step, index === turn.steps.length - 1 && step.text === turn.final_text
+    )).join("") + `</div>` +
     (turn.final_text
       ? `<div class="final-wrap"><div class="muted">最终回复</div><div class="final">${esc(turn.final_text)}</div></div>`
       : "") + `</div>`;
@@ -392,7 +462,8 @@ function renderMain(t) {
     (t.trace_available ? " · <span title='时间戳与终态来自 trace,非真源'>trace 增强</span>" : "") + `</div>` +
     overviewCards(t, st) +
     runtimeMetricCards(t) +
-    `<section><h3>上下文占用（每 step 实际输入）</h3>${contextChart(t)}</section>` +
+    `<section><h3>缓存前缀递进</h3><p class="muted">每一步的 cache_read 会复用此前已写入的提示前缀；cache_write 是本步新增的可缓存尾部。</p>${cacheFlow(t)}</section>` +
+    `<section><h3>Token 构成</h3>${contextChart(t)}</section>` +
     `<section><h3>执行轨迹</h3>${t.turns.map(turnBlock).join("")}</section>`;
   bindChartTooltip(t);
 }

@@ -128,6 +128,12 @@ def _text_of(blocks: list[Any]) -> str:
     return "".join(block.text for block in blocks if isinstance(block, TextContent))
 
 
+def _thinking_of(blocks: list[Any]) -> str:
+    return "\n\n".join(
+        block.text for block in blocks if isinstance(block, ThinkingContent)
+    )
+
+
 def _build_step(index: int, message: AssistantMessage) -> Step:
     metadata = message.metadata
     usage = metadata.usage if metadata else None
@@ -142,6 +148,7 @@ def _build_step(index: int, message: AssistantMessage) -> Step:
             for block in message.content
             if isinstance(block, ThinkingContent)
         ),
+        thinking=_thinking_of(message.content),
         text=_text_of(message.content),
         tool_executions=[
             ToolExecution(

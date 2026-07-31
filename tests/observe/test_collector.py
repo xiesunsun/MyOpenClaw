@@ -89,6 +89,7 @@ def test_single_turn_two_steps_with_tool_pairing():
     assert turn.query == "列文件"
     assert len(turn.steps) == 2
     assert turn.steps[0].thinking_chars == 3
+    assert turn.steps[0].thinking == "想一想"
     execution = turn.steps[0].tool_executions[0]
     assert execution.result_preview == "a.txt\nb.txt"
     assert execution.is_error is False
