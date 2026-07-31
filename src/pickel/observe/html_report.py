@@ -12,19 +12,15 @@ import json
 from pickel.observe.model import SessionTrajectory, trajectory_to_dict
 
 
-def render_html(
-    trajectories: list[SessionTrajectory], *, generated_at: str
-) -> str:
+def render_html(trajectories: list[SessionTrajectory], *, generated_at: str) -> str:
     if not trajectories:
         raise ValueError("没有可导出的会话轨迹")
     payload = json.dumps(
         [trajectory_to_dict(trajectory) for trajectory in trajectories],
         ensure_ascii=False,
     ).replace("</", "<\\/")
-    return (
-        _TEMPLATE
-        .replace("__GENERATED_AT__", generated_at)
-        .replace("__DATA__", payload)
+    return _TEMPLATE.replace("__GENERATED_AT__", generated_at).replace(
+        "__DATA__", payload
     )
 
 
@@ -186,6 +182,29 @@ function overviewCards(t, st) {
     (hint ? `<div class="hint">${hint}</div>` : "") + `</div>`).join("") + `</div>`;
 }
 
+function runtimeMetricCards(t) {
+  const m = t.metrics || {};
+  if (!m.provider?.count && !m.tool?.count && !m.turn?.count) return "";
+  const rate = x => x == null ? "—" : (x * 100).toFixed(1) + "%";
+  const pct = (group, key) => ms(group?.[key]);
+  const cards = [
+    ["Turn 成功率", rate(m.turn?.success_rate), `${m.turn?.count || 0} 次`],
+    ["Provider 成功率", rate(m.provider?.success_rate), `${m.provider?.count || 0} 次`],
+    ["模型 P50", pct(m.provider?.duration_ms, "p50"), "完整响应"],
+    ["模型 P95", pct(m.provider?.duration_ms, "p95"), "完整响应"],
+    ["TTFT P50", pct(m.provider?.ttft_ms, "p50"), "首个流式块"],
+    ["TTFT P95", pct(m.provider?.ttft_ms, "p95"), "首个流式块"],
+    ["工具成功率", rate(m.tool?.success_rate), `${m.tool?.count || 0} 次`],
+    ["工具 P95", pct(m.tool?.duration_ms, "p95"), "执行副作用"],
+    ["Hook 失败", fmt(m.hook?.failure_count || 0), `${m.hook?.count || 0} 次调用`],
+    ["缓存读取", fmt(m.provider?.tokens?.cache_read_tokens || 0), "tokens"],
+  ];
+  return `<section><h3>运行指标（Trace）</h3><div class="cards">` +
+    cards.map(([label, value, hint]) =>
+      `<div class="card"><div class="label">${label}</div><div class="value">${value}</div>` +
+      `<div class="hint">${hint}</div></div>`).join("") + `</div></section>`;
+}
+
 const SERIES = [
   ["input", "var(--series-1)", "input"],
   ["cache_read", "var(--series-2)", "cache_read"],
@@ -331,6 +350,7 @@ function renderMain(t) {
     `${esc(t.created_at)} ~ ${esc(t.updated_at)}` +
     (t.trace_available ? " · <span title='时间戳与终态来自 trace,非真源'>trace 增强</span>" : "") + `</div>` +
     overviewCards(t, st) +
+    runtimeMetricCards(t) +
     `<section><h3>上下文占用（每 step 实际输入）</h3>${contextChart(t)}</section>` +
     `<section><h3>执行轨迹</h3>${t.turns.map(turnBlock).join("")}</section>`;
   bindChartTooltip(t);

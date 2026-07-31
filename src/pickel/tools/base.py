@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Union
-import inspect
 
+from pickel.observe.records import ErrorInfo
 from pickel.tools.services import ToolServices
-
 
 ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
 ToolFunction = Callable[[dict[str, Any], "ToolExecutionContext"], ToolFunctionResult]
@@ -33,6 +33,7 @@ class ToolExecutionResult:
     content: str
     is_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    error: ErrorInfo | None = None
 
 
 class BaseTool:

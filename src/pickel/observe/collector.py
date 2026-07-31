@@ -73,14 +73,10 @@ def collect_trajectory(
             flush_turn()
             current_query = _text_of(message.content)
         elif isinstance(message, AssistantMessage):
-            current_steps.append(
-                _build_step(len(current_steps), message)
-            )
+            current_steps.append(_build_step(len(current_steps), message))
             step_count += 1
         elif isinstance(message, ToolResultMessage):
-            current_steps = _attach_result(
-                current_steps, message, result_preview_chars
-            )
+            current_steps = _attach_result(current_steps, message, result_preview_chars)
 
     flush_turn()
 
@@ -99,6 +95,11 @@ def collect_trajectory(
         compaction_steps=compaction_steps,
         session_usage=session_usage,
         trace_available=enhancement is not None,
+        metrics=(
+            dict(getattr(enhancement, "metrics", {}) or {})
+            if enhancement is not None
+            else {}
+        ),
     )
 
 
@@ -124,9 +125,7 @@ def _message_from_payload(payload: dict[str, Any]) -> AgentMessage | None:
 
 
 def _text_of(blocks: list[Any]) -> str:
-    return "".join(
-        block.text for block in blocks if isinstance(block, TextContent)
-    )
+    return "".join(block.text for block in blocks if isinstance(block, TextContent))
 
 
 def _build_step(index: int, message: AssistantMessage) -> Step:
@@ -153,9 +152,7 @@ def _build_step(index: int, message: AssistantMessage) -> Step:
             for block in message.content
             if isinstance(block, ToolCallContent)
         ],
-        model_label=(
-            f"{metadata.provider} / {metadata.model}" if metadata else ""
-        ),
+        model_label=(f"{metadata.provider} / {metadata.model}" if metadata else ""),
         finish_reason=metadata.finish_reason if metadata else None,
         usage={
             "input": input_tokens,
@@ -192,9 +189,7 @@ def _attach_result(
                     is_error=message.is_error,
                 )
                 steps = list(steps)
-                steps[step_index] = replace(
-                    steps[step_index], tool_executions=updated
-                )
+                steps[step_index] = replace(steps[step_index], tool_executions=updated)
                 return steps
 
     # 孤儿结果：挂到最后一个 step；无 step 则造一个空 step 承载，不丢数据。
@@ -247,9 +242,7 @@ def _sum_usages(usages: list[dict[str, int]]) -> dict[str, int]:
     return totals
 
 
-def _apply_enhancement(
-    turns: list[Turn], enhancement: _Enhancement
-) -> list[Turn]:
+def _apply_enhancement(turns: list[Turn], enhancement: _Enhancement) -> list[Turn]:
     timings = enhancement.tool_timings
     enhanced: list[Turn] = []
     markers = (
@@ -259,9 +252,7 @@ def _apply_enhancement(
     )
 
     digest_groups = getattr(enhancement, "request_digests", None)
-    if not (
-        isinstance(digest_groups, list) and len(digest_groups) == len(turns)
-    ):
+    if not (isinstance(digest_groups, list) and len(digest_groups) == len(turns)):
         digest_groups = None
 
     for turn_index, turn in enumerate(turns):
@@ -297,6 +288,11 @@ def _apply_enhancement(
                 started_at=marker.started_at,
                 failed=marker.failed,
                 interrupted=marker.interrupted,
+                elapsed_ms=(
+                    marker.duration_ms
+                    if getattr(marker, "duration_ms", None) is not None
+                    else turn.elapsed_ms
+                ),
             )
         enhanced.append(turn)
     return enhanced

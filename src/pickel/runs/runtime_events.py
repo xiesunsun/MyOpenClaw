@@ -13,7 +13,7 @@ dataclass）必须是拷贝，不得与执行路径共享引用。发射点自�
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, TypeAlias
 
 from pickel.conversations.message import ToolCall
@@ -42,6 +42,7 @@ def _tool_result_to_dict(result: ToolExecutionResult) -> dict[str, Any]:
         "content": result.content,
         "is_error": result.is_error,
         "metadata": result.metadata,
+        "error": asdict(result.error) if result.error is not None else None,
     }
 
 
@@ -160,11 +161,13 @@ class TurnCompleted(RuntimeEventBase):
 
     usage: TurnUsage | None = None
     elapsed_ms: int = 0
+    outcome: str = "completed"
 
     def _payload(self) -> dict[str, Any]:
         return {
             "usage": _usage_to_dict(self.usage) if self.usage else None,
             "elapsed_ms": self.elapsed_ms,
+            "outcome": self.outcome,
         }
 
 
@@ -259,6 +262,4 @@ class TurnInterrupted(RuntimeEventBase):
         return {"at_step": self.at_step, "partial_text": self.partial_text}
 
 
-RuntimeEventHandler: TypeAlias = Callable[
-    [RuntimeEventBase], Awaitable[None] | None
-]
+RuntimeEventHandler: TypeAlias = Callable[[RuntimeEventBase], Awaitable[None] | None]

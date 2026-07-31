@@ -24,7 +24,17 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
     "default_file_access_mode": "workspace",
     "react_max_steps": 8,
     "context_cli_turn_window": 5,
-    "trace_enabled": False,
+    "observability": {
+        "trace": {
+            "mode": "standard",
+            "queue_capacity": 8192,
+            "batch_size": 128,
+            "flush_interval_ms": 250,
+            "max_file_size_mb": 64,
+            "max_age_days": 14,
+            "max_total_size_mb": 1024,
+        }
+    },
     "providers": {},
     "agents": {},
 }
@@ -34,11 +44,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     """深度合并：dict 递归，数组与标量整键替换。不修改入参。"""
     result: dict[str, Any] = dict(base)
     for key, value in override.items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = deep_merge(result[key], value)
         else:
             result[key] = value

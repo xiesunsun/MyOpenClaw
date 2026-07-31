@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import traceback
 from collections.abc import Iterable
@@ -17,8 +18,16 @@ from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.service import SessionService
 from pickel.conversations.session import Session
-from pickel.hooks.events import UserPromptSubmitEvent
+from pickel.hooks.events import TurnEndEvent, UserPromptSubmitEvent
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
+from pickel.observe.records import (
+    ErrorInfo,
+    ObservationIdentity,
+    Observer,
+    SpanTimer,
+    observation_scope,
+    span_scope,
+)
 from pickel.providers import create_llm_provider
 from pickel.providers.base import Provider
 from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
@@ -26,16 +35,16 @@ from pickel.runs.turn_usage import last_turn_usage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.file_access import FileAccessMode
 from pickel.shared.model_config import ModelSelection
+from pickel.skills.store import SkillStore
 from pickel.tools.base import BaseTool, ToolExecutionContext
+from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import (
     FileAccessPolicy,
     FullAccessPathPolicy,
     WorkspacePathAccessPolicy,
 )
-from pickel.tools.bus import ToolActivation, ToolBus, bus_with
 from pickel.tools.services import ToolServices
-from pickel.skills.store import SkillStore
 from pickel.tools.shell import ShellSessionManager
 
 if TYPE_CHECKING:
@@ -95,7 +104,9 @@ class Run:
             resolved_bus = bus_with(tools or [])
             activation = ToolActivation(allowed=frozenset(resolved_bus.list_names()))
 
-        resolved_policy = file_access_policy or cls._policy_for_mode(agent.file_access_mode)
+        resolved_policy = file_access_policy or cls._policy_for_mode(
+            agent.file_access_mode
+        )
         workspace_files = WorkspaceFileService(
             workspace_root=agent.workspace,
             access_policy=resolved_policy,
@@ -170,15 +181,58 @@ class Run:
         session: Session,
         user_text: str,
         bus: "EventBus | None" = None,
+        observer: Observer | None = None,
     ) -> AssistantMessage:
+        turn_id = str(uuid4())
+        identity = ObservationIdentity(session_id=session.session_id, turn_id=turn_id)
+        with observation_scope(observer):
+            timer = SpanTimer(
+                "pickel.turn",
+                identity,
+                attributes={
+                    "agent_id": self.agent.agent_id,
+                    "provider": self.agent.model_config.provider,
+                    "model": self.agent.model_config.model,
+                },
+            )
+            try:
+                with span_scope(timer.span_id):
+                    reply, outcome = await self._execute_turn(
+                        session=session,
+                        user_text=user_text,
+                        bus=bus,
+                        turn_id=turn_id,
+                    )
+            except asyncio.CancelledError:
+                timer.finish(status="cancelled", attributes={"outcome": "cancelled"})
+                raise
+            except Exception as exc:
+                timer.finish(
+                    status="error",
+                    attributes={"outcome": "failed"},
+                    error=ErrorInfo.from_exception(exc, kind="runtime"),
+                )
+                raise
+            timer.finish(
+                status="denied" if outcome == "blocked" else "ok",
+                attributes={"outcome": outcome},
+            )
+            return reply
+
+    async def _execute_turn(
+        self,
+        *,
+        session: Session,
+        user_text: str,
+        bus: "EventBus | None",
+        turn_id: str,
+    ) -> tuple[AssistantMessage, str]:
         """turn 边界：UserPromptSubmit hook → 写 user → strategy.execute。"""
         if session.agent_id != self.agent.agent_id:
             raise ValueError(
                 f"Session '{session.session_id}' belongs to agent '{session.agent_id}', "
                 f"not '{self.agent.agent_id}'"
             )
-
-        turn_id = str(uuid4())
 
         def envelope() -> EventEnvelope:
             return EventEnvelope(session_id=session.session_id, turn_id=turn_id)
@@ -189,48 +243,80 @@ class Run:
 
         await emit(TurnStarted(envelope=envelope(), user_text=user_text))
         started = time.perf_counter()
-
-        decision = await self.lifecycle_hooks.user_prompt_submit(
-            UserPromptSubmitEvent(
-                session_id=session.session_id,
-                turn_id=turn_id,
-                prompt=user_text,
-            )
-        )
-        if decision.action == "block":
-            blocked = AssistantMessage(
-                content=[TextContent(text=decision.reason or "请求被 Hook 阻止")]
-            )
-            await emit(
-                TurnCompleted(
-                    envelope=envelope(),
-                    usage=None,
-                    elapsed_ms=round((time.perf_counter() - started) * 1000),
+        end_reason = "failed"
+        try:
+            decision = await self.lifecycle_hooks.user_prompt_submit(
+                UserPromptSubmitEvent(
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    prompt=user_text,
                 )
             )
-            return blocked
+            if decision.action == "block":
+                end_reason = "blocked"
+                blocked = AssistantMessage(
+                    content=[TextContent(text=decision.reason or "请求被 Hook 阻止")]
+                )
+                await emit(
+                    TurnCompleted(
+                        envelope=envelope(),
+                        usage=None,
+                        elapsed_ms=round((time.perf_counter() - started) * 1000),
+                        outcome="blocked",
+                    )
+                )
+                return blocked, "blocked"
 
-        user_entry = session.append_user(
-            UserMessage(content=[TextContent(text=user_text)])
-        )
-        if self.session_service is not None:
-            self.session_service.flush_new_entries(
-                session=session,
-                entries=[user_entry],
+            user_entry = session.append_user(
+                UserMessage(content=[TextContent(text=user_text)])
             )
+            if self.session_service is not None:
+                flush_timer = SpanTimer(
+                    "pickel.session.append",
+                    ObservationIdentity(session_id=session.session_id, turn_id=turn_id),
+                    attributes={"entry_type": user_entry.entry_type, "entry_count": 1},
+                )
+                try:
+                    self.session_service.flush_new_entries(
+                        session=session,
+                        entries=[user_entry],
+                    )
+                except Exception as exc:
+                    flush_timer.finish(
+                        status="error",
+                        error=ErrorInfo.from_exception(exc, kind="storage"),
+                    )
+                    raise
+                flush_timer.finish()
 
-        try:
             reply = await self.strategy.execute(
                 run=self,
                 session=session,
                 bus=bus,
                 turn_id=turn_id,
                 initial_hook_feedback=(
-                    [HookFeedback(source_event="UserPromptSubmit", text=decision.feedback_text)]
+                    [
+                        HookFeedback(
+                            source_event="UserPromptSubmit",
+                            text=decision.feedback_text,
+                        )
+                    ]
                     if decision.feedback_text
                     else None
                 ),
             )
+            end_reason = "completed"
+            await emit(
+                TurnCompleted(
+                    envelope=envelope(),
+                    usage=last_turn_usage(session),
+                    elapsed_ms=round((time.perf_counter() - started) * 1000),
+                )
+            )
+            return reply, "completed"
+        except asyncio.CancelledError:
+            end_reason = "cancelled"
+            raise
         except Exception as exc:
             await emit(
                 TurnFailed(
@@ -241,15 +327,14 @@ class Run:
                 )
             )
             raise
-
-        await emit(
-            TurnCompleted(
-                envelope=envelope(),
-                usage=last_turn_usage(session),
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
+        finally:
+            await self.lifecycle_hooks.turn_end(
+                TurnEndEvent(
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    reason=end_reason,
+                )
             )
-        )
-        return reply
 
     def get_tool_execution_context(self, session_id: str) -> ToolExecutionContext:
         return ToolExecutionContext(

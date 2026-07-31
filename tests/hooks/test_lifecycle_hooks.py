@@ -16,6 +16,7 @@ from pickel.hooks.events import (
     UserPromptSubmitEvent,
 )
 from pickel.hooks.lifecycle import LifecycleHooks
+from pickel.observe.records import DiagnosticRecord, observation_scope
 
 
 class MergeRulesTests(unittest.TestCase):
@@ -104,9 +105,7 @@ class BoomHandler:
 class LifecycleHooksTests(unittest.TestCase):
     def test_no_hooks_preserves_behavior(self) -> None:
         hooks = LifecycleHooks()
-        d = asyncio.run(
-            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
-        )
+        d = asyncio.run(hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi")))
         self.assertEqual("continue", d.action)
         p = asyncio.run(
             hooks.pre_tool_use(
@@ -117,9 +116,7 @@ class LifecycleHooksTests(unittest.TestCase):
 
     def test_observer_failure_is_best_effort(self) -> None:
         hooks = LifecycleHooks(handlers=[BoomHandler()])
-        d = asyncio.run(
-            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
-        )
+        d = asyncio.run(hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi")))
         self.assertEqual("continue", d.action)
 
     def test_handler_block(self) -> None:
@@ -132,9 +129,7 @@ class LifecycleHooksTests(unittest.TestCase):
                 )
             ]
         )
-        d = asyncio.run(
-            hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi"))
-        )
+        d = asyncio.run(hooks.user_prompt_submit(UserPromptSubmitEvent(prompt="hi")))
         self.assertEqual("block", d.action)
 
     def test_before_request_handler_can_replace_system(self) -> None:
@@ -159,6 +154,57 @@ class LifecycleHooksTests(unittest.TestCase):
         self.assertIs(replaced, d.model_context)
         self.assertEqual("patched-by-hook", d.model_context.system.as_text())
 
+    def test_pre_tool_handlers_form_transform_chain(self) -> None:
+        seen: list[dict] = []
+
+        class Transform:
+            def __init__(self, key, value):
+                self.key = key
+                self.value = value
+
+            async def pre_tool_use(self, event):
+                seen.append(dict(event.arguments))
+                updated = dict(event.arguments)
+                updated[self.key] = self.value
+                return PreToolUseDecision(updated_arguments=updated)
+
+        hooks = LifecycleHooks(handlers=[Transform("a", 1), Transform("b", 2)])
+        decision = asyncio.run(
+            hooks.pre_tool_use(PreToolUseEvent(arguments={"original": True}))
+        )
+
+        self.assertEqual([{"original": True}, {"original": True, "a": 1}], seen)
+        self.assertEqual({"original": True, "a": 1, "b": 2}, decision.updated_arguments)
+
+    def test_pre_tool_exception_fails_closed_and_records_diagnostic(self) -> None:
+        class BoomPreTool:
+            async def pre_tool_use(self, event):
+                raise RuntimeError("boom")
+
+        class Recorder:
+            def __init__(self):
+                self.records = []
+
+            def record(self, record):
+                self.records.append(record)
+
+        recorder = Recorder()
+        hooks = LifecycleHooks(handlers=[BoomPreTool()])
+        with observation_scope(recorder):
+            decision = asyncio.run(
+                hooks.pre_tool_use(PreToolUseEvent(arguments={"x": 1}))
+            )
+
+        self.assertEqual("deny", decision.action)
+        diagnostics = [
+            record
+            for record in recorder.records
+            if isinstance(record, DiagnosticRecord)
+        ]
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual("hook_error", diagnostics[0].name)
+        self.assertEqual("RuntimeError", diagnostics[0].error.type)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -167,6 +213,7 @@ if __name__ == "__main__":
 class DenyAllTools:
     async def pre_tool_use(self, event):
         from pickel.hooks.decisions import PreToolUseDecision
+
         return PreToolUseDecision(action="deny", reason="denied-by-test")
 
 
@@ -184,7 +231,12 @@ class ReactHookIntegrationTests(unittest.TestCase):
         from pickel.runs.run import Run
         from pickel.runs.strategy.react import ReActStrategy
         from pickel.shared.model_config import ModelConfig
-        from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+        from pickel.tools.base import (
+            BaseTool,
+            ToolExecutionContext,
+            ToolExecutionResult,
+            ToolSpec,
+        )
         from pickel.tools.bus import ToolActivation, bus_with
 
         class FakeProvider(Provider):
@@ -200,7 +252,9 @@ class ReactHookIntegrationTests(unittest.TestCase):
                 if self.calls == 1:
                     return AssistantMessage(
                         content=[
-                            ToolCallContent(id="c1", name="echo", arguments={"text": "x"})
+                            ToolCallContent(
+                                id="c1", name="echo", arguments={"text": "x"}
+                            )
                         ]
                     )
                 return AssistantMessage(content=[TextContent(text="after-deny")])
@@ -214,7 +268,9 @@ class ReactHookIntegrationTests(unittest.TestCase):
                 )
                 self.executed = 0
 
-            async def execute(self, arguments, context: ToolExecutionContext) -> ToolExecutionResult:
+            async def execute(
+                self, arguments, context: ToolExecutionContext
+            ) -> ToolExecutionResult:
                 self.executed += 1
                 return ToolExecutionResult(content="should-not-run")
 
@@ -246,10 +302,14 @@ class ReactHookIntegrationTests(unittest.TestCase):
             unit_window=5,
             strategy=ReActStrategy(max_steps=3),
         )
-        final = asyncio.run(ReActStrategy(max_steps=3).execute(run=run, session=session))
+        final = asyncio.run(
+            ReActStrategy(max_steps=3).execute(run=run, session=session)
+        )
         self.assertEqual(0, tool.executed)
         roles = [e.payload.get("role") for e in session.active_path()]
         self.assertIn("tool", roles)
-        tool_entry = next(e for e in session.active_path() if e.payload.get("role") == "tool")
+        tool_entry = next(
+            e for e in session.active_path() if e.payload.get("role") == "tool"
+        )
         self.assertTrue(tool_entry.payload.get("is_error"))
         self.assertEqual("after-deny", final.content[0].text)

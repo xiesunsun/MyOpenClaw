@@ -13,6 +13,7 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
+from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
@@ -26,9 +27,14 @@ from pickel.runs.runtime_events import (
     TurnCompleted,
 )
 from pickel.runs.usage_anchor import resolve_anchor
-from pickel.tools.bus import ToolActivation, bus_with
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
+from pickel.tools.bus import ToolActivation, bus_with
 from pickel.tools.shell import ShellSessionManager
 
 
@@ -166,6 +172,48 @@ def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: R
 
 
 class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_events_use_effective_arguments_after_hook(self) -> None:
+        class ReplaceArguments:
+            async def pre_tool_use(self, event):
+                return PreToolUseDecision(
+                    updated_arguments={"text": "hooked", "delay_ms": 0}
+                )
+
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "original"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=3),
+        )
+        run.lifecycle_hooks = LifecycleHooks(handlers=[ReplaceArguments()])
+        session = Session.create(agent_id="Pickle")
+        bus = EventBus()
+        events = []
+        bus.subscribe(events.append)
+
+        await run.turn(session=session, user_text="hello", bus=bus)
+
+        started = next(event for event in events if isinstance(event, ToolCallStarted))
+        completed = next(
+            event for event in events if isinstance(event, ToolCallCompleted)
+        )
+        self.assertEqual("hooked", started.tool_call.arguments["text"])
+        self.assertEqual("hooked", completed.tool_call.arguments["text"])
+        self.assertEqual("hooked", completed.tool_result.content)
+
     async def test_runner_emits_batch_aware_events_for_started_and_completed_calls(self) -> None:
         agent = Agent(
             agent_id="Pickle",

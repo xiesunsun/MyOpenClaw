@@ -13,13 +13,6 @@ from pickel.context.assembler import append_hook_feedback
 from pickel.context.hook_feedback import HookFeedback
 from pickel.context.model_context import ModelContext
 from pickel.context.prepare import prepare
-from pickel.hooks.events import (
-    BeforeRequestEvent,
-    PostToolBatchEvent,
-    PostToolUseEvent,
-    PreToolUseEvent,
-    TurnEndEvent,
-)
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -28,15 +21,22 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.message import ToolCall
 from pickel.conversations.session import Session
+from pickel.hooks.events import (
+    BeforeRequestEvent,
+    PostToolBatchEvent,
+    PostToolUseEvent,
+    PreToolUseEvent,
+)
+from pickel.observe.records import ErrorInfo, ObservationIdentity, SpanTimer
 from pickel.providers.stream import (
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
 )
-from pickel.runs.run import Run
 from pickel.runs.estimator import request_char_count
 from pickel.runs.event_bus import EventBus
+from pickel.runs.run import Run
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     RequestDigestEvent,
@@ -49,10 +49,10 @@ from pickel.runs.runtime_events import (
     ToolCallStarted,
     TurnInterrupted,
 )
-from pickel.runs.turn_usage import last_turn_usage
-from pickel.runs.usage_anchor import context_fingerprint
 from pickel.runs.strategy.base import ExecutionStrategy
 from pickel.runs.turn_state import TurnState
+from pickel.runs.turn_usage import last_turn_usage
+from pickel.runs.usage_anchor import context_fingerprint
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolSnapshot
@@ -95,13 +95,33 @@ class ReActStrategy(ExecutionStrategy):
             step = turn.begin_step(step_index)
             await self._emit(bus, StepStarted(envelope=envelope(step_index)))
 
-            model_context = await prepare(
-                run=run,
-                session=session,
-                hook_feedback=turn.hook_feedback_for_current_step(),
-                unit_window=run.unit_window,
-                recall_sources=run.recall_sources,
-                snapshot=turn.tool_snapshot,
+            identity = ObservationIdentity(
+                session_id=session.session_id,
+                turn_id=turn.turn_id,
+                step_index=step_index,
+            )
+            step_timer = SpanTimer("pickel.step", identity)
+            prepare_timer = SpanTimer("pickel.context.prepare", identity)
+            try:
+                model_context = await prepare(
+                    run=run,
+                    session=session,
+                    hook_feedback=turn.hook_feedback_for_current_step(),
+                    unit_window=run.unit_window,
+                    recall_sources=run.recall_sources,
+                    snapshot=turn.tool_snapshot,
+                )
+            except Exception as exc:
+                prepare_timer.finish(
+                    status="error",
+                    error=ErrorInfo.from_exception(exc, kind="context"),
+                )
+                raise
+            prepare_timer.finish(
+                attributes={
+                    "message_count": len(model_context.messages),
+                    "tool_count": len(model_context.tools),
+                }
             )
             # 指纹取 prepare 输出（hook 前）：/context 预览不跑 hook，
             # 记 hook 后的 Request 会让有 hook 时锚永远失效。
@@ -154,13 +174,37 @@ class ReActStrategy(ExecutionStrategy):
             )
 
             start = time.perf_counter()
-            assistant = await self._generate_streaming(
-                run=run,
-                context=model_context,
-                bus=bus,
-                envelope=envelope,
-                step_index=step_index,
+            provider_timer = SpanTimer(
+                "pickel.provider.request",
+                identity,
+                attributes={
+                    "provider": run.agent.model_config.provider,
+                    "model": run.agent.model_config.model,
+                },
             )
+            try:
+                assistant, ttft_ms = await self._generate_streaming(
+                    run=run,
+                    context=model_context,
+                    bus=bus,
+                    envelope=envelope,
+                    step_index=step_index,
+                )
+            except asyncio.CancelledError:
+                provider_timer.finish(status="cancelled")
+                raise
+            except Exception as exc:
+                kind, retryable, status_code = self._provider_error_details(exc)
+                provider_timer.finish(
+                    status="error",
+                    attributes={
+                        "error_category": kind,
+                        "status_code": status_code,
+                        "retryable": retryable,
+                    },
+                    error=ErrorInfo.from_exception(exc, kind=kind, retryable=retryable),
+                )
+                raise
             elapsed_ms = round((time.perf_counter() - start) * 1000)
             assistant = self._ensure_metadata(
                 run,
@@ -169,11 +213,22 @@ class ReActStrategy(ExecutionStrategy):
                 context_fingerprint_value=prepared_fingerprint,
                 hook_injected_chars=final_request_chars - prepared_chars,
             )
+            metadata = assistant.metadata
+            usage = metadata.usage if metadata else None
+            provider_timer.finish(
+                attributes={
+                    "ttft_ms": ttft_ms,
+                    "input_tokens": usage.input_tokens if usage else None,
+                    "output_tokens": usage.output_tokens if usage else None,
+                    "cache_read_tokens": usage.cache_read_tokens if usage else None,
+                    "cache_write_tokens": usage.cache_write_tokens if usage else None,
+                }
+            )
 
             # checkpoint BEFORE tools
             entry = session.append_assistant(assistant)
             step.assistant_entry_id = entry.entry_id
-            self._flush_entry(run, session, entry)
+            self._flush_entry(run, session, entry, identity=identity)
 
             tool_calls = [
                 block
@@ -192,13 +247,7 @@ class ReActStrategy(ExecutionStrategy):
                 )
                 turn.final_assistant_entry_id = entry.entry_id
                 turn.status = "completed"
-                await run.lifecycle_hooks.turn_end(
-                    TurnEndEvent(
-                        session_id=session.session_id,
-                        turn_id=turn.turn_id,
-                        reason="completed",
-                    )
-                )
+                step_timer.finish(attributes={"tool_call_count": 0})
                 return assistant
 
             step.pending_tool_call_ids = [call.id for call in tool_calls]
@@ -207,16 +256,6 @@ class ReActStrategy(ExecutionStrategy):
             # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
             try:
                 for call_index, tool_call in enumerate(tool_calls):
-                    await self._emit(
-                        bus,
-                        ToolCallStarted(
-                            envelope=envelope(step_index),
-                            tool_call=self._event_tool_call(tool_call),
-                            batch_id=batch_id,
-                            call_index=call_index,
-                            total_calls=len(tool_calls),
-                        ),
-                    )
                     pre = await run.lifecycle_hooks.pre_tool_use(
                         PreToolUseEvent(
                             session_id=session.session_id,
@@ -227,27 +266,62 @@ class ReActStrategy(ExecutionStrategy):
                             arguments=dict(tool_call.arguments),
                         )
                     )
+                    args = (
+                        dict(pre.updated_arguments)
+                        if pre.updated_arguments is not None
+                        else dict(tool_call.arguments)
+                    )
+                    effective_call = ToolCallContent(
+                        id=tool_call.id,
+                        name=tool_call.name,
+                        arguments=args,
+                        thought_signature=tool_call.thought_signature,
+                    )
+                    await self._emit(
+                        bus,
+                        ToolCallStarted(
+                            envelope=envelope(step_index),
+                            tool_call=self._event_tool_call(effective_call),
+                            batch_id=batch_id,
+                            call_index=call_index,
+                            total_calls=len(tool_calls),
+                        ),
+                    )
+                    tool_timer = SpanTimer(
+                        "pickel.tool.execute",
+                        identity,
+                        attributes={
+                            "tool_name": tool_call.name,
+                            "tool_call_id": tool_call.id,
+                        },
+                    )
                     if pre.action == "deny":
                         reason = pre.reason or "工具调用被 Hook 拒绝"
-                        result = ToolExecutionResult(content=reason, is_error=True)
+                        result = ToolExecutionResult(
+                            content=reason,
+                            is_error=True,
+                            error=ErrorInfo(
+                                kind="denied",
+                                type="ToolDenied",
+                                message=reason,
+                                retryable=False,
+                            ),
+                        )
+                        tool_timer.finish(status="denied")
                     else:
-                        args = (
-                            dict(pre.updated_arguments)
-                            if pre.updated_arguments is not None
-                            else dict(tool_call.arguments)
-                        )
-                        # 用可能更新后的参数执行
-                        exec_call = ToolCallContent(
-                            id=tool_call.id,
-                            name=tool_call.name,
-                            arguments=args,
-                            thought_signature=tool_call.thought_signature,
-                        )
-                        result = await self._execute_tool_call(
-                            run=run,
-                            session=session,
-                            tool_call=exec_call,
-                            snapshot=turn.tool_snapshot,
+                        try:
+                            result = await self._execute_tool_call(
+                                run=run,
+                                session=session,
+                                tool_call=effective_call,
+                                snapshot=turn.tool_snapshot,
+                            )
+                        except asyncio.CancelledError:
+                            tool_timer.finish(status="cancelled")
+                            raise
+                        tool_timer.finish(
+                            status="error" if result.is_error else "ok",
+                            error=result.error,
                         )
                     result_entry = session.append_tool_result(
                         ToolResultMessage(
@@ -257,7 +331,7 @@ class ReActStrategy(ExecutionStrategy):
                             is_error=result.is_error,
                         )
                     )
-                    self._flush_entry(run, session, result_entry)
+                    self._flush_entry(run, session, result_entry, identity=identity)
                     step.completed_tool_call_ids.append(tool_call.id)
                     batch_outcomes.append(
                         {
@@ -271,7 +345,7 @@ class ReActStrategy(ExecutionStrategy):
                         bus,
                         ToolCallCompleted(
                             envelope=envelope(step_index),
-                            tool_call=self._event_tool_call(tool_call),
+                            tool_call=self._event_tool_call(effective_call),
                             tool_result=replace(result, metadata=dict(result.metadata)),
                             batch_id=batch_id,
                             call_index=call_index,
@@ -285,7 +359,7 @@ class ReActStrategy(ExecutionStrategy):
                             step_index=step_index,
                             tool_name=tool_call.name,
                             tool_call_id=tool_call.id,
-                            arguments=dict(tool_call.arguments),
+                            arguments=dict(effective_call.arguments),
                             result_content=result.content,
                             is_error=result.is_error,
                         )
@@ -331,6 +405,7 @@ class ReActStrategy(ExecutionStrategy):
                 )
                 turn.step_hook_feedback.append(fb)
                 turn.hook_feedback.append(fb)
+            step_timer.finish(attributes={"tool_call_count": len(tool_calls)})
 
         # max steps
         # 合成消息不带 metadata：它不是一次模型调用，复用最后一次 generate 的
@@ -344,7 +419,7 @@ class ReActStrategy(ExecutionStrategy):
             ],
         )
         entry = session.append_assistant(max_msg)
-        self._flush_entry(run, session, entry)
+        self._flush_entry(run, session, entry, identity=identity)
         await self._emit(
             bus,
             AssistantMessageEvent(
@@ -378,10 +453,30 @@ class ReActStrategy(ExecutionStrategy):
             )
             self._flush_entry(run, session, entry)
 
-    def _flush_entry(self, run: Run, session: Session, entry) -> None:
+    def _flush_entry(
+        self,
+        run: Run,
+        session: Session,
+        entry,
+        *,
+        identity: ObservationIdentity | None = None,
+    ) -> None:
         if run.session_service is None:
             return
-        run.session_service.flush_new_entries(session=session, entries=[entry])
+        timer = SpanTimer(
+            "pickel.session.append",
+            identity or ObservationIdentity(session_id=session.session_id),
+            attributes={"entry_type": entry.entry_type, "entry_count": 1},
+        )
+        try:
+            run.session_service.flush_new_entries(session=session, entries=[entry])
+        except Exception as exc:
+            timer.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="storage"),
+            )
+            raise
+        timer.finish()
 
     async def _generate_streaming(
         self,
@@ -391,7 +486,7 @@ class ReActStrategy(ExecutionStrategy):
         bus: EventBus | None,
         envelope,
         step_index: int,
-    ) -> AssistantMessage:
+    ) -> tuple[AssistantMessage, float | None]:
         """消费 provider.stream，把增量转成事件，返回最终消息。
 
         超时语义与改造前一致：包住整个消费过程的总时长，
@@ -399,6 +494,8 @@ class ReActStrategy(ExecutionStrategy):
         """
         timeout_seconds = self._provider_timeout_seconds(run)
         text_parts: list[str] = []
+        started = time.perf_counter()
+        first_chunk_ms: list[float | None] = [None]
         coro = self._consume_stream(
             run=run,
             context=context,
@@ -406,11 +503,15 @@ class ReActStrategy(ExecutionStrategy):
             envelope=envelope,
             step_index=step_index,
             text_parts=text_parts,
+            started=started,
+            first_chunk_ms=first_chunk_ms,
         )
         try:
             if timeout_seconds is None:
-                return await coro
-            return await asyncio.wait_for(coro, timeout=timeout_seconds)
+                assistant = await coro
+            else:
+                assistant = await asyncio.wait_for(coro, timeout=timeout_seconds)
+            return assistant, first_chunk_ms[0]
         except asyncio.CancelledError:
             # 用户中断落在 stream 消费期：工具循环那处 except 只覆盖
             # 工具执行期，这里不发 TurnInterrupted 的话 UI 收不到任何
@@ -439,6 +540,8 @@ class ReActStrategy(ExecutionStrategy):
         envelope,
         step_index: int,
         text_parts: list[str],
+        started: float,
+        first_chunk_ms: list[float | None],
     ) -> AssistantMessage:
         """取到 StreamCompleted 就返回；上游生成器显式关闭。
 
@@ -453,11 +556,11 @@ class ReActStrategy(ExecutionStrategy):
         纯 AsyncIterator 没有要关的资源，直接消费。
         """
         iterator = run.provider.stream(context).__aiter__()
-        closer = (
-            aclosing(iterator) if hasattr(iterator, "aclose") else nullcontext()
-        )
+        closer = aclosing(iterator) if hasattr(iterator, "aclose") else nullcontext()
         async with closer:
             async for delta in iterator:
+                if first_chunk_ms[0] is None:
+                    first_chunk_ms[0] = round((time.perf_counter() - started) * 1000, 3)
                 if isinstance(delta, StreamCompleted):
                     return delta.message
                 if isinstance(delta, TextDelta):
@@ -483,9 +586,7 @@ class ReActStrategy(ExecutionStrategy):
 
     @staticmethod
     def _provider_timeout_seconds(run: Run) -> float | None:
-        timeout_seconds = run.agent.model_config.provider_options.get(
-            "timeout_seconds"
-        )
+        timeout_seconds = run.agent.model_config.provider_options.get("timeout_seconds")
         if timeout_seconds is None:
             return ReActStrategy.DEFAULT_PROVIDER_TIMEOUT_SECONDS
         if not isinstance(timeout_seconds, Real):
@@ -494,6 +595,28 @@ class ReActStrategy(ExecutionStrategy):
         if timeout_value <= 0:
             return ReActStrategy.DEFAULT_PROVIDER_TIMEOUT_SECONDS
         return timeout_value
+
+    @staticmethod
+    def _provider_error_details(
+        exc: Exception,
+    ) -> tuple[str, bool | None, int | None]:
+        status = getattr(exc, "status_code", None)
+        if not isinstance(status, int):
+            response = getattr(exc, "response", None)
+            candidate = getattr(response, "status_code", None)
+            status = candidate if isinstance(candidate, int) else None
+        name = type(exc).__name__.lower()
+        if isinstance(exc, TimeoutError) or "timeout" in name:
+            return "timeout", True, status
+        if status == 429 or "ratelimit" in name or "rate_limit" in name:
+            return "rate_limit", True, status
+        if status in {401, 403} or "authentication" in name:
+            return "authentication", False, status
+        if status is not None and 400 <= status < 500:
+            return "bad_request", False, status
+        if status is not None and status >= 500:
+            return "unavailable", True, status
+        return "unknown", None, status
 
     async def _execute_tool_call(
         self,
@@ -509,6 +632,12 @@ class ReActStrategy(ExecutionStrategy):
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' is not available.",
                 is_error=True,
+                error=ErrorInfo(
+                    kind="validation",
+                    type="ToolNotAvailable",
+                    message=f"Tool '{tool_call.name}' is not available.",
+                    retryable=False,
+                ),
             )
         exec_context = run.get_tool_execution_context(session.session_id)
         try:
@@ -517,6 +646,7 @@ class ReActStrategy(ExecutionStrategy):
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' failed: {exc}",
                 is_error=True,
+                error=ErrorInfo.from_exception(exc, kind="exception"),
             )
 
     @staticmethod
@@ -565,7 +695,9 @@ class ReActStrategy(ExecutionStrategy):
             content=list(assistant.content),
             metadata=replace(
                 meta,
-                elapsed_ms=meta.elapsed_ms if meta.elapsed_ms is not None else elapsed_ms,
+                elapsed_ms=(
+                    meta.elapsed_ms if meta.elapsed_ms is not None else elapsed_ms
+                ),
                 context_fingerprint=context_fingerprint_value,
                 hook_injected_chars=max(0, hook_injected_chars),
             ),

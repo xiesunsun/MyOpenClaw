@@ -1,18 +1,18 @@
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from pickel.config.environ import Environ
 from pickel.shared.file_access import FileAccessMode
-from pickel.tools.sandbox import SandboxSettings
 from pickel.shared.model_config import (
     ModelConfig,
     ModelSelection,
     ProviderModelConfig,
 )
+from pickel.tools.sandbox import SandboxSettings
 
 
 class ProviderCatalog(BaseModel):
@@ -53,6 +53,22 @@ class SkillSettings(BaseModel):
     guard: bool = True
 
 
+class TraceSettings(BaseModel):
+    """派生运行轨迹；默认 standard，写入失败不影响 Runtime。"""
+
+    mode: Literal["off", "standard", "full"] = "standard"
+    queue_capacity: int = Field(default=8192, ge=1)
+    batch_size: int = Field(default=128, ge=1)
+    flush_interval_ms: int = Field(default=250, ge=10)
+    max_file_size_mb: int = Field(default=64, ge=1)
+    max_age_days: int = Field(default=14, ge=0)
+    max_total_size_mb: int = Field(default=1024, ge=1)
+
+
+class ObservabilitySettings(BaseModel):
+    trace: TraceSettings = Field(default_factory=TraceSettings)
+
+
 class AppConfig(BaseModel):
     root: Path = Field(default_factory=Path.cwd, exclude=True)
     default_agent: str
@@ -61,8 +77,7 @@ class AppConfig(BaseModel):
     default_skills_path: Path | None = None
     react_max_steps: int = 8
     context_cli_turn_window: int = 5
-    # 事件 JSONL trace；默认关（含工具参数与文件内容）
-    trace_enabled: bool = False
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
     # extension 的原始配置段：core 不认识任何 extension 的配置模型，
@@ -76,6 +91,21 @@ class AppConfig(BaseModel):
     auth_providers: dict[str, dict[str, Any]] = Field(
         default_factory=dict, exclude=True
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_trace_enabled(cls, value: Any) -> Any:
+        """运行时兼容旧 settings.trace_enabled，不要求用户先迁移配置。"""
+        if not isinstance(value, dict) or "trace_enabled" not in value:
+            return value
+        migrated = dict(value)
+        enabled = bool(migrated.pop("trace_enabled"))
+        observability = dict(migrated.get("observability") or {})
+        trace = dict(observability.get("trace") or {})
+        trace["mode"] = "standard" if enabled else "off"
+        observability["trace"] = trace
+        migrated["observability"] = observability
+        return migrated
 
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":
@@ -148,9 +178,7 @@ class AppConfig(BaseModel):
             model = environ.overlay_model_config(model)
         return model
 
-    def resolve_file_access_mode(
-        self, agent_id: str | None = None
-    ) -> FileAccessMode:
+    def resolve_file_access_mode(self, agent_id: str | None = None) -> FileAccessMode:
         agent_config = self.get_agent_config(agent_id)
         return agent_config.file_access_mode or self.default_file_access_mode
 

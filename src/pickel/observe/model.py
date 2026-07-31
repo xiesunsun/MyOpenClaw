@@ -72,6 +72,7 @@ class SessionTrajectory:
     compaction_steps: list[int] = field(default_factory=list)
     session_usage: dict[str, int] = field(default_factory=dict)
     trace_available: bool = False
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def trajectory_to_dict(trajectory: SessionTrajectory) -> dict[str, Any]:

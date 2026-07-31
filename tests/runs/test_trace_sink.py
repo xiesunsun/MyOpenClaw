@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pickel.runs.trace_sink as trace_module
 from pickel.config.paths import home_dir
+from pickel.observe.records import ObservationIdentity, SpanRecord
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     StepStarted,
@@ -17,12 +18,19 @@ from pickel.runs.runtime_events import (
     TurnInterrupted,
     TurnStarted,
 )
-from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
+from pickel.runs.trace_sink import (
+    JsonlTraceSink,
+    TraceOptions,
+    trace_enabled,
+    trace_mode,
+    trace_path,
+)
 from pickel.shared.event_envelope import EventEnvelope
 
 
-def test_默认关闭():
-    assert trace_enabled(False) is False
+def test_默认开启_standard():
+    assert trace_mode() == "standard"
+    assert trace_enabled() is True
 
 
 def test_配置可开启():
@@ -39,11 +47,10 @@ def test_环境变量为_0_时关闭即使配置为开(monkeypatch):
     assert trace_enabled(True) is False
 
 
-def test_app_config_默认_trace_关闭():
-    """扁平键走 loader 的 _BUILTIN_DEFAULTS，默认必须是 False。"""
+def test_app_config_默认_trace_standard():
     from pickel.config.loader import _BUILTIN_DEFAULTS
 
-    assert _BUILTIN_DEFAULTS["trace_enabled"] is False
+    assert _BUILTIN_DEFAULTS["observability"]["trace"]["mode"] == "standard"
 
 
 def test_trace_path_是_home_下的_traces_目录里的_jsonl(tmp_path: Path, monkeypatch):
@@ -64,10 +71,14 @@ def test_写出的每行都是合法_json(tmp_path: Path):
     sink.close()
 
     lines = path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2
-    assert [json.loads(line)["event_type"] for line in lines] == [
-        "turn_started", "step_started",
+    records = [json.loads(line) for line in lines]
+    assert len(records) == 2
+    assert [record["event_type"] for record in records] == [
+        "turn_started",
+        "step_started",
     ]
+    assert all(record["record_type"] == "runtime_event" for record in records)
+    assert [record["trace_seq"] for record in records] == [0, 1]
 
 
 async def _emit(bus: EventBus) -> None:
@@ -91,7 +102,7 @@ def test_落盘的_seq_与_bus_分配一致(tmp_path: Path):
 def test_delta_事件写入_jsonl_后可_json_loads_读回(tmp_path: Path):
     """Task 4 新增的 4 个事件类型都必须能落盘成合法 JSON。"""
     path = tmp_path / "s1.jsonl"
-    sink = JsonlTraceSink(path)
+    sink = JsonlTraceSink(path, TraceOptions(mode="full"))
     bus = EventBus()
     bus.subscribe(sink)
 
@@ -114,6 +125,55 @@ def test_delta_事件写入_jsonl_后可_json_loads_读回(tmp_path: Path):
     assert records[2]["partial_json"] == '{"text": "你'
     assert records[3]["at_step"] == 1
     assert records[3]["partial_text"] == "你"
+
+
+def test_standard_不写逐块_delta(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    bus = EventBus()
+    bus.subscribe(sink)
+
+    asyncio.run(_emit_deltas(bus))
+    sink.close()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [record["event_type"] for record in records] == ["turn_interrupted"]
+
+
+def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    sink(StepStarted())
+    sink.record(
+        SpanRecord(
+            name="pickel.provider.request",
+            identity=ObservationIdentity(session_id="s1", turn_id="t1"),
+            duration_ms=12.5,
+        )
+    )
+    sink.close()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [record["record_type"] for record in records] == [
+        "runtime_event",
+        "span",
+    ]
+    assert [record["trace_seq"] for record in records] == [0, 1]
+
+
+def test_超过文件上限后轮转(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(
+        path,
+        TraceOptions(mode="full", batch_size=1, max_file_size_mb=1),
+    )
+    sink(TextDeltaEvent(text="x" * 1_100_000))
+    sink(TextDeltaEvent(text="y" * 10))
+    sink.close()
+
+    rotated = list(tmp_path.glob("s1.*.jsonl"))
+    assert len(rotated) == 1
+    assert path.exists()
 
 
 async def _emit_deltas(bus: EventBus) -> None:

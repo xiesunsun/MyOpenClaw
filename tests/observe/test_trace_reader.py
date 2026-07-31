@@ -20,14 +20,25 @@ def _write_trace(path: Path) -> None:
             "event_type": "tool_call_started",
             "seq": 1,
             "occurred_at": "2026-07-26T00:00:01+00:00",
-            "tool_call": {"id": "c1", "name": "shell_exec", "arguments": {"cmd": "SECRET2"}},
+            "tool_call": {
+                "id": "c1",
+                "name": "shell_exec",
+                "arguments": {"cmd": "SECRET2"},
+            },
         },
         {
             "event_type": "tool_call_completed",
             "seq": 2,
             "occurred_at": "2026-07-26T00:00:02.500000+00:00",
-            "tool_call": {"id": "c1", "name": "shell_exec", "arguments": {"cmd": "SECRET2"}},
-            "tool_result": {"content": [{"type": "text", "text": "SECRET3"}], "is_error": False},
+            "tool_call": {
+                "id": "c1",
+                "name": "shell_exec",
+                "arguments": {"cmd": "SECRET2"},
+            },
+            "tool_result": {
+                "content": [{"type": "text", "text": "SECRET3"}],
+                "is_error": False,
+            },
         },
         {
             "event_type": "turn_failed",
@@ -78,8 +89,17 @@ def test_missing_file_returns_none(tmp_path):
 def test_interrupted_marks_turn(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
-        {"event_type": "turn_started", "seq": 0, "occurred_at": "2026-07-26T00:00:00+00:00"},
-        {"event_type": "turn_interrupted", "seq": 1, "occurred_at": "2026-07-26T00:00:01+00:00", "at_step": 2},
+        {
+            "event_type": "turn_started",
+            "seq": 0,
+            "occurred_at": "2026-07-26T00:00:00+00:00",
+        },
+        {
+            "event_type": "turn_interrupted",
+            "seq": 1,
+            "occurred_at": "2026-07-26T00:00:01+00:00",
+            "at_step": 2,
+        },
     ]
     trace_file.write_text(
         "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
@@ -93,7 +113,12 @@ def test_interrupted_marks_turn(tmp_path):
 def test_request_digests_grouped_by_turn(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
-        {"event_type": "turn_started", "seq": 0, "occurred_at": "2026-07-27T00:00:00+00:00", "user_text": "SECRET"},
+        {
+            "event_type": "turn_started",
+            "seq": 0,
+            "occurred_at": "2026-07-27T00:00:00+00:00",
+            "user_text": "SECRET",
+        },
         {
             "event_type": "request_digest",
             "seq": 1,
@@ -114,7 +139,11 @@ def test_request_digests_grouped_by_turn(tmp_path):
             "request_chars": 5200,
             "hook_injected_chars": 40,
         },
-        {"event_type": "turn_started", "seq": 3, "occurred_at": "2026-07-27T00:01:00+00:00"},
+        {
+            "event_type": "turn_started",
+            "seq": 3,
+            "occurred_at": "2026-07-27T00:01:00+00:00",
+        },
         {
             "event_type": "request_digest",
             "seq": 4,
@@ -162,3 +191,70 @@ def test_request_digest_before_any_turn_is_dropped(tmp_path):
     enhancement = read_trace(trace_file)
 
     assert enhancement.request_digests == []
+
+
+def test_span_metrics_include_percentiles_success_and_tokens(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    spans = []
+    for index, duration in enumerate([100, 200, 1000]):
+        spans.append(
+            {
+                "record_type": "span",
+                "payload": {
+                    "name": "pickel.provider.request",
+                    "duration_ms": duration,
+                    "status": "error" if index == 2 else "ok",
+                    "attributes": {
+                        "ttft_ms": duration / 2,
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "cache_read_tokens": 5,
+                        "cache_write_tokens": 1,
+                    },
+                },
+            }
+        )
+    trace_file.write_text(
+        "\n".join(json.dumps(span) for span in spans) + "\n", encoding="utf-8"
+    )
+
+    enhancement = read_trace(trace_file)
+    provider = enhancement.metrics["provider"]
+
+    assert provider["count"] == 3
+    assert provider["success_count"] == 2
+    assert provider["success_rate"] == 0.6667
+    assert provider["duration_ms"] == {"p50": 200.0, "p95": 1000.0, "p99": 1000.0}
+    assert provider["ttft_ms"]["p50"] == 100.0
+    assert provider["tokens"]["input_tokens"] == 30
+
+
+def test_rotated_segments_are_read_before_active_file(tmp_path):
+    active = tmp_path / "s.jsonl"
+    rotated = tmp_path / "s.20260731T000000.0001.jsonl"
+    rotated.write_text(
+        json.dumps(
+            {
+                "event_type": "turn_started",
+                "occurred_at": "2026-07-31T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    active.write_text(
+        json.dumps(
+            {
+                "event_type": "turn_failed",
+                "occurred_at": "2026-07-31T00:00:01+00:00",
+                "error_type": "RuntimeError",
+                "message": "boom",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    enhancement = read_trace(active)
+
+    assert enhancement.turn_markers[0].failed["error_type"] == "RuntimeError"

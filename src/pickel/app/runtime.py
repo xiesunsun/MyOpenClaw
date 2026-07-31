@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -46,7 +45,12 @@ from pickel.runs.event_bus import EventBus
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
 from pickel.runs.runtime_events import RuntimeEventHandler
-from pickel.runs.trace_sink import JsonlTraceSink, trace_enabled, trace_path
+from pickel.runs.trace_sink import (
+    JsonlTraceSink,
+    TraceOptions,
+    trace_mode,
+    trace_path,
+)
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
 from pickel.shared.model_config import ModelSelection
@@ -73,7 +77,7 @@ class RuntimeConversation:
         session_service: SessionService | Any | None = None,
         app_config: AppConfig | None = None,
         trace_path_resolver: Callable[[str], Path] = trace_path,
-        trace_sink_factory: Callable[[Path], JsonlTraceSink] = JsonlTraceSink,
+        trace_sink_factory: Callable[..., JsonlTraceSink] = JsonlTraceSink,
     ) -> None:
         self._agent = agent
         self._run = run
@@ -118,7 +122,7 @@ class RuntimeConversation:
         return self._trace_path_resolver
 
     @property
-    def trace_sink_factory(self) -> Callable[[Path], JsonlTraceSink]:
+    def trace_sink_factory(self) -> Callable[..., JsonlTraceSink]:
         return self._trace_sink_factory
 
     @property
@@ -132,11 +136,14 @@ class RuntimeConversation:
             raise TurnInProgressError("当前 Conversation 已有 turn 正在执行")
         self._turn_running = True
         try:
-            return await self._run.turn(
-                session=self._session,
-                user_text=text,
-                bus=self._bus,
-            )
+            kwargs = {
+                "session": self._session,
+                "user_text": text,
+                "bus": self._bus,
+            }
+            if isinstance(self._run, Run):
+                kwargs["observer"] = self._trace_sink
+            return await self._run.turn(**kwargs)
         finally:
             self._turn_running = False
 
@@ -296,14 +303,32 @@ class RuntimeConversation:
         self._closed = True
 
     def _open_trace(self) -> None:
-        if not trace_enabled(
-            self._app_config.trace_enabled if self._app_config is not None else False
-        ):
+        configured = (
+            self._app_config.observability.trace
+            if self._app_config is not None
+            else None
+        )
+        mode = trace_mode(configured.mode if configured is not None else "standard")
+        if mode == "off":
             return
         try:
-            self._trace_sink = self._trace_sink_factory(
-                self._trace_path_resolver(self._session.session_id)
-            )
+            path = self._trace_path_resolver(self._session.session_id)
+            option_values = {}
+            if configured is not None:
+                option_values = {
+                    "queue_capacity": configured.queue_capacity,
+                    "batch_size": configured.batch_size,
+                    "flush_interval_ms": configured.flush_interval_ms,
+                    "max_file_size_mb": configured.max_file_size_mb,
+                    "max_age_days": configured.max_age_days,
+                    "max_total_size_mb": configured.max_total_size_mb,
+                }
+            options = TraceOptions(mode=mode, **option_values)
+            try:
+                self._trace_sink = self._trace_sink_factory(path, options)
+            except TypeError:
+                # 兼容嵌入方和测试中的单参数 factory。
+                self._trace_sink = self._trace_sink_factory(path)
         except OSError as exc:
             logger.warning("trace 打开失败，本次运行禁用 trace: %s", exc)
             return
@@ -383,7 +408,7 @@ class RuntimeHost:
         session: Session,
         session_service: SessionService | Any | None = None,
         trace_path_resolver: Callable[[str], Path] = trace_path,
-        trace_sink_factory: Callable[[Path], JsonlTraceSink] = JsonlTraceSink,
+        trace_sink_factory: Callable[..., JsonlTraceSink] = JsonlTraceSink,
     ) -> RuntimeConversation:
         return RuntimeConversation(
             agent=agent,

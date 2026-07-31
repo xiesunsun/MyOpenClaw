@@ -12,6 +12,12 @@ import logging
 from dataclasses import replace
 from typing import Callable
 
+from pickel.observe.records import (
+    DiagnosticRecord,
+    ErrorInfo,
+    ObservationIdentity,
+    record_diagnostic,
+)
 from pickel.runs.runtime_events import RuntimeEventBase, RuntimeEventHandler
 
 logger = logging.getLogger(__name__)
@@ -47,7 +53,19 @@ class EventBus:
                 result = handler(stamped)
                 if inspect.isawaitable(result):
                     await result
-            except Exception:  # noqa: BLE001 — 订阅者异常不得影响 turn
+            except Exception as exc:  # noqa: BLE001 — 订阅者异常不得影响 turn
                 identifier = getattr(handler, "__qualname__", repr(handler))
                 logger.exception("事件订阅者异常，已隔离: %s", identifier)
+                record_diagnostic(
+                    DiagnosticRecord(
+                        name="event_handler_error",
+                        identity=ObservationIdentity(
+                            session_id=stamped.envelope.session_id,
+                            turn_id=stamped.envelope.turn_id,
+                            step_index=stamped.envelope.step_index,
+                        ),
+                        attributes={"handler": identifier},
+                        error=ErrorInfo.from_exception(exc, kind="event_handler"),
+                    )
+                )
         return stamped

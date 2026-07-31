@@ -656,6 +656,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             events = [
                 json.loads(line)
                 for line in trace_file.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("record_type") == "runtime_event"
             ]
 
         self.assertEqual(["assistant_message"], [e["event_type"] for e in events])
@@ -727,7 +728,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([[]], session_service.flush_calls)
         self.assertTrue(session_service.closed)
 
-    async def test_trace_disabled_by_default_builds_no_sink(self) -> None:
+    async def test_trace_standard_by_default_builds_sink(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PICKEL_TRACE", None)
             loop = ChatLoop(
@@ -737,7 +738,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 console=Mock(),
             )
 
-        self.assertIsNone(loop._trace_sink)
+        self.assertIsNotNone(loop._trace_sink)
+        loop._close_trace_sink()
 
     async def test_seq_stays_monotonic_across_turns_in_one_session(self) -> None:
         """红线 4：seq 是 session 内全序的唯一来源。
@@ -763,6 +765,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             seqs = [
                 json.loads(line)["seq"]
                 for line in trace_file.read_text(encoding="utf-8").splitlines()
+                if "seq" in json.loads(line)
             ]
 
         self.assertEqual([0, 1, 2], seqs)
@@ -877,6 +880,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             records = [
                 json.loads(line)
                 for line in trace_file.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("record_type") == "runtime_event"
             ]
 
         self.assertEqual(
@@ -978,7 +982,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 strategy=ReActStrategy(max_steps=4),
             )
             submitted_inputs = iter(["hello", "/exit"])
-            with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
+            with patch.dict(os.environ, {"PICKEL_TRACE": "full", "PICKEL_HOME": str(home)}):
                 loop = ChatLoop(
                     agent=agent,
                     run=run,
@@ -991,7 +995,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             trace_file = home / "traces" / "session-1.jsonl"
             lines = trace_file.read_text(encoding="utf-8").splitlines()
             # 逐行 json.loads 可读
-            records = [json.loads(line) for line in lines]
+            records = [
+                json.loads(line)
+                for line in lines
+                if json.loads(line).get("record_type") == "runtime_event"
+            ]
 
         # delta 事件全部出现在 assistant_message 之前，且顺序与 provider 产出一致
         kinds = [record["event_type"] for record in records]
@@ -1014,7 +1022,13 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         # 全事件 seq 连续（0..n-1）；seq 由 bus 按事件分配，
         # 连续即证明 trace 行数与事件数一致——没有事件被 sink 吞掉
         self.assertEqual(list(range(len(records))), [record["seq"] for record in records])
-        self.assertEqual(len(records), len(lines))
+        spans = [
+            json.loads(line)
+            for line in lines
+            if json.loads(line).get("record_type") == "span"
+        ]
+        self.assertIn("pickel.provider.request", [s["payload"]["name"] for s in spans])
+        self.assertIn("pickel.turn", [s["payload"]["name"] for s in spans])
         # delta 拼起来就是最终消息正文
         self.assertEqual(
             "你好，世界",
@@ -1046,10 +1060,10 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
             written = sorted(path.name for path in traces.glob("*.jsonl"))
             first = json.loads(
-                (traces / "session-1.jsonl").read_text(encoding="utf-8").strip()
+                (traces / "session-1.jsonl").read_text(encoding="utf-8").splitlines()[0]
             )
             second = json.loads(
-                (traces / f"{new_session_id}.jsonl").read_text(encoding="utf-8").strip()
+                (traces / f"{new_session_id}.jsonl").read_text(encoding="utf-8").splitlines()[0]
             )
 
         self.assertNotEqual("session-1", new_session_id)

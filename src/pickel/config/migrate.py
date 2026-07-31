@@ -123,9 +123,17 @@ def _build_settings(raw: dict[str, Any], *, project_root: Path) -> dict[str, Any
         "default_file_access_mode",
         "react_max_steps",
         "context_cli_turn_window",
+        "observability",
     ):
         if key in raw and raw[key] is not None:
             settings[key] = raw[key]
+
+    if "trace_enabled" in raw and "observability" not in settings:
+        settings["observability"] = {
+            "trace": {
+                "mode": "standard" if bool(raw["trace_enabled"]) else "off"
+            }
+        }
 
     skills = raw.get("default_skills_path")
     if skills is not None:
