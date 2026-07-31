@@ -54,7 +54,10 @@ def test_settle_后正文一份且有_footer():
     )
 
     assert text.count("你好") == 1
-    assert "anthropic / claude-jupiter-v1-p · 100→20 · 1.5s" in text
+    assert (
+        "anthropic / claude-jupiter-v1-p · 100→20"
+        " · cache r0/w0 · 1.5s"
+    ) in text
     assert "╭" not in text
 
 
@@ -131,5 +134,8 @@ def test_无_delta_时渲染正文与_footer():
     )
 
     assert "完整回复" in text
-    assert "anthropic / claude-jupiter-v1-p · 100→20 · 1.5s" in text
+    assert (
+        "anthropic / claude-jupiter-v1-p · 100→20"
+        " · cache r0/w0 · 1.5s"
+    ) in text
     assert "╭" not in text

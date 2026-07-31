@@ -112,11 +112,14 @@ def test_footer_用量口径是实际输入而非裸_input_tokens():
 
 
 def test_footer_格式逐字锁定():
-    """布局与结构在 E3 锁定：单行右对齐 `{label} · {in}→{out} · {Z.Z}s`。"""
+    """单行右对齐，固定显示 cache read/write，包括零值。"""
     text = _render(AssistantMessageEvent(text="hi", usage=_cached_usage()))
 
     last_line = [line for line in text.splitlines() if line.strip()][-1]
-    assert last_line.strip() == "anthropic / claude-jupiter-v1-p · 8.3k→20 · 1.5s"
+    assert last_line.strip() == (
+        "anthropic / claude-jupiter-v1-p · 8.3k→20"
+        " · cache r8.2k/w0 · 1.5s"
+    )
     assert last_line.startswith(" ")  # 右对齐
 
 

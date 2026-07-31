@@ -123,7 +123,7 @@ def test_settle_同文预览只补_footer():
     )
     text = console.export_text()
     assert text.count("你好") == 1
-    assert "m · 10→2 · 1.0s" in text
+    assert "m · 10→2 · cache r0/w0 · 1.0s" in text
 
 
 def test_settle_仅_thinking_仍打印最终正文():

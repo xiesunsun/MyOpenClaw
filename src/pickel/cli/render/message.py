@@ -29,6 +29,7 @@ def format_footer(
 
     输入规模一律用 usage.actual_input_tokens（§5.1 口径：
     input + cache_read + cache_write），禁止退回裸 input_tokens。
+    cache read/write 固定显示（包括 0），确保每轮统计口径一致。
     """
     if usage is None:
         return fallback_model_label or None
@@ -40,6 +41,10 @@ def format_footer(
     parts.append(
         f"{abbrev_tokens(usage.actual_input_tokens)}"
         f"→{abbrev_tokens(usage.output_tokens)}"
+    )
+    parts.append(
+        f"cache r{abbrev_tokens(usage.cache_read_tokens)}"
+        f"/w{abbrev_tokens(usage.cache_write_tokens)}"
     )
     if usage.elapsed_ms:
         parts.append(f"{usage.elapsed_ms / 1000:.1f}s")

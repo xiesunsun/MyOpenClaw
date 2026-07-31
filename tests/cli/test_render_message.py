@@ -53,7 +53,10 @@ def test_footer_输入规模必须是_5_1_口径():
 
     footer = format_footer(usage, None)
 
-    assert footer == "anthropic / claude-jupiter-v1-p · 8.3k→20 · 1.5s"
+    assert footer == (
+        "anthropic / claude-jupiter-v1-p · 8.3k→20"
+        " · cache r8k/w200 · 1.5s"
+    )
 
 
 def test_footer_elapsed_为零省略时间段():
@@ -62,7 +65,7 @@ def test_footer_elapsed_为零省略时间段():
         elapsed_ms=0, model_label="anthropic / m",
     )
 
-    assert format_footer(usage, None) == "anthropic / m · 100→20"
+    assert format_footer(usage, None) == "anthropic / m · 100→20 · cache r0/w0"
 
 
 def test_footer_model_label_为空退_fallback():
@@ -70,7 +73,7 @@ def test_footer_model_label_为空退_fallback():
 
     footer = format_footer(usage, "gemini / flash")
 
-    assert footer == "gemini / flash · 100→20 · 1.0s"
+    assert footer == "gemini / flash · 100→20 · cache r0/w0 · 1.0s"
 
 
 def test_footer_usage_为_None_只显示_fallback():
@@ -142,7 +145,7 @@ def test_render_assistant_白字加_footer_无框_不解析_md():
     text = console.export_text()
     assert "# 标题" in text  # 不解析 Markdown，字面输出
     assert "正文" in text
-    assert "anthropic / m · 100→20 · 1.5s" in text
+    assert "anthropic / m · 100→20 · cache r0/w0 · 1.5s" in text
     assert "╭" not in text
 
 

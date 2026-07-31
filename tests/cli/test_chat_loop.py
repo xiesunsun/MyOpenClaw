@@ -524,7 +524,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("· 思考中……", rendered)
         self.assertIn("done", rendered)
         # 两步合计：input 100+100=200、output 10+10=20、elapsed 100+100ms=0.2s
-        self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
+        self.assertIn(
+            "google/gemini / gemini-3-flash-preview · 200→20"
+            " · cache r0/w0 · 0.2s",
+            rendered,
+        )
         # 顺序：工具行 < ok < 思考行 < footer；正文 settle 后一份
         self.assertLess(rendered.index("⏺ echo"), rendered.index("ok"))
         self.assertLess(rendered.index("ok"), rendered.index("· 思考中……"))
@@ -913,7 +917,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("out", rendered)
         self.assertIn("hi", rendered)
         self.assertIn("done", rendered)
-        self.assertIn("google/gemini / gemini-3-flash-preview · 200→20 · 0.2s", rendered)
+        self.assertIn(
+            "google/gemini / gemini-3-flash-preview · 200→20"
+            " · cache r0/w0 · 0.2s",
+            rendered,
+        )
         # 工具行先于最终正文；Step 行不再上屏
         self.assertLess(rendered.index("⏺ echo"), rendered.rindex("done"))
         self.assertNotIn("Step 1", rendered)
