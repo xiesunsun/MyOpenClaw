@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from pickel.app.boot import Boot
     from pickel.config.app_config import AppConfig
     from pickel.runs.event_bus import EventBus
+    from pickel.runs.host_calls import HostCallClient
     from pickel.runs.strategy.base import ExecutionStrategy
 
 
@@ -182,6 +183,7 @@ class Run:
         user_text: str,
         bus: "EventBus | None" = None,
         observer: Observer | None = None,
+        host_calls: "HostCallClient | None" = None,
     ) -> AssistantMessage:
         turn_id = str(uuid4())
         identity = ObservationIdentity(session_id=session.session_id, turn_id=turn_id)
@@ -202,6 +204,7 @@ class Run:
                         user_text=user_text,
                         bus=bus,
                         turn_id=turn_id,
+                        host_calls=host_calls,
                     )
             except asyncio.CancelledError:
                 timer.finish(status="cancelled", attributes={"outcome": "cancelled"})
@@ -226,6 +229,7 @@ class Run:
         user_text: str,
         bus: "EventBus | None",
         turn_id: str,
+        host_calls: "HostCallClient | None",
     ) -> tuple[AssistantMessage, str]:
         """turn 边界：UserPromptSubmit hook → 写 user → strategy.execute。"""
         if session.agent_id != self.agent.agent_id:
@@ -294,6 +298,7 @@ class Run:
                 session=session,
                 bus=bus,
                 turn_id=turn_id,
+                host_calls=host_calls,
                 initial_hook_feedback=(
                     [
                         HookFeedback(
@@ -336,7 +341,15 @@ class Run:
                 )
             )
 
-    def get_tool_execution_context(self, session_id: str) -> ToolExecutionContext:
+    def get_tool_execution_context(
+        self,
+        session_id: str,
+        *,
+        turn_id: str = "",
+        step_index: int | None = None,
+        tool_call_id: str = "",
+        host_calls: "HostCallClient | None" = None,
+    ) -> ToolExecutionContext:
         return ToolExecutionContext(
             agent_id=self.agent.agent_id,
             session_id=session_id,
@@ -346,7 +359,11 @@ class Run:
                 shell_sessions=self.shell_session_manager,
                 activation_control=self,
                 skill_store=self.skill_store,
+                host_calls=host_calls,
             ),
+            turn_id=turn_id,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
         )
 
     @staticmethod

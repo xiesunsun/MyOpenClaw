@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, TypeAlias
 
 from pickel.conversations.message import ToolCall
+from pickel.conversations.content_blocks import content_blocks_to_list
 from pickel.runs.turn_usage import TurnUsage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
@@ -40,6 +41,8 @@ def _tool_call_to_dict(tool_call: ToolCall) -> dict[str, Any]:
 def _tool_result_to_dict(result: ToolExecutionResult) -> dict[str, Any]:
     return {
         "content": result.content,
+        "content_blocks": content_blocks_to_list(result.content_blocks),
+        "structured_content": result.structured_content,
         "is_error": result.is_error,
         "metadata": result.metadata,
         "error": asdict(result.error) if result.error is not None else None,

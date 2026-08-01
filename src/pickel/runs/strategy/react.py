@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from contextlib import aclosing, nullcontext
 from dataclasses import replace
@@ -42,6 +43,7 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.runs.estimator import request_char_count
+from pickel.runs.host_calls import HostCallClient
 from pickel.runs.event_bus import EventBus
 from pickel.runs.run import Run
 from pickel.runs.runtime_events import (
@@ -80,6 +82,7 @@ class ReActStrategy(ExecutionStrategy):
         bus: EventBus | None = None,
         turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
+        host_calls: HostCallClient | None = None,
     ) -> AssistantMessage:
         turn = TurnState() if turn_id is None else TurnState(turn_id=turn_id)
         # turn 边界快照：整个 turn 的所有 step 共用同一份工具集。
@@ -340,6 +343,9 @@ class ReActStrategy(ExecutionStrategy):
                                 session=session,
                                 tool_call=effective_call,
                                 snapshot=turn.tool_snapshot,
+                                turn_id=turn.turn_id,
+                                step_index=step_index,
+                                host_calls=host_calls,
                             )
                         except asyncio.CancelledError:
                             tool_timer.finish(status="cancelled")
@@ -352,7 +358,11 @@ class ReActStrategy(ExecutionStrategy):
                         ToolResultMessage(
                             tool_call_id=tool_call.id,
                             tool_name=tool_call.name,
-                            content=[TextContent(text=result.content)],
+                            content=(
+                                list(result.content_blocks)
+                                if result.content_blocks
+                                else [TextContent(text=result.content)]
+                            ),
                             is_error=result.is_error,
                         )
                     )
@@ -371,7 +381,7 @@ class ReActStrategy(ExecutionStrategy):
                         ToolCallCompleted(
                             envelope=envelope(step_index),
                             tool_call=self._event_tool_call(effective_call),
-                            tool_result=replace(result, metadata=dict(result.metadata)),
+                            tool_result=copy.deepcopy(result),
                             batch_id=batch_id,
                             call_index=call_index,
                             total_calls=len(tool_calls),
@@ -650,6 +660,9 @@ class ReActStrategy(ExecutionStrategy):
         session: Session,
         tool_call: ToolCallContent,
         snapshot: ToolSnapshot | None,
+        turn_id: str,
+        step_index: int,
+        host_calls: HostCallClient | None,
     ) -> ToolExecutionResult:
         # 按 ToolEntry.name 查找：模型看到的名字（含命名空间前缀）就是查找键
         tool = snapshot.find(tool_call.name) if snapshot is not None else None
@@ -664,7 +677,13 @@ class ReActStrategy(ExecutionStrategy):
                     retryable=False,
                 ),
             )
-        exec_context = run.get_tool_execution_context(session.session_id)
+        exec_context = run.get_tool_execution_context(
+            session.session_id,
+            turn_id=turn_id,
+            step_index=step_index,
+            tool_call_id=tool_call.id,
+            host_calls=host_calls,
+        )
         try:
             return await tool.execute(tool_call.arguments, exec_context)
         except Exception as exc:  # noqa: BLE001 — 工具失败转错误结果

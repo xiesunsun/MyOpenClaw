@@ -10,6 +10,7 @@ from pickel.conversations.session import Session
 if TYPE_CHECKING:
     from pickel.runs.event_bus import EventBus
     from pickel.runs.run import Run
+    from pickel.runs.host_calls import HostCallClient
 
 
 class ExecutionStrategy(ABC):
@@ -23,6 +24,7 @@ class ExecutionStrategy(ABC):
         bus: EventBus | None = None,
         turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
+        host_calls: "HostCallClient | None" = None,
     ) -> AssistantMessage:
         """推进 turn 内 step 循环，返回最终 AssistantMessage。
 

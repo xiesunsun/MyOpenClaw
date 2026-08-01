@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pickel.app.boot import Boot
+from pickel.app.host_call_recorder import SessionHostCallRecorder
 from pickel.app.runtime_models import (
     AgentInfo,
     ContextInspection,
@@ -42,6 +43,7 @@ from pickel.extensions_host.loader import (
     teardown_extensions,
 )
 from pickel.runs.event_bus import EventBus
+from pickel.runs.runtime_bus import RuntimeBus
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
 from pickel.runs.runtime_events import RuntimeEventHandler
@@ -86,7 +88,13 @@ class RuntimeConversation:
         self._app_config = app_config
         self._trace_path_resolver = trace_path_resolver
         self._trace_sink_factory = trace_sink_factory
-        self._bus = EventBus()
+        self._runtime_bus = RuntimeBus(
+            host_call_recorder=SessionHostCallRecorder(
+                session=session,
+                session_service=session_service,
+            )
+        )
+        self._bus = self._runtime_bus.events
         self._closed = False
         self._turn_running = False
         self._trace_sink: JsonlTraceSink | None = None
@@ -112,6 +120,10 @@ class RuntimeConversation:
     @property
     def event_bus(self) -> EventBus:
         return self._bus
+
+    @property
+    def runtime_bus(self) -> RuntimeBus:
+        return self._runtime_bus
 
     @property
     def trace_sink(self) -> JsonlTraceSink | None:
@@ -143,6 +155,7 @@ class RuntimeConversation:
             }
             if isinstance(self._run, Run):
                 kwargs["observer"] = self._trace_sink
+                kwargs["host_calls"] = self._runtime_bus.host_calls.client
             return await self._run.turn(**kwargs)
         finally:
             self._turn_running = False
@@ -293,6 +306,7 @@ class RuntimeConversation:
         self._close_trace()
         if self._closed:
             return
+        self._runtime_bus.close_now()
         if self._session_service is not None:
             self._session_service.close(session=self._session)
         self._closed = True
@@ -300,6 +314,7 @@ class RuntimeConversation:
     def detach(self) -> None:
         """状态切换时只释放观察资源，不归档旧会话以保持现有 CLI 语义。"""
         self._close_trace()
+        self._runtime_bus.close_now()
         self._closed = True
 
     def _open_trace(self) -> None:

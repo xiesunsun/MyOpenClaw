@@ -19,11 +19,13 @@ class McpConnectionTests(unittest.IsolatedAsyncioTestCase):
             await connection.open()
             self.assertTrue(connection.is_alive())
             self.assertEqual(
-                {"boom", "die", "echo"},
+                {"boom", "die", "echo", "elicited", "elicited_multi_round"},
                 {tool.name for tool in connection.tools},
             )
             result = await connection.call_tool("echo", {"text": "hi"})
-            self.assertFalse(bool(result.isError))
+            self.assertFalse(bool(result.is_error))
+            self.assertEqual("2026-07-28", connection.protocol_version)
+            self.assertIsNotNone(connection.server_capabilities)
             self.assertEqual("echo:hi", result.content[0].text)
         finally:
             await connection.close()
@@ -34,7 +36,7 @@ class McpConnectionTests(unittest.IsolatedAsyncioTestCase):
         try:
             await connection.open()
             result = await connection.call_tool("boom", {})
-            self.assertTrue(bool(result.isError))
+            self.assertTrue(bool(result.is_error))
         finally:
             await connection.close()
 

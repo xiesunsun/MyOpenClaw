@@ -14,6 +14,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ImageContent,
     TextContent,
     ThinkingContent,
     ToolCallContent,
@@ -76,6 +77,27 @@ class AnthropicProviderTests(unittest.TestCase):
             ],
             tools,
         )
+
+    def test_build_tools_keeps_mcp_json_schema_composition(self) -> None:
+        schema = {
+            "type": "object",
+            "$defs": {"query": {"type": "string"}},
+            "properties": {
+                "query": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/query"},
+                        {"type": "null"},
+                    ]
+                }
+            },
+        }
+
+        tool = AnthropicProvider._build_tools(
+            [ToolDefinition(name="search", description="Search", input_schema=schema)]
+        )[0]
+
+        self.assertEqual(schema, tool["input_schema"])
+        self.assertNotIn("strict", tool)
 
     def test_build_messages_thinking_tool_use_and_results(self) -> None:
         messages = AnthropicProvider._build_messages(
@@ -147,6 +169,29 @@ class AnthropicProviderTests(unittest.TestCase):
             ]
         )
         self.assertTrue(messages[1]["content"][0]["is_error"])
+
+    def test_build_messages_maps_image_tool_result(self) -> None:
+        messages = AnthropicProvider._build_messages(
+            [
+                AssistantMessage(
+                    content=[ToolCallContent(id="call-1", name="look", arguments={})]
+                ),
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="look",
+                    content=[
+                        TextContent(text="截图"),
+                        ImageContent(media_type="image/png", data_base64="aGk="),
+                    ],
+                ),
+            ]
+        )
+
+        content = messages[1]["content"][0]["content"]
+        self.assertEqual("text", content[0]["type"])
+        self.assertEqual("image", content[1]["type"])
+        self.assertEqual("base64", content[1]["source"]["type"])
+        self.assertEqual("image/png", content[1]["source"]["media_type"])
 
     def test_build_messages_aggregates_consecutive_tool_results(self) -> None:
         messages = AnthropicProvider._build_messages(

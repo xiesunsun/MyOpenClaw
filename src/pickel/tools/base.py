@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from pickel.observe.records import ErrorInfo
+from pickel.conversations.content_blocks import ToolResultContent
 from pickel.tools.services import ToolServices
 
 ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
@@ -26,6 +27,10 @@ class ToolExecutionContext:
     session_id: str
     workspace_path: Path
     services: ToolServices = field(default_factory=ToolServices)
+    # 末尾默认字段兼容外部 extension 的旧构造方式；生产执行路径填写真实身份。
+    turn_id: str = ""
+    step_index: int | None = None
+    tool_call_id: str = ""
 
 
 @dataclass
@@ -34,6 +39,9 @@ class ToolExecutionResult:
     is_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     error: ErrorInfo | None = None
+    # 新字段放在末尾，避免破坏外部 extension 的位置参数调用。
+    content_blocks: list[ToolResultContent] = field(default_factory=list)
+    structured_content: Any | None = None
 
 
 class BaseTool:

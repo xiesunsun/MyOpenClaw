@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from pickel.app.boot import Boot
 from pickel.app.runtime import RuntimeConversation, RuntimeHost
 from pickel.cli.context_renderer import ContextRenderer
+from pickel.cli.host_call_handlers import CliHostCallHandlers
 from pickel.cli.slash import (
     BUILTIN_SLASH_COMMANDS,
     SlashCompleter,
@@ -65,6 +66,8 @@ class ChatLoop:
             trace_path_resolver=trace_path,
             trace_sink_factory=JsonlTraceSink,
         )
+        self._host_call_handler_leases = []
+        self._attach_host_call_handlers()
         self._fallback_message_count = self._read_session_message_count()
         self._slash_registry = BUILTIN_SLASH_COMMANDS
         self._slash_completer = SlashCompleter(self._slash_registry, self)
@@ -218,6 +221,17 @@ class ChatLoop:
     def _render_error_message(self, text: str) -> None:
         render_error(self.console, text)
 
+    def _attach_host_call_handlers(self) -> None:
+        for lease in self._host_call_handler_leases:
+            lease.close()
+        handlers = CliHostCallHandlers(
+            input_reader=self.input_reader,
+            render_message=self._render_system_message,
+        )
+        self._host_call_handler_leases = list(
+            handlers.attach(self._conversation.runtime_bus)
+        )
+
     def _render_help(self) -> None:
         width = max(len(item.usage) for item in self._slash_registry.list()) + 2
         lines = ["[bold]Available commands[/bold]"]
@@ -333,6 +347,7 @@ class ChatLoop:
                 self._conversation,
                 agent_id,
             )
+            self._attach_host_call_handlers()
             self._fallback_message_count = 0
             self._render_system_message(
                 f"Switched to {agent_id}, new session {self.session.session_id}"
@@ -363,6 +378,7 @@ class ChatLoop:
                 app_config=self._app_config,
                 trace_path_resolver=trace_path,
             )
+        self._attach_host_call_handlers()
         self._fallback_message_count = 0
         self._render_system_message(
             f"New session {self.session.session_id} (agent={self.agent_id})"
@@ -380,6 +396,7 @@ class ChatLoop:
                 boot_factory=Boot.from_config,
             )
             self._conversation = result.conversation
+            self._attach_host_call_handlers()
             for warning in result.warnings:
                 self._render_error_message(f"Extension load error: {warning}")
             self._render_system_message(

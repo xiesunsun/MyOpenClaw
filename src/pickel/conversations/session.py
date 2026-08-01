@@ -19,7 +19,10 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.session_entry import (
     COMPACTION_PAYLOAD_VERSION,
     ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_HOST_CALL_REQUEST,
+    ENTRY_TYPE_HOST_CALL_RESPONSE,
     ENTRY_TYPE_MESSAGE,
+    HOST_CALL_PAYLOAD_VERSION,
     SessionEntry,
 )
 
@@ -101,6 +104,14 @@ class Session:
         stored.setdefault("payload_version", COMPACTION_PAYLOAD_VERSION)
         return self._append_entry(ENTRY_TYPE_COMPACTION, stored)
 
+    def append_host_call_request(self, payload: dict[str, Any]) -> SessionEntry:
+        """追加一次 Runtime → Host 调用请求的审计事实。"""
+        return self._append_host_call_entry(ENTRY_TYPE_HOST_CALL_REQUEST, payload)
+
+    def append_host_call_response(self, payload: dict[str, Any]) -> SessionEntry:
+        """追加一次 Host 调用完成结果的审计事实。"""
+        return self._append_host_call_entry(ENTRY_TYPE_HOST_CALL_RESPONSE, payload)
+
     def move_leaf(self, entry_id: str) -> None:
         """将活动指针移到本 session 已有 entry（切分支，不写新 entry）。"""
         if entry_id not in self._entry_map():
@@ -113,6 +124,17 @@ class Session:
         message: UserMessage | AssistantMessage | ToolResultMessage,
     ) -> SessionEntry:
         return self._append_entry(ENTRY_TYPE_MESSAGE, agent_message_to_dict(message))
+
+    def _append_host_call_entry(
+        self,
+        entry_type: str,
+        payload: dict[str, Any],
+    ) -> SessionEntry:
+        if not isinstance(payload, dict):
+            raise TypeError("host call payload 必须是 dict")
+        stored = dict(payload)
+        stored.setdefault("payload_version", HOST_CALL_PAYLOAD_VERSION)
+        return self._append_entry(entry_type, stored)
 
     def _append_entry(self, entry_type: str, payload: dict[str, Any]) -> SessionEntry:
         now = datetime.now(timezone.utc)

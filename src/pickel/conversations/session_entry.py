@@ -13,9 +13,12 @@ from typing import Any
 
 ENTRY_TYPE_MESSAGE = "message"
 ENTRY_TYPE_COMPACTION = "compaction"
+ENTRY_TYPE_HOST_CALL_REQUEST = "host_call_request"
+ENTRY_TYPE_HOST_CALL_RESPONSE = "host_call_response"
 
 MESSAGE_PAYLOAD_VERSION = 1
 COMPACTION_PAYLOAD_VERSION = 1
+HOST_CALL_PAYLOAD_VERSION = 1
 
 
 @dataclass(frozen=True)

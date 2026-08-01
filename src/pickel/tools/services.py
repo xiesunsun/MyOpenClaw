@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:  # 运行期不导入，避免 base ↔ shell / file_service 循环
+    from pickel.runs.host_calls import HostCallClient
     from pickel.skills.store import SkillStore
     from pickel.tools.file_service import WorkspaceFileService
     from pickel.tools.shell import ShellSessionManager
@@ -37,3 +38,4 @@ class ToolServices:
     shell_sessions: "ShellSessionManager | None" = None
     activation_control: ActivationControl | None = None
     skill_store: "SkillStore | None" = None
+    host_calls: "HostCallClient | None" = None

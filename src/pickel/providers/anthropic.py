@@ -17,6 +17,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ImageContent,
     TextContent,
     ThinkingContent,
     ToolCallContent,
@@ -34,6 +35,10 @@ from pickel.shared.model_config import ModelConfig
 
 
 class AnthropicProvider(Provider):
+    _IMAGE_MEDIA_TYPES = frozenset(
+        {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    )
+
     def __init__(
         self,
         model: str,
@@ -268,17 +273,44 @@ class AnthropicProvider(Provider):
 
     @staticmethod
     def _tool_result_block(message: ToolResultMessage) -> dict[str, Any]:
-        text_parts = [
-            block.text for block in message.content if isinstance(block, TextContent)
-        ]
+        content: list[dict[str, Any]] = []
+        for item in message.content:
+            if isinstance(item, TextContent):
+                content.append({"type": "text", "text": item.text})
+            elif isinstance(item, ImageContent):
+                content.append(AnthropicProvider._image_content_block(item))
+        wire_content: str | list[dict[str, Any]]
+        if content and all(item["type"] == "text" for item in content):
+            wire_content = "\n".join(str(item["text"]) for item in content)
+        else:
+            wire_content = content
         block: dict[str, Any] = {
             "type": "tool_result",
             "tool_use_id": message.tool_call_id,
-            "content": "\n".join(text_parts),
+            "content": wire_content,
         }
         if message.is_error:
             block["is_error"] = True
         return block
+
+    @staticmethod
+    def _image_content_block(image: ImageContent) -> dict[str, Any]:
+        if image.media_type not in AnthropicProvider._IMAGE_MEDIA_TYPES:
+            return {
+                "type": "text",
+                "text": f"[Anthropic 不支持的图片类型: {image.media_type}]",
+            }
+        if image.data_base64 is not None:
+            source = {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": image.data_base64,
+            }
+        elif image.url is not None:
+            source = {"type": "url", "url": image.url}
+        else:
+            raise ValueError("ImageContent 必须包含 data_base64 或 url")
+        return {"type": "image", "source": source}
 
     @staticmethod
     def _build_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
