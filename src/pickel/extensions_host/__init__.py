@@ -11,6 +11,11 @@ from pickel.extensions_host.loader import (
     load_extensions_async,
     teardown_extensions,
 )
+from pickel.extensions_host.mcp_status import (
+    McpServerStatusSnapshot,
+    McpStatusSnapshot,
+    McpStatusSource,
+)
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 
 __all__ = [
@@ -20,6 +25,9 @@ __all__ = [
     "ExtensionLoadError",
     "ExtensionRegistry",
     "LoadResult",
+    "McpServerStatusSnapshot",
+    "McpStatusSnapshot",
+    "McpStatusSource",
     "load_extensions",
     "load_extensions_async",
     "teardown_extensions",

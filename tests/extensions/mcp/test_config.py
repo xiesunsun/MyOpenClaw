@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
-from pickel.extensions.mcp.config import load_mcp_servers
+from pickel.extensions.mcp.config import load_mcp_config, load_mcp_servers
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -35,7 +35,9 @@ class LoadMcpServersTests(unittest.TestCase):
             servers = load_mcp_servers(home=home, project_root=proj)
 
             self.assertEqual("project-cmd", servers["github"].command)
+            self.assertEqual("project", servers["github"].config_scope)
             self.assertEqual(("--x",), servers["jira"].args)
+            self.assertEqual("global", servers["jira"].config_scope)
 
     def test_invalid_json_file_is_skipped_entirely(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -75,3 +77,33 @@ class LoadMcpServersTests(unittest.TestCase):
 
             self.assertEqual("sekrit", servers["s"].env["TOKEN"])
             self.assertEqual("${PICKEL_TEST_NO_SUCH_VAR}", servers["s"].env["MISSING"])
+
+    def test_diagnostics_report_errors_without_exposing_env_values(self) -> None:
+        with TemporaryDirectory() as tmp:
+            proj = Path(tmp)
+            (proj / ".mcp.json").write_text("{not json", encoding="utf-8")
+
+            result = load_mcp_config(home=proj / "nohome", project_root=proj)
+
+            self.assertEqual({}, result.servers)
+            self.assertIn("Invalid MCP config", result.diagnostics[0])
+
+    def test_missing_env_diagnostic_contains_name_not_secret_value(self) -> None:
+        with TemporaryDirectory() as tmp:
+            proj = Path(tmp)
+            _write(
+                proj / ".mcp.json",
+                {
+                    "mcpServers": {
+                        "s": {
+                            "command": "c",
+                            "env": {"TOKEN": "${PICKEL_MCP_MISSING_SECRET}"},
+                        }
+                    }
+                },
+            )
+
+            result = load_mcp_config(home=proj / "nohome", project_root=proj)
+
+            self.assertIn("PICKEL_MCP_MISSING_SECRET", result.diagnostics[0])
+            self.assertNotIn("TOKEN=", result.diagnostics[0])

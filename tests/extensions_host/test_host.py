@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from pickel.extensions_host.errors import ExtensionConfigError
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
+from pickel.extensions_host.mcp_status import McpStatusSnapshot
 from pickel.tools.base import BaseTool, ToolSpec
 from pickel.tools.bus import ToolBus, ToolSource
 
@@ -158,3 +159,20 @@ class McpHostApiTests(unittest.TestCase):
         host = self._mcp_host(ToolBus())
 
         self.assertEqual(Path("/tmp/project"), host.app_config.root)
+
+    def test_register_mcp_status_source_is_typed_and_unique(self) -> None:
+        bus = ToolBus()
+        registry = ExtensionRegistry()
+        host = ExtensionHost(
+            name="mcp",
+            config_section=None,
+            tool_bus=bus,
+            registry=registry,
+        )
+        source = SimpleNamespace(snapshot=lambda: McpStatusSnapshot())
+
+        host.register_mcp_status_source(source)
+
+        self.assertIs(source, registry.mcp_status_source)
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            host.register_mcp_status_source(source)

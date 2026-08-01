@@ -1,9 +1,10 @@
 import asyncio
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from pickel.agents.agent import Agent
-from pickel.app.runtime import RuntimeConversation
+from pickel.app.runtime import RuntimeConversation, RuntimeHost
 from pickel.app.runtime_models import TurnInProgressError
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextContent
@@ -13,6 +14,11 @@ from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import FunctionTool
 from pickel.tools.bus import ToolActivation, ToolBus, ToolSource
+from pickel.extensions_host.mcp_status import (
+    McpServerStatusSnapshot,
+    McpStatusSnapshot,
+)
+from pickel.extensions_host.registry import ExtensionRegistry
 
 
 class _SessionService:
@@ -131,3 +137,68 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(service.closed)
         self.assertTrue(conversation.closed)
+
+
+class RuntimeHostMcpInspectionTests(unittest.TestCase):
+    def _conversation_with_one_active_mcp_tool(self) -> RuntimeConversation:
+        agent = _agent()
+        run = _Run(agent)
+        run.tool_bus.register(
+            FunctionTool(
+                name="search",
+                description="test",
+                input_schema={},
+                func=lambda: "ok",
+            ),
+            source=ToolSource.MCP,
+            origin="github",
+        )
+        run.activation = ToolActivation(allowed=frozenset({"mcp__github__search"}))
+        return RuntimeConversation(
+            agent=agent,
+            run=run,
+            session=Session.create(agent_id=agent.agent_id),
+        )
+
+    def test_inspect_mcp_combines_server_state_with_conversation_activation(
+        self,
+    ) -> None:
+        registry = ExtensionRegistry()
+        registry.mcp_status_source = SimpleNamespace(
+            snapshot=lambda: McpStatusSnapshot(
+                servers=(
+                    McpServerStatusSnapshot(
+                        name="github",
+                        status="connected",
+                        config_scope="project",
+                        protocol_version="2026-01-01",
+                        implementation_name="github-mcp",
+                        implementation_version="1.2.0",
+                        discovered_tools=12,
+                    ),
+                ),
+                diagnostics=("warning",),
+            )
+        )
+        host = RuntimeHost(SimpleNamespace(extensions=registry, extension_result=None))
+
+        inspection = host.inspect_mcp(self._conversation_with_one_active_mcp_tool())
+
+        self.assertTrue(inspection.available)
+        self.assertEqual(("warning",), inspection.diagnostics)
+        self.assertEqual(12, inspection.servers[0].discovered_tools)
+        self.assertEqual(1, inspection.servers[0].active_tools)
+        self.assertEqual("github-mcp 1.2.0", inspection.servers[0].implementation)
+
+    def test_inspect_mcp_distinguishes_unavailable_extension(self) -> None:
+        host = RuntimeHost(
+            SimpleNamespace(
+                extensions=ExtensionRegistry(),
+                extension_result=None,
+            )
+        )
+
+        inspection = host.inspect_mcp(self._conversation_with_one_active_mcp_tool())
+
+        self.assertFalse(inspection.available)
+        self.assertEqual((), inspection.servers)

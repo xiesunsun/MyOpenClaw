@@ -14,6 +14,8 @@ from pickel.app.runtime_models import (
     ContextInspection,
     ConversationClosedError,
     ModelInfo,
+    McpInspection,
+    McpServerInfo,
     PendingSkillInfo,
     ReloadResult,
     RuntimeSnapshot,
@@ -385,6 +387,41 @@ class RuntimeHost:
             for model in sorted(self.app_config.providers[provider].models)
         )
 
+    def inspect_mcp(self, conversation: RuntimeConversation) -> McpInspection:
+        """读取 MCP 最后已知状态，并按当前 Conversation 计算 active tools。"""
+        source = self._boot.extensions.mcp_status_source
+        if source is None:
+            return McpInspection(available=False)
+
+        snapshot = source.snapshot()
+        active_by_server: dict[str, int] = {}
+        for tool in conversation.list_tools():
+            if tool.source != "mcp" or tool.origin is None:
+                continue
+            active_by_server[tool.origin] = active_by_server.get(tool.origin, 0) + 1
+
+        return McpInspection(
+            available=True,
+            servers=tuple(
+                McpServerInfo(
+                    name=server.name,
+                    status=server.status,
+                    transport=server.transport,
+                    config_scope=server.config_scope,
+                    protocol_version=server.protocol_version,
+                    implementation=_implementation_label(
+                        server.implementation_name,
+                        server.implementation_version,
+                    ),
+                    discovered_tools=server.discovered_tools,
+                    active_tools=active_by_server.get(server.name, 0),
+                    last_error=server.last_error,
+                )
+                for server in snapshot.servers
+            ),
+            diagnostics=snapshot.diagnostics,
+        )
+
     def start(self, agent_id: str | None = None) -> RuntimeConversation:
         agent, run = self._boot.build_run(agent_id=agent_id)
         service = self._boot.build_session_service(agent_id=agent.agent_id)
@@ -540,6 +577,12 @@ class RuntimeHost:
             self._extension_result,
             tool_bus=self._boot.tool_bus,
         )
+
+
+def _implementation_label(name: str | None, version: str | None) -> str | None:
+    if name and version:
+        return f"{name} {version}"
+    return name or version
 
 
 def _parse_model(app_config: AppConfig, arg: str) -> ModelSelection:

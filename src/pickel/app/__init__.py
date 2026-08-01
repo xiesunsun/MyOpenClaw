@@ -5,6 +5,8 @@ from pickel.app.runtime import RuntimeConversation, RuntimeHost
 from pickel.app.runtime_models import (
     AgentInfo,
     ContextInspection,
+    McpInspection,
+    McpServerInfo,
     ModelInfo,
     PendingSkillInfo,
     ReloadResult,
@@ -16,6 +18,8 @@ __all__ = [
     "AgentInfo",
     "Boot",
     "ContextInspection",
+    "McpInspection",
+    "McpServerInfo",
     "ModelInfo",
     "PendingSkillInfo",
     "ReloadResult",

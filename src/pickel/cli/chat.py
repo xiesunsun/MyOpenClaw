@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pickel.app.boot import Boot
 from pickel.app.runtime import RuntimeConversation, RuntimeHost
+from pickel.app.runtime_models import McpServerInfo
 from pickel.cli.context_renderer import ContextRenderer
 from pickel.cli.host_call_handlers import CliHostCallHandlers
 from pickel.cli.slash import (
@@ -436,6 +437,12 @@ class ChatLoop:
                 return tuple(item.name for item in self._conversation.list_tools())
             except AttributeError:
                 return ()
+        if kind == "mcp_servers":
+            if self._host is None:
+                return ()
+            return tuple(
+                item.name for item in self._host.inspect_mcp(self._conversation).servers
+            )
         if kind == "skills":
             parts = argument.split()
             if len(parts) <= 1 and not argument.endswith(" "):
@@ -485,6 +492,10 @@ class ChatLoop:
 
     def _command_tools(self, arg: str | None) -> bool:
         self._render_tools(arg)
+        return True
+
+    def _command_mcp(self, arg: str | None) -> bool:
+        self._render_mcp(arg)
         return True
 
     def _command_clear(self, _arg: str | None) -> bool:
@@ -580,6 +591,84 @@ class ChatLoop:
         for item in tools:
             table.add_row(item.name, item.source, item.origin or "-")
         self.console.print(table)
+
+    def _render_mcp(self, server_name: str | None) -> None:
+        if self._host is None:
+            self._render_error_message("当前 Runtime 不支持 MCP 状态查询")
+            return
+
+        inspection = self._host.inspect_mcp(self._conversation)
+        if not inspection.available:
+            self._render_system_message("MCP extension is disabled or unavailable.")
+            return
+
+        servers = inspection.servers
+        if server_name is not None:
+            server = next((item for item in servers if item.name == server_name), None)
+            if server is None:
+                self._render_error_message(f"Unknown MCP server: {server_name}")
+            else:
+                self._render_mcp_server(server)
+            self._render_mcp_diagnostics(inspection.diagnostics)
+            return
+
+        if not servers:
+            message = (
+                "No MCP servers available."
+                if inspection.diagnostics
+                else "No MCP servers configured."
+            )
+            self._render_system_message(message)
+            self._render_mcp_diagnostics(inspection.diagnostics)
+            return
+
+        table = Table(title="MCP servers", title_justify="left", box=None)
+        table.add_column("server")
+        table.add_column("status")
+        table.add_column("transport")
+        table.add_column("tools")
+        table.add_column("protocol")
+        for server in servers:
+            table.add_row(
+                server.name,
+                server.status,
+                server.transport,
+                f"{server.discovered_tools} / {server.active_tools}",
+                server.protocol_version or "-",
+            )
+        table.caption = "tools = discovered / active"
+        self.console.print(table)
+        self._render_mcp_diagnostics(inspection.diagnostics)
+
+    def _render_mcp_server(self, server: McpServerInfo) -> None:
+        table = Table(
+            title=f"MCP server: {server.name}", title_justify="left", box=None
+        )
+        table.add_column("field")
+        table.add_column("value")
+        rows = (
+            ("Status", server.status),
+            ("Transport", server.transport),
+            ("Config", server.config_scope or "-"),
+            ("Implementation", server.implementation or "-"),
+            ("Protocol", server.protocol_version or "-"),
+            (
+                "Tools",
+                f"{server.discovered_tools} discovered / {server.active_tools} active",
+            ),
+        )
+        for label, value in rows:
+            table.add_row(label, value)
+        if server.last_error:
+            table.add_row("Error", server.last_error)
+        self.console.print(table)
+
+    def _render_mcp_diagnostics(self, diagnostics: tuple[str, ...]) -> None:
+        if not diagnostics:
+            return
+        self.console.print(Text("Diagnostics", style="bold"))
+        for diagnostic in diagnostics:
+            self._render_system_message(diagnostic)
 
     async def _render_context_command(self) -> None:
         """`/context` = ContextUsage 视图（设计 §7）。

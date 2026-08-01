@@ -12,12 +12,12 @@ import logging
 from pydantic import BaseModel
 
 from pickel.config.paths import home_dir
-from pickel.extensions.mcp.config import load_mcp_servers
-from pickel.extensions.mcp.runtime import McpServerRuntime
+from pickel.extensions.mcp.config import load_mcp_config
+from pickel.extensions.mcp.state import McpExtensionState
 
 logger = logging.getLogger(__name__)
 
-_runtimes: list[McpServerRuntime] = []
+_state: McpExtensionState | None = None
 
 
 class McpExtensionConfig(BaseModel):
@@ -25,6 +25,7 @@ class McpExtensionConfig(BaseModel):
 
 
 async def setup(host) -> None:
+    global _state
     config = host.config(McpExtensionConfig)
     if config is not None and not config.enabled:
         return
@@ -32,24 +33,15 @@ async def setup(host) -> None:
     if project_root is None:
         logger.warning("MCP extension: app_config.root unavailable; skipping")
         return
-    specs = load_mcp_servers(home=home_dir(), project_root=project_root)
-    for spec in specs.values():
-        runtime = McpServerRuntime(spec=spec, host=host)
-        try:
-            await runtime.start()
-        except Exception:
-            logger.warning(
-                "MCP server '%s' failed to start; skipping", spec.name, exc_info=True
-            )
-            continue
-        _runtimes.append(runtime)
-        logger.info("MCP server '%s' connected", spec.name)
+    loaded = load_mcp_config(home=home_dir(), project_root=project_root)
+    state = McpExtensionState(diagnostics=loaded.diagnostics)
+    host.register_mcp_status_source(state)
+    _state = state
+    await state.start(loaded.servers.values(), host=host)
 
 
 async def teardown() -> None:
-    for runtime in _runtimes:
-        try:
-            await runtime.close()
-        except Exception:
-            logger.exception("MCP server '%s' close failed", runtime.spec.name)
-    _runtimes.clear()
+    global _state
+    if _state is not None:
+        await _state.close()
+        _state = None

@@ -32,6 +32,26 @@ class ToolInfo:
 
 
 @dataclass(frozen=True)
+class McpServerInfo:
+    name: str
+    status: str
+    transport: str
+    config_scope: str | None
+    protocol_version: str | None
+    implementation: str | None
+    discovered_tools: int
+    active_tools: int
+    last_error: str | None
+
+
+@dataclass(frozen=True)
+class McpInspection:
+    available: bool
+    servers: tuple[McpServerInfo, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PendingSkillInfo:
     pending_id: str
     action: str

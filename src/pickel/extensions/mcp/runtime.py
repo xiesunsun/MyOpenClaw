@@ -12,6 +12,7 @@ from pickel.extensions.mcp.config import McpServerSpec
 from pickel.extensions.mcp.connection import McpConnection, McpConnectionError
 from pickel.extensions.mcp.elicitation_mapper import resolve_elicitation
 from pickel.extensions.mcp.proxy import McpProxyTool
+from pickel.extensions_host.mcp_status import McpServerStatusSnapshot
 from pickel.runs.host_calls import HostCallClient, HostCallContext
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,21 @@ class McpServerRuntime:
         self._host = host
         self._connection: McpConnection | None = None
         self._reconnect_lock = asyncio.Lock()
+        self._status = "connecting"
+        self._last_error: str | None = None
 
     async def start(self) -> None:
+        self._status = "connecting"
+        self._last_error = None
         self._connection = McpConnection(self.spec)
-        await self._connection.open()
-        self._register_tools()
+        try:
+            await self._connection.open()
+            self._register_tools()
+        except Exception as exc:
+            self._status = "failed"
+            self._last_error = _safe_error(exc)
+            raise
+        self._status = "connected"
 
     async def call(
         self,
@@ -142,10 +153,13 @@ class McpServerRuntime:
         return dict(pairs)
 
     async def close(self) -> None:
-        if self._connection is not None:
-            await self._connection.close()
+        try:
+            if self._connection is not None:
+                await self._connection.close()
+        finally:
             self._connection = None
-        self._host.unregister_mcp_origin(self.spec.name)
+            self._host.unregister_mcp_origin(self.spec.name)
+            self._status = "closed"
 
     def _register_tools(self) -> None:
         # 先卸后注：server 升级后消失的工具被剔除
@@ -160,6 +174,7 @@ class McpServerRuntime:
         async with self._reconnect_lock:
             if self._connection is not None and self._connection.is_alive():
                 return  # 并发失败的其他调用已经重连好了
+            self._status = "reconnecting"
             logger.warning("Reconnecting to MCP server '%s'", self.spec.name)
             if self._connection is not None:
                 await self._connection.close()
@@ -167,8 +182,34 @@ class McpServerRuntime:
             connection = McpConnection(self.spec)
             try:
                 await connection.open()
-            except McpConnectionError:
+            except McpConnectionError as exc:
                 self._host.unregister_mcp_origin(self.spec.name)
+                self._status = "failed"
+                self._last_error = _safe_error(exc)
                 raise
             self._connection = connection
             self._register_tools()
+            self._status = "connected"
+            self._last_error = None
+
+    def snapshot(self) -> McpServerStatusSnapshot:
+        connection = self._connection
+        implementation = connection.server_info if connection is not None else None
+        return McpServerStatusSnapshot(
+            name=self.spec.name,
+            status=self._status,
+            config_scope=self.spec.config_scope,
+            protocol_version=(
+                connection.protocol_version if connection is not None else None
+            ),
+            implementation_name=getattr(implementation, "name", None),
+            implementation_version=getattr(implementation, "version", None),
+            discovered_tools=(len(connection.tools) if connection is not None else 0),
+            last_error=self._last_error,
+        )
+
+
+def _safe_error(exc: Exception) -> str:
+    """状态输出只保留有限错误文本，不包含配置 env 或启动参数。"""
+    message = str(exc).strip() or type(exc).__name__
+    return message[:500]

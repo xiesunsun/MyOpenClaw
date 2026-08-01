@@ -60,15 +60,21 @@ class McpSetupTests(unittest.IsolatedAsyncioTestCase):
                 "broken": {"command": "/no/such/command-xyz"},
                 "fixture": _fixture_entry(),
             })
+            host = _host(bus, root)
             with mock.patch.object(
                 mcp_extension, "home_dir", return_value=root / "nohome"
             ):
-                await mcp_extension.setup(_host(bus, root))
+                await mcp_extension.setup(host)
             try:
                 names = bus.list_names(source=ToolSource.MCP)
                 self.assertIn("mcp__fixture__echo", names)
                 self.assertEqual(
                     [], [n for n in names if n.startswith("mcp__broken__")]
+                )
+                statuses = host._registry.mcp_status_source.snapshot().servers
+                self.assertEqual(
+                    {"broken": "failed", "fixture": "connected"},
+                    {item.name: item.status for item in statuses},
                 )
             finally:
                 await mcp_extension.teardown()
@@ -88,8 +94,11 @@ class McpSetupTests(unittest.IsolatedAsyncioTestCase):
         bus = ToolBus()
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
+            host = _host(bus, root)
             with mock.patch.object(
                 mcp_extension, "home_dir", return_value=root / "nohome"
             ):
-                await mcp_extension.setup(_host(bus, root))
+                await mcp_extension.setup(host)
             self.assertEqual([], bus.list_names(source=ToolSource.MCP))
+            self.assertEqual((), host._registry.mcp_status_source.snapshot().servers)
+            await mcp_extension.teardown()

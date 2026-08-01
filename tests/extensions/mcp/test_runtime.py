@@ -65,6 +65,21 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.close()
         self.assertEqual([], bus.list_names(source=ToolSource.MCP))
 
+    async def test_snapshot_reports_last_known_connection_state(self) -> None:
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(ToolBus()))
+        try:
+            await runtime.start()
+            snapshot = runtime.snapshot()
+
+            self.assertEqual("connected", snapshot.status)
+            self.assertEqual(5, snapshot.discovered_tools)
+            self.assertIsNotNone(snapshot.protocol_version)
+            self.assertIsNone(snapshot.last_error)
+        finally:
+            await runtime.close()
+
+        self.assertEqual("closed", runtime.snapshot().status)
+
     async def test_proxy_execute_converts_text_and_error(self) -> None:
         bus = ToolBus()
         runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))

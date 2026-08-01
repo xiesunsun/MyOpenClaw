@@ -102,6 +102,13 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
             "models",
         ),
         SlashCommand(
+            "mcp",
+            "Show MCP server status",
+            "/mcp [server]",
+            "_command_mcp",
+            "mcp_servers",
+        ),
+        SlashCommand(
             "thinking",
             "Show or set thinking level",
             "/thinking [level]",

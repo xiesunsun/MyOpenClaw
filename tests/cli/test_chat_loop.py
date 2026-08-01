@@ -21,6 +21,7 @@ from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.conversations.session_preview import SessionPreview
 from pickel.cli.chat import ChatLoop
+from pickel.app.runtime_models import McpInspection, McpServerInfo
 from pickel.conversations.agent_message import ModelResponseMetadata, ModelUsage
 from pickel.runs.usage_anchor import context_fingerprint
 from pickel.runs.event_bus import EventBus
@@ -1110,6 +1111,88 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = console.export_text()
         self.assertIn("/context", rendered)
+        self.assertIn("/mcp", rendered)
+
+    def test_mcp_command_renders_discovered_and_active_tool_counts(self) -> None:
+        console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
+        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop._host = Mock()
+        loop._host.inspect_mcp.return_value = McpInspection(
+            available=True,
+            servers=(
+                McpServerInfo(
+                    name="github",
+                    status="connected",
+                    transport="stdio",
+                    config_scope="project",
+                    protocol_version="2026-01-01",
+                    implementation="github-mcp 1.2.0",
+                    discovered_tools=12,
+                    active_tools=3,
+                    last_error=None,
+                ),
+            ),
+        )
+
+        loop._render_mcp(None)
+
+        rendered = console.export_text()
+        self.assertIn("MCP servers", rendered)
+        self.assertIn("github", rendered)
+        self.assertIn("connected", rendered)
+        self.assertIn("12 / 3", rendered)
+        self.assertIn("discovered / active", rendered)
+
+    def test_mcp_server_detail_renders_error_and_diagnostics(self) -> None:
+        console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
+        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop._host = Mock()
+        loop._host.inspect_mcp.return_value = McpInspection(
+            available=True,
+            servers=(
+                McpServerInfo(
+                    name="broken",
+                    status="failed",
+                    transport="stdio",
+                    config_scope="global",
+                    protocol_version=None,
+                    implementation=None,
+                    discovered_tools=0,
+                    active_tools=0,
+                    last_error="failed to initialize",
+                ),
+            ),
+            diagnostics=("Environment variable TOKEN is not set",),
+        )
+
+        loop._render_mcp("broken")
+
+        rendered = console.export_text()
+        self.assertIn("MCP server: broken", rendered)
+        self.assertIn("failed to initialize", rendered)
+        self.assertIn("Diagnostics", rendered)
+        self.assertIn("TOKEN is not set", rendered)
+
+    def test_mcp_command_distinguishes_unavailable_and_empty_configuration(
+        self,
+    ) -> None:
+        console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
+        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop._host = Mock()
+        loop._host.inspect_mcp.side_effect = (
+            McpInspection(available=False),
+            McpInspection(available=True),
+            McpInspection(available=True, diagnostics=("Invalid MCP config",)),
+        )
+
+        loop._render_mcp(None)
+        loop._render_mcp(None)
+        loop._render_mcp(None)
+
+        rendered = console.export_text()
+        self.assertIn("disabled or unavailable", rendered)
+        self.assertIn("No MCP servers configured", rendered)
+        self.assertIn("No MCP servers available", rendered)
 
     async def test_header_lists_context_command(self) -> None:
         output = StringIO()

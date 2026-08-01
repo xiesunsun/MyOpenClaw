@@ -10,6 +10,7 @@ class _Sources:
     def __init__(self) -> None:
         self.models = ["anthropic/ClaudeCase"]
         self.pending = ["AbC123"]
+        self.mcp_servers = ["GitHub"]
 
     def complete(self, kind: str, argument: str):
         if kind == "models":
@@ -18,6 +19,8 @@ class _Sources:
             if argument.startswith("approve "):
                 return tuple(self.pending)
             return ("pending", "diff", "approve", "reject")
+        if kind == "mcp_servers":
+            return tuple(self.mcp_servers)
         return ()
 
 
@@ -56,6 +59,11 @@ class SlashCompleterTests(unittest.TestCase):
             ["AbC123"],
             _values(self.completer, "/skills approve A"),
         )
+
+    def test_mcp_server_completion_reads_current_status_source(self) -> None:
+        self.assertEqual(["GitHub"], _values(self.completer, "/mcp G"))
+        self.sources.mcp_servers = ["GitLab"]
+        self.assertEqual(["GitLab"], _values(self.completer, "/mcp G"))
 
     def test_parser_only_normalizes_command_name(self) -> None:
         parsed = parse_slash("/MODEL anthropic/ClaudeCase")

@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from pickel.extensions_host.errors import ExtensionConfigError
+from pickel.extensions_host.mcp_status import McpStatusSource
 from pickel.extensions_host.registry import ExtensionRegistry, Factory
 from pickel.tools.base import BaseTool
 from pickel.tools.bus import ToolBus, ToolSource
@@ -69,6 +70,12 @@ class ExtensionHost:
     def unregister_mcp_origin(self, server: str) -> list[str]:
         """卸掉某个 MCP server 的全部工具（断连/重连失败路径）。"""
         return self._tool_bus.unregister_origin(ToolSource.MCP, server)
+
+    def register_mcp_status_source(self, source: McpStatusSource) -> None:
+        """注册唯一的 MCP 只读状态源，供 Runtime Application 查询。"""
+        if self._registry.mcp_status_source is not None:
+            raise ValueError("MCP status source is already registered")
+        self._registry.mcp_status_source = source
 
     def add_hook_handler(self, factory: Factory) -> None:
         """注册 hook handler 工厂：(AgentScope) -> handler | None。

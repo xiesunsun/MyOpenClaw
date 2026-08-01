@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any
 
+from pickel.extensions_host.mcp_status import McpStatusSource
+
 logger = logging.getLogger(__name__)
 
 # per-agent 扩展点注册的是工厂：返回 None 表示该 agent 不启用这项贡献
@@ -36,6 +38,7 @@ class ExtensionRegistry:
     recall_factories: list[Factory] = field(default_factory=list)
     sync_factories: list[Factory] = field(default_factory=list)
     extension_names: list[str] = field(default_factory=list)
+    mcp_status_source: McpStatusSource | None = None
 
     def note_extension(self, name: str) -> None:
         if name not in self.extension_names:
