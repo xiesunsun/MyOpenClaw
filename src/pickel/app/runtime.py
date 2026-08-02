@@ -664,6 +664,20 @@ class RuntimeConversation:
                 entries=[],
             )
 
+    def export_observation(self, out: Path | None = None) -> Path:
+        """导出当前会话的观测 HTML，供 CLI、TUI 与后端共同调用。"""
+        from pickel.observe.exporter import export_html
+
+        self.flush()
+        flush_trace = getattr(self._trace_sink, "flush", None)
+        if callable(flush_trace):
+            flush_trace()
+        return export_html(
+            [self._session],
+            out=out,
+            trace_path_resolver=self._trace_path_resolver,
+        )
+
     def archive(self) -> None:
         self._close_trace()
         if self._closed:

@@ -70,6 +70,7 @@ class TraceOptions:
 class _QueuedRecord:
     value: dict[str, Any]
     low_priority: bool = False
+    flush_barrier: threading.Event | None = None
 
 
 class _TraceBuffer:
@@ -112,6 +113,15 @@ class _TraceBuffer:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
+
+    def put_flush_barrier(self, barrier: threading.Event) -> bool:
+        """控制记录不受容量限制，确保此前记录可被同步等待。"""
+        with self._condition:
+            if self._closed:
+                return False
+            self._items.append(_QueuedRecord(value={}, flush_barrier=barrier))
+            self._condition.notify()
+            return True
 
     @property
     def empty(self) -> bool:
@@ -213,6 +223,15 @@ class JsonlTraceSink:
     def wants(self, capability: str) -> bool:
         return self._options.mode == "full" and capability == "request_snapshot"
 
+    def flush(self, timeout_seconds: float = 5.0) -> bool:
+        """等待当前已入队记录落盘，不关闭 sink。"""
+        if self._closed:
+            return False
+        barrier = threading.Event()
+        if not self._buffer.put_flush_barrier(barrier):
+            return False
+        return barrier.wait(timeout=max(0.0, timeout_seconds))
+
     def close(self) -> None:
         if self._closed:
             return
@@ -249,19 +268,32 @@ class JsonlTraceSink:
             if not batch:
                 self._flush()
                 continue
+            barriers = [
+                item.flush_barrier
+                for item in batch
+                if item.flush_barrier is not None
+            ]
             try:
                 lines = [
                     json.dumps(item.value, ensure_ascii=False, default=str) + "\n"
                     for item in batch
+                    if item.flush_barrier is None
                 ]
-                self._rotate_if_needed(sum(len(line.encode("utf-8")) for line in lines))
-                self._handle.writelines(lines)
-                self._written += len(lines)
-                self._handle.flush()
+                if lines:
+                    self._rotate_if_needed(
+                        sum(len(line.encode("utf-8")) for line in lines)
+                    )
+                    self._handle.writelines(lines)
+                    self._written += len(lines)
+                self._flush()
             except Exception as exc:  # noqa: BLE001 — trace 永不阻断 Runtime
                 self._write_errors += 1
-                self._dropped += len(batch)
-                logger.warning("trace 写入失败，已丢弃 %d 条记录: %s", len(batch), exc)
+                dropped = len(batch) - len(barriers)
+                self._dropped += dropped
+                logger.warning("trace 写入失败，已丢弃 %d 条记录: %s", dropped, exc)
+            finally:
+                for barrier in barriers:
+                    barrier.set()
         self._flush()
 
     def _flush(self) -> None:

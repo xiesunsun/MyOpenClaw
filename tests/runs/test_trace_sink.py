@@ -85,6 +85,20 @@ def test_写出的每行都是合法_json(tmp_path: Path):
     assert [record["trace_seq"] for record in records] == [0, 1]
 
 
+def test_flush_等待已入队记录落盘且不关闭_sink(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    bus = EventBus()
+    bus.subscribe(sink)
+
+    asyncio.run(_emit(bus))
+
+    assert sink.flush() is True
+    assert sink.closed is False
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+    sink.close()
+
+
 async def _emit(bus: EventBus) -> None:
     await bus.emit(TurnStarted(envelope=EventEnvelope(session_id="s1"), user_text="hi"))
     await bus.emit(StepStarted(envelope=EventEnvelope(session_id="s1", step_index=1)))

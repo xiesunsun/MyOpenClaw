@@ -443,6 +443,17 @@ class ChatLoop:
         await self._render_context_command()
         return True
 
+    def _command_observe(self, arg: str | None) -> bool:
+        try:
+            path = self._conversation.export_observation(
+                Path(arg).expanduser() if arg is not None else None
+            )
+        except (OSError, ValueError) as exc:
+            self._render_error_message(f"导出观测报告失败: {exc}")
+            return True
+        self._render_system_message(f"Observation report: {path}")
+        return True
+
     def _command_session(self, _arg: str | None) -> bool:
         self._render_session_summary()
         return True

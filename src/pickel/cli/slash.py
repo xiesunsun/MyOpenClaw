@@ -127,6 +127,12 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
             "reload", "Reload runtime resources", "/reload", "_command_reload"
         ),
         SlashCommand("context", "Show context usage", "/context", "_command_context"),
+        SlashCommand(
+            "observe",
+            "Export current session observability HTML",
+            "/observe [path]",
+            "_command_observe",
+        ),
         SlashCommand("session", "Show session details", "/session", "_command_session"),
         SlashCommand(
             "skills",

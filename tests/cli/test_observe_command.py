@@ -55,6 +55,19 @@ def test_observe_exports_html(tmp_path, monkeypatch):
     assert str(out.resolve()) in result.output
 
 
+def test_observe_default_filename_contains_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("PICKEL_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    session_id = _seed_session(tmp_path)
+
+    result = CliRunner().invoke(app, ["observe", "--session", session_id])
+
+    out = tmp_path / f"pickel-observe-{session_id}.html"
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert str(out) in result.output
+
+
 def test_observe_empty_db_exits_nonzero(tmp_path, monkeypatch):
     monkeypatch.setenv("PICKEL_HOME", str(tmp_path))
     out = tmp_path / "report.html"
