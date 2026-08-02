@@ -12,6 +12,19 @@ from pickel.runs.turn_usage import TurnUsage
 
 
 @dataclass(frozen=True)
+class RuntimeLaunchRequest:
+    """Runtime 进程装配请求；agent_ids=None 表示为全部 Agent 装配。"""
+
+    cwd: Path
+    agent_ids: tuple[str, ...] | None = None
+    session_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.session_id is not None and self.agent_ids is not None:
+            raise ValueError("按 session 装配 Runtime 时不能同时指定 agent_ids")
+
+
+@dataclass(frozen=True)
 class AgentInfo:
     agent_id: str
 

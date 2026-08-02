@@ -68,6 +68,39 @@ async def setup(host):
 
 
 class LoaderDiscoveryTests(unittest.TestCase):
+    def test_only_loads_explicitly_enabled_extensions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_extension(home, "enabled", _RECALL_EXT)
+            _write_extension(home, "disabled", _RECALL_EXT)
+
+            result = load_extensions(
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
+                enabled_names={"enabled"},
+            )
+
+            self.assertEqual([], result.errors)
+            self.assertEqual(["enabled"], result.registry.extension_names)
+
+    def test_empty_enabled_extensions_starts_nothing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_extension(home, "disabled", _RECALL_EXT)
+
+            result = load_extensions(
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
+                enabled_names=set(),
+            )
+
+            self.assertEqual([], result.errors)
+            self.assertEqual([], result.registry.extension_names)
+
     def test_loads_user_level_extension_and_collects_contribution(self) -> None:
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -83,7 +116,9 @@ class LoaderDiscoveryTests(unittest.TestCase):
             self.assertEqual([], result.errors)
             self.assertEqual(["demo"], result.registry.extension_names)
             scope = SimpleNamespace(agent_id="Pickle", app_config=None)
-            self.assertEqual(["recall-from-demo"], result.registry.recall_sources(scope))
+            self.assertEqual(
+                ["recall-from-demo"], result.registry.recall_sources(scope)
+            )
 
     def test_registers_tools_under_extension_origin(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -91,7 +126,9 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "probe_ext", _TOOL_EXT)
             bus = ToolBus()
 
-            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None)
+            result = load_extensions(
+                tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None
+            )
 
             self.assertEqual([], result.errors)
             entry = bus.get("ext__probe_ext__probe")
@@ -103,7 +140,10 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "async_ext", _ASYNC_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
             )
 
             self.assertEqual([], result.errors)
@@ -120,7 +160,10 @@ class LoaderDiscoveryTests(unittest.TestCase):
             _write_extension(home, "real", _RECALL_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
             )
 
             self.assertEqual(["real"], result.registry.extension_names)
@@ -128,7 +171,10 @@ class LoaderDiscoveryTests(unittest.TestCase):
     def test_missing_extensions_dir_is_not_an_error(self) -> None:
         with TemporaryDirectory() as tmp:
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=Path(tmp), builtin_package=None
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=Path(tmp),
+                builtin_package=None,
             )
 
             self.assertEqual([], result.errors)
@@ -142,7 +188,10 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "zzz_healthy", _RECALL_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
             )
 
             self.assertEqual(1, len(result.errors))
@@ -155,7 +204,10 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "no_setup", _NO_SETUP_EXT)
 
             result = load_extensions(
-                tool_bus=ToolBus(), app_config=_app_config(), home=home, builtin_package=None
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
             )
 
             self.assertEqual(1, len(result.errors))
@@ -167,7 +219,9 @@ class LoaderIsolationTests(unittest.TestCase):
             _write_extension(home, "half_dead", _SETUP_BOOM_AFTER_TOOL_EXT)
             bus = ToolBus()
 
-            result = load_extensions(tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None)
+            result = load_extensions(
+                tool_bus=bus, app_config=_app_config(), home=home, builtin_package=None
+            )
 
             self.assertEqual(1, len(result.errors))
             # 半装状态必须回滚，否则 bus 里留着一个无人维护的工具

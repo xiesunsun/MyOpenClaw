@@ -18,6 +18,7 @@ _YAML_FIELDS = frozenset(
     {
         "workspace_path",
         "tools",
+        "extensions",
         "file_access_mode",
         "llm",
         "remote_agent_id",
@@ -32,7 +33,15 @@ def scan_agents(project_root: Path) -> dict[str, Any]:
 
     含 ``AGENT.md`` / ``agent.md`` 或 ``agent.yaml`` 的子目录即注册。
     """
-    agents_root = Path(project_root) / _AGENTS_DIR
+    return scan_agents_dir(
+        Path(project_root) / _AGENTS_DIR,
+        project_root=Path(project_root),
+    )
+
+
+def scan_agents_dir(agents_root: Path, *, project_root: Path) -> dict[str, Any]:
+    """扫描指定 Agent 根目录；内置与项目 Agent 共用同一份解析合同。"""
+    agents_root = Path(agents_root)
     if not agents_root.is_dir():
         return {}
 
@@ -42,7 +51,7 @@ def scan_agents(project_root: Path) -> dict[str, Any]:
             continue
         if not _is_agent_dir(child):
             continue
-        result[child.name] = load_agent_dir(child, project_root)
+        result[child.name] = load_agent_dir(child, Path(project_root))
     return result
 
 

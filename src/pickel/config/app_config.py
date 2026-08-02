@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -24,6 +25,8 @@ class AgentConfig(BaseModel):
     behavior_path: Path
     llm: ModelSelection | None = None
     tools: list[str] = Field(default_factory=list)
+    # "*" 保持旧 Agent 的全量装配语义；新 Agent 应显式声明运行所需 Extension。
+    extensions: list[str] = Field(default_factory=lambda: ["*"])
     file_access_mode: FileAccessMode | None = None
     skills_path: Path | None = None
     remote_agent_id: str | None = None
@@ -185,6 +188,20 @@ class AppConfig(BaseModel):
     def resolve_skills_path(self, agent_id: str | None = None) -> Path | None:
         agent_config = self.get_agent_config(agent_id)
         return agent_config.skills_path or self.default_skills_path
+
+    def resolve_agent_extensions(
+        self,
+        agent_ids: Iterable[str] | None = None,
+    ) -> frozenset[str] | None:
+        """解析目标 Agent 所需 Extension；None 表示装载全部。"""
+        resolved_ids = tuple(agent_ids) if agent_ids is not None else tuple(self.agents)
+        names: set[str] = set()
+        for agent_id in resolved_ids:
+            agent_config = self.get_agent_config(agent_id)
+            if "*" in agent_config.extensions:
+                return None
+            names.update(agent_config.extensions)
+        return frozenset(names)
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

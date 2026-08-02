@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from typer.testing import CliRunner
@@ -47,7 +48,7 @@ class MainSessionsCliTests(unittest.TestCase):
         with patch("pickel.cli.main._run_query") as run_query:
             result = self.runner.invoke(
                 app,
-                ["-q", "你是谁？", "--output-format", "json", "--ephemeral"],
+                ["-q", "你是谁？", "--output-format", "json", "--save-session"],
             )
 
         self.assertEqual(0, result.exit_code)
@@ -55,14 +56,91 @@ class MainSessionsCliTests(unittest.TestCase):
             query="你是谁？",
             agent=None,
             session_id=None,
-            ephemeral=True,
+            save_session=True,
             output_format="json",
         )
 
     def test_query_only_options_require_query(self) -> None:
-        result = self.runner.invoke(app, ["--ephemeral"])
+        result = self.runner.invoke(app, ["--save-session"])
         self.assertEqual(2, result.exit_code)
         self.assertIn("只能和 -q/--query 一起使用", result.stderr)
+
+    def test_query_defaults_to_shell_ephemeral_without_extensions(self) -> None:
+        fake_host = Mock()
+        fake_host.open_conversation.return_value = Mock()
+        runtime = MagicMock()
+        runtime.__aenter__ = AsyncMock(return_value=runtime)
+        runtime.__aexit__ = AsyncMock(return_value=None)
+        runtime.host = fake_host
+        runtime.warnings = ()
+        surface = Mock()
+        surface.run = AsyncMock(return_value=SimpleNamespace(status="completed"))
+
+        with (
+            patch(
+                "pickel.cli.main.RuntimeApplication.open", return_value=runtime
+            ) as open_app,
+            patch("pickel.cli.main.QuerySurface", return_value=surface),
+        ):
+            result = self.runner.invoke(app, ["-q", "你好"])
+
+        self.assertEqual(0, result.exit_code, result.stderr)
+        launch_request = open_app.call_args.args[0]
+        self.assertEqual(("shell",), launch_request.agent_ids)
+        request = fake_host.open_conversation.call_args.args[0]
+        self.assertEqual("shell", request.agent_id)
+        self.assertEqual("ephemeral", request.persistence)
+
+    def test_query_save_session_uses_persistent_conversation(self) -> None:
+        fake_host = Mock()
+        fake_host.open_conversation.return_value = Mock()
+        runtime = MagicMock()
+        runtime.__aenter__ = AsyncMock(return_value=runtime)
+        runtime.__aexit__ = AsyncMock(return_value=None)
+        runtime.host = fake_host
+        runtime.warnings = ()
+        surface = Mock()
+        surface.run = AsyncMock(return_value=SimpleNamespace(status="completed"))
+
+        with (
+            patch("pickel.cli.main.RuntimeApplication.open", return_value=runtime),
+            patch("pickel.cli.main.QuerySurface", return_value=surface),
+        ):
+            result = self.runner.invoke(app, ["-q", "你好", "--save-session"])
+
+        self.assertEqual(0, result.exit_code, result.stderr)
+        request = fake_host.open_conversation.call_args.args[0]
+        self.assertEqual("persistent", request.persistence)
+
+    def test_query_session_resolves_agent_before_extension_startup(self) -> None:
+        fake_host = Mock()
+        fake_host.open_conversation.return_value = Mock()
+        runtime = MagicMock()
+        runtime.__aenter__ = AsyncMock(return_value=runtime)
+        runtime.__aexit__ = AsyncMock(return_value=None)
+        runtime.host = fake_host
+        runtime.warnings = ()
+        surface = Mock()
+        surface.run = AsyncMock(return_value=SimpleNamespace(status="completed"))
+
+        with (
+            patch(
+                "pickel.cli.main.RuntimeApplication.open", return_value=runtime
+            ) as open_app,
+            patch("pickel.cli.main.QuerySurface", return_value=surface),
+        ):
+            result = self.runner.invoke(
+                app,
+                ["--session-id", "session-1", "-q", "继续"],
+            )
+
+        self.assertEqual(0, result.exit_code, result.stderr)
+        launch_request = open_app.call_args.args[0]
+        self.assertIsNone(launch_request.agent_ids)
+        self.assertEqual("session-1", launch_request.session_id)
+        request = fake_host.open_conversation.call_args.args[0]
+        self.assertEqual("session-1", request.session_id)
+        self.assertEqual("persistent", request.persistence)
 
     def test_sessions_command_all_flag_passes_all_sessions_true(self) -> None:
         fake_service = Mock()

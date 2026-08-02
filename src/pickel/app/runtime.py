@@ -730,8 +730,14 @@ class RuntimeConversation:
 class RuntimeHost:
     """进程级 Runtime 应用入口。"""
 
-    def __init__(self, boot: Boot) -> None:
+    def __init__(
+        self,
+        boot: Boot,
+        *,
+        launch_agent_ids: tuple[str, ...] | None = None,
+    ) -> None:
         self._boot = boot
+        self._launch_agent_ids = launch_agent_ids
         self._extension_result = getattr(boot, "extension_result", None) or LoadResult()
 
     @property
@@ -902,6 +908,7 @@ class RuntimeHost:
         extension_result = await load_extensions_async(
             tool_bus=tool_bus,
             app_config=app_config,
+            enabled_names=app_config.resolve_agent_extensions(self._launch_agent_ids),
         )
         next_boot = boot_factory(
             app_config,

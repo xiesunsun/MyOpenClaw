@@ -11,7 +11,11 @@ from pickel.app.application import RuntimeApplication
 from pickel.cli.chat import ChatLoop
 from pickel.cli.query import QuerySurface
 from pickel.cli.query_input import read_query_input
-from pickel.app.runtime_models import ConversationRequest, TurnRequest
+from pickel.app.runtime_models import (
+    ConversationRequest,
+    RuntimeLaunchRequest,
+    TurnRequest,
+)
 from pickel.config.loader import Config
 from pickel.conversations.service import SessionNotFoundError
 from pickel.extensions_host.loader import load_extensions
@@ -21,6 +25,7 @@ from pickel.tools.catalog import install_builtin_tools
 app = typer.Typer(invoke_without_command=True)
 sessions_app = typer.Typer(invoke_without_command=True)
 config_app = typer.Typer(help="配置相关命令")
+QUERY_DEFAULT_AGENT = "shell"
 
 
 def _prepare_boot() -> tuple[Config, ToolBus]:
@@ -52,7 +57,9 @@ def _run_chat(
     session_id: str | None,
 ) -> None:
     async def _main() -> None:
-        async with RuntimeApplication.open(cwd=Path.cwd()) as runtime:
+        async with RuntimeApplication.open(
+            RuntimeLaunchRequest(cwd=Path.cwd())
+        ) as runtime:
             for warning in runtime.warnings:
                 typer.secho(
                     f"Extension load error: {warning}",
@@ -90,7 +97,7 @@ def _run_query(
     query: str,
     agent: str | None,
     session_id: str | None,
-    ephemeral: bool,
+    save_session: bool,
     output_format: str,
 ) -> None:
     if output_format not in {"text", "json", "jsonl"}:
@@ -104,7 +111,17 @@ def _run_query(
         raise typer.Exit(code=2) from exc
 
     async def _main():
-        async with RuntimeApplication.open(cwd=Path.cwd()) as runtime:
+        resolved_agent = agent
+        if resolved_agent is None and session_id is None:
+            resolved_agent = QUERY_DEFAULT_AGENT
+        launch_agent_ids = (resolved_agent,) if resolved_agent is not None else None
+        async with RuntimeApplication.open(
+            RuntimeLaunchRequest(
+                cwd=Path.cwd(),
+                agent_ids=launch_agent_ids,
+                session_id=(session_id if resolved_agent is None else None),
+            )
+        ) as runtime:
             for warning in runtime.warnings:
                 typer.secho(
                     f"Extension load error: {warning}",
@@ -114,9 +131,13 @@ def _run_query(
             assert runtime.host is not None
             conversation = runtime.host.open_conversation(
                 ConversationRequest(
-                    agent_id=agent,
+                    agent_id=resolved_agent,
                     session_id=session_id,
-                    persistence="ephemeral" if ephemeral else "persistent",
+                    persistence=(
+                        "persistent"
+                        if save_session or session_id is not None
+                        else "ephemeral"
+                    ),
                     cwd=Path.cwd(),
                 )
             )
@@ -157,7 +178,7 @@ def main(
     session_id: str | None = typer.Option(None, "--session-id"),
     query: str | None = typer.Option(None, "--query", "-q"),
     output_format: str = typer.Option("text", "--output-format"),
-    ephemeral: bool = typer.Option(False, "--ephemeral"),
+    save_session: bool = typer.Option(False, "--save-session"),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -166,13 +187,14 @@ def main(
             query=query,
             agent=agent,
             session_id=session_id,
-            ephemeral=ephemeral,
+            save_session=save_session,
             output_format=output_format,
         )
         return
-    if output_format != "text" or ephemeral:
+    if output_format != "text" or save_session:
         typer.echo(
-            "--output-format 与 --ephemeral 只能和 -q/--query 一起使用", err=True
+            "--output-format 与 --save-session 只能和 -q/--query 一起使用",
+            err=True,
         )
         raise typer.Exit(code=2)
     _run_chat(agent=agent, session_id=session_id)

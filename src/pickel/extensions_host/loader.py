@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import dataclass, field
 import importlib
 import importlib.util
@@ -43,6 +44,7 @@ def load_extensions(
     app_config: Any,
     home: Path | None = None,
     builtin_package: str | None = _BUILTIN_PACKAGE,
+    enabled_names: Collection[str] | None = None,
 ) -> LoadResult:
     """同步入口。setup 可以是 async def，内部 asyncio.run 承接。
 
@@ -54,6 +56,7 @@ def load_extensions(
             app_config=app_config,
             home=home,
             builtin_package=builtin_package,
+            enabled_names=enabled_names,
         )
     )
 
@@ -64,11 +67,23 @@ async def load_extensions_async(
     app_config: Any,
     home: Path | None = None,
     builtin_package: str | None = _BUILTIN_PACKAGE,
+    enabled_names: Collection[str] | None = None,
 ) -> LoadResult:
     result = LoadResult()
     sections = getattr(app_config, "extensions", None) or {}
+    discovered = _discover(home, builtin_package)
+    if enabled_names is not None:
+        requested = set(enabled_names)
+        missing = requested.difference(discovered)
+        for name in sorted(missing):
+            result.errors.append(
+                ExtensionLoadError(f"Unknown extension requested by agent: '{name}'")
+            )
+        discovered = {
+            name: loader for name, loader in discovered.items() if name in requested
+        }
 
-    for name, module_loader in _discover(home, builtin_package).items():
+    for name, module_loader in discovered.items():
         try:
             module = module_loader()
         except Exception as exc:
@@ -81,9 +96,7 @@ async def load_extensions_async(
         setup = getattr(module, "setup", None)
         if setup is None:
             result.errors.append(
-                ExtensionLoadError(
-                    f"Extension '{name}' has no setup(host) function"
-                )
+                ExtensionLoadError(f"Extension '{name}' has no setup(host) function")
             )
             continue
 

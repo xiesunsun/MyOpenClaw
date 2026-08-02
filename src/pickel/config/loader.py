@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from pickel.config.agents import scan_agents
+from pickel.config.agents import scan_agents, scan_agents_dir
 from pickel.config.app_config import AppConfig
 from pickel.config.auth import auth_path, load_auth
 from pickel.config.models_catalog import load_models, models_path
@@ -18,6 +18,7 @@ from pickel.config.paths import discover_project_root, home_dir
 from pickel.config.settings import load_settings, settings_path
 
 _PROJECT_DIR = ".pickel"
+_BUILTIN_AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "builtin"
 
 # 内置默认（最低优先级；不含 default_agent / default_llm，须由 settings 提供）
 _BUILTIN_DEFAULTS: dict[str, Any] = {
@@ -104,7 +105,7 @@ class Config:
                     )
         merged["extensions"] = extensions
 
-        agents: dict[str, Any] = {}
+        agents = scan_agents_dir(_BUILTIN_AGENTS_DIR, project_root=root)
         if isinstance(merged.get("agents"), dict):
             agents = deep_merge(agents, merged["agents"])
         if project_root is not None:

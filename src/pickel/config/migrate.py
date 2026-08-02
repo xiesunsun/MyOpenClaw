@@ -17,9 +17,7 @@ import yaml
 from pickel.config.paths import home_dir, sessions_db_path
 
 # openviking：策略进 settings 的 extensions.openviking，密钥进 auth 的 extensions.openviking
-_OPENVIKING_SECRET_KEYS = frozenset(
-    {"base_url", "account_id", "user_id", "user_key"}
-)
+_OPENVIKING_SECRET_KEYS = frozenset({"base_url", "account_id", "user_id", "user_key"})
 _OPENVIKING_STRATEGY_KEYS = frozenset(
     {
         "enabled",
@@ -35,6 +33,7 @@ _MODEL_SECRET_KEYS = frozenset({"api_key", "api_base"})
 _AGENT_YAML_FIELDS = (
     "workspace_path",
     "tools",
+    "extensions",
     "file_access_mode",
     "llm",
     "remote_agent_id",
@@ -130,9 +129,7 @@ def _build_settings(raw: dict[str, Any], *, project_root: Path) -> dict[str, Any
 
     if "trace_enabled" in raw and "observability" not in settings:
         settings["observability"] = {
-            "trace": {
-                "mode": "standard" if bool(raw["trace_enabled"]) else "off"
-            }
+            "trace": {"mode": "standard" if bool(raw["trace_enabled"]) else "off"}
         }
 
     skills = raw.get("default_skills_path")
@@ -143,9 +140,7 @@ def _build_settings(raw: dict[str, Any], *, project_root: Path) -> dict[str, Any
 
     ov = raw.get("openviking")
     if isinstance(ov, dict):
-        strategy = {
-            k: v for k, v in ov.items() if k in _OPENVIKING_STRATEGY_KEYS
-        }
+        strategy = {k: v for k, v in ov.items() if k in _OPENVIKING_STRATEGY_KEYS}
         if strategy:
             settings.setdefault("extensions", {})["openviking"] = strategy
 
@@ -206,9 +201,7 @@ def _build_auth(
     return auth
 
 
-def _merge_write_auth(
-    path: Path, incoming: dict[str, Any]
-) -> dict[str, Any]:
+def _merge_write_auth(path: Path, incoming: dict[str, Any]) -> dict[str, Any]:
     """写入 auth.json；已存在则合并不覆盖已有密钥键。"""
     skipped: list[str] = []
     merged = False
@@ -331,9 +324,7 @@ def _migrate_sessions(
         bak = _rename_to_bak(legacy)
         info["action"] = "copied"
         info["legacy_bak"] = str(bak) if bak else None
-        warnings.append(
-            "已复制项目 sessions.db 到全局；若 schema 非 v3 可能需重建"
-        )
+        warnings.append("已复制项目 sessions.db 到全局；若 schema 非 v3 可能需重建")
         return info
 
     # 全局库已存在：尝试导入补 cwd；失败则备份说明
@@ -362,8 +353,7 @@ def _fill_missing_cwd(
     try:
         with sqlite3.connect(db_path) as conn:
             cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+                row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
             }
             if "sessions" not in {
                 r[0]
@@ -374,9 +364,7 @@ def _fill_missing_cwd(
                 warnings.append("全局 sessions.db 无 sessions 表，跳过 cwd 回填")
                 return
             if "cwd" not in cols:
-                warnings.append(
-                    "sessions 表无 cwd 列（非 v3 schema），跳过 cwd 回填"
-                )
+                warnings.append("sessions 表无 cwd 列（非 v3 schema），跳过 cwd 回填")
                 return
             conn.execute(
                 """
@@ -391,9 +379,7 @@ def _fill_missing_cwd(
         warnings.append(f"cwd 回填失败: {exc}")
 
 
-def _import_sessions(
-    *, source: Path, target: Path, project_root: Path
-) -> int:
+def _import_sessions(*, source: Path, target: Path, project_root: Path) -> int:
     """把 source 中 sessions/entries 导入 target（同 id 跳过）。返回导入 session 数。"""
     cwd_value = str(project_root.resolve())
     imported = 0
@@ -417,8 +403,7 @@ def _import_sessions(
             raise ValueError("sessions 表缺少 session_id")
 
         existing = {
-            r[0]
-            for r in dst.execute("SELECT session_id FROM sessions").fetchall()
+            r[0] for r in dst.execute("SELECT session_id FROM sessions").fetchall()
         }
         session_rows = src.execute("SELECT * FROM sessions").fetchall()
         for row in session_rows:

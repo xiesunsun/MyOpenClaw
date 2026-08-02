@@ -226,7 +226,9 @@ class ConfigLoaderTests(unittest.TestCase):
             self.assertEqual("model-key", model.api_key)
             self.assertEqual("https://auth.example.com", model.api_base)
 
-    def test_extensions_openviking_merges_settings_strategy_and_auth_secrets(self) -> None:
+    def test_extensions_openviking_merges_settings_strategy_and_auth_secrets(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             project = Path(tmpdir) / "project"
@@ -239,7 +241,11 @@ class ConfigLoaderTests(unittest.TestCase):
                         "openviking": {
                             "enabled": True,
                             "timeout_seconds": 45,
-                            "session_recall": {"enabled": False, "max_chars": 1000, "limit": 2},
+                            "session_recall": {
+                                "enabled": False,
+                                "max_chars": 1000,
+                                "limit": 2,
+                            },
                         }
                     }
                 ),
@@ -279,7 +285,9 @@ class ConfigLoaderTests(unittest.TestCase):
             home.mkdir()
             project = Path(tmpdir) / "project"
             (project / "agents" / "Pickle").mkdir(parents=True)
-            (project / "agents" / "Pickle" / "AGENT.md").write_text("hi", encoding="utf-8")
+            (project / "agents" / "Pickle" / "AGENT.md").write_text(
+                "hi", encoding="utf-8"
+            )
             (project / "config.yaml").write_text(
                 "default_agent: Pickle\n",
                 encoding="utf-8",
@@ -302,13 +310,11 @@ class ConfigLoaderTests(unittest.TestCase):
             agent_dir.mkdir(parents=True)
             (agent_dir / "AGENT.md").write_text("# Pickle\n", encoding="utf-8")
             (agent_dir / "agent.yaml").write_text(
-                textwrap.dedent(
-                    """
+                textwrap.dedent("""
                     workspace_path: workspace
                     tools:
                       - echo
-                    """
-                ).strip(),
+                    """).strip(),
                 encoding="utf-8",
             )
 
@@ -317,15 +323,13 @@ class ConfigLoaderTests(unittest.TestCase):
             self._write_json(home / "auth.json", {"providers": {}})
 
             (project / "config.yaml").write_text(
-                textwrap.dedent(
-                    """
+                textwrap.dedent("""
                     agents:
                       Pickle:
                         workspace_path: ignored
                         tools:
                           - should_not_load
-                    """
-                ).strip(),
+                    """).strip(),
                 encoding="utf-8",
             )
 
@@ -366,7 +370,7 @@ class ConfigLoaderTests(unittest.TestCase):
 
             self.assertEqual("Pickle", config.default_agent)
 
-    def test_agents_empty_when_no_legacy_yaml(self) -> None:
+    def test_builtin_shell_exists_without_project_agents(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             project = Path(tmpdir) / "project"
@@ -378,7 +382,11 @@ class ConfigLoaderTests(unittest.TestCase):
 
             config = Config.load(cwd=project, home=home)
 
-            self.assertEqual({}, config.agents)
+            self.assertEqual(["shell"], list(config.agents))
+            shell = config.agents["shell"]
+            self.assertEqual([], shell.tools)
+            self.assertEqual([], shell.extensions)
+            self.assertEqual(frozenset(), config.resolve_agent_extensions(("shell",)))
 
 
 if __name__ == "__main__":

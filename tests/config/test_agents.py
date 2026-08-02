@@ -55,17 +55,17 @@ class AgentsScanTests(unittest.TestCase):
             foo.mkdir(parents=True)
             (foo / "AGENT.md").write_text("# Foo\n", encoding="utf-8")
             (foo / "agent.yaml").write_text(
-                textwrap.dedent(
-                    """
+                textwrap.dedent("""
                     workspace_path: foo_ws
                     tools:
                       - read_file
+                    extensions:
+                      - mcp
                     file_access_mode: full
                     llm:
                       provider: google/gemini
                       model: gemini-3-flash-preview
-                    """
-                ).strip(),
+                    """).strip(),
                 encoding="utf-8",
             )
             (root / "foo_ws").mkdir()
@@ -75,6 +75,7 @@ class AgentsScanTests(unittest.TestCase):
             self.assertIn("Foo", scanned)
             self.assertEqual("foo_ws", scanned["Foo"]["workspace_path"])
             self.assertEqual(["read_file"], scanned["Foo"]["tools"])
+            self.assertEqual(["mcp"], scanned["Foo"]["extensions"])
             self.assertEqual("agents/Foo", scanned["Foo"]["behavior_path"])
 
     def test_config_load_finds_directory_agent(self) -> None:
@@ -86,8 +87,7 @@ class AgentsScanTests(unittest.TestCase):
             foo.mkdir(parents=True)
             (foo / "AGENT.md").write_text("# Foo\n", encoding="utf-8")
             (foo / "agent.yaml").write_text(
-                textwrap.dedent(
-                    """
+                textwrap.dedent("""
                     workspace_path: foo_ws
                     tools:
                       - read_file
@@ -96,8 +96,7 @@ class AgentsScanTests(unittest.TestCase):
                     llm:
                       provider: google/gemini
                       model: gemini-3-flash-preview
-                    """
-                ).strip(),
+                    """).strip(),
                 encoding="utf-8",
             )
             (project / "foo_ws").mkdir()
@@ -123,13 +122,11 @@ class AgentsScanTests(unittest.TestCase):
             foo.mkdir(parents=True)
             (foo / "AGENT.md").write_text("# Foo\n", encoding="utf-8")
             (foo / "agent.yaml").write_text(
-                textwrap.dedent(
-                    """
+                textwrap.dedent("""
                     workspace_path: from_dir
                     tools:
                       - from_dir_tool
-                    """
-                ).strip(),
+                    """).strip(),
                 encoding="utf-8",
             )
             (project / "from_dir").mkdir()
