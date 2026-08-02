@@ -11,27 +11,29 @@ import select
 import signal
 import subprocess
 import termios
-import threading
 import time
 from typing import Any, Protocol
 from uuid import uuid4
 
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
 from pickel.tools.sandbox import SandboxPolicy
 
 
 class ShellStatus(StrEnum):
     READY = "ready"
-    RUNNING = "running"          # 前台命令仍在执行（超时后 pending）
+    RUNNING = "running"  # 前台命令仍在执行（超时后 pending）
     TERMINATED = "terminated"
-    TIMED_OUT = "timed_out"
-    ERROR = "error"
 
 
 @dataclass(frozen=True)
 class OutputLimits:
-    raw_max_chars: int = 2 * 1024 * 1024   # 采集缓冲上限，超过丢中间
-    result_max_chars: int = 30_000          # 注入结果上限
+    raw_max_chars: int = 2 * 1024 * 1024  # 采集缓冲上限，超过丢中间
+    result_max_chars: int = 30_000  # 注入结果上限
     head_chars: int = 20_000
     tail_chars: int = 8_000
 
@@ -98,6 +100,9 @@ class PtyShellProcess:
             if env:
                 shell_env.update(env)
             shell_env.setdefault("TERM", "dumb")
+            # macOS 自带 Bash 3.2 会向首次命令输出升级 zsh 的提示；它不是
+            # 命令结果，且 Seatbelt 启动稍慢时可能越过启动 drain 窗口。
+            shell_env["BASH_SILENCE_DEPRECATION_WARNING"] = "1"
             shell_env["PS1"] = ""
             shell_env["PS2"] = ""
             shell_env["PROMPT"] = ""
@@ -301,10 +306,7 @@ class PersistentShell:
         if self._running:
             raise RuntimeError("The shell is already executing a command")
         if self.pending:
-            raise RuntimeError(
-                "A foreground command is still running; "
-                "use shell_wait / shell_stdin / shell_interrupt first"
-            )
+            raise RuntimeError("The previous foreground command is still being stopped")
 
         self.start()
         if not self.is_alive():
@@ -325,12 +327,16 @@ class PersistentShell:
             self.process.write(wrapped_command)
             return self._read_until_marker(
                 marker,
-                timeout_ms=self.default_timeout_ms if timeout_ms is None else timeout_ms,
+                timeout_ms=(
+                    self.default_timeout_ms if timeout_ms is None else timeout_ms
+                ),
             )
         finally:
             self._running = False
 
-    def _read_until_marker(self, marker: str, *, timeout_ms: int) -> ShellExecutionResult:
+    def _read_until_marker(
+        self, marker: str, *, timeout_ms: int
+    ) -> ShellExecutionResult:
         buffer = ""
         err_buffer = ""
         deadline = time.monotonic() + (timeout_ms / 1000)
@@ -359,7 +365,7 @@ class PersistentShell:
                 _, late_err = self.process.read_chunks(timeout_ms=50)
                 err_buffer += late_err
                 output, truncated, full_path = self._finalize_output(
-                    _normalize_output(buffer[:marker_match.start()])
+                    _normalize_output(buffer[: marker_match.start()])
                 )
                 exit_code = int(marker_match.group("exit_code"))
                 cwd = Path(marker_match.group("cwd"))
@@ -376,8 +382,8 @@ class PersistentShell:
 
             remaining_ms = int((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
-                # 超时不杀任何进程：命令继续在前台跑，会话进 pending，
-                # agent 可用 shell_wait / shell_stdin / shell_interrupt 续处理
+                # 先返回 pending 结果；LocalBashOperations 随即负责中断前台
+                # 进程并恢复 Shell，模型无需管理 Runtime 内部状态。
                 stdout, truncated, full_path = self._finalize_output(
                     _normalize_output(buffer)
                 )
@@ -385,9 +391,7 @@ class PersistentShell:
                     stdout=stdout,
                     stderr=_normalize_output(err_buffer),
                     status_message=(
-                        "Command timed out and is still running in the foreground. "
-                        "Use shell_wait to keep waiting, shell_stdin to send input, "
-                        "or shell_interrupt to stop it."
+                        "Command timed out and is being stopped by the runtime."
                     ),
                     exit_code=124,
                     cwd=self._last_cwd,
@@ -413,27 +417,12 @@ class PersistentShell:
                     + buffer[-keep_tail:]
                 )
 
-    def wait_foreground(self, timeout_ms: int | None = None) -> ShellExecutionResult:
-        """续等 pending 前台命令，直到 marker 或再次超时。"""
+    def interrupt_foreground(self) -> ShellExecutionResult:
+        """超时后停止前台进程；Shell 不可恢复时才丢弃会话。"""
         marker = self._require_pending()
-        return self._read_until_marker(
-            marker,
-            timeout_ms=self.default_timeout_ms if timeout_ms is None else timeout_ms,
-        )
-
-    def write_stdin(self, text: str, *, newline: bool = True) -> ShellExecutionResult:
-        """向 pending 前台命令写入文本，返回短窗口内的增量输出。"""
-        self._require_pending()
-        self.process.write(text + ("\n" if newline else ""))
-        return self._read_pending_window(window_ms=300)
-
-    def interrupt_foreground(self, *, kill: bool = False) -> ShellExecutionResult:
-        """SIGINT（或 SIGKILL）前台进程组；shell 不可恢复时才弃会话。"""
-        marker = self._require_pending()
-        sig = signal.SIGKILL if kill else signal.SIGINT
-        self.process.signal_foreground(sig)
+        self.process.signal_foreground(signal.SIGINT)
         result = self._read_until_marker(marker, timeout_ms=2000)
-        if result.shell_status is ShellStatus.RUNNING and not kill:
+        if result.shell_status is ShellStatus.RUNNING:
             # SIGINT 无效（命令捕获/忽略了），升级 SIGKILL 再试一轮
             self.process.signal_foreground(signal.SIGKILL)
             result = self._read_until_marker(marker, timeout_ms=2000)
@@ -454,11 +443,6 @@ class PersistentShell:
         if self._pending_marker is None:
             raise RuntimeError("No foreground command is pending")
         return self._pending_marker
-
-    def _read_pending_window(self, *, window_ms: int) -> ShellExecutionResult:
-        """短窗口增量读：可能读到 marker（命令因输入而结束），也可能只有增量输出。"""
-        marker = self._require_pending()
-        return self._read_until_marker(marker, timeout_ms=window_ms)
 
     def _finalize_output(self, output: str) -> tuple[str, bool, Path | None]:
         """结果档：超上限截中间保头尾，完整输出落盘给引用。"""
@@ -492,79 +476,6 @@ class PersistentShell:
         return f"__pickel_marker='{marker}'; {{ :\n{command}\n}}{redirect}\n"
 
 
-@dataclass
-class ShellSession:
-    session_id: str
-    workspace_path: Path
-    shell: PersistentShell
-    created_at: float
-    last_used_at: float
-
-
-class BackgroundTask:
-    """独立 pty 上跑的一条后台命令。reader 线程持续采集输出。"""
-
-    def __init__(
-        self,
-        *,
-        task_id: str,
-        command: str,
-        workspace_path: Path,
-        shell_program: str,
-        limits: OutputLimits | None = None,
-        sandbox: SandboxPolicy | None = None,
-    ) -> None:
-        self.task_id = task_id
-        self.command = command
-        self.started_at = time.time()
-        self._limits = limits or OutputLimits()
-        self._lock = threading.Lock()
-        self._buffer = ""
-        self._process = PtyShellProcess(
-            shell_program=shell_program, sandbox=sandbox
-        )
-        self._process.spawn(workspace_path)
-        self._process.write(self.command + "\nexit $?\n")
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
-
-    def _read_loop(self) -> None:
-        while self._process.is_alive():
-            out, err = self._process.read_chunks(timeout_ms=200)
-            if out or err:
-                self._append(out + err)
-        # 进程退出后 drain 残余
-        out, err = self._process.read_chunks(timeout_ms=100)
-        if out or err:
-            self._append(out + err)
-
-    def _append(self, text: str) -> None:
-        with self._lock:
-            self._buffer += text
-            if len(self._buffer) > self._limits.raw_max_chars:
-                keep = self._limits.raw_max_chars // 2
-                self._buffer = (
-                    self._buffer[:keep] + "\n... [dropped] ...\n"
-                    + self._buffer[-keep // 2 :]
-                )
-
-    def read_output(self, since: int = 0) -> tuple[str, int]:
-        with self._lock:
-            text = _normalize_output(self._buffer)
-        return text[since:], len(text)
-
-    def status(self) -> str:
-        return "running" if self._process.is_alive() else "exited"
-
-    @property
-    def exit_code(self) -> int | None:
-        proc = self._process._process
-        return None if proc is None else proc.poll()
-
-    def kill(self) -> None:
-        self._process.terminate()
-
-
 class ShellSessionManager:
     def __init__(
         self,
@@ -573,97 +484,30 @@ class ShellSessionManager:
     ) -> None:
         self.shell_program = shell_program
         self.sandbox = sandbox
-        self._sessions: dict[str, ShellSession] = {}
-        self._background: dict[str, dict[str, BackgroundTask]] = {}
+        self._sessions: dict[str, PersistentShell] = {}
 
     def __del__(self) -> None:
         for session_id in list(self._sessions):
             self.close(session_id)
 
-    def start_background(
-        self, session_id: str, workspace_path: Path, command: str
-    ) -> BackgroundTask:
-        task = BackgroundTask(
-            task_id=uuid4().hex[:8],
-            command=command,
-            workspace_path=workspace_path.resolve(),
-            shell_program=self.shell_program,
-            sandbox=self.sandbox,
-        )
-        self._background.setdefault(session_id, {})[task.task_id] = task
-        return task
-
-    def background_tasks(self, session_id: str) -> list[BackgroundTask]:
-        return list(self._background.get(session_id, {}).values())
-
-    def get_background(self, session_id: str, task_id: str) -> BackgroundTask | None:
-        return self._background.get(session_id, {}).get(task_id)
-
-    def kill_background(self, session_id: str, task_id: str) -> bool:
-        task = self.get_background(session_id, task_id)
-        if task is None:
-            return False
-        task.kill()
-        return True
-
-    def get(self, session_id: str) -> ShellSession | None:
-        return self._sessions.get(session_id)
-
-    def get_or_create(self, session_id: str, workspace_path: Path) -> ShellSession:
-        session = self._sessions.get(session_id)
-        if session is None:
-            now = time.time()
-            session = ShellSession(
-                session_id=session_id,
-                workspace_path=workspace_path.resolve(),
-                shell=PersistentShell(
-                    workspace_path=workspace_path.resolve(),
-                    process=PtyShellProcess(
-                        shell_program=self.shell_program, sandbox=self.sandbox
-                    ),
-                    output_dir=workspace_path.resolve()
-                    / ".pickel" / "shell-output" / session_id,
-                ),
-                created_at=now,
-                last_used_at=now,
-            )
-            self._sessions[session_id] = session
-        session.last_used_at = time.time()
-        return session
-
-    def restart(
-        self, session_id: str, workspace_path: Path, *, sandbox: bool = True
-    ) -> ShellSession:
-        existing = self._sessions.get(session_id)
-        if existing is not None:
-            existing.shell.terminate()
-        policy = self.sandbox
-        if not sandbox and policy is not None and policy.allow_disable:
-            policy = replace(policy, enabled=False)
-        session = ShellSession(
-            session_id=session_id,
-            workspace_path=workspace_path.resolve(),
-            shell=PersistentShell(
-                workspace_path=workspace_path.resolve(),
+    def get_or_create(self, session_id: str, workspace_path: Path) -> PersistentShell:
+        shell = self._sessions.get(session_id)
+        if shell is None:
+            workspace = workspace_path.resolve()
+            shell = PersistentShell(
+                workspace_path=workspace,
                 process=PtyShellProcess(
-                    shell_program=self.shell_program, sandbox=policy
+                    shell_program=self.shell_program, sandbox=self.sandbox
                 ),
-                output_dir=workspace_path.resolve()
-                / ".pickel" / "shell-output" / session_id,
-            ),
-            created_at=time.time(),
-            last_used_at=time.time(),
-        )
-        session.shell.start()
-        self._sessions[session_id] = session
-        return session
+                output_dir=workspace / ".pickel" / "shell-output" / session_id,
+            )
+            self._sessions[session_id] = shell
+        return shell
 
     def close(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
-        if session is not None:
-            session.shell.terminate()
-        for task in self._background.pop(session_id, {}).values():
-            task.kill()
+        shell = self._sessions.pop(session_id, None)
+        if shell is not None:
+            shell.terminate()
 
 
 class LocalBashOperations:
@@ -684,17 +528,17 @@ class LocalBashOperations:
         command: str,
         timeout: float | None = None,
     ) -> ShellExecutionResult:
-        session = self._sessions.get_or_create(session_id, workspace_path)
+        shell = self._sessions.get_or_create(session_id, workspace_path)
         timeout_ms = None if timeout is None else max(1, int(timeout * 1000))
-        result = await asyncio.to_thread(session.shell.exec, command, timeout_ms)
+        result = await asyncio.to_thread(shell.exec, command, timeout_ms)
         if not result.timed_out:
             return replace(
                 result,
                 environment="local",
-                sandboxed=session.shell.process.sandboxed,
+                sandboxed=shell.process.sandboxed,
             )
 
-        stopped = await asyncio.to_thread(session.shell.interrupt_foreground)
+        stopped = await asyncio.to_thread(shell.interrupt_foreground)
         return ShellExecutionResult(
             stdout=_join_output(result.stdout, stopped.stdout),
             stderr=_join_output(result.stderr, stopped.stderr),
@@ -706,7 +550,7 @@ class LocalBashOperations:
             truncated=result.truncated or stopped.truncated,
             full_output_path=stopped.full_output_path or result.full_output_path,
             environment="local",
-            sandboxed=session.shell.process.sandboxed,
+            sandboxed=shell.process.sandboxed,
         )
 
     def close(self, session_id: str) -> None:
@@ -792,8 +636,7 @@ class BashTool(BaseTool):
                 is_error=True,
             )
 
-        # macOS 沙箱接入前保留既有的最低限度保护；不再扩充规则，待真实
-        # OS 边界落地后删除。
+        # 仅作为明显误操作的快速反馈；真正安全边界由执行环境提供。
         reason = _dangerous_command_reason(str(arguments["command"]))
         if reason is not None:
             return ToolExecutionResult(
@@ -838,117 +681,6 @@ class BashTool(BaseTool):
         )
 
 
-class ShellExecTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_exec",
-        description=(
-            "Execute a command inside the current session shell. "
-            "The shell is persistent for the duration of the conversation session and starts in the workspace directory."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to run in the current persistent shell.",
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Optional timeout override for this command in milliseconds.",
-                    "minimum": 1,
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": (
-                        "Run in the background; returns a task_id to poll with shell_output."
-                    ),
-                },
-            },
-            "required": ["command"],
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-
-        reason = _dangerous_command_reason(str(arguments["command"]))
-        if reason is not None:
-            return ToolExecutionResult(
-                content=(
-                    f"Command blocked ({reason}). "
-                    "If this is genuinely intended, ask the user to run it manually."
-                ),
-                is_error=True,
-                metadata={"blocked": True, "reason": reason},
-            )
-
-        if arguments.get("background"):
-            task = manager.start_background(
-                context.session_id, context.workspace_path, str(arguments["command"])
-            )
-            return ToolExecutionResult(
-                content=f"Background task started: {task.task_id}",
-                metadata={"task_id": task.task_id, "background": True},
-            )
-
-        created_new_shell = manager.get(context.session_id) is None
-        session = manager.get_or_create(context.session_id, context.workspace_path)
-
-        if not created_new_shell and not session.shell.is_alive():
-            return ToolExecutionResult(
-                content="Shell is not running. Call shell_restart to create a fresh shell.",
-                is_error=True,
-                metadata={
-                    "cwd": str(session.shell.cwd),
-                    "exit_code": 1,
-                    "shell_status": ShellStatus.TERMINATED,
-                    "timed_out": False,
-                    "truncated": False,
-                    "created_new_shell": False,
-                },
-            )
-
-        timeout_ms = arguments.get("timeout_ms")
-        if timeout_ms is not None and int(timeout_ms) <= 0:
-            return ToolExecutionResult(
-                content="timeout_ms must be a positive integer.",
-                is_error=True,
-                metadata={
-                    "cwd": str(session.shell.cwd),
-                    "exit_code": 1,
-                    "shell_status": ShellStatus.ERROR,
-                    "timed_out": False,
-                    "truncated": False,
-                    "created_new_shell": created_new_shell,
-                },
-            )
-
-        try:
-            result = await asyncio.to_thread(
-                session.shell.exec,
-                str(arguments["command"]),
-                int(timeout_ms) if timeout_ms is not None else None,
-            )
-        except RuntimeError as exc:
-            return ToolExecutionResult(content=str(exc), is_error=True)
-        return ToolExecutionResult(
-            content=_format_result_content(result),
-            is_error=(
-                result.exit_code != 0
-                or result.shell_status not in (ShellStatus.READY, ShellStatus.RUNNING)
-            ),
-            metadata=_result_metadata(
-                result,
-                created_new_shell=created_new_shell,
-                sandboxed=session.shell.process.sandboxed,
-            ),
-        )
-
-
 def _format_result_content(result: ShellExecutionResult) -> str:
     parts = [result.stdout] if result.stdout else []
     if result.stderr:
@@ -958,366 +690,7 @@ def _format_result_content(result: ShellExecutionResult) -> str:
     return "\n".join(parts)
 
 
-def _result_metadata(
-    result: ShellExecutionResult, **extra: Any
-) -> dict[str, Any]:
-    return {
-        "cwd": str(result.cwd),
-        "exit_code": result.exit_code,
-        "shell_status": result.shell_status,
-        "timed_out": result.timed_out,
-        "truncated": result.truncated,
-        "full_output_path": (
-            str(result.full_output_path) if result.full_output_path else None
-        ),
-        "stderr_chars": len(result.stderr),
-        **extra,
-    }
-
-
-def _foreground_result(result: ShellExecutionResult) -> ToolExecutionResult:
-    # 三件套的 is_error 只看 shell 是否被弃：非零退出码（如 SIGINT 的 130）
-    # 是被请求动作的正常结果，不是工具错误
-    return ToolExecutionResult(
-        content=_format_result_content(result) or "(no new output)",
-        is_error=result.shell_status is ShellStatus.TERMINATED,
-        metadata=_result_metadata(result),
-    )
-
-
-def _require_pending_shell(
-    manager: ShellSessionManager, session_id: str
-) -> ShellSession | None:
-    session = manager.get(session_id)
-    if session is None or not session.shell.pending:
-        return None
-    return session
-
-
-def _no_pending_result() -> ToolExecutionResult:
-    return ToolExecutionResult(
-        content="No foreground command is pending.", is_error=True
-    )
-
-
-class ShellWaitTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_wait",
-        description=(
-            "Keep waiting for the foreground command that previously timed out in shell_exec. "
-            "Returns new output since the last call."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "How long to wait this time, in milliseconds.",
-                },
-            },
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        session = _require_pending_shell(manager, context.session_id)
-        if session is None:
-            return _no_pending_result()
-        timeout_ms = arguments.get("timeout_ms")
-        result = await asyncio.to_thread(
-            session.shell.wait_foreground,
-            int(timeout_ms) if timeout_ms is not None else None,
-        )
-        return _foreground_result(result)
-
-
-class ShellStdinTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_stdin",
-        description=(
-            "Send text to the stdin of the foreground command still running in the session shell "
-            "(e.g. to answer an interactive prompt). Returns any output produced shortly after."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Text to write to the foreground command's stdin.",
-                },
-                "newline": {
-                    "type": "boolean",
-                    "description": "Append a trailing newline (submit the input). Default true.",
-                },
-            },
-            "required": ["text"],
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        session = _require_pending_shell(manager, context.session_id)
-        if session is None:
-            return _no_pending_result()
-        result = await asyncio.to_thread(
-            lambda: session.shell.write_stdin(
-                str(arguments["text"]),
-                newline=bool(arguments.get("newline", True)),
-            )
-        )
-        return _foreground_result(result)
-
-
-class ShellInterruptTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_interrupt",
-        description=(
-            "Stop the foreground command still running in the session shell. "
-            "Sends SIGINT first (escalating to SIGKILL if needed); set kill=true to SIGKILL directly. "
-            "The shell session itself survives and stays usable."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "kill": {
-                    "type": "boolean",
-                    "description": "Send SIGKILL immediately instead of SIGINT. Default false.",
-                },
-            },
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        session = _require_pending_shell(manager, context.session_id)
-        if session is None:
-            return _no_pending_result()
-        result = await asyncio.to_thread(
-            lambda: session.shell.interrupt_foreground(
-                kill=bool(arguments.get("kill", False))
-            )
-        )
-        return _foreground_result(result)
-
-
-def _unknown_task_result(
-    manager: ShellSessionManager, session_id: str, task_id: str
-) -> ToolExecutionResult:
-    known = [task.task_id for task in manager.background_tasks(session_id)]
-    listing = ", ".join(known) if known else "(none)"
-    return ToolExecutionResult(
-        content=f"Unknown task_id: {task_id}. Known tasks: {listing}",
-        is_error=True,
-    )
-
-
-class ShellTasksTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_tasks",
-        description="List background tasks started with shell_exec background=true in this session.",
-        input_schema={
-            "type": "object",
-            "properties": {},
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        tasks = manager.background_tasks(context.session_id)
-        if not tasks:
-            return ToolExecutionResult(content="No background tasks.")
-        lines = []
-        now = time.time()
-        for task in tasks:
-            runtime = int(now - task.started_at)
-            command = task.command.replace("\n", " ")[:60]
-            lines.append(f"{task.task_id}  {task.status()}  {runtime}s  {command}")
-        return ToolExecutionResult(
-            content="\n".join(lines),
-            metadata={"task_ids": [task.task_id for task in tasks]},
-        )
-
-
-class ShellOutputTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_output",
-        description=(
-            "Read output from a background task. Pass the `since` offset from the previous "
-            "call's metadata to read only new output."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Background task id returned by shell_exec.",
-                },
-                "since": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Read from this offset (metadata.next_since of the previous call).",
-                },
-            },
-            "required": ["task_id"],
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        task_id = str(arguments["task_id"])
-        task = manager.get_background(context.session_id, task_id)
-        if task is None:
-            return _unknown_task_result(manager, context.session_id, task_id)
-        text, next_since = task.read_output(since=int(arguments.get("since", 0)))
-        return ToolExecutionResult(
-            content=text,
-            metadata={
-                "task_id": task.task_id,
-                "next_since": next_since,
-                "status": task.status(),
-                "exit_code": task.exit_code,
-            },
-        )
-
-
-class ShellKillTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_kill",
-        description="Terminate a background task started with shell_exec background=true.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Background task id returned by shell_exec.",
-                },
-            },
-            "required": ["task_id"],
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        task_id = str(arguments["task_id"])
-        task = manager.get_background(context.session_id, task_id)
-        if task is None:
-            return _unknown_task_result(manager, context.session_id, task_id)
-        await asyncio.to_thread(task.kill)
-        return ToolExecutionResult(
-            content=f"Task {task.task_id} killed.",
-            metadata={
-                "task_id": task.task_id,
-                "status": task.status(),
-                "exit_code": task.exit_code,
-            },
-        )
-
-
-class ShellRestartTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_restart",
-        description="Restart the current session shell and reset it to the workspace root.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "sandbox": {
-                    "type": "boolean",
-                    "description": (
-                        "Restart with the sandbox enabled (default true). "
-                        "Requests to disable it are ignored unless the user has "
-                        "set sandbox.allow_disable."
-                    ),
-                },
-            },
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        requested_sandbox = bool(arguments.get("sandbox", True))
-        session = manager.restart(
-            context.session_id, context.workspace_path, sandbox=requested_sandbox
-        )
-        policy = manager.sandbox
-        ignored = (
-            not requested_sandbox
-            and policy is not None
-            and policy.enabled
-            and not policy.allow_disable
-        )
-        message = f"Shell restarted at {session.workspace_path}"
-        if ignored:
-            message += (
-                " (sandbox=false ignored: set sandbox.allow_disable in settings "
-                "to permit unsandboxed shells)"
-            )
-        return ToolExecutionResult(
-            content=message,
-            metadata={
-                "cwd": str(session.workspace_path),
-                "shell_status": ShellStatus.READY,
-                "restarted": True,
-                "sandboxed": session.shell.process.sandboxed,
-            },
-        )
-
-
-class ShellCloseTool(BaseTool):
-    spec = ToolSpec(
-        name="shell_close",
-        description="Close the current session shell and release its resources.",
-        input_schema={
-            "type": "object",
-            "properties": {},
-        },
-    )
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        manager = _require_shell_manager(context)
-        manager.close(context.session_id)
-        return ToolExecutionResult(
-            content="Shell closed",
-            metadata={
-                "shell_status": ShellStatus.TERMINATED,
-                "closed": True,
-            },
-        )
-
-
-# 危险命令静态拦截：挡「明显自杀」，不做 shell 解析级对抗（真防线在 S2 sandbox）
+# 仅拦截明显误操作，不维护“危险命令大全”；安全边界由 OS sandbox 提供。
 _DANGEROUS_RULES: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
@@ -1345,13 +718,6 @@ def _dangerous_command_reason(command: str) -> str | None:
         if pattern.search(stripped):
             return reason
     return None
-
-
-def _require_shell_manager(context: ToolExecutionContext) -> ShellSessionManager:
-    manager = context.services.shell_sessions
-    if manager is None:
-        raise RuntimeError("A shell session manager is required for shell tools")
-    return manager
 
 
 def _find_marker(buffer: str, marker: str) -> re.Match[str] | None:

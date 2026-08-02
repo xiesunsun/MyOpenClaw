@@ -39,7 +39,6 @@ class SandboxConfigTests(unittest.TestCase):
 
         self.assertTrue(settings.enabled)
         self.assertFalse(settings.strict)
-        self.assertFalse(settings.allow_disable)
 
     def test_app_config_has_sandbox_field(self) -> None:
         self.assertIn("sandbox", AppConfig.model_fields)

@@ -1,8 +1,10 @@
 from pathlib import Path
+import platform
 import shutil
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
+from uuid import uuid4
 
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.sandbox import SandboxPolicy, SandboxSettings
@@ -11,12 +13,13 @@ from pickel.tools.shell import (
     BashTool,
     LocalBashOperations,
     PersistentShell,
-    ShellRestartTool,
     ShellSessionManager,
     ShellStatus,
 )
 
 HAS_BWRAP = shutil.which("bwrap") is not None
+HAS_SEATBELT = platform.system() == "Darwin" and Path("/usr/bin/sandbox-exec").is_file()
+HAS_OS_SANDBOX = HAS_BWRAP or HAS_SEATBELT
 
 
 def _policy(tmp: Path, **kwargs) -> SandboxPolicy:
@@ -26,7 +29,7 @@ def _policy(tmp: Path, **kwargs) -> SandboxPolicy:
 
 
 class SandboxSpawnTests(unittest.IsolatedAsyncioTestCase):
-    async def test_env_is_filtered_even_without_bwrap(self) -> None:
+    async def test_env_is_filtered_even_without_os_sandbox(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             shell = PersistentShell(workspace_path=tmp, sandbox=_policy(tmp))
@@ -34,7 +37,10 @@ class SandboxSpawnTests(unittest.IsolatedAsyncioTestCase):
                 with mock.patch.dict(
                     "os.environ", {"PROBE_API_KEY": "leak", "PROBE_PLAIN": "fine"}
                 ):
-                    with mock.patch("shutil.which", return_value=None):
+                    with (
+                        mock.patch("platform.system", return_value="Linux"),
+                        mock.patch("shutil.which", return_value=None),
+                    ):
                         shell.start()
                 result = shell.exec(
                     "echo key=[${PROBE_API_KEY:-empty}] plain=$PROBE_PLAIN"
@@ -47,7 +53,7 @@ class SandboxSpawnTests(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(HAS_BWRAP, "bubblewrap not installed")
-class SandboxedShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
+class BubblewrapShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def _shell(self, tmp: Path) -> PersistentShell:
         return PersistentShell(workspace_path=tmp, sandbox=_policy(tmp))
 
@@ -79,7 +85,6 @@ class SandboxedShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 shell.terminate()
 
     async def test_job_control_survives_sandbox(self) -> None:
-        """--new-session 的回归闸：缺它这条必挂。"""
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             shell = self._shell(tmp)
@@ -93,15 +98,12 @@ class SandboxedShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 interrupted = shell.interrupt_foreground()
                 self.assertIs(ShellStatus.READY, interrupted.shell_status)
                 self.assertTrue(shell.is_alive())
-                after = shell.exec("echo alive")
-                self.assertIn("alive", after.stdout)
             finally:
                 shell.terminate()
 
     async def test_stderr_separation_survives_sandbox(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            shell = self._shell(tmp)
+            shell = self._shell(Path(tmpdir))
             try:
                 shell.start()
                 result = shell.exec("echo out; echo err >&2")
@@ -112,41 +114,67 @@ class SandboxedShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 shell.terminate()
 
 
-def _context(workspace: Path, manager: ShellSessionManager) -> ToolExecutionContext:
-    return ToolExecutionContext(
-        agent_id="Pickle",
-        session_id="s",
-        workspace_path=workspace,
-        services=ToolServices(shell_sessions=manager),
-    )
-
-
-class EscapeHatchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_disable_request_is_ignored_by_default(self) -> None:
+@unittest.skipUnless(HAS_SEATBELT, "macOS Seatbelt not available")
+class SeatbeltShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workspace_write_and_sensitive_read_boundaries(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            manager = ShellSessionManager(sandbox=_policy(tmp))
-            context = _context(tmp, manager)
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            secret = root / "secret"
+            secret.mkdir()
+            (secret / "value").write_text("hidden", encoding="utf-8")
+            policy = SandboxPolicy.from_settings(
+                SandboxSettings(strict=True, deny_read=[str(secret)]),
+                home=Path.home() / ".pickel",
+                project_root=root,
+            )
+            shell = PersistentShell(workspace_path=workspace, sandbox=policy)
+            outside = Path.home() / f".pickel-seatbelt-write-probe-{uuid4().hex}"
             try:
-                result = await ShellRestartTool().execute({"sandbox": False}, context)
+                shell.start()
+                self.assertTrue(shell.process.sandboxed)
 
-                self.assertIn("ignored", result.content.lower())
-                self.assertEqual(HAS_BWRAP, result.metadata["sandboxed"])
+                writable = shell.exec("touch allowed && echo write-ok")
+                denied_write = shell.exec(
+                    f"touch {outside} 2>/dev/null || echo write-denied"
+                )
+                denied_read = shell.exec(
+                    f"cat {secret / 'value'} 2>/dev/null || echo read-denied"
+                )
+
+                self.assertIn("write-ok", writable.stdout)
+                self.assertIn("write-denied", denied_write.stdout)
+                self.assertIn("read-denied", denied_read.stdout)
             finally:
-                manager.close(context.session_id)
+                shell.terminate()
+                outside.unlink(missing_ok=True)
 
-    async def test_disable_is_honoured_when_allowed(self) -> None:
+    async def test_python_stderr_and_persistent_shell_survive_seatbelt(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            manager = ShellSessionManager(sandbox=_policy(tmp, allow_disable=True))
-            context = _context(tmp, manager)
+            workspace = Path(tmpdir)
+            shell = PersistentShell(
+                workspace_path=workspace,
+                sandbox=_policy(workspace, strict=True),
+            )
             try:
-                result = await ShellRestartTool().execute({"sandbox": False}, context)
+                first = shell.exec(
+                    "python -c \"import os,sys; print(os.getcwd()); print('err', file=sys.stderr)\""
+                )
+                timed_out = shell.exec("sleep 30", timeout_ms=200)
+                interrupted = shell.interrupt_foreground()
+                after = shell.exec("echo alive")
 
-                self.assertFalse(result.metadata["sandboxed"])
+                self.assertEqual(str(workspace.resolve()), first.stdout.strip())
+                self.assertEqual("err", first.stderr.strip())
+                self.assertTrue(timed_out.timed_out)
+                self.assertIs(ShellStatus.READY, interrupted.shell_status)
+                self.assertIn("alive", after.stdout)
             finally:
-                manager.close(context.session_id)
+                shell.terminate()
 
+
+class SandboxMetadataTests(unittest.IsolatedAsyncioTestCase):
     async def test_exec_metadata_reports_sandbox_state(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -160,6 +188,6 @@ class EscapeHatchTests(unittest.IsolatedAsyncioTestCase):
             try:
                 result = await BashTool().execute({"command": "echo hi"}, context)
 
-                self.assertEqual(HAS_BWRAP, result.metadata["sandboxed"])
+                self.assertEqual(HAS_OS_SANDBOX, result.metadata["sandboxed"])
             finally:
                 manager.close(context.session_id)

@@ -362,7 +362,6 @@ class Run:
             services=ToolServices(
                 workspace_files=self.workspace_files,
                 bash=self.bash_operations,
-                shell_sessions=self.shell_session_manager,
                 activation_control=self,
                 skill_store=self.skill_store,
                 host_calls=host_calls,

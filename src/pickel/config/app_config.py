@@ -83,7 +83,7 @@ class AppConfig(BaseModel):
     # extension 的原始配置段：core 不认识任何 extension 的配置模型，
     # 解析由 extension 自己做（ExtensionHost.config）
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    # 进程级沙箱（S2）：默认开，缺 bwrap 降级；strict 时缺依赖即拒绝
+    # 进程级沙箱：Linux Bubblewrap / macOS Seatbelt；strict 时缺依赖即拒绝
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     # skill 自管理（V1a）：写入默认待审、内容护栏默认开
     skills: SkillSettings = Field(default_factory=SkillSettings)

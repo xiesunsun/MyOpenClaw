@@ -37,7 +37,9 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("pickle@/tmp/pickle", result.content)
         self.assertFalse(result.is_error)
 
-    async def test_decorator_supports_raw_arguments_parameter_and_structured_result(self) -> None:
+    async def test_decorator_supports_raw_arguments_parameter_and_structured_result(
+        self,
+    ) -> None:
         @tool(
             name="inspect",
             description="Inspect arguments",
@@ -83,12 +85,12 @@ class ToolServicesTests(unittest.TestCase):
 
         self.assertIsInstance(context.services, ToolServices)
         self.assertIsNone(context.services.workspace_files)
-        self.assertIsNone(context.services.shell_sessions)
+        self.assertIsNone(context.services.bash)
 
     def test_services_carries_injected_dependencies(self) -> None:
         from pickel.tools.services import ToolServices
 
-        services = ToolServices(workspace_files="fake-files", shell_sessions="fake-shell")
+        services = ToolServices(workspace_files="fake-files", bash="fake-bash")
         context = ToolExecutionContext(
             agent_id="Pickle",
             session_id="session-1",
@@ -97,7 +99,7 @@ class ToolServicesTests(unittest.TestCase):
         )
 
         self.assertEqual("fake-files", context.services.workspace_files)
-        self.assertEqual("fake-shell", context.services.shell_sessions)
+        self.assertEqual("fake-bash", context.services.bash)
 
 
 if __name__ == "__main__":

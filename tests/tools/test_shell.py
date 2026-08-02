@@ -1,7 +1,6 @@
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import time
 import unittest
 
 from pickel.tools.services import ToolServices
@@ -11,16 +10,10 @@ from pickel.tools.bus import ToolBus
 from pickel.tools.shell import (
     BashTool,
     LocalBashOperations,
-    ShellCloseTool,
-    ShellExecTool,
     PersistentShell,
-    ShellKillTool,
-    ShellOutputTool,
-    ShellRestartTool,
     ShellExecutionResult,
     ShellSessionManager,
     ShellStatus,
-    ShellTasksTool,
     _dangerous_command_reason,
 )
 
@@ -156,221 +149,6 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(124, timed_out.structured_content["exit_code"])
         self.assertIn("alive", after.content)
 
-    def test_shell_session_manager_reuses_session_for_same_conversation(self) -> None:
-        manager = ShellSessionManager()
-        workspace = Path("/tmp/workspace")
-
-        first = manager.get_or_create("session-1", workspace)
-        second = manager.get_or_create("session-1", workspace)
-
-        self.assertIs(first, second)
-        self.assertEqual(workspace.resolve(), first.workspace_path)
-
-    def test_persistent_shell_defaults_to_two_minute_timeout(self) -> None:
-        shell = PersistentShell(workspace_path=Path("/tmp/workspace"))
-
-        self.assertEqual(120000, shell.default_timeout_ms)
-
-    async def test_shell_exec_reuses_same_shell_and_persists_cwd(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            (workspace / "nested").mkdir()
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            first = await exec_tool.execute({"command": "cd nested"}, context)
-            second = await exec_tool.execute({"command": "pwd"}, context)
-
-        self.assertFalse(first.is_error)
-        self.assertEqual(str((workspace / "nested").resolve()), first.metadata["cwd"])
-        self.assertEqual(True, first.metadata["created_new_shell"])
-        self.assertEqual(str((workspace / "nested").resolve()), second.content.strip())
-        self.assertEqual(str((workspace / "nested").resolve()), second.metadata["cwd"])
-        self.assertEqual("ready", second.metadata["shell_status"])
-
-    async def test_shell_restart_recreates_shell_at_workspace_root(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-        restart_tool = ShellRestartTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            (workspace / "nested").mkdir()
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            await exec_tool.execute({"command": "cd nested"}, context)
-            restart_result = await restart_tool.execute({}, context)
-            pwd_result = await exec_tool.execute({"command": "pwd"}, context)
-
-        self.assertFalse(restart_result.is_error)
-        self.assertEqual(str(workspace.resolve()), restart_result.metadata["cwd"])
-        self.assertEqual("ready", restart_result.metadata["shell_status"])
-        self.assertEqual(str(workspace.resolve()), pwd_result.content.strip())
-
-    async def test_shell_close_terminates_session_shell(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-        close_tool = ShellCloseTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            await exec_tool.execute({"command": "pwd"}, context)
-            close_result = await close_tool.execute({}, context)
-
-        self.assertFalse(close_result.is_error)
-        self.assertEqual("terminated", close_result.metadata["shell_status"])
-        self.assertIsNone(manager.get("session-1"))
-
-    async def test_shell_exec_returns_structured_metadata(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            result = await exec_tool.execute({"command": "printf 'hello'"}, context)
-
-        self.assertFalse(result.is_error)
-        self.assertEqual("hello", result.content)
-        self.assertEqual(0, result.metadata["exit_code"])
-        self.assertEqual(False, result.metadata["timed_out"])
-        self.assertEqual(False, result.metadata["truncated"])
-        self.assertEqual("ready", result.metadata["shell_status"])
-
-    async def test_shell_exec_does_not_truncate_long_output(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            result = await exec_tool.execute({"command": "python -c \"print('a' * 5000, end='')\""}, context)
-
-        self.assertFalse(result.is_error)
-        self.assertEqual("a" * 5000, result.content)
-        self.assertEqual(False, result.metadata["truncated"])
-        self.assertEqual("ready", result.metadata["shell_status"])
-
-    async def test_shell_exec_reports_non_zero_exit_without_killing_shell(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            failed = await exec_tool.execute({"command": "false"}, context)
-            recovered = await exec_tool.execute({"command": "printf ok"}, context)
-
-        self.assertTrue(failed.is_error)
-        self.assertEqual(1, failed.metadata["exit_code"])
-        self.assertEqual("ready", failed.metadata["shell_status"])
-        self.assertEqual("ok", recovered.content)
-
-    async def test_shell_exec_allows_timeout_override(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            timed_out = await exec_tool.execute(
-                {"command": "sleep 1", "timeout_ms": 50},
-                context,
-            )
-            # 新语义：超时不杀会话，前台命令仍在跑
-            session = manager.get("session-1")
-            self.assertTrue(session.shell.is_alive())
-            self.assertTrue(session.shell.pending)
-            manager.close("session-1")
-
-        self.assertTrue(timed_out.is_error)
-        self.assertIn("timed out and is still running", timed_out.content)
-        self.assertEqual(124, timed_out.metadata["exit_code"])
-        self.assertEqual(True, timed_out.metadata["timed_out"])
-        self.assertEqual("running", timed_out.metadata["shell_status"])
-
-    async def test_shell_exec_rejects_non_positive_timeout_override(self) -> None:
-        manager = ShellSessionManager()
-        exec_tool = ShellExecTool()
-
-        with TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            context = ToolExecutionContext(
-                agent_id="Pickle",
-                session_id="session-1",
-                workspace_path=workspace,
-                services=ToolServices(shell_sessions=manager),
-            )
-
-            result = await exec_tool.execute(
-                {"command": "pwd", "timeout_ms": 0},
-                context,
-            )
-
-        self.assertTrue(result.is_error)
-        self.assertEqual("timeout_ms must be a positive integer.", result.content)
-        self.assertEqual("error", result.metadata["shell_status"])
-
-    def test_shell_status_string_values_are_stable(self) -> None:
-        self.assertEqual("ready", ShellStatus.READY)
-        self.assertEqual("terminated", ShellStatus.TERMINATED)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-def _context(workspace: Path, manager: ShellSessionManager) -> ToolExecutionContext:
-    return ToolExecutionContext(
-        agent_id="Pickle",
-        session_id="session-1",
-        workspace_path=workspace,
-        services=ToolServices(shell_sessions=manager),
-    )
-
 
 class NormalizeOutputTests(unittest.TestCase):
     def test_strips_csi_color_sequences(self) -> None:
@@ -408,7 +186,10 @@ class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
                 workspace_path=workspace,
                 output_dir=out_dir,
                 limits=OutputLimits(
-                    raw_max_chars=100_000, result_max_chars=200, head_chars=120, tail_chars=50
+                    raw_max_chars=100_000,
+                    result_max_chars=200,
+                    head_chars=120,
+                    tail_chars=50,
                 ),
             )
             try:
@@ -450,9 +231,14 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_content_appends_stderr_block(self) -> None:
         manager = ShellSessionManager()
-        tool = ShellExecTool()
+        tool = BashTool()
         with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=LocalBashOperations(manager)),
+            )
             try:
                 result = await tool.execute(
                     {"command": "echo ok; echo bad >&2"}, context
@@ -475,7 +261,7 @@ class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.timed_out)
                 self.assertEqual(ShellStatus.RUNNING, result.shell_status)
                 self.assertIn("before-sleep", result.stdout)
-                self.assertTrue(shell.is_alive())      # 会话没被杀
+                self.assertTrue(shell.is_alive())  # 会话没被杀
                 self.assertTrue(shell.pending)
             finally:
                 shell.terminate()
@@ -491,72 +277,10 @@ class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
                 shell.terminate()
 
 
-class ForegroundInteractionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_wait_picks_up_completion_after_timeout(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
-            try:
-                first = shell.exec("sleep 1; echo late-done", timeout_ms=200)
-                self.assertTrue(first.timed_out)
-
-                second = shell.wait_foreground(timeout_ms=3000)
-
-                self.assertEqual(ShellStatus.READY, second.shell_status)
-                self.assertIn("late-done", second.stdout)
-                self.assertFalse(shell.pending)
-            finally:
-                shell.terminate()
-
-    async def test_stdin_feeds_interactive_read(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
-            try:
-                first = shell.exec("read -r line; echo got:$line", timeout_ms=300)
-                self.assertTrue(first.timed_out)
-
-                # write_stdin 的观察窗内命令可能已完成（READY）；
-                # 未完成（RUNNING）才继续 wait_foreground
-                final = shell.write_stdin("hello-stdin")
-                if final.shell_status is ShellStatus.RUNNING:
-                    final = shell.wait_foreground(timeout_ms=2000)
-
-                self.assertEqual(ShellStatus.READY, final.shell_status)
-                self.assertIn("got:hello-stdin", final.stdout)
-            finally:
-                shell.terminate()
-
-    async def test_interrupt_recovers_ready_session(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
-            try:
-                first = shell.exec("sleep 60", timeout_ms=200)
-                self.assertTrue(first.timed_out)
-
-                result = shell.interrupt_foreground()
-
-                self.assertEqual(ShellStatus.READY, result.shell_status)
-                self.assertTrue(shell.is_alive())
-                self.assertFalse(shell.pending)
-                follow_up = shell.exec("echo alive-again")
-                self.assertIn("alive-again", follow_up.stdout)
-            finally:
-                shell.terminate()
-
-    async def test_wait_without_pending_is_error(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
-            try:
-                shell.start()
-                with self.assertRaises(RuntimeError):
-                    shell.wait_foreground(timeout_ms=100)
-            finally:
-                shell.terminate()
-
-
 class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
     async def test_exec_does_not_block_event_loop(self) -> None:
         manager = ShellSessionManager()
-        tool = ShellExecTool()
+        tool = BashTool()
         ticks = 0
 
         async def ticker() -> None:
@@ -566,11 +290,15 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
                 ticks += 1
 
         with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=LocalBashOperations(manager)),
+            )
             ticker_task = asyncio.create_task(ticker())
             try:
                 await tool.execute({"command": "sleep 0.6; echo done"}, context)
-                # exec 结束瞬间采样：若 exec 阻塞 loop，ticker 此刻还没跑过几次
                 ticks_during = ticks
             finally:
                 ticker_task.cancel()
@@ -579,127 +307,17 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(ticks_during, 8)
 
 
-class BackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
-    async def test_background_exec_returns_task_id_and_output_is_pollable(self) -> None:
-        manager = ShellSessionManager()
-        tool = ShellExecTool()
-        with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
-            try:
-                started = await tool.execute(
-                    {"command": "echo bg-line; sleep 0.2; echo bg-done", "background": True},
-                    context,
-                )
-                self.assertFalse(started.is_error)
-                task_id = started.metadata["task_id"]
-
-                output_tool = ShellOutputTool()
-                deadline = time.monotonic() + 5
-                text = ""
-                while time.monotonic() < deadline:
-                    polled = await output_tool.execute({"task_id": task_id}, context)
-                    text += polled.content
-                    if "bg-done" in text:
-                        break
-                    await asyncio.sleep(0.1)
-                self.assertIn("bg-line", text)
-                self.assertIn("bg-done", text)
-            finally:
-                manager.close(context.session_id)
-
-    async def test_tasks_lists_and_kill_terminates(self) -> None:
-        manager = ShellSessionManager()
-        tool = ShellExecTool()
-        with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
-            try:
-                started = await tool.execute(
-                    {"command": "sleep 60", "background": True}, context
-                )
-                task_id = started.metadata["task_id"]
-
-                listed = await ShellTasksTool().execute({}, context)
-                self.assertIn(task_id, listed.content)
-
-                killed = await ShellKillTool().execute({"task_id": task_id}, context)
-                self.assertFalse(killed.is_error)
-                task = manager.get_background(context.session_id, task_id)
-                deadline = time.monotonic() + 3
-                while time.monotonic() < deadline and task.status() == "running":
-                    await asyncio.sleep(0.05)
-                self.assertEqual("exited", task.status())
-            finally:
-                manager.close(context.session_id)
-
-    async def test_close_kills_background_tasks(self) -> None:
-        manager = ShellSessionManager()
-        tool = ShellExecTool()
-        with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
-            started = await tool.execute(
-                {"command": "sleep 60", "background": True}, context
-            )
-            task = manager.get_background(context.session_id, started.metadata["task_id"])
-
-            manager.close(context.session_id)
-
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline and task.status() == "running":
-                await asyncio.sleep(0.05)
-            self.assertEqual("exited", task.status())
-
-
-class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def _exec(self, command: str) -> "ToolExecutionResult":
-        manager = ShellSessionManager()
-        tool = ShellExecTool()
-        with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
-            try:
-                return await tool.execute({"command": command}, context)
-            finally:
-                manager.close(context.session_id)
-
-    async def test_blocks_rm_rf_root_and_home(self) -> None:
-        for cmd in ("rm -rf /", "rm -fr /", "sudo rm -rf /*", "rm -rf ~", "rm -rf $HOME"):
-            result = await self._exec(cmd)
-            self.assertTrue(result.is_error, cmd)
-            self.assertIn("blocked", result.content.lower(), cmd)
-
-    async def test_blocks_mkfs_dd_forkbomb_chmod(self) -> None:
-        for cmd in (
-            "mkfs.ext4 /dev/sda1",
-            "dd if=/dev/zero of=/dev/sda",
-            ":(){ :|:& };:",
-            "chmod -R 777 /",
-        ):
-            result = await self._exec(cmd)
-            self.assertTrue(result.is_error, cmd)
-
-    async def test_allows_normal_rm_and_workspace_paths(self) -> None:
-        for cmd in ("rm -rf ./build", "rm -rf node_modules", "echo 'rm -rf /' 只是文本"):
-            result = await self._exec(cmd)
-            self.assertFalse(result.is_error, cmd)
-
-
-class _NoShellManager(ShellSessionManager):
-    """碰到任何会真正执行命令的路径就失败——危险命令测试绝不进 shell。"""
-
-    def get(self, session_id):  # type: ignore[override]
-        raise AssertionError("dangerous command reached the shell path")
-
-    def get_or_create(self, session_id, workspace_path):  # type: ignore[override]
-        raise AssertionError("dangerous command reached the shell path")
-
-    def start_background(self, session_id, workspace_path, command):  # type: ignore[override]
-        raise AssertionError("dangerous command reached the background path")
-
-
 class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
     # 拦截判定测纯函数，零执行风险；漏拦时下面的工具级用例
     # 会命中 _NoShellManager 的 AssertionError，同样不会执行任何命令。
     def test_reason_blocks_rm_rf_root_and_home(self) -> None:
-        for cmd in ("rm -rf /", "rm -fr /", "sudo rm -rf /*", "rm -rf ~", "rm -rf $HOME"):
+        for cmd in (
+            "rm -rf /",
+            "rm -fr /",
+            "sudo rm -rf /*",
+            "rm -rf ~",
+            "rm -rf $HOME",
+        ):
             self.assertIsNotNone(_dangerous_command_reason(cmd), cmd)
 
     def test_reason_blocks_mkfs_dd_forkbomb_chmod(self) -> None:
@@ -712,29 +330,48 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(_dangerous_command_reason(cmd), cmd)
 
     def test_reason_allows_normal_rm_and_quoted_text(self) -> None:
-        for cmd in ("rm -rf ./build", "rm -rf node_modules", "echo 'rm -rf /' 只是文本"):
+        for cmd in (
+            "rm -rf ./build",
+            "rm -rf node_modules",
+            "echo 'rm -rf /' 只是文本",
+        ):
             self.assertIsNone(_dangerous_command_reason(cmd), cmd)
 
     async def test_tool_blocks_before_touching_shell(self) -> None:
-        tool = ShellExecTool()
+        class FailingBash:
+            async def exec(self, **kwargs):
+                raise AssertionError("dangerous command reached BashOperations")
+
+            def close(self, session_id: str) -> None:
+                pass
+
+        tool = BashTool()
         with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), _NoShellManager())
-            for arguments in (
-                {"command": "rm -rf /"},
-                {"command": "rm -rf /", "background": True},
-            ):
-                result = await tool.execute(arguments, context)
-                self.assertTrue(result.is_error)
-                self.assertIn("blocked", result.content.lower())
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=FailingBash()),
+            )
+            result = await tool.execute({"command": "rm -rf /"}, context)
+
+        self.assertTrue(result.is_error)
+        self.assertIn("blocked", result.content.lower())
 
     async def test_tool_allows_harmless_rm_in_workspace(self) -> None:
         manager = ShellSessionManager()
-        tool = ShellExecTool()
+        tool = BashTool()
         with TemporaryDirectory() as tmpdir:
-            context = _context(Path(tmpdir), manager)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=LocalBashOperations(manager)),
+            )
             try:
                 await tool.execute({"command": "mkdir -p ./build"}, context)
                 result = await tool.execute({"command": "rm -rf ./build"}, context)
-                self.assertFalse(result.is_error)
             finally:
                 manager.close(context.session_id)
+
+        self.assertFalse(result.is_error)

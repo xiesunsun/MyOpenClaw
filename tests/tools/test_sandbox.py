@@ -22,16 +22,18 @@ class EnvFilterTests(unittest.TestCase):
     def test_default_patterns_strip_credential_shaped_names(self) -> None:
         policy = _policy()
 
-        filtered = policy.filter_env({
-            "PATH": "/usr/bin",
-            "OPENVIKING_API_KEY": "secret",
-            "github_token": "secret",
-            "MY_SECRET": "secret",
-            "DB_PASSWORD": "secret",
-            "GOOGLE_APPLICATION_CREDENTIALS": "/path",
-            "AWS_ACCESS_KEY_ID": "secret",
-            "HOME": "/home/u",
-        })
+        filtered = policy.filter_env(
+            {
+                "PATH": "/usr/bin",
+                "OPENVIKING_API_KEY": "secret",
+                "github_token": "secret",
+                "MY_SECRET": "secret",
+                "DB_PASSWORD": "secret",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/path",
+                "AWS_ACCESS_KEY_ID": "secret",
+                "HOME": "/home/u",
+            }
+        )
 
         self.assertEqual({"PATH": "/usr/bin", "HOME": "/home/u"}, filtered)
 
@@ -39,15 +41,17 @@ class EnvFilterTests(unittest.TestCase):
         # 后缀匹配会漏掉 ANTHROPIC_API_KEY_PICKLE 这类中缀命名——实测泄露过
         policy = _policy()
 
-        filtered = policy.filter_env({
-            "ANTHROPIC_API_KEY_PICKLE": "leak",
-            "TOKEN_FOR_CI": "leak",
-            "MY_SECRET_THING": "leak",
-            "OPENVIKING_USER_KEY": "leak",
-            "SSH_KEY_PATH": "leak",
-            "PATH": "/usr/bin",
-            "MONKEY_MODE": "harmless",
-        })
+        filtered = policy.filter_env(
+            {
+                "ANTHROPIC_API_KEY_PICKLE": "leak",
+                "TOKEN_FOR_CI": "leak",
+                "MY_SECRET_THING": "leak",
+                "OPENVIKING_USER_KEY": "leak",
+                "SSH_KEY_PATH": "leak",
+                "PATH": "/usr/bin",
+                "MONKEY_MODE": "harmless",
+            }
+        )
 
         self.assertEqual({"PATH": "/usr/bin", "MONKEY_MODE": "harmless"}, filtered)
 
@@ -72,7 +76,7 @@ class EnvFilterTests(unittest.TestCase):
         self.assertEqual(env, policy.filter_env(env))
 
 
-class WrapCommandTests(unittest.TestCase):
+class SandboxCommandTests(unittest.TestCase):
     def _policy_for(self, tmp: Path, **kwargs) -> SandboxPolicy:
         return SandboxPolicy.from_settings(
             SandboxSettings(**kwargs), home=tmp / "home", project_root=tmp / "proj"
@@ -81,13 +85,16 @@ class WrapCommandTests(unittest.TestCase):
     def _wrap(self, policy: SandboxPolicy, workspace: Path) -> tuple[list[str], bool]:
         return policy.wrap_command(["/bin/bash", "-s"], workspace=workspace)
 
-    def test_wrapped_command_has_required_flags_and_binds(self) -> None:
+    def test_bubblewrap_has_required_flags_and_binds(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             workspace = tmp / "ws"
             workspace.mkdir()
 
-            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"),
+            ):
                 argv, sandboxed = self._wrap(self._policy_for(tmp), workspace)
 
             self.assertTrue(sandboxed)
@@ -99,7 +106,8 @@ class WrapCommandTests(unittest.TestCase):
             self.assertNotIn("--dev-bind", argv)
             joined = " ".join(argv)
             self.assertIn("--ro-bind / /", joined)
-            self.assertIn(f"--bind {workspace} {workspace}", joined)
+            resolved = workspace.resolve()
+            self.assertIn(f"--bind {resolved} {resolved}", joined)
             self.assertIn("--bind /tmp /tmp", joined)
             self.assertEqual(["/bin/bash", "-s"], argv[argv.index("--") + 1 :])
 
@@ -113,13 +121,21 @@ class WrapCommandTests(unittest.TestCase):
                 SandboxSettings(), home=tmp / "home", project_root=workspace
             )
 
-            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"),
+            ):
                 argv, _ = self._wrap(policy, workspace)
 
             joined = " ".join(argv)
-            bind_at = joined.index(f"--bind {workspace} {workspace}")
-            ro_at = joined.index(f"--ro-bind {workspace / 'agents'}")
-            self.assertLess(bind_at, ro_at, "self-protect 必须在 workspace bind 之后盖回")
+            bind_at = joined.index(
+                f"--bind {workspace.resolve()} {workspace.resolve()}"
+            )
+            agents = (workspace / "agents").resolve()
+            ro_at = joined.index(f"--ro-bind {agents}")
+            self.assertLess(
+                bind_at, ro_at, "self-protect 必须在 workspace bind 之后盖回"
+            )
 
     def test_deny_read_paths_become_tmpfs(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -130,10 +146,13 @@ class WrapCommandTests(unittest.TestCase):
             secret.mkdir()
             policy = self._policy_for(tmp, deny_read=[str(secret)])
 
-            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"),
+            ):
                 argv, _ = self._wrap(policy, workspace)
 
-            self.assertIn(f"--tmpfs {secret}", " ".join(argv))
+            self.assertIn(f"--tmpfs {secret.resolve()}", " ".join(argv))
 
     def test_missing_paths_are_skipped(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -142,7 +161,10 @@ class WrapCommandTests(unittest.TestCase):
             workspace.mkdir()
             policy = self._policy_for(tmp, deny_read=[str(tmp / "nope")])
 
-            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"),
+            ):
                 argv, _ = self._wrap(policy, workspace)
 
             self.assertNotIn("nope", " ".join(argv))
@@ -156,10 +178,51 @@ class WrapCommandTests(unittest.TestCase):
             extra.mkdir()
             policy = self._policy_for(tmp, allow_write=[str(extra)])
 
-            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"),
+            ):
                 argv, _ = self._wrap(policy, workspace)
 
-            self.assertIn(f"--bind {extra} {extra}", " ".join(argv))
+            resolved = extra.resolve()
+            self.assertIn(f"--bind {resolved} {resolved}", " ".join(argv))
+
+    def test_seatbelt_uses_fixed_executable_and_path_parameters(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            workspace = tmp / "ws"
+            workspace.mkdir()
+            secret = tmp / "secret"
+            secret.mkdir()
+            extra = tmp / "cache"
+            extra.mkdir()
+            policy = self._policy_for(
+                tmp,
+                allow_write=[str(extra)],
+                deny_read=[str(secret)],
+            )
+
+            with (
+                mock.patch("platform.system", return_value="Darwin"),
+                mock.patch(
+                    "pickel.tools.sandbox._seatbelt_available", return_value=True
+                ),
+            ):
+                argv, sandboxed = self._wrap(policy, workspace)
+
+            self.assertTrue(sandboxed)
+            self.assertEqual("/usr/bin/sandbox-exec", argv[0])
+            self.assertEqual("-p", argv[1])
+            profile = argv[2]
+            self.assertIn("(deny default)", profile)
+            self.assertIn("(allow process-exec)", profile)
+            self.assertIn("(allow file-read*)", profile)
+            self.assertIn("(allow network*)", profile)
+            definitions = " ".join(argv[3 : argv.index("--")])
+            self.assertIn(str(workspace.resolve()), definitions)
+            self.assertIn(str(extra.resolve()), definitions)
+            self.assertIn(str(secret.resolve()), definitions)
+            self.assertEqual(["/bin/bash", "-s"], argv[argv.index("--") + 1 :])
 
     def test_disabled_policy_returns_command_unchanged(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -176,7 +239,10 @@ class WrapCommandTests(unittest.TestCase):
             tmp = Path(tmpdir)
             policy = self._policy_for(tmp)
 
-            with mock.patch("shutil.which", return_value=None):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value=None),
+            ):
                 argv, sandboxed = self._wrap(policy, tmp)
 
             self.assertEqual(["/bin/bash", "-s"], argv)
@@ -187,6 +253,24 @@ class WrapCommandTests(unittest.TestCase):
             tmp = Path(tmpdir)
             policy = self._policy_for(tmp, strict=True)
 
-            with mock.patch("shutil.which", return_value=None):
+            with (
+                mock.patch("platform.system", return_value="Linux"),
+                mock.patch("shutil.which", return_value=None),
+            ):
                 with self.assertRaises(SandboxUnavailableError):
                     self._wrap(policy, tmp)
+
+    def test_missing_seatbelt_degrades_or_raises_by_strictness(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            with (
+                mock.patch("platform.system", return_value="Darwin"),
+                mock.patch(
+                    "pickel.tools.sandbox._seatbelt_available", return_value=False
+                ),
+            ):
+                argv, sandboxed = self._wrap(self._policy_for(tmp), tmp)
+                self.assertEqual(["/bin/bash", "-s"], argv)
+                self.assertFalse(sandboxed)
+                with self.assertRaises(SandboxUnavailableError):
+                    self._wrap(self._policy_for(tmp, strict=True), tmp)

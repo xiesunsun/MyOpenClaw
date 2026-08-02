@@ -55,7 +55,7 @@ async def exec(*, session_id, workspace_path, command, timeout=None): ...
 def close(session_id): ...
 ```
 
-`LocalBashOperations` 当前复用已经稳定运行的 `ShellSessionManager -> PersistentShell -> PtyShellProcess`。这些类只是本地实现细节，不是新的公共架构层；后续可以在不改变 `bash` 合同的前提下逐步简化。
+`LocalBashOperations` 复用 `ShellSessionManager -> PersistentShell -> PtyShellProcess`。Manager 只负责按 session 复用和关闭 Shell；PTY 只负责本地进程与终端语义。它们都是本地实现细节，不进入工具合同。
 
 ## 4. 行为语义
 
@@ -70,14 +70,14 @@ def close(session_id): ...
 
 `BashOperations` 决定命令在哪里执行，权限与沙箱由装配层选择，而不是由 `bash` 工具描述决定。
 
-当前本地实现沿用已有的最低限度危险命令拦截，并在结果中如实返回 `sandboxed`。该规则不是安全边界，也不继续扩充；真正的 macOS 隔离应由后续的 OS sandbox 执行环境实现，并保持相同的 `BashOperations` 接口。
+本地实现由 Linux Bubblewrap 或 macOS Seatbelt 约束整个进程树，并在结果中如实返回 `sandboxed`。危险命令规则只提供明显误操作的快速反馈，不作为安全边界，也不扩充成命令黑名单。
 
 ## 6. 迁移结果
 
 - builtin catalog 和默认 agent 配置只注册 `bash`。
-- `shell_exec`、`shell_wait`、`shell_stdin`、`shell_interrupt`、`shell_tasks`、`shell_output`、`shell_kill`、`shell_restart`、`shell_close` 不再暴露给模型。
-- 旧工具类暂时保留在本地实现文件中，为已有底层测试和渐进迁移服务；它们不是受支持的模型合同。
-- Shell 合同和 PTY 底层不同时重写，降低迁移风险。
+- `shell_exec`、`shell_wait`、`shell_stdin`、`shell_interrupt`、`shell_tasks`、`shell_output`、`shell_kill`、`shell_restart`、`shell_close` 及其 Runtime 专用任务代码已经删除。
+- 后台任务只使用 Bash 原生语义；Runtime 不维护第二套任务状态。
+- PTY 核心保留，因为持久 cwd、stderr 分离、输出截断和超时恢复仍由它稳定提供。
 
 ## 7. 验收标准
 

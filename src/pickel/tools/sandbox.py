@@ -1,4 +1,4 @@
-"""进程级沙箱策略：bubblewrap 参数生成 + 凭据环境变量剥离。
+"""进程级沙箱策略：Linux Bubblewrap、macOS Seatbelt 与环境过滤。
 
 接线点只有一个——PtyShellProcess.spawn。前台 shell 与后台任务共用它，
 所以一处生效即全覆盖。
@@ -9,14 +9,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import fnmatch
 import logging
+import platform
 from pathlib import Path
 import shutil
+import tempfile
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 _BWRAP = "bwrap"
+_SEATBELT = "/usr/bin/sandbox-exec"
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -55,7 +58,6 @@ _DEFAULT_DENY_READ_HOME_DIRS = (
 class SandboxSettings(BaseModel):
     enabled: bool = True
     strict: bool = False
-    allow_disable: bool = False
     allow_write: list[str] = Field(default_factory=list)
     deny_read: list[str] = Field(default_factory=list)
     env_deny: list[str] = Field(default_factory=list)
@@ -66,7 +68,6 @@ class SandboxSettings(BaseModel):
 class SandboxPolicy:
     enabled: bool = True
     strict: bool = False
-    allow_disable: bool = False
     pickel_home: Path = Path.home() / ".pickel"
     project_root: Path = Path.cwd()
     allow_write: tuple[Path, ...] = ()
@@ -86,7 +87,6 @@ class SandboxPolicy:
         return cls(
             enabled=resolved.enabled,
             strict=resolved.strict,
-            allow_disable=resolved.allow_disable,
             pickel_home=Path(home),
             project_root=Path(project_root),
             allow_write=tuple(Path(item).expanduser() for item in resolved.allow_write),
@@ -134,19 +134,28 @@ class SandboxPolicy:
     def wrap_command(
         self, command: list[str], *, workspace: Path
     ) -> tuple[list[str], bool]:
-        """把命令包进 bwrap。返回 (最终命令, 是否沙箱化)。"""
+        """按宿主平台包裹命令，返回 ``(最终命令, 是否沙箱化)``。"""
         if not self.enabled:
             return list(command), False
+
+        system = platform.system()
+        if system == "Linux":
+            return self._wrap_bubblewrap(command, workspace=workspace)
+        if system == "Darwin":
+            return self._wrap_seatbelt(command, workspace=workspace)
+        return self._sandbox_unavailable(
+            command,
+            f"sandbox is not supported on {system or 'this platform'}",
+        )
+
+    def _wrap_bubblewrap(
+        self, command: list[str], *, workspace: Path
+    ) -> tuple[list[str], bool]:
         if shutil.which(_BWRAP) is None:
-            if self.strict:
-                raise SandboxUnavailableError(
-                    "bubblewrap (bwrap) is not installed and sandbox.strict is on"
-                )
-            logger.warning(
-                "bubblewrap (bwrap) not found; running shell without sandbox. "
-                "Credential env vars are still stripped."
+            return self._sandbox_unavailable(
+                command,
+                "bubblewrap (bwrap) is not installed",
             )
-            return list(command), False
 
         workspace = workspace.resolve()
         argv = [
@@ -155,11 +164,19 @@ class SandboxPolicy:
             # --new-session 必需：缺它 bwrap 内 bash 的 job control 失效，
             # 超时探测与 shell_interrupt 依赖的前台进程组就不存在了
             "--new-session",
-            "--ro-bind", "/", "/",
-            "--dev", "/dev",
-            "--proc", "/proc",
-            "--bind", "/tmp", "/tmp",
-            "--bind", str(workspace), str(workspace),
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--bind",
+            "/tmp",
+            "/tmp",
+            "--bind",
+            str(workspace),
+            str(workspace),
         ]
         for path in self.allow_write:
             resolved = path.resolve()
@@ -174,6 +191,116 @@ class SandboxPolicy:
         argv.extend(command)
         return argv, True
 
+    def _wrap_seatbelt(
+        self, command: list[str], *, workspace: Path
+    ) -> tuple[list[str], bool]:
+        if not _seatbelt_available():
+            return self._sandbox_unavailable(
+                command,
+                f"Seatbelt executable {_SEATBELT} is not available",
+            )
+
+        profile, definitions = self._seatbelt_profile(workspace)
+        argv = [_SEATBELT, "-p", profile]
+        argv.extend(f"-D{name}={path}" for name, path in definitions)
+        argv.append("--")
+        argv.extend(command)
+        return argv, True
+
+    def _seatbelt_profile(
+        self, workspace: Path
+    ) -> tuple[str, tuple[tuple[str, Path], ...]]:
+        """生成以文件系统隔离为核心、兼容开发工具的 Seatbelt profile。"""
+        writable = _existing_paths(
+            (
+                workspace,
+                Path("/tmp"),
+                Path(tempfile.gettempdir()),
+                *self.allow_write,
+            )
+        )
+        protected = self.self_protect_paths(workspace)
+        unreadable = self._deny_read_paths()
+
+        definitions: list[tuple[str, Path]] = []
+        write_rules: list[str] = []
+        for index, path in enumerate(writable):
+            name = f"WRITE_{index}"
+            definitions.append((name, path))
+            write_rules.append(
+                f'(allow file-write* (literal (param "{name}")) '
+                f'(subpath (param "{name}")))'
+            )
+
+        protect_rules: list[str] = []
+        for index, path in enumerate(protected):
+            name = f"PROTECT_{index}"
+            definitions.append((name, path))
+            protect_rules.append(
+                f'(deny file-write* (literal (param "{name}")) '
+                f'(subpath (param "{name}")))'
+            )
+
+        unreadable_rules: list[str] = []
+        for index, path in enumerate(unreadable):
+            name = f"DENY_READ_{index}"
+            definitions.append((name, path))
+            unreadable_rules.append(
+                f'(deny file-read* (literal (param "{name}")) '
+                f'(subpath (param "{name}")))'
+            )
+
+        sections = [
+            "(version 1)",
+            "(deny default)",
+            "(allow process-exec)",
+            "(allow process-fork)",
+            "(allow signal (target same-sandbox))",
+            "(allow process-info* (target same-sandbox))",
+            "(allow file-read*)",
+            *write_rules,
+            *protect_rules,
+            *unreadable_rules,
+            '(allow file-write-data (literal "/dev/null"))',
+            "(allow sysctl-read)",
+            "(allow ipc-posix-sem)",
+            "(allow ipc-posix-shm*)",
+            "(allow pseudo-tty)",
+            '(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))',
+            '(allow file-read* file-write* file-ioctl (regex #"^/dev/ttys[0-9]+"))',
+            "(allow user-preference-read)",
+            '(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))',
+            '(allow mach-lookup (global-name "com.apple.PowerManagement.control"))',
+            '(allow mach-lookup (global-name "com.apple.cfprefsd.daemon") '
+            '(global-name "com.apple.cfprefsd.agent") '
+            '(local-name "com.apple.cfprefsd.agent"))',
+            "(allow network*)",
+            "(allow system-socket)",
+            '(allow mach-lookup (global-name "com.apple.bsd.dirhelper") '
+            '(global-name "com.apple.system.opendirectoryd.membership") '
+            '(global-name "com.apple.SecurityServer") '
+            '(global-name "com.apple.networkd") '
+            '(global-name "com.apple.ocspd") '
+            '(global-name "com.apple.trustd.agent") '
+            '(global-name "com.apple.SystemConfiguration.DNSConfiguration") '
+            '(global-name "com.apple.SystemConfiguration.configd"))',
+        ]
+        return "\n".join(sections), tuple(definitions)
+
+    def _sandbox_unavailable(
+        self,
+        command: list[str],
+        reason: str,
+    ) -> tuple[list[str], bool]:
+        if self.strict:
+            raise SandboxUnavailableError(f"{reason} and sandbox.strict is on")
+        logger.warning(
+            "%s; running shell without an OS sandbox. Credential environment "
+            "variables are still stripped.",
+            reason,
+        )
+        return list(command), False
+
     def _deny_read_paths(self) -> tuple[Path, ...]:
         home = self.pickel_home.expanduser().parent
         candidates = [self.pickel_home]
@@ -185,3 +312,17 @@ class SandboxPolicy:
             if resolved.exists() and resolved not in seen:
                 seen.append(resolved)
         return tuple(seen)
+
+
+def _seatbelt_available() -> bool:
+    # 固定系统路径，避免 PATH 中的同名程序替换安全边界。
+    return Path(_SEATBELT).is_file()
+
+
+def _existing_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    seen: list[Path] = []
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        if resolved.exists() and resolved not in seen:
+            seen.append(resolved)
+    return tuple(seen)
