@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from pickel.extensions_host.errors import ExtensionConfigError
+from pickel.extensions_host.event_processor import ConversationProcessorFactory
 from pickel.extensions_host.mcp_status import McpStatusSource
 from pickel.extensions_host.registry import ExtensionRegistry, Factory
 from pickel.tools.base import BaseTool
@@ -83,6 +84,21 @@ class ExtensionHost:
         handler 只需实现感兴趣的方法（duck typing，见 hooks/lifecycle.py 的 _call）。
         """
         self._registry.hook_factories.append(factory)
+
+    def add_event_processor(
+        self,
+        *,
+        event_types: tuple[type[Any], ...],
+        factory: ConversationProcessorFactory,
+    ) -> None:
+        """注册会话级 Runtime 事件处理器。"""
+        if not event_types:
+            raise ValueError("event_types 不能为空")
+        self._registry.add_event_processor(
+            extension_name=self.name,
+            event_types=event_types,
+            factory=factory,
+        )
 
     def add_recall_source(self, factory: Factory) -> None:
         """注册召回源工厂：(AgentScope) -> Recall | None。"""

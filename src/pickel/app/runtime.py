@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from collections.abc import Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -56,7 +57,12 @@ from pickel.extensions_host.loader import (
     load_extensions_async,
     teardown_extensions,
 )
+from pickel.extensions_host.event_processor import (
+    ConversationExtensionContext,
+    EventProcessor,
+)
 from pickel.runs.event_bus import EventBus
+from pickel.runs.conversation_output_bus import ConversationOutputBus
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
 from pickel.runs.runtime_bus import RuntimeBus
@@ -87,6 +93,11 @@ from pickel.runs.turn_mailbox import (
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.conversation_output import (
+    ConversationOutputBase,
+    ConversationOutputHandler,
+)
+from pickel.shared.conversation_mode import ConversationMode
 from pickel.shared.model_config import ModelSelection
 from pickel.skills.store import SkillStoreError
 
@@ -105,6 +116,14 @@ class _TurnExecution:
     mailbox: TurnMailbox
 
 
+@dataclass
+class _EventProcessorBinding:
+    """RuntimeConversation 私有的 extension 事件处理器。"""
+
+    processor: EventProcessor
+    unsubscribe: Callable[[], None]
+
+
 class RuntimeConversation:
     """一个活动会话及其运行资源。
 
@@ -119,6 +138,7 @@ class RuntimeConversation:
         session: Session,
         session_service: SessionService | Any | None = None,
         app_config: AppConfig | None = None,
+        mode: ConversationMode = "batch",
         trace_path_resolver: Callable[[str], Path] = trace_path,
         trace_sink_factory: Callable[..., JsonlTraceSink] = JsonlTraceSink,
     ) -> None:
@@ -127,6 +147,7 @@ class RuntimeConversation:
         self._session = session
         self._session_service = session_service
         self._app_config = app_config
+        self._mode = mode
         self._trace_path_resolver = trace_path_resolver
         self._trace_sink_factory = trace_sink_factory
         self._runtime_bus = RuntimeBus(
@@ -136,12 +157,15 @@ class RuntimeConversation:
             )
         )
         self._bus = self._runtime_bus.events
+        self._outputs = ConversationOutputBus()
         self._closed = False
         self._execution: _TurnExecution | None = None
         self._follow_ups: list[PendingInput] = []
         self._control_lock = asyncio.Lock()
         self._trace_sink: JsonlTraceSink | None = None
         self._unsubscribe_trace: Callable[[], None] | None = None
+        self._event_processors: list[_EventProcessorBinding] = []
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._open_trace()
 
     @property
@@ -159,6 +183,10 @@ class RuntimeConversation:
     @property
     def app_config(self) -> AppConfig | None:
         return self._app_config
+
+    @property
+    def mode(self) -> ConversationMode:
+        return self._mode
 
     @property
     def event_bus(self) -> EventBus:
@@ -525,6 +553,61 @@ class RuntimeConversation:
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
         return self._bus.subscribe(handler)
 
+    def subscribe_outputs(
+        self,
+        handler: ConversationOutputHandler,
+    ) -> Callable[[], None]:
+        return self._outputs.subscribe(handler)
+
+    async def publish_output(self, output: ConversationOutputBase) -> None:
+        await self._outputs.publish(output)
+
+    def start_background_task(
+        self,
+        coroutine: Coroutine[Any, Any, None],
+        name: str,
+    ) -> None:
+        """启动由 Conversation 统一取消和回收的后台任务。"""
+        if self._closed:
+            coroutine.close()
+            raise ConversationClosedError("Conversation 已关闭")
+        task = asyncio.create_task(coroutine, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._finish_background_task)
+
+    def _finish_background_task(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error(
+                "Conversation 后台任务失败: %s",
+                task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def add_event_processor(
+        self,
+        processor: EventProcessor,
+        event_types: tuple[type[Any], ...],
+    ) -> None:
+        """把一个会话级 extension 处理器挂到只读事件流。"""
+
+        async def handle(event) -> None:
+            if isinstance(event, event_types):
+                await processor.handle_event(event)
+
+        self._event_processors.append(
+            _EventProcessorBinding(
+                processor=processor,
+                unsubscribe=self.subscribe(handle),
+            )
+        )
+
     def snapshot(self) -> RuntimeSnapshot:
         preview = (
             self._session_service.build_preview(session=self._session)
@@ -682,6 +765,7 @@ class RuntimeConversation:
         self._close_trace()
         if self._closed:
             return
+        self._close_event_processors()
         self._close_bash()
         self._runtime_bus.close_now()
         if self._session_service is not None:
@@ -691,6 +775,7 @@ class RuntimeConversation:
     def detach(self) -> None:
         """状态切换时只释放观察资源，不归档旧会话以保持现有 CLI 语义。"""
         self._close_trace()
+        self._close_event_processors()
         self._close_bash()
         self._runtime_bus.close_now()
         self._closed = True
@@ -699,6 +784,20 @@ class RuntimeConversation:
         bash = getattr(self._run, "bash_operations", None)
         if bash is not None:
             bash.close(self._session.session_id)
+
+    def _close_event_processors(self) -> None:
+        for binding in reversed(self._event_processors):
+            binding.unsubscribe()
+        for task in tuple(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
+        for binding in reversed(self._event_processors):
+            try:
+                binding.processor.close()
+            except Exception:
+                logger.exception("Extension event processor close failed")
+        self._event_processors.clear()
+        self._outputs.clear()
 
     def _open_trace(self) -> None:
         configured = (
@@ -833,6 +932,7 @@ class RuntimeHost:
             run=run,
             session=session,
             session_service=service,
+            mode=request.mode,
         )
 
     def attach(
@@ -842,18 +942,44 @@ class RuntimeHost:
         run: Run | Any,
         session: Session,
         session_service: SessionService | Any | None = None,
+        mode: ConversationMode = "batch",
         trace_path_resolver: Callable[[str], Path] = trace_path,
         trace_sink_factory: Callable[..., JsonlTraceSink] = JsonlTraceSink,
     ) -> RuntimeConversation:
-        return RuntimeConversation(
+        conversation = RuntimeConversation(
             agent=agent,
             run=run,
             session=session,
             session_service=session_service,
             app_config=self.app_config,
+            mode=mode,
             trace_path_resolver=trace_path_resolver,
             trace_sink_factory=trace_sink_factory,
         )
+        self._add_event_processors(
+            conversation,
+            registry=self._boot.extensions,
+        )
+        return conversation
+
+    @staticmethod
+    def _add_event_processors(
+        conversation: RuntimeConversation,
+        *,
+        registry,
+    ) -> None:
+        context = ConversationExtensionContext(
+            agent_id=conversation.agent.agent_id,
+            session_id=conversation.session.session_id,
+            mode=conversation.mode,
+            publish_output=conversation.publish_output,
+            start_background_task=conversation.start_background_task,
+        )
+        for resolved in registry.resolve_event_processors(context):
+            conversation.add_event_processor(
+                resolved.processor,
+                resolved.event_types,
+            )
 
     def new_session(
         self,
@@ -877,6 +1003,7 @@ class RuntimeHost:
             run=conversation._run,
             session=session,
             session_service=service,
+            mode=conversation.mode,
             trace_path_resolver=conversation.trace_path_resolver,
             trace_sink_factory=conversation.trace_sink_factory,
         )
@@ -900,6 +1027,7 @@ class RuntimeHost:
             run=run,
             session=session,
             session_service=service,
+            mode=conversation.mode,
             trace_path_resolver=conversation.trace_path_resolver,
             trace_sink_factory=conversation.trace_sink_factory,
         )
@@ -945,8 +1073,13 @@ class RuntimeHost:
             session=conversation.session,
             session_service=service,
             app_config=app_config,
+            mode=conversation.mode,
             trace_path_resolver=conversation.trace_path_resolver,
             trace_sink_factory=conversation.trace_sink_factory,
+        )
+        self._add_event_processors(
+            next_conversation,
+            registry=next_boot.extensions,
         )
         conversation.detach()
         self._boot = next_boot

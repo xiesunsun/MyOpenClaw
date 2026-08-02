@@ -8,6 +8,12 @@ import logging
 from typing import Any
 
 from pickel.extensions_host.mcp_status import McpStatusSource
+from pickel.extensions_host.event_processor import (
+    ConversationExtensionContext,
+    ConversationProcessorFactory,
+    EventProcessorRegistration,
+    ResolvedEventProcessor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,7 @@ class ExtensionRegistry:
     hook_factories: list[Factory] = field(default_factory=list)
     recall_factories: list[Factory] = field(default_factory=list)
     sync_factories: list[Factory] = field(default_factory=list)
+    event_processors: list[EventProcessorRegistration] = field(default_factory=list)
     extension_names: list[str] = field(default_factory=list)
     mcp_status_source: McpStatusSource | None = None
 
@@ -52,6 +59,44 @@ class ExtensionRegistry:
 
     def session_syncs(self, scope: AgentScope) -> list[Any]:
         return self._evaluate(self.sync_factories, scope, "session sync")
+
+    def add_event_processor(
+        self,
+        *,
+        extension_name: str,
+        event_types: tuple[type[Any], ...],
+        factory: ConversationProcessorFactory,
+    ) -> None:
+        self.event_processors.append(
+            EventProcessorRegistration(
+                extension_name=extension_name,
+                event_types=event_types,
+                factory=factory,
+            )
+        )
+
+    def resolve_event_processors(
+        self,
+        context: ConversationExtensionContext,
+    ) -> list[ResolvedEventProcessor]:
+        resolved: list[ResolvedEventProcessor] = []
+        for registration in self.event_processors:
+            try:
+                processor = registration.factory(context)
+            except Exception:
+                logger.exception(
+                    "Extension event processor factory failed: %s",
+                    registration.extension_name,
+                )
+                continue
+            if processor is not None:
+                resolved.append(
+                    ResolvedEventProcessor(
+                        processor=processor,
+                        event_types=registration.event_types,
+                    )
+                )
+        return resolved
 
     @staticmethod
     def _evaluate(factories: list[Factory], scope: AgentScope, label: str) -> list[Any]:

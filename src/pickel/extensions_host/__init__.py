@@ -5,6 +5,13 @@
 
 from pickel.extensions_host.errors import ExtensionConfigError, ExtensionLoadError
 from pickel.extensions_host.host import ExtensionHost
+from pickel.extensions_host.event_processor import (
+    ConversationExtensionContext,
+    EventProcessor,
+    EventProcessorRegistration,
+    ResolvedEventProcessor,
+)
+from pickel.shared.conversation_mode import ConversationMode
 from pickel.extensions_host.loader import (
     LoadResult,
     load_extensions,
@@ -20,6 +27,10 @@ from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 
 __all__ = [
     "AgentScope",
+    "ConversationMode",
+    "ConversationExtensionContext",
+    "EventProcessor",
+    "EventProcessorRegistration",
     "ExtensionConfigError",
     "ExtensionHost",
     "ExtensionLoadError",
@@ -28,6 +39,7 @@ __all__ = [
     "McpServerStatusSnapshot",
     "McpStatusSnapshot",
     "McpStatusSource",
+    "ResolvedEventProcessor",
     "load_extensions",
     "load_extensions_async",
     "teardown_extensions",

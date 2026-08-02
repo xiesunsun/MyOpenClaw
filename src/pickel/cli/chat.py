@@ -15,6 +15,8 @@ from pickel.app.runtime_models import (
     TurnResult,
 )
 from pickel.cli.context_renderer import ContextRenderer
+from pickel.cli.audio_output_handler import CliAudioOutputHandler
+from pickel.cli.audio_player import MacAudioPlayer
 from pickel.cli.host_call_handlers import CliHostCallHandlers
 from pickel.cli.slash import (
     BUILTIN_SLASH_COMMANDS,
@@ -55,6 +57,9 @@ class ChatLoop:
         self._conversation = conversation
         self._host_call_handler_leases = []
         self._attach_host_call_handlers()
+        self._audio_output_unsubscribe: Callable[[], None] | None = None
+        self._audio_output_handler: CliAudioOutputHandler | None = None
+        self._attach_audio_output_handler()
         self._fallback_message_count = self._read_session_message_count()
         self._slash_registry = BUILTIN_SLASH_COMMANDS
         self._slash_completer = SlashCompleter(self._slash_registry, self)
@@ -72,6 +77,7 @@ class ChatLoop:
                 agent_id=agent_id,
                 session_id=session_id,
                 cwd=Path.cwd(),
+                mode="interactive",
             )
         )
         return cls(
@@ -194,6 +200,27 @@ class ChatLoop:
             handlers.attach(self._conversation.runtime_bus)
         )
 
+    def _attach_audio_output_handler(self) -> None:
+        if self._audio_output_unsubscribe is not None:
+            self._audio_output_unsubscribe()
+        if self._audio_output_handler is not None:
+            self._audio_output_handler.close()
+        self._audio_output_handler = CliAudioOutputHandler(
+            player=MacAudioPlayer(),
+            render_error=self._render_error_message,
+        )
+        self._audio_output_unsubscribe = self._conversation.subscribe_outputs(
+            self._audio_output_handler.handle_output
+        )
+
+    def _close_audio_output_handler(self) -> None:
+        if self._audio_output_unsubscribe is not None:
+            self._audio_output_unsubscribe()
+            self._audio_output_unsubscribe = None
+        if self._audio_output_handler is not None:
+            self._audio_output_handler.close()
+            self._audio_output_handler = None
+
     def _render_help(self) -> None:
         width = max(len(item.usage) for item in self._slash_registry.list()) + 2
         lines = ["[bold]Available commands[/bold]"]
@@ -310,6 +337,7 @@ class ChatLoop:
                 agent_id,
             )
             self._attach_host_call_handlers()
+            self._attach_audio_output_handler()
             self._fallback_message_count = 0
             self._render_system_message(
                 f"Switched to {agent_id}, new session {self.session.session_id}"
@@ -341,6 +369,7 @@ class ChatLoop:
                 trace_path_resolver=trace_path,
             )
         self._attach_host_call_handlers()
+        self._attach_audio_output_handler()
         self._fallback_message_count = 0
         self._render_system_message(
             f"New session {self.session.session_id} (agent={self.agent_id})"
@@ -359,6 +388,7 @@ class ChatLoop:
             )
             self._conversation = result.conversation
             self._attach_host_call_handlers()
+            self._attach_audio_output_handler()
             for warning in result.warnings:
                 self._render_error_message(f"Extension load error: {warning}")
             self._render_system_message(
@@ -673,6 +703,7 @@ class ChatLoop:
             await self._loop()
         finally:
             self._close_trace_sink()
+            self._close_audio_output_handler()
             if not self._conversation.closed:
                 self._conversation.detach()
 

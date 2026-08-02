@@ -15,6 +15,7 @@ from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.runs.runtime_events import AssistantMessageEvent
+from pickel.shared.conversation_output import AudioContent, AudioOutputReady
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import FunctionTool
@@ -24,6 +25,7 @@ from pickel.extensions_host.mcp_status import (
     McpStatusSnapshot,
 )
 from pickel.extensions_host.registry import ExtensionRegistry
+from pickel.extensions_host.host import ExtensionHost
 
 
 class _SessionService:
@@ -80,6 +82,18 @@ class _Run:
         return reply
 
 
+class _EventProcessor:
+    def __init__(self) -> None:
+        self.events = []
+        self.closed = False
+
+    async def handle_event(self, event) -> None:
+        self.events.append(event)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _agent() -> Agent:
     return Agent(
         agent_id="Pickle",
@@ -113,6 +127,51 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("completed", second.status)
         self.assertEqual(["one", "two"], [item.text for item in events])
         self.assertEqual([0, 1], [item.envelope.seq for item in events])
+
+    async def test_publishes_outputs_to_surface_subscriber(self) -> None:
+        agent = _agent()
+        conversation = RuntimeConversation(
+            agent=agent,
+            run=_Run(agent),
+            session=Session.create(agent_id=agent.agent_id),
+        )
+        outputs = []
+        conversation.subscribe_outputs(outputs.append)
+        output = AudioOutputReady(
+            session_id=conversation.session.session_id,
+            turn_id="turn-1",
+            source="test",
+            audio=AudioContent(data=b"wav", media_type="audio/wav"),
+        )
+
+        await conversation.publish_output(output)
+
+        self.assertEqual([output], outputs)
+
+    async def test_detach_cancels_owned_background_tasks(self) -> None:
+        agent = _agent()
+        conversation = RuntimeConversation(
+            agent=agent,
+            run=_Run(agent),
+            session=Session.create(agent_id=agent.agent_id),
+        )
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        conversation.start_background_task(worker(), "test-worker")
+        await started.wait()
+
+        conversation.detach()
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+
+        self.assertTrue(conversation.closed)
 
     async def test_concurrent_turn_is_rejected(self) -> None:
         agent = _agent()
@@ -256,3 +315,35 @@ class RuntimeHostConversationTests(unittest.TestCase):
     def test_resume_rejects_conflicting_agent(self) -> None:
         with self.assertRaisesRegex(ValueError, "不能同时指定 agent_id"):
             ConversationRequest(agent_id="A", session_id="session-1")
+
+    def test_attach_resolves_and_closes_interactive_event_processor(self) -> None:
+        agent = _agent()
+        run = _Run(agent)
+        registry = ExtensionRegistry()
+        processor = _EventProcessor()
+        ExtensionHost(
+            name="demo",
+            config_section=None,
+            tool_bus=ToolBus(),
+            registry=registry,
+        ).add_event_processor(
+            event_types=(AssistantMessageEvent,),
+            factory=lambda context: (
+                processor if context.mode == "interactive" else None
+            ),
+        )
+        boot = SimpleNamespace(
+            app_config=SimpleNamespace(observability=SimpleNamespace(trace=None)),
+            extensions=registry,
+            extension_result=None,
+        )
+
+        conversation = RuntimeHost(boot).attach(
+            agent=agent,
+            run=run,
+            session=Session.create(agent_id=agent.agent_id),
+            mode="interactive",
+        )
+        conversation.archive()
+
+        self.assertTrue(processor.closed)

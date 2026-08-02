@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.runs.turn_usage import TurnUsage
+from pickel.shared.conversation_mode import ConversationMode
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class ConversationRequest:
     session_id: str | None = None
     persistence: Literal["persistent", "ephemeral"] = "persistent"
     cwd: Path | None = None
+    mode: ConversationMode = "batch"
 
     def __post_init__(self) -> None:
         if self.session_id is not None and self.agent_id is not None:
@@ -103,6 +105,8 @@ class ConversationRequest:
             raise ValueError("ephemeral Conversation 不能恢复持久化 session")
         if self.persistence not in {"persistent", "ephemeral"}:
             raise ValueError(f"未知 persistence: {self.persistence}")
+        if self.mode not in {"interactive", "batch"}:
+            raise ValueError(f"未知 mode: {self.mode}")
 
 
 @dataclass(frozen=True)
