@@ -631,11 +631,12 @@ class BashTool(BaseTool):
     spec = ToolSpec(
         name="bash",
         description=(
-            "Execute a Bash command in the agent's working environment. "
-            "The shell persists for the current session, so cwd, environment variables, "
-            "and background jobs carry over between calls. Use standard Bash syntax for "
-            "pipes, redirects, and background jobs. Redirect background output to a file "
-            "and use jobs, ps, tail, and kill to manage it."
+            "Execute Bash in the agent's persistent working environment. cwd, "
+            "environment variables, and background jobs carry over between calls. A "
+            "non-zero exit code is a completed command result, not a tool failure. "
+            "When timeout is omitted, no Runtime timeout is applied. Use standard "
+            "Bash pipes, redirects, and background jobs. Redirect long-running "
+            "background output to a file and manage jobs with jobs, ps, tail, and kill."
         ),
         input_schema={
             "type": "object",
@@ -659,16 +660,41 @@ class BashTool(BaseTool):
         output_schema={
             "type": "object",
             "properties": {
-                "stdout": {"type": "string"},
-                "stderr": {"type": "string"},
-                "exit_code": {"type": "integer"},
-                "cwd": {"type": "string"},
-                "shell_status": {"type": "string"},
-                "timed_out": {"type": "boolean"},
-                "truncated": {"type": "boolean"},
-                "full_output_path": {"type": ["string", "null"]},
-                "sandboxed": {"type": "boolean"},
-                "environment": {"type": "string"},
+                "stdout": {"type": "string", "description": "Command stdout."},
+                "stderr": {"type": "string", "description": "Command stderr."},
+                "exit_code": {
+                    "type": "integer",
+                    "description": "POSIX command exit status.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory after the command.",
+                },
+                "shell_status": {
+                    "type": "string",
+                    "enum": ["ready", "running", "terminated"],
+                    "description": "Whether the persistent shell can accept a command.",
+                },
+                "timed_out": {
+                    "type": "boolean",
+                    "description": "Whether the Runtime timeout was reached.",
+                },
+                "truncated": {
+                    "type": "boolean",
+                    "description": "Whether displayed output was truncated.",
+                },
+                "full_output_path": {
+                    "type": ["string", "null"],
+                    "description": "Complete output file when output was truncated.",
+                },
+                "sandboxed": {
+                    "type": "boolean",
+                    "description": "Whether the execution backend enforced a sandbox.",
+                },
+                "environment": {
+                    "type": "string",
+                    "description": "Execution backend name.",
+                },
             },
             "required": [
                 "stdout",

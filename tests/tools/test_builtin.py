@@ -2,15 +2,56 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from pickel.context.prepare import resolve_tools
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.bus import ToolBus
-from pickel.tools.catalog import install_builtin_tools
+from pickel.tools.bus import ToolActivation, ToolBus
+from pickel.tools.catalog import builtin_tools, install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import WorkspacePathAccessPolicy
 from pickel.tools.services import ToolServices
 
 
 class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
+    def test_builtin_model_contracts_are_self_describing(self) -> None:
+        specs = {tool.spec.name: tool.spec for tool in builtin_tools()}
+        bus = ToolBus()
+        install_builtin_tools(bus)
+        snapshot = bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
+        definitions = {
+            definition.name: definition
+            for definition in resolve_tools(snapshot=snapshot)
+        }
+
+        self.assertEqual(
+            {"ls", "glob", "grep", "read", "edit", "write", "bash"},
+            set(definitions),
+        )
+        self.assertIn("does not recurse", definitions["ls"].description)
+        self.assertIn("respects Git ignore rules", definitions["glob"].description)
+        self.assertIn("path:line:text", definitions["grep"].description)
+        self.assertIn("UTF-8", definitions["read"].description)
+        self.assertIn("without changing the file", definitions["edit"].description)
+        self.assertIn("completely overwrite", definitions["write"].description)
+        self.assertIn("non-zero exit code", definitions["bash"].description)
+
+        expected_defaults = {
+            "ls": {"path": ".", "limit": 500},
+            "glob": {"path": ".", "limit": 1_000},
+            "grep": {"path": ".", "ignore_case": False, "limit": 100},
+            "read": {"offset": 1, "limit": 2_000},
+        }
+        for tool_name, defaults in expected_defaults.items():
+            properties = definitions[tool_name].input_schema["properties"]
+            self.assertEqual(
+                defaults,
+                {name: properties[name]["default"] for name in defaults},
+            )
+
+        self.assertEqual(
+            ["ready", "running", "terminated"],
+            specs["bash"].output_schema["properties"]["shell_status"]["enum"],
+        )
+
     def test_builtin_tool_catalog_can_seed_bus(self) -> None:
         bus = ToolBus()
         install_builtin_tools(bus)

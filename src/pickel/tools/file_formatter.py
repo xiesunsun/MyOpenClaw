@@ -18,7 +18,7 @@ class FileToolFormatter:
             lines.append(f"{entry.path}{suffix}")
         if result.truncated:
             lines.append("[Result limit reached. Use a narrower path.]")
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "(empty directory)"
 
     def format_glob_search(self, result: GlobSearchResult) -> str:
         lines: list[str] = []
@@ -26,7 +26,7 @@ class FileToolFormatter:
             lines.append(match.path)
         if result.truncated:
             lines.append("[Result limit reached. Use a narrower pattern or path.]")
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "(no matches)"
 
     def format_grep_search(self, result: GrepSearchResult) -> str:
         lines: list[str] = []
@@ -34,7 +34,7 @@ class FileToolFormatter:
             lines.append(f"{hit.path}:{hit.line_number}:{hit.line_text}")
         if result.truncated:
             lines.append("[Result limit reached. Use a narrower pattern or path.]")
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "(no matches)"
 
     def format_file_read(self, result: FileReadResult) -> str:
         lines: list[str] = []
@@ -48,7 +48,7 @@ class FileToolFormatter:
                 f"[Showing lines {result.start_line}-{result.end_line}{total}. "
                 f"Use offset={result.end_line + 1} to continue.]"
             )
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "(empty file)"
 
     def format_replace(self, result: ReplaceResult) -> str:
         return result.diff or f"Edited {result.path}"

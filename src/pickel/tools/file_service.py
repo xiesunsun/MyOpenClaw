@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import difflib
-import fnmatch
 import json
+import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 
 from pickel.tools.file_errors import (
@@ -69,6 +69,9 @@ class WorkspaceFileService:
                 part.startswith(".") for part in entry.relative_to(directory_path).parts
             ):
                 continue
+            if len(entries) == max_entries:
+                truncated = True
+                break
             entries.append(
                 DirectoryEntry(
                     path=self._to_workspace_relative(entry),
@@ -76,10 +79,6 @@ class WorkspaceFileService:
                     size_bytes=entry.stat().st_size if entry.is_file() else None,
                 )
             )
-            if len(entries) >= max_entries:
-                truncated = True
-                break
-
         return DirectoryListing(
             base_path=self._to_workspace_relative(directory_path),
             entries=entries,
@@ -213,7 +212,7 @@ class WorkspaceFileService:
         max_results: int,
     ) -> tuple[list[GlobMatch], bool]:
         process = subprocess.Popen(
-            [rg_path, "--files", "--hidden", "--glob", pattern],
+            [rg_path, "--files", "--hidden", "--glob", "!.git/**"],
             cwd=directory_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -224,8 +223,11 @@ class WorkspaceFileService:
         assert process.stdout is not None
         try:
             for raw_path in process.stdout:
+                relative_path = raw_path.rstrip("\r\n")
+                if not _matches_glob(relative_path, pattern):
+                    continue
                 candidate = self.access_policy.resolve_path(
-                    str(directory_path / raw_path.rstrip("\r\n")),
+                    str(directory_path / relative_path),
                     self.workspace_root,
                 )
                 self.access_policy.assert_file_readable(candidate)
@@ -247,10 +249,9 @@ class WorkspaceFileService:
         self, *, directory_path: Path, pattern: str, max_results: int
     ) -> tuple[list[GlobMatch], bool]:
         matches: list[GlobMatch] = []
-        for candidate in sorted(
-            directory_path.glob(pattern), key=lambda item: item.as_posix()
-        ):
-            if not candidate.is_file():
+        for candidate in _fallback_files(directory_path):
+            relative_path = candidate.relative_to(directory_path).as_posix()
+            if not _matches_glob(relative_path, pattern):
                 continue
             resolved = self.access_policy.resolve_path(
                 str(candidate), self.workspace_root
@@ -270,11 +271,18 @@ class WorkspaceFileService:
         case_sensitive: bool,
         max_results: int,
     ) -> tuple[list[SearchHit], bool]:
-        command = [rg_path, "--json", "--line-number", "--color", "never"]
+        command = [
+            rg_path,
+            "--json",
+            "--line-number",
+            "--color",
+            "never",
+            "--hidden",
+            "--glob",
+            "!.git/**",
+        ]
         if not case_sensitive:
             command.append("--ignore-case")
-        if glob_pattern is not None:
-            command.extend(["--glob", glob_pattern])
         command.extend(["--", pattern, "."])
         process = subprocess.Popen(
             command,
@@ -292,6 +300,11 @@ class WorkspaceFileService:
                 if event.get("type") != "match":
                     continue
                 data = event["data"]
+                relative_path = data["path"]["text"].removeprefix("./")
+                if glob_pattern is not None and not _matches_glob(
+                    relative_path, glob_pattern
+                ):
+                    continue
                 candidate = self.access_policy.resolve_path(
                     str(directory_path / data["path"]["text"]),
                     self.workspace_root,
@@ -326,13 +339,12 @@ class WorkspaceFileService:
         max_results: int,
     ) -> tuple[list[SearchHit], bool]:
         hits: list[SearchHit] = []
-        for candidate in sorted(
-            directory_path.rglob("*"), key=lambda item: item.as_posix()
-        ):
+        for candidate in _fallback_files(directory_path):
             if not candidate.is_file() or candidate.is_symlink():
                 continue
-            if glob_pattern is not None and not fnmatch.fnmatch(
-                candidate.name, glob_pattern
+            relative_path = candidate.relative_to(directory_path).as_posix()
+            if glob_pattern is not None and not _matches_glob(
+                relative_path, glob_pattern
             ):
                 continue
             resolved = self.access_policy.resolve_path(
@@ -340,6 +352,9 @@ class WorkspaceFileService:
             )
             self.access_policy.assert_file_readable(resolved)
             try:
+                with resolved.open("rb") as handle:
+                    if b"\0" in handle.read(8_192):
+                        continue
                 with resolved.open("r", encoding=self.default_encoding) as handle:
                     for line_number, line_text in enumerate(handle, start=1):
                         if not compiled.search(line_text):
@@ -443,3 +458,67 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
+
+
+def _matches_glob(path: str, pattern: str) -> bool:
+    """匹配模型常用 glob；`**/` 可匹配零层或多层目录。"""
+    patterns = {pattern}
+    pending = [pattern]
+    while pending:
+        candidate = pending.pop()
+        marker = candidate.find("**/")
+        if marker < 0:
+            continue
+        without_directory = candidate[:marker] + candidate[marker + 3 :]
+        if without_directory not in patterns:
+            patterns.add(without_directory)
+            pending.append(without_directory)
+    relative_path = PurePosixPath(path)
+    return any(relative_path.match(candidate) for candidate in patterns)
+
+
+def _fallback_files(directory_path: Path) -> list[Path]:
+    """返回与 rg Git-ignore 语义一致的 fallback 文件集合。"""
+    try:
+        git_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(directory_path),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--deduplicate",
+                "-z",
+                "--",
+                ".",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        git_result = None
+    if git_result is not None and git_result.returncode == 0:
+        candidates = [
+            directory_path / os.fsdecode(raw_path)
+            for raw_path in git_result.stdout.split(b"\0")
+            if raw_path
+        ]
+        return sorted(
+            (
+                candidate.resolve()
+                for candidate in candidates
+                if candidate.is_file() and not candidate.is_symlink()
+            ),
+            key=lambda item: item.as_posix(),
+        )
+
+    return sorted(
+        (
+            candidate.resolve()
+            for candidate in directory_path.rglob("*")
+            if candidate.is_file() and not candidate.is_symlink()
+        ),
+        key=lambda item: item.as_posix(),
+    )

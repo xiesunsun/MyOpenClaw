@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,7 +7,14 @@ from unittest.mock import patch
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
-from pickel.tools.file_tools import EditTool, GlobTool, GrepTool, ReadTool, WriteTool
+from pickel.tools.file_tools import (
+    EditTool,
+    GlobTool,
+    GrepTool,
+    LsTool,
+    ReadTool,
+    WriteTool,
+)
 from pickel.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
 from pickel.tools.services import ToolServices
 
@@ -203,6 +211,99 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("nested/note.py", glob_result.content)
         self.assertIn("nested/note.py:1:fallback match", grep_result.content)
+
+    async def test_grep_skips_binary_files_in_ripgrep_and_fallback(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "binary.dat").write_bytes(b"needle\0binary\n")
+            context = self._context(workspace)
+            tool = GrepTool(FileToolFormatter())
+
+            rg_result = await tool.execute({"pattern": "needle"}, context)
+            with patch("pickel.tools.file_service.shutil.which", return_value=None):
+                fallback_result = await tool.execute({"pattern": "needle"}, context)
+
+        self.assertEqual("(no matches)", rg_result.content)
+        self.assertEqual("(no matches)", fallback_result.content)
+
+    async def test_ripgrep_and_fallback_share_git_ignore_and_hidden_semantics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
+            (workspace / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+            for filename in ("keep.py", "ignored.py", ".hidden.py"):
+                (workspace / filename).write_text(
+                    f"needle in {filename}\n", encoding="utf-8"
+                )
+            context = self._context(workspace)
+            glob_tool = GlobTool(FileToolFormatter())
+            grep_tool = GrepTool(FileToolFormatter())
+
+            rg_glob = await glob_tool.execute({"pattern": "**/*.py"}, context)
+            rg_all = await glob_tool.execute({"pattern": "**/*"}, context)
+            rg_grep = await grep_tool.execute(
+                {"pattern": "needle", "glob": "*.py"}, context
+            )
+            with patch("pickel.tools.file_service.shutil.which", return_value=None):
+                fallback_glob = await glob_tool.execute({"pattern": "**/*.py"}, context)
+                fallback_all = await glob_tool.execute({"pattern": "**/*"}, context)
+                fallback_grep = await grep_tool.execute(
+                    {"pattern": "needle", "glob": "*.py"}, context
+                )
+
+        self.assertEqual(
+            set(rg_glob.content.splitlines()), set(fallback_glob.content.splitlines())
+        )
+        self.assertEqual(
+            set(rg_grep.content.splitlines()), set(fallback_grep.content.splitlines())
+        )
+        self.assertEqual(
+            set(rg_all.content.splitlines()), set(fallback_all.content.splitlines())
+        )
+        self.assertNotIn("ignored.py", rg_glob.content)
+        self.assertIn(".hidden.py", rg_glob.content)
+        self.assertNotIn(".git/", rg_all.content)
+
+    async def test_empty_results_are_self_describing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "empty").mkdir()
+            (workspace / "empty.txt").write_text("", encoding="utf-8")
+            context = self._context(workspace)
+
+            ls_result = await LsTool(FileToolFormatter()).execute(
+                {"path": "empty"}, context
+            )
+            read_result = await ReadTool(FileToolFormatter()).execute(
+                {"path": "empty.txt"}, context
+            )
+            glob_result = await GlobTool(FileToolFormatter()).execute(
+                {"pattern": "**/*.py"}, context
+            )
+            grep_result = await GrepTool(FileToolFormatter()).execute(
+                {"pattern": "missing"}, context
+            )
+
+        self.assertEqual("(empty directory)", ls_result.content)
+        self.assertEqual("(empty file)", read_result.content)
+        self.assertEqual("(no matches)", glob_result.content)
+        self.assertEqual("(no matches)", grep_result.content)
+
+    async def test_ls_marks_truncation_only_when_more_entries_exist(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "one.txt").write_text("", encoding="utf-8")
+            tool = LsTool(FileToolFormatter())
+            context = self._context(workspace)
+
+            exact = await tool.execute({"limit": 1}, context)
+            (workspace / "two.txt").write_text("", encoding="utf-8")
+            truncated = await tool.execute({"limit": 1}, context)
+
+        self.assertFalse(exact.metadata["truncated"])
+        self.assertTrue(truncated.metadata["truncated"])
 
     async def test_read_tool_rejects_paths_outside_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:

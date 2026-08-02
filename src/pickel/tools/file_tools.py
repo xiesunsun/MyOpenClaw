@@ -44,20 +44,23 @@ class LsTool(BaseFileTool):
     spec = ToolSpec(
         name="ls",
         description=(
-            "List one directory in the workspace. Returns paths sorted alphabetically; "
-            "directories end with '/'. Includes hidden entries."
+            "List the immediate contents of a workspace directory. Returns one "
+            "workspace-relative path per line, sorted alphabetically; directories end "
+            "with '/'. Includes hidden entries and does not recurse."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory to list. Defaults to the workspace root.",
+                    "description": "Workspace directory to list.",
+                    "default": ".",
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum entries to return. Defaults to 500.",
+                    "description": "Maximum directory entries to return.",
+                    "default": 500,
                 },
             },
             "additionalProperties": False,
@@ -90,24 +93,30 @@ class GlobTool(BaseFileTool):
     spec = ToolSpec(
         name="glob",
         description=(
-            "Find workspace files matching a glob pattern. Respects ignore files "
-            "when ripgrep is available."
+            "Find workspace files whose paths relative to the search directory match a "
+            "glob pattern. Returns one workspace-relative file path per line. Includes "
+            "hidden files and respects Git ignore rules."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern, for example '**/*.py'.",
+                    "description": (
+                        "Glob matched against paths relative to the search directory, "
+                        "for example '**/*.py'."
+                    ),
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search. Defaults to the workspace root.",
+                    "description": "Workspace directory to search.",
+                    "default": ".",
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum paths to return. Defaults to 1,000.",
+                    "description": "Maximum file paths to return.",
+                    "default": 1_000,
                 },
             },
             "required": ["pattern"],
@@ -141,8 +150,9 @@ class GrepTool(BaseFileTool):
     spec = ToolSpec(
         name="grep",
         description=(
-            "Search workspace file contents with a regular expression. Returns "
-            "path:line:text matches."
+            "Search workspace text files with a regular expression. Returns one match "
+            "per line as path:line:text. Includes hidden files, skips binary files, "
+            "and respects Git ignore rules."
         ),
         input_schema={
             "type": "object",
@@ -153,20 +163,26 @@ class GrepTool(BaseFileTool):
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search. Defaults to the workspace root.",
+                    "description": "Workspace directory to search.",
+                    "default": ".",
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional filename glob filter, for example '*.py'.",
+                    "description": (
+                        "Optional glob matched against paths relative to the search "
+                        "directory, for example '*.py' or '**/test_*.py'."
+                    ),
                 },
                 "ignore_case": {
                     "type": "boolean",
-                    "description": "Use case-insensitive matching. Defaults to false.",
+                    "description": "Use case-insensitive matching.",
+                    "default": False,
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum matches to return. Defaults to 100.",
+                    "description": "Maximum matching lines to return.",
+                    "default": 100,
                 },
             },
             "required": ["pattern"],
@@ -205,8 +221,10 @@ class ReadTool(BaseFileTool):
     spec = ToolSpec(
         name="read",
         description=(
-            "Read a text file with line numbers. Use offset and limit for large files, "
-            "and continue from the offset reported in truncated results."
+            "Read a UTF-8 text file with 1-indexed line numbers. Reads at most limit "
+            "lines beginning at offset; truncated results report the next offset. Use "
+            "bash for binary files or unusually long lines. Model-visible output is "
+            f"capped at {DEFAULT_READ_CHARS:,} characters."
         ),
         input_schema={
             "type": "object",
@@ -215,14 +233,16 @@ class ReadTool(BaseFileTool):
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "First line to read, 1-indexed. Defaults to 1.",
+                    "description": "First line to read, 1-indexed.",
+                    "default": 1,
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        f"Maximum lines to read. Defaults to {DEFAULT_READ_LINES}."
+                        "Maximum lines to read before returning a continuation offset."
                     ),
+                    "default": DEFAULT_READ_LINES,
                 },
             },
             "required": ["path"],
@@ -262,7 +282,9 @@ class EditTool(BaseFileTool):
     spec = ToolSpec(
         name="edit",
         description=(
-            "Edit one file by replacing an exact, unique text span. Returns a unified diff."
+            "Replace one exact, unique text span in a UTF-8 file. Fails without "
+            "changing the file when the text is absent or occurs more than once. "
+            "Returns a unified diff."
         ),
         input_schema={
             "type": "object",
@@ -304,8 +326,8 @@ class WriteTool(BaseFileTool):
     spec = ToolSpec(
         name="write",
         description=(
-            "Create or completely overwrite a text file. Creates parent directories. "
-            "Use edit for localized changes."
+            "Create or completely overwrite a UTF-8 text file. Creates missing parent "
+            "directories. Use edit for localized changes."
         ),
         input_schema={
             "type": "object",
