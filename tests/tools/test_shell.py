@@ -6,15 +6,18 @@ import unittest
 
 from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.catalog import builtin_tools, install_builtin_tools
+from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.bus import ToolBus
 from pickel.tools.shell import (
+    BashTool,
+    LocalBashOperations,
     ShellCloseTool,
     ShellExecTool,
     PersistentShell,
     ShellKillTool,
     ShellOutputTool,
     ShellRestartTool,
+    ShellExecutionResult,
     ShellSessionManager,
     ShellStatus,
     ShellTasksTool,
@@ -22,40 +25,136 @@ from pickel.tools.shell import (
 )
 
 
+class _RecordingBash:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def exec(self, **kwargs) -> ShellExecutionResult:
+        self.calls.append(kwargs)
+        return ShellExecutionResult(
+            stdout="remote-ok",
+            stderr="",
+            exit_code=0,
+            cwd=kwargs["workspace_path"],
+            shell_status=ShellStatus.READY,
+            environment="staging",
+        )
+
+    def close(self, session_id: str) -> None:
+        pass
+
+
 class ShellToolTests(unittest.IsolatedAsyncioTestCase):
     def test_builtin_catalog_registers_shell_tools(self) -> None:
         bus = ToolBus()
         install_builtin_tools(bus)
 
-        tools = [
-            bus.get(name).tool
-            for name in [
-                "shell_exec",
-                "shell_wait",
-                "shell_stdin",
-                "shell_interrupt",
-                "shell_tasks",
-                "shell_output",
-                "shell_kill",
-                "shell_restart",
-                "shell_close",
-            ]
-        ]
+        self.assertEqual("bash", bus.get("bash").tool.spec.name)
+        for legacy_name in (
+            "shell_exec",
+            "shell_wait",
+            "shell_stdin",
+            "shell_interrupt",
+            "shell_tasks",
+            "shell_output",
+            "shell_kill",
+            "shell_restart",
+            "shell_close",
+        ):
+            self.assertNotIn(legacy_name, bus.list_names())
 
-        self.assertEqual(
-            [
-                "shell_exec",
-                "shell_wait",
-                "shell_stdin",
-                "shell_interrupt",
-                "shell_tasks",
-                "shell_output",
-                "shell_kill",
-                "shell_restart",
-                "shell_close",
-            ],
-            [tool.spec.name for tool in tools],
+    async def test_bash_contract_does_not_depend_on_local_pty(self) -> None:
+        bash = _RecordingBash()
+        context = ToolExecutionContext(
+            agent_id="Pickle",
+            session_id="session-1",
+            workspace_path=Path("/tmp/workspace"),
+            services=ToolServices(bash=bash),
         )
+
+        result = await BashTool().execute(
+            {"command": "echo hi", "timeout": 2.5}, context
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual("remote-ok", result.content)
+        self.assertEqual("echo hi", bash.calls[0]["command"])
+        self.assertEqual(2.5, bash.calls[0]["timeout"])
+        self.assertEqual("staging", result.structured_content["environment"])
+
+    async def test_bash_uses_replaceable_operations_and_persists_cwd(self) -> None:
+        manager = ShellSessionManager()
+        bash = LocalBashOperations(manager)
+        tool = BashTool()
+
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "nested").mkdir()
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=workspace,
+                services=ToolServices(bash=bash),
+            )
+            try:
+                first = await tool.execute({"command": "cd nested"}, context)
+                second = await tool.execute({"command": "pwd"}, context)
+            finally:
+                bash.close(context.session_id)
+
+        self.assertFalse(first.is_error)
+        self.assertEqual(str((workspace / "nested").resolve()), second.content.strip())
+        self.assertEqual(
+            str((workspace / "nested").resolve()),
+            second.structured_content["cwd"],
+        )
+
+    async def test_bash_nonzero_exit_is_command_result_not_tool_error(self) -> None:
+        manager = ShellSessionManager()
+        bash = LocalBashOperations(manager)
+        tool = BashTool()
+
+        with TemporaryDirectory() as tmpdir:
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=bash),
+            )
+            try:
+                result = await tool.execute(
+                    {"command": "exit_code=7; (exit $exit_code)"}, context
+                )
+            finally:
+                bash.close(context.session_id)
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(7, result.structured_content["exit_code"])
+
+    async def test_bash_timeout_stops_foreground_and_keeps_shell_usable(self) -> None:
+        manager = ShellSessionManager()
+        bash = LocalBashOperations(manager)
+        tool = BashTool()
+
+        with TemporaryDirectory() as tmpdir:
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="session-1",
+                workspace_path=Path(tmpdir),
+                services=ToolServices(bash=bash),
+            )
+            try:
+                timed_out = await tool.execute(
+                    {"command": "echo before; sleep 30", "timeout": 0.1}, context
+                )
+                after = await tool.execute({"command": "echo alive"}, context)
+            finally:
+                bash.close(context.session_id)
+
+        self.assertFalse(timed_out.is_error)
+        self.assertTrue(timed_out.structured_content["timed_out"])
+        self.assertEqual(124, timed_out.structured_content["exit_code"])
+        self.assertIn("alive", after.content)
 
     def test_shell_session_manager_reuses_session_for_same_conversation(self) -> None:
         manager = ShellSessionManager()

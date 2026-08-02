@@ -7,15 +7,7 @@ tools:
   - read_many_files
   - replace
   - write_file
-  - shell_exec
-  - shell_wait
-  - shell_stdin
-  - shell_interrupt
-  - shell_tasks
-  - shell_output
-  - shell_kill
-  - shell_restart
-  - shell_close
+  - bash
   - skill_manage
   - mcp__tavily__*
 file_access_mode: full

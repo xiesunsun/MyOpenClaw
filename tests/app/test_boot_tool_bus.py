@@ -15,7 +15,8 @@ class InstallBuiltinToolsTests(unittest.TestCase):
 
         names = bus.list_names(source=ToolSource.BUILTIN)
         self.assertIn("read_file", names)
-        self.assertIn("shell_exec", names)
+        self.assertIn("bash", names)
+        self.assertNotIn("shell_exec", names)
         self.assertIn("echo", names)
         self.assertEqual(sorted(names), sorted(bus.list_names()))
 

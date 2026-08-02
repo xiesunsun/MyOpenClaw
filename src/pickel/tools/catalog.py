@@ -12,17 +12,7 @@ from pickel.tools.file_tools import (
     WriteFileTool,
 )
 from pickel.tools.skill_manage import SkillManageTool
-from pickel.tools.shell import (
-    ShellCloseTool,
-    ShellExecTool,
-    ShellInterruptTool,
-    ShellKillTool,
-    ShellOutputTool,
-    ShellRestartTool,
-    ShellStdinTool,
-    ShellTasksTool,
-    ShellWaitTool,
-)
+from pickel.tools.shell import BashTool
 
 
 def builtin_tools() -> list[BaseTool]:
@@ -37,15 +27,7 @@ def builtin_tools() -> list[BaseTool]:
         ReadManyFilesTool(formatter),
         ReplaceTool(formatter),
         WriteFileTool(formatter),
-        ShellExecTool(),
-        ShellWaitTool(),
-        ShellStdinTool(),
-        ShellInterruptTool(),
-        ShellTasksTool(),
-        ShellOutputTool(),
-        ShellKillTool(),
-        ShellRestartTool(),
-        ShellCloseTool(),
+        BashTool(),
         SkillManageTool(),
     ]
 

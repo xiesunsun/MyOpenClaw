@@ -8,8 +8,9 @@ from pickel.tools.base import ToolExecutionContext
 from pickel.tools.sandbox import SandboxPolicy, SandboxSettings
 from pickel.tools.services import ToolServices
 from pickel.tools.shell import (
+    BashTool,
+    LocalBashOperations,
     PersistentShell,
-    ShellExecTool,
     ShellRestartTool,
     ShellSessionManager,
     ShellStatus,
@@ -150,9 +151,14 @@ class EscapeHatchTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             manager = ShellSessionManager(sandbox=_policy(tmp))
-            context = _context(tmp, manager)
+            context = ToolExecutionContext(
+                agent_id="Pickle",
+                session_id="s",
+                workspace_path=tmp,
+                services=ToolServices(bash=LocalBashOperations(manager)),
+            )
             try:
-                result = await ShellExecTool().execute({"command": "echo hi"}, context)
+                result = await BashTool().execute({"command": "echo hi"}, context)
 
                 self.assertEqual(HAS_BWRAP, result.metadata["sandboxed"])
             finally:

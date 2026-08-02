@@ -32,6 +32,14 @@ class _SessionService:
         pass
 
 
+class _BashOperations:
+    def __init__(self) -> None:
+        self.closed_sessions: list[str] = []
+
+    def close(self, session_id: str) -> None:
+        self.closed_sessions.append(session_id)
+
+
 class _Run:
     def __init__(self, agent: Agent, *, wait: bool = False) -> None:
         self.agent = agent
@@ -50,6 +58,7 @@ class _Run:
         )
         self.activation = ToolActivation(allowed=frozenset({"read_file"}))
         self.skill_store = None
+        self.bash_operations = _BashOperations()
 
     async def turn(self, *, session, user_text, bus):
         self.started.set()
@@ -125,10 +134,12 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_archive_is_idempotent(self) -> None:
         agent = _agent()
         service = _SessionService()
+        run = _Run(agent)
+        session = Session.create(agent_id=agent.agent_id)
         conversation = RuntimeConversation(
             agent=agent,
-            run=_Run(agent),
-            session=Session.create(agent_id=agent.agent_id),
+            run=run,
+            session=session,
             session_service=service,
         )
 
@@ -137,6 +148,7 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(service.closed)
         self.assertTrue(conversation.closed)
+        self.assertEqual([session.session_id], run.bash_operations.closed_sessions)
 
 
 class RuntimeHostMcpInspectionTests(unittest.TestCase):

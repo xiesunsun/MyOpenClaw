@@ -26,15 +26,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "read_many_files",
                 "replace",
                 "write_file",
-                "shell_exec",
-                "shell_wait",
-                "shell_stdin",
-                "shell_interrupt",
-                "shell_tasks",
-                "shell_output",
-                "shell_kill",
-                "shell_restart",
-                "shell_close",
+                "bash",
                 "skill_manage",
             ]
         ]
@@ -49,15 +41,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "read_many_files",
                 "replace",
                 "write_file",
-                "shell_exec",
-                "shell_wait",
-                "shell_stdin",
-                "shell_interrupt",
-                "shell_tasks",
-                "shell_output",
-                "shell_kill",
-                "shell_restart",
-                "shell_close",
+                "bash",
                 "skill_manage",
             ],
             [tool.spec.name for tool in tools],
@@ -112,7 +96,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_disable_narrows_activation_for_next_turn(self) -> None:
         from pickel.tools.builtin import tool_set_active
 
-        control = _FakeActivationControl(allowed={"read_file", "shell_exec"})
+        control = _FakeActivationControl(allowed={"read_file", "bash"})
         context = ToolExecutionContext(
             agent_id="Pickle",
             session_id="session-1",
@@ -120,10 +104,10 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
             services=ToolServices(activation_control=control),
         )
 
-        result = await tool_set_active.execute({"disable": ["shell_exec"]}, context)
+        result = await tool_set_active.execute({"disable": ["bash"]}, context)
 
         self.assertFalse(result.is_error)
-        self.assertEqual({"shell_exec"}, control.disabled)
+        self.assertEqual({"bash"}, control.disabled)
         self.assertIn("next turn", result.content.lower())
 
     async def test_enable_restores_previously_disabled_tool(self) -> None:
@@ -153,10 +137,10 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
             services=ToolServices(activation_control=control),
         )
 
-        result = await tool_set_active.execute({"enable": ["shell_exec"]}, context)
+        result = await tool_set_active.execute({"enable": ["bash"]}, context)
 
         self.assertTrue(result.is_error)
-        self.assertIn("shell_exec", result.content)
+        self.assertIn("bash", result.content)
         self.assertEqual(set(), control.disabled)
 
     async def test_missing_activation_control_is_an_error(self) -> None:

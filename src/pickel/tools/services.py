@@ -16,7 +16,7 @@ if TYPE_CHECKING:  # 运行期不导入，避免 base ↔ shell / file_service �
     from pickel.runs.host_calls import HostCallClient
     from pickel.skills.store import SkillStore
     from pickel.tools.file_service import WorkspaceFileService
-    from pickel.tools.shell import ShellSessionManager
+    from pickel.tools.shell import BashOperations, ShellSessionManager
 
 
 class ActivationControl(Protocol):
@@ -35,6 +35,8 @@ class ActivationControl(Protocol):
 @dataclass(frozen=True)
 class ToolServices:
     workspace_files: "WorkspaceFileService | None" = None
+    bash: "BashOperations | None" = None
+    # 迁移期兼容旧 shell 工具；Builtin catalog 已不再向模型暴露它们。
     shell_sessions: "ShellSessionManager | None" = None
     activation_control: ActivationControl | None = None
     skill_store: "SkillStore | None" = None

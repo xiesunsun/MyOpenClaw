@@ -48,9 +48,7 @@ agents:
       - read_many_files
       - replace
       - write_file
-      - shell_exec
-      - shell_restart
-      - shell_close
+      - bash
 extensions:
   openviking:
     enabled: false

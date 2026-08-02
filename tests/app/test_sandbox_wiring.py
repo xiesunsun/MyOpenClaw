@@ -29,7 +29,7 @@ agents:
     workspace_path: workspace
     behavior_path: agents/Pickle
     tools:
-      - shell_exec
+      - bash
 """
 
 
@@ -77,9 +77,7 @@ class SandboxWiringTests(unittest.TestCase):
                 captured.update(kwargs)
                 raise RuntimeError("stop after capture")
 
-            with unittest.mock.patch(
-                "pickel.app.boot.Run.open", side_effect=_capture
-            ):
+            with unittest.mock.patch("pickel.app.boot.Run.open", side_effect=_capture):
                 with self.assertRaises(RuntimeError):
                     boot.build_run()
 

@@ -308,6 +308,7 @@ class RuntimeConversation:
         self._close_trace()
         if self._closed:
             return
+        self._close_bash()
         self._runtime_bus.close_now()
         if self._session_service is not None:
             self._session_service.close(session=self._session)
@@ -316,8 +317,14 @@ class RuntimeConversation:
     def detach(self) -> None:
         """状态切换时只释放观察资源，不归档旧会话以保持现有 CLI 语义。"""
         self._close_trace()
+        self._close_bash()
         self._runtime_bus.close_now()
         self._closed = True
+
+    def _close_bash(self) -> None:
+        bash = getattr(self._run, "bash_operations", None)
+        if bash is not None:
+            bash.close(self._session.session_id)
 
     def _open_trace(self) -> None:
         configured = (

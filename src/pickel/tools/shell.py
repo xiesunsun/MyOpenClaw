@@ -13,7 +13,7 @@ import subprocess
 import termios
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
@@ -47,6 +47,27 @@ class ShellExecutionResult:
     truncated: bool = False
     full_output_path: Path | None = None
     status_message: str = ""
+    environment: str = "local"
+    sandboxed: bool = False
+
+
+class BashOperations(Protocol):
+    """``bash`` 工具依赖的最小执行接口。
+
+    模型合同只认识 command 与 timeout；本地 PTY、SSH 或容器实现负责把
+    同一合同翻译到各自的执行环境。
+    """
+
+    async def exec(
+        self,
+        *,
+        session_id: str,
+        workspace_path: Path,
+        command: str,
+        timeout: float | None = None,
+    ) -> ShellExecutionResult: ...
+
+    def close(self, session_id: str) -> None: ...
 
 
 class PtyShellProcess:
@@ -643,6 +664,178 @@ class ShellSessionManager:
             session.shell.terminate()
         for task in self._background.pop(session_id, {}).values():
             task.kill()
+
+
+class LocalBashOperations:
+    """基于现有持久 PTY 的本地 Bash 实现。
+
+    ``ShellSessionManager`` 暂时只作为本实现的内部兼容层；Builtin Tool 与
+    Run 不应依赖它的任务管理接口。
+    """
+
+    def __init__(self, sessions: ShellSessionManager | None = None) -> None:
+        self._sessions = sessions or ShellSessionManager()
+
+    async def exec(
+        self,
+        *,
+        session_id: str,
+        workspace_path: Path,
+        command: str,
+        timeout: float | None = None,
+    ) -> ShellExecutionResult:
+        session = self._sessions.get_or_create(session_id, workspace_path)
+        timeout_ms = None if timeout is None else max(1, int(timeout * 1000))
+        result = await asyncio.to_thread(session.shell.exec, command, timeout_ms)
+        if not result.timed_out:
+            return replace(
+                result,
+                environment="local",
+                sandboxed=session.shell.process.sandboxed,
+            )
+
+        stopped = await asyncio.to_thread(session.shell.interrupt_foreground)
+        return ShellExecutionResult(
+            stdout=_join_output(result.stdout, stopped.stdout),
+            stderr=_join_output(result.stderr, stopped.stderr),
+            status_message="Command timed out and the foreground process was stopped.",
+            exit_code=124,
+            cwd=stopped.cwd,
+            shell_status=stopped.shell_status,
+            timed_out=True,
+            truncated=result.truncated or stopped.truncated,
+            full_output_path=stopped.full_output_path or result.full_output_path,
+            environment="local",
+            sandboxed=session.shell.process.sandboxed,
+        )
+
+    def close(self, session_id: str) -> None:
+        self._sessions.close(session_id)
+
+
+def _join_output(first: str, second: str) -> str:
+    if first and second:
+        return f"{first}\n{second}"
+    return first or second
+
+
+class BashTool(BaseTool):
+    """模型侧唯一的 Bash 工具。"""
+
+    spec = ToolSpec(
+        name="bash",
+        description=(
+            "Execute a Bash command in the agent's working environment. "
+            "The shell persists for the current session, so cwd, environment variables, "
+            "and background jobs carry over between calls. Use standard Bash syntax for "
+            "pipes, redirects, and background jobs. Redirect background output to a file "
+            "and use jobs, ps, tail, and kill to manage it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Bash command to execute.",
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": (
+                        "Maximum foreground execution time in seconds. When exceeded, "
+                        "the foreground process is stopped and the shell remains usable."
+                    ),
+                    "exclusiveMinimum": 0,
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "stdout": {"type": "string"},
+                "stderr": {"type": "string"},
+                "exit_code": {"type": "integer"},
+                "cwd": {"type": "string"},
+                "shell_status": {"type": "string"},
+                "timed_out": {"type": "boolean"},
+                "truncated": {"type": "boolean"},
+                "full_output_path": {"type": ["string", "null"]},
+                "sandboxed": {"type": "boolean"},
+                "environment": {"type": "string"},
+            },
+            "required": [
+                "stdout",
+                "stderr",
+                "exit_code",
+                "cwd",
+                "shell_status",
+                "timed_out",
+                "truncated",
+                "full_output_path",
+                "sandboxed",
+                "environment",
+            ],
+            "additionalProperties": False,
+        },
+    )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        bash = context.services.bash
+        if bash is None:
+            return ToolExecutionResult(
+                content="Bash is not available in this agent environment.",
+                is_error=True,
+            )
+
+        # macOS 沙箱接入前保留既有的最低限度保护；不再扩充规则，待真实
+        # OS 边界落地后删除。
+        reason = _dangerous_command_reason(str(arguments["command"]))
+        if reason is not None:
+            return ToolExecutionResult(
+                content=f"Command blocked ({reason}).",
+                is_error=True,
+                metadata={"blocked": True, "reason": reason},
+            )
+
+        timeout = arguments.get("timeout")
+        try:
+            result = await bash.exec(
+                session_id=context.session_id,
+                workspace_path=context.workspace_path,
+                command=str(arguments["command"]),
+                timeout=float(timeout) if timeout is not None else None,
+            )
+        except Exception as exc:
+            return ToolExecutionResult(
+                content=f"Bash execution failed: {exc}",
+                is_error=True,
+            )
+
+        structured = {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "cwd": str(result.cwd),
+            "shell_status": result.shell_status.value,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+            "full_output_path": (
+                str(result.full_output_path) if result.full_output_path else None
+            ),
+            "sandboxed": result.sandboxed,
+            "environment": result.environment,
+        }
+        return ToolExecutionResult(
+            content=_format_result_content(result),
+            is_error=result.shell_status is ShellStatus.TERMINATED,
+            metadata=dict(structured),
+            structured_content=structured,
+        )
 
 
 class ShellExecTool(BaseTool):

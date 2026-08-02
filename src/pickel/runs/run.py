@@ -45,7 +45,7 @@ from pickel.tools.policy import (
     WorkspacePathAccessPolicy,
 )
 from pickel.tools.services import ToolServices
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import BashOperations, LocalBashOperations, ShellSessionManager
 
 if TYPE_CHECKING:
     from pickel.app.boot import Boot
@@ -74,6 +74,7 @@ class Run:
     environ: Environ = field(default_factory=Environ)
     recall_sources: list = field(default_factory=list)
     skill_store: SkillStore | None = None
+    bash_operations: BashOperations | None = None
 
     @classmethod
     def open(
@@ -87,6 +88,7 @@ class Run:
         lifecycle_hooks: LifecycleHooks | None = None,
         file_access_policy: FileAccessPolicy | None = None,
         shell_session_manager: ShellSessionManager | None = None,
+        bash_operations: BashOperations | None = None,
         skill_store: SkillStore | None = None,
         provider: Provider | None = None,
         tools: list[BaseTool] | None = None,
@@ -112,6 +114,8 @@ class Run:
             workspace_root=agent.workspace,
             access_policy=resolved_policy,
         )
+        resolved_shell_sessions = shell_session_manager or ShellSessionManager()
+        resolved_bash = bash_operations or LocalBashOperations(resolved_shell_sessions)
         return cls(
             agent=agent,
             provider=resolved_provider,
@@ -122,12 +126,13 @@ class Run:
             session_service=session_service,
             file_access_policy=resolved_policy,
             workspace_files=workspace_files,
-            shell_session_manager=shell_session_manager or ShellSessionManager(),
+            shell_session_manager=resolved_shell_sessions,
             skill_store=skill_store,
             unit_window=unit_window,
             strategy=strategy or ReActStrategy(),
             environ=Environ(),
             recall_sources=list(recall_sources or []),
+            bash_operations=resolved_bash,
         )
 
     # --- ActivationControl 协议：供 tool_set_active 收窄/恢复激活集 ---
@@ -356,6 +361,7 @@ class Run:
             workspace_path=self.agent.workspace,
             services=ToolServices(
                 workspace_files=self.workspace_files,
+                bash=self.bash_operations,
                 shell_sessions=self.shell_session_manager,
                 activation_control=self,
                 skill_store=self.skill_store,
