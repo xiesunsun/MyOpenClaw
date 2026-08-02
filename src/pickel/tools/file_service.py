@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from pickel.tools.file_errors import (
+    FileNotReadableError,
     FileNotWritableError,
     MultipleReplacementMatchesError,
     NoReplacementMatchError,
@@ -92,15 +96,20 @@ class WorkspaceFileService:
         directory_path = self.access_policy.resolve_path(base_path, self.workspace_root)
         self.access_policy.assert_directory_readable(directory_path)
 
-        matches: list[GlobMatch] = []
-        truncated = False
-        for candidate in sorted(
-            directory_path.glob(pattern), key=lambda candidate: candidate.as_posix()
-        ):
-            matches.append(GlobMatch(path=self._to_workspace_relative(candidate)))
-            if len(matches) >= max_results:
-                truncated = True
-                break
+        rg_path = shutil.which("rg")
+        if rg_path is not None:
+            matches, truncated = self._glob_with_ripgrep(
+                rg_path=rg_path,
+                directory_path=directory_path,
+                pattern=pattern,
+                max_results=max_results,
+            )
+        else:
+            matches, truncated = self._glob_with_python(
+                directory_path=directory_path,
+                pattern=pattern,
+                max_results=max_results,
+            )
 
         return GlobSearchResult(
             base_path=self._to_workspace_relative(directory_path),
@@ -122,40 +131,27 @@ class WorkspaceFileService:
         self.access_policy.assert_directory_readable(directory_path)
 
         flags = 0 if case_sensitive else re.IGNORECASE
-        compiled = re.compile(pattern, flags)
-        hits: list[SearchHit] = []
-        truncated = False
-
-        for candidate in sorted(
-            directory_path.rglob("*"), key=lambda candidate: candidate.as_posix()
-        ):
-            if not candidate.is_file():
-                continue
-            if glob_pattern is not None and not fnmatch.fnmatch(
-                candidate.name, glob_pattern
-            ):
-                continue
-            self.access_policy.assert_file_readable(candidate)
-            try:
-                lines = candidate.read_text(encoding=self.default_encoding).splitlines()
-            except UnicodeDecodeError:
-                continue
-
-            for line_number, line_text in enumerate(lines, start=1):
-                if not compiled.search(line_text):
-                    continue
-                hits.append(
-                    SearchHit(
-                        path=self._to_workspace_relative(candidate),
-                        line_number=line_number,
-                        line_text=line_text,
-                    )
-                )
-                if len(hits) >= max_results:
-                    truncated = True
-                    break
-            if truncated:
-                break
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as exc:
+            raise ValueError(f"Invalid regular expression: {exc}") from exc
+        rg_path = shutil.which("rg")
+        if rg_path is not None:
+            hits, truncated = self._grep_with_ripgrep(
+                rg_path=rg_path,
+                directory_path=directory_path,
+                pattern=pattern,
+                glob_pattern=glob_pattern,
+                case_sensitive=case_sensitive,
+                max_results=max_results,
+            )
+        else:
+            hits, truncated = self._grep_with_python(
+                directory_path=directory_path,
+                compiled=compiled,
+                glob_pattern=glob_pattern,
+                max_results=max_results,
+            )
 
         return GrepSearchResult(pattern=pattern, hits=hits, truncated=truncated)
 
@@ -168,20 +164,198 @@ class WorkspaceFileService:
     ) -> FileReadResult:
         file_path = self.access_policy.resolve_path(path, self.workspace_root)
         self.access_policy.assert_file_readable(file_path)
-        lines = file_path.read_text(encoding=self.default_encoding).splitlines()
         normalized_start = max(start_line, 1)
         normalized_end = (
-            len(lines) if end_line is None else max(end_line, normalized_start - 1)
+            None if end_line is None else max(end_line, normalized_start - 1)
         )
-        selected_lines = lines[normalized_start - 1 : normalized_end]
+        selected_lines: list[str] = []
+        total_lines: int | None = 0
+        truncated = False
+        try:
+            with file_path.open("r", encoding=self.default_encoding) as handle:
+                for total_lines, line in enumerate(handle, start=1):
+                    if total_lines < normalized_start:
+                        continue
+                    if normalized_end is not None and total_lines > normalized_end:
+                        truncated = True
+                        total_lines = None
+                        break
+                    selected_lines.append(line.rstrip("\r\n"))
+        except UnicodeDecodeError as exc:
+            raise FileNotReadableError(
+                f"File is not valid UTF-8 text: {file_path}"
+            ) from exc
+
+        if (
+            total_lines is not None
+            and normalized_start > total_lines
+            and not (total_lines == 0 and normalized_start == 1)
+        ):
+            raise FileNotReadableError(
+                f"Offset {normalized_start} is beyond the end of "
+                f"{self._to_workspace_relative(file_path)} ({total_lines} lines)"
+            )
         return FileReadResult(
             path=self._to_workspace_relative(file_path),
             start_line=normalized_start,
             end_line=normalized_start + max(len(selected_lines) - 1, 0),
-            total_lines=len(lines),
+            total_lines=total_lines,
             lines=selected_lines,
-            truncated=normalized_end < len(lines),
+            truncated=truncated,
         )
+
+    def _glob_with_ripgrep(
+        self,
+        *,
+        rg_path: str,
+        directory_path: Path,
+        pattern: str,
+        max_results: int,
+    ) -> tuple[list[GlobMatch], bool]:
+        process = subprocess.Popen(
+            [rg_path, "--files", "--hidden", "--glob", pattern],
+            cwd=directory_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding=self.default_encoding,
+        )
+        matches: list[GlobMatch] = []
+        assert process.stdout is not None
+        try:
+            for raw_path in process.stdout:
+                candidate = self.access_policy.resolve_path(
+                    str(directory_path / raw_path.rstrip("\r\n")),
+                    self.workspace_root,
+                )
+                self.access_policy.assert_file_readable(candidate)
+                if len(matches) == max_results:
+                    return matches, True
+                matches.append(GlobMatch(path=self._to_workspace_relative(candidate)))
+
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            return_code = process.wait()
+            if return_code not in (0, 1):
+                raise ValueError(
+                    stderr.strip() or f"rg exited with status {return_code}"
+                )
+            return matches, False
+        finally:
+            _terminate_process(process)
+
+    def _glob_with_python(
+        self, *, directory_path: Path, pattern: str, max_results: int
+    ) -> tuple[list[GlobMatch], bool]:
+        matches: list[GlobMatch] = []
+        for candidate in sorted(
+            directory_path.glob(pattern), key=lambda item: item.as_posix()
+        ):
+            if not candidate.is_file():
+                continue
+            resolved = self.access_policy.resolve_path(
+                str(candidate), self.workspace_root
+            )
+            if len(matches) == max_results:
+                return matches, True
+            matches.append(GlobMatch(path=self._to_workspace_relative(resolved)))
+        return matches, False
+
+    def _grep_with_ripgrep(
+        self,
+        *,
+        rg_path: str,
+        directory_path: Path,
+        pattern: str,
+        glob_pattern: str | None,
+        case_sensitive: bool,
+        max_results: int,
+    ) -> tuple[list[SearchHit], bool]:
+        command = [rg_path, "--json", "--line-number", "--color", "never"]
+        if not case_sensitive:
+            command.append("--ignore-case")
+        if glob_pattern is not None:
+            command.extend(["--glob", glob_pattern])
+        command.extend(["--", pattern, "."])
+        process = subprocess.Popen(
+            command,
+            cwd=directory_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding=self.default_encoding,
+        )
+        hits: list[SearchHit] = []
+        assert process.stdout is not None
+        try:
+            for raw_event in process.stdout:
+                event = json.loads(raw_event)
+                if event.get("type") != "match":
+                    continue
+                data = event["data"]
+                candidate = self.access_policy.resolve_path(
+                    str(directory_path / data["path"]["text"]),
+                    self.workspace_root,
+                )
+                self.access_policy.assert_file_readable(candidate)
+                if len(hits) == max_results:
+                    return hits, True
+                hits.append(
+                    SearchHit(
+                        path=self._to_workspace_relative(candidate),
+                        line_number=int(data["line_number"]),
+                        line_text=data["lines"]["text"].rstrip("\r\n"),
+                    )
+                )
+
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            return_code = process.wait()
+            if return_code not in (0, 1):
+                raise ValueError(
+                    stderr.strip() or f"rg exited with status {return_code}"
+                )
+            return hits, False
+        finally:
+            _terminate_process(process)
+
+    def _grep_with_python(
+        self,
+        *,
+        directory_path: Path,
+        compiled: re.Pattern[str],
+        glob_pattern: str | None,
+        max_results: int,
+    ) -> tuple[list[SearchHit], bool]:
+        hits: list[SearchHit] = []
+        for candidate in sorted(
+            directory_path.rglob("*"), key=lambda item: item.as_posix()
+        ):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            if glob_pattern is not None and not fnmatch.fnmatch(
+                candidate.name, glob_pattern
+            ):
+                continue
+            resolved = self.access_policy.resolve_path(
+                str(candidate), self.workspace_root
+            )
+            self.access_policy.assert_file_readable(resolved)
+            try:
+                with resolved.open("r", encoding=self.default_encoding) as handle:
+                    for line_number, line_text in enumerate(handle, start=1):
+                        if not compiled.search(line_text):
+                            continue
+                        if len(hits) == max_results:
+                            return hits, True
+                        hits.append(
+                            SearchHit(
+                                path=self._to_workspace_relative(resolved),
+                                line_number=line_number,
+                                line_text=line_text.rstrip("\r\n"),
+                            )
+                        )
+            except UnicodeDecodeError:
+                continue
+        return hits, False
 
     def replace_exact(
         self,
@@ -258,3 +432,14 @@ class WorkspaceFileService:
             return resolved_path.relative_to(self.workspace_root).as_posix()
         except ValueError:
             return resolved_path.as_posix()
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()

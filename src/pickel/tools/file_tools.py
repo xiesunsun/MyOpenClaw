@@ -89,7 +89,10 @@ class LsTool(BaseFileTool):
 class GlobTool(BaseFileTool):
     spec = ToolSpec(
         name="glob",
-        description="Find workspace paths matching a glob pattern.",
+        description=(
+            "Find workspace files matching a glob pattern. Respects ignore files "
+            "when ripgrep is available."
+        ),
         input_schema={
             "type": "object",
             "properties": {

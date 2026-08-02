@@ -61,9 +61,11 @@ def close(session_id): ...
 
 - 每个 Run 持有一个 `BashOperations`，默认使用本地实现，也可由装配层注入其他实现。
 - 同一 session 复用持久 Shell，保留 `cwd`、环境变量和标准 Bash 后台作业。
+- Agent Bash 关闭 history expansion 和历史文件写入；这只影响 Runtime 子进程，不修改用户终端配置。
 - 长任务使用 Bash 原生的 `&`、重定向、`jobs`、`ps`、`tail` 和 `kill`，不再暴露 Runtime 专用任务工具。
 - 前台命令超时后，Runtime 停止该进程并恢复 Shell 可用状态，返回退出码 `124`。
-- Run 归档或切换时调用 `close(session_id)`，由执行环境负责清理资源。
+- 语法错误返回 Bash 退出码 `2`，Shell 恢复可用状态，不误报为超时。
+- Run 归档或切换时调用 `close(session_id)`，由执行环境清理 Bash job table 中的后台进程组及 Shell 进程。
 - 工具参数不包含 sandbox 开关；模型不能自行扩大权限。
 
 ## 5. 安全边界
@@ -86,4 +88,6 @@ def close(session_id): ...
 - 同一 session 的 `cwd` 能跨调用保持。
 - 非零退出码不会被误判为工具故障。
 - 超时后 Shell 仍可执行下一条命令。
+- `$!` 可稳定取得后台进程 PID，命令文本中的 `!` 不触发交互式历史展开。
+- 关闭 session 后，其后台作业不残留。
 - 本地和替换执行环境都返回正确的 `environment` 与 `sandboxed`。

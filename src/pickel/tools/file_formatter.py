@@ -41,9 +41,12 @@ class FileToolFormatter:
         for index, line in enumerate(result.lines, start=result.start_line):
             lines.append(f"{index}: {line}")
         if result.truncated:
+            total = (
+                f" of {result.total_lines}" if result.total_lines is not None else ""
+            )
             lines.append(
-                f"[Showing lines {result.start_line}-{result.end_line} of "
-                f"{result.total_lines}. Use offset={result.end_line + 1} to continue.]"
+                f"[Showing lines {result.start_line}-{result.end_line}{total}. "
+                f"Use offset={result.end_line + 1} to continue.]"
             )
         return "\n".join(lines)
 

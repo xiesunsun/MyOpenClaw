@@ -52,17 +52,22 @@ class ToolRenderer:
 
         if started_at is None:
             self._print_plain(self._format_started_block(tool_call, running=False))
-        self._print_status_and_out(tool_result, elapsed)
+        self._print_status_and_out(tool_call.name, tool_result, elapsed)
 
     def _print_plain(self, body: str) -> None:
         self.console.print(body, highlight=False, markup=False, end="")
 
     def _print_status_and_out(
-        self, tool_result: ToolExecutionResult, elapsed: float | None
+        self,
+        tool_name: str,
+        tool_result: ToolExecutionResult,
+        elapsed: float | None,
     ) -> None:
-        status = "failed" if tool_result.is_error else "ok"
+        status, style, details = _tool_status(tool_name, tool_result)
         head = Text("· ")
-        head.append(status, style="red" if tool_result.is_error else "green")
+        head.append(status, style=style)
+        if details:
+            head.append(f" · {details}", style="dim")
         if elapsed is not None:
             head.append(f"  ({elapsed:.1f}s)", style="dim")
         self.console.print(head, highlight=False, markup=False)
@@ -92,10 +97,7 @@ class ToolRenderer:
             return ["· out  (empty)"]
         raw_lines = content.splitlines() or [content]
         total_chars = len(content)
-        if (
-            len(raw_lines) <= _RESULT_MAX_LINES
-            and total_chars <= _RESULT_MAX_CHARS
-        ):
+        if len(raw_lines) <= _RESULT_MAX_LINES and total_chars <= _RESULT_MAX_CHARS:
             lines = [f"· out  {raw_lines[0]}"]
             for line in raw_lines[1:]:
                 lines.append(f"·      {line}")
@@ -114,6 +116,38 @@ class ToolRenderer:
         else:
             lines.append(f"·      … / {total_chars} chars")
         return lines
+
+
+def _tool_status(
+    tool_name: str, tool_result: ToolExecutionResult
+) -> tuple[str, str, str]:
+    structured = tool_result.structured_content
+    if tool_name != "bash" or not isinstance(structured, dict):
+        if tool_result.is_error:
+            return "failed", "red", ""
+        return "ok", "green", ""
+
+    exit_code = structured.get("exit_code")
+    shell_status = structured.get("shell_status")
+    timed_out = structured.get("timed_out") is True
+    if timed_out:
+        status, style = "timeout", "yellow"
+    elif tool_result.is_error or shell_status == "terminated":
+        status, style = "failed", "red"
+    elif exit_code == 0:
+        status, style = "ok", "green"
+    else:
+        # 非零退出码是命令执行结果，不是 Runtime 工具调用失败。
+        status, style = "completed", "yellow"
+
+    details = []
+    if isinstance(exit_code, int):
+        details.append(f"exit {exit_code}")
+    if isinstance(shell_status, str) and shell_status:
+        details.append(shell_status)
+    if structured.get("truncated") is True:
+        details.append("truncated")
+    return status, style, " · ".join(details)
 
 
 def _format_args_inline(arguments: dict[str, object]) -> str:
@@ -139,9 +173,7 @@ def _ordered_items(arguments: dict[str, object]) -> list[tuple[str, object]]:
 
 
 def _fold_value_inline(key: str, value: object) -> str:
-    if key == "content" or (
-        isinstance(value, str) and len(value) > _ARG_VALUE_LIMIT
-    ):
+    if key == "content" or (isinstance(value, str) and len(value) > _ARG_VALUE_LIMIT):
         text = value if isinstance(value, str) else str(value)
         return f"{key}=<{len(text)} chars>"
     rendered = repr(value)

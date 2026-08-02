@@ -74,6 +74,52 @@ def test_failed_分支():
     assert "boom" in text
 
 
+def test_bash_展示退出码和shell状态():
+    console = _console()
+    renderer = ToolRenderer(console)
+    call = _call(name="bash", arguments={"command": "exit 7"})
+
+    renderer.on_started(call, _T0)
+    renderer.on_completed(
+        call,
+        ToolExecutionResult(
+            content="",
+            structured_content={
+                "exit_code": 7,
+                "shell_status": "ready",
+                "timed_out": False,
+                "truncated": False,
+            },
+        ),
+        _T0 + timedelta(seconds=1),
+    )
+
+    assert "· completed · exit 7 · ready" in console.export_text()
+
+
+def test_bash_超时与截断可见():
+    console = _console()
+    renderer = ToolRenderer(console)
+    call = _call(name="bash", arguments={"command": "sleep 30"})
+
+    renderer.on_started(call, _T0)
+    renderer.on_completed(
+        call,
+        ToolExecutionResult(
+            content="stopped",
+            structured_content={
+                "exit_code": 124,
+                "shell_status": "ready",
+                "timed_out": True,
+                "truncated": True,
+            },
+        ),
+        _T0 + timedelta(seconds=1),
+    )
+
+    assert "· timeout · exit 124 · ready · truncated" in console.export_text()
+
+
 def test_间隔不足_100ms_不显示耗时():
     console = _console()
     renderer = ToolRenderer(console)
@@ -93,9 +139,7 @@ def test_配不上_started_补头再打结果():
     console = _console()
     renderer = ToolRenderer(console)
 
-    renderer.on_completed(
-        _call("orphan"), ToolExecutionResult(content="hi"), _T0
-    )
+    renderer.on_completed(_call("orphan"), ToolExecutionResult(content="hi"), _T0)
 
     text = console.export_text()
     assert "⏺ echo" in text
@@ -146,9 +190,7 @@ def test_长结果多行折叠():
 
 def test_终端模式也只追加不擦屏():
     buffer = io.StringIO()
-    console = Console(
-        width=100, record=True, force_terminal=True, file=buffer
-    )
+    console = Console(width=100, record=True, force_terminal=True, file=buffer)
     renderer = ToolRenderer(console)
 
     renderer.on_started(_call(), _T0)

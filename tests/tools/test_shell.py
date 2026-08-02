@@ -1,4 +1,7 @@
 import asyncio
+import os
+import signal
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -147,6 +150,60 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timed_out.structured_content["timed_out"])
         self.assertEqual(124, timed_out.structured_content["exit_code"])
         self.assertIn("alive", after.content)
+
+
+class BashSessionBehaviorTests(unittest.TestCase):
+    def test_history_expansion_is_disabled_but_background_pid_expands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = BashSession(workspace_path=Path(tmpdir))
+            try:
+                result = shell.exec('sleep 0.1 & echo "bg pid: $!"')
+                pid = int(result.stdout.removeprefix("bg pid: "))
+                shell.exec(f'wait {pid}; echo "wait status: $?"')
+            finally:
+                shell.terminate()
+
+        self.assertGreater(pid, 0)
+        self.assertNotIn("event not found", result.stdout)
+        self.assertEqual(0, result.exit_code)
+
+    def test_syntax_error_returns_exit_two_and_session_stays_ready(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = BashSession(workspace_path=Path(tmpdir))
+            try:
+                failed = shell.exec("if then; fi", timeout_ms=1_000)
+                after = shell.exec("echo alive")
+            finally:
+                shell.terminate()
+
+        self.assertEqual(2, failed.exit_code)
+        self.assertIs(ShellStatus.READY, failed.shell_status)
+        self.assertFalse(failed.timed_out)
+        self.assertIn("syntax error", failed.stdout)
+        self.assertEqual("alive", after.stdout)
+
+    def test_close_terminates_background_job(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            shell = BashSession(workspace_path=Path(tmpdir))
+            result = shell.exec("sleep 30 & printf '%s\\n' $!")
+            pid = int(result.stdout)
+            try:
+                shell.terminate()
+                deadline = time.monotonic() + 1
+                while _process_exists(pid) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(_process_exists(pid))
+            finally:
+                if _process_exists(pid):
+                    os.kill(pid, signal.SIGKILL)
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 class NormalizeOutputTests(unittest.TestCase):

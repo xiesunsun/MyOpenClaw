@@ -103,18 +103,23 @@ class _PtyProcess:
             # macOS 自带 Bash 3.2 会向首次命令输出升级 zsh 的提示；它不是
             # 命令结果，且 Seatbelt 启动稍慢时可能越过启动 drain 窗口。
             shell_env["BASH_SILENCE_DEPRECATION_WARNING"] = "1"
+            # Agent 发送的是脚本片段，不是人类键入的历史命令。保留 PTY 和
+            # job control，但关闭 history expansion，使 "$!" 等语法稳定。
+            # 这些环境变量只属于本子进程，不修改用户的终端配置。
+            shell_env["HISTFILE"] = "/dev/null"
             shell_env["PS1"] = ""
             shell_env["PS2"] = ""
             shell_env["PROMPT"] = ""
             shell_env["RPROMPT"] = ""
-            # marker 由 PROMPT_COMMAND 发射：bash 每回到顶层提示符必执行，
-            # 前台命令死于 SIGINT（bash 会丢弃当前列表剩余部分）时也不例外，
-            # 所以中断后依然能拿到 marker + 退出码。marker 为空时不发射，
-            # 发射后立即清空，杜绝启动噪声与空行触发的重复 marker。
+            # marker 由 PROMPT_COMMAND 发射。内部先用一条独立命令登记
+            # marker，并跳过它产生的第一次 prompt；下一次 prompt 才属于
+            # 用户脚本，因此语法错误和 SIGINT 也能返回真实退出码。
             shell_env["PROMPT_COMMAND"] = (
                 '__pickel_ec=$?; if [ -n "$__pickel_marker" ]; then '
-                "printf '%s\\037%s\\037%s\\n' "
-                '"$__pickel_marker" "$__pickel_ec" "$PWD"; fi; __pickel_marker='
+                'if [ -n "$__pickel_skip_prompt" ]; then __pickel_skip_prompt=; '
+                "else printf '%s\\037%s\\037%s\\n' "
+                '"$__pickel_marker" "$__pickel_ec" "$PWD"; '
+                "__pickel_marker=; fi; fi"
             )
 
             if self.sandbox is not None:
@@ -212,16 +217,19 @@ class _PtyProcess:
         if self.is_alive():
             try:
                 os.killpg(self._process.pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (PermissionError, ProcessLookupError):
                 pass
             try:
                 self._process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(self._process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (PermissionError, ProcessLookupError):
                     pass
-                self._process.wait(timeout=1)
+                try:
+                    self._process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
 
         if self._master_fd is not None:
             try:
@@ -256,7 +264,14 @@ class _PtyProcess:
             # --noediting：pty 上没有人类编辑命令，不需要 readline；
             # 不关的话 bash≥5.1 的 bracketed-paste 会把 \x1b[?2004h/l
             # 写进 pty 流，混进工具结果进而污染发给模型的上下文
-            return [self.shell_program, "--noprofile", "--norc", "--noediting", "-s"]
+            return [
+                self.shell_program,
+                "--noprofile",
+                "--norc",
+                "--noediting",
+                "+H",
+                "-s",
+            ]
         if "zsh" in shell_name:
             return [self.shell_program, "-f", "-s"]
         return [self.shell_program]
@@ -299,8 +314,42 @@ class BashSession:
         return self.process.is_alive()
 
     def terminate(self) -> None:
+        self._terminate_background_jobs()
         self.process.terminate()
         self._pending_marker = None
+
+    def _terminate_background_jobs(self) -> None:
+        """关闭会话前清理 Bash job table 中仍存活的后台进程组。"""
+        if not self.is_alive() or self._running or self.pending:
+            return
+        try:
+            jobs = self.exec("jobs -pr", timeout_ms=1_000)
+        except RuntimeError:
+            return
+
+        process_groups = {
+            int(line)
+            for line in jobs.stdout.splitlines()
+            if line.strip().isdigit() and int(line) > 0
+        }
+        if not process_groups:
+            return
+
+        for process_group in process_groups:
+            _signal_process_group(process_group, signal.SIGTERM)
+
+        deadline = time.monotonic() + 0.5
+        while process_groups and time.monotonic() < deadline:
+            process_groups = {
+                process_group
+                for process_group in process_groups
+                if _process_group_exists(process_group)
+            }
+            if process_groups:
+                time.sleep(0.02)
+
+        for process_group in process_groups:
+            _signal_process_group(process_group, signal.SIGKILL)
 
     def exec(self, command: str, timeout_ms: int | None = None) -> ShellExecutionResult:
         if self._running:
@@ -367,7 +416,9 @@ class BashSession:
                 output, truncated, full_path = self._finalize_output(
                     _normalize_output(buffer[: marker_match.start()])
                 )
-                exit_code = int(marker_match.group("exit_code"))
+                # Bash 3.2 的交互解析错误可能在 PROMPT_COMMAND 中暴露内部
+                # 状态 258；对外统一为 POSIX 8-bit exit status（即 2）。
+                exit_code = int(marker_match.group("exit_code")) & 0xFF
                 cwd = Path(marker_match.group("cwd"))
                 self._last_cwd = cwd
                 return ShellExecutionResult(
@@ -469,11 +520,15 @@ class BashSession:
         # 因此命令内部的 read 只会等待新输入，不会把后续行吃掉。
         # 组内先放一个 : 兜住空命令/纯注释（否则 { } 空组是语法错误）。
         # 组级 2>&N 把命令 stderr 送进独立管道（bash 自身 stderr 留在 tty）。
-        # marker 不在这里发射——由 PROMPT_COMMAND 发射（见 spawn），
-        # 否则前台命令死于 SIGINT 时 bash 丢弃列表剩余部分，marker 永不到达。
+        # marker 先单独登记：即使用户脚本无法完成解析，下一次
+        # PROMPT_COMMAND 仍可发回退出码。skip_prompt 避免登记 marker 的
+        # 内部命令被误认为用户脚本已经结束。
         stderr_fd = getattr(self.process, "_stderr_child_fd", None)
         redirect = f" 2>&{stderr_fd}" if stderr_fd is not None else ""
-        return f"__pickel_marker='{marker}'; {{ :\n{command}\n}}{redirect}\n"
+        return (
+            f"__pickel_marker='{marker}'; __pickel_skip_prompt=1\n"
+            f"{{ :\n{command}\n}}{redirect}\n"
+        )
 
 
 class LocalBashOperations:
@@ -553,6 +608,21 @@ def _join_output(first: str, second: str) -> str:
     if first and second:
         return f"{first}\n{second}"
     return first or second
+
+
+def _signal_process_group(process_group: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(process_group, sig)
+    except (PermissionError, ProcessLookupError):
+        pass
+
+
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except (PermissionError, ProcessLookupError):
+        return False
+    return True
 
 
 class BashTool(BaseTool):

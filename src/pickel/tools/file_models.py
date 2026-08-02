@@ -50,7 +50,7 @@ class FileReadResult:
     path: str
     start_line: int
     end_line: int
-    total_lines: int
+    total_lines: int | None
     lines: list[str] = field(default_factory=list)
     truncated: bool = False
 
