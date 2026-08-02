@@ -26,6 +26,8 @@ class PreToolUseEvent(HookEventBase):
     tool_name: str = ""
     tool_call_id: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
+    tool_source: str = ""
+    tool_origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class PostToolUseEvent(HookEventBase):
     arguments: dict[str, Any] = field(default_factory=dict)
     result_content: str = ""
     is_error: bool = False
+    tool_source: str = ""
+    tool_origin: str | None = None
 
 
 @dataclass(frozen=True)

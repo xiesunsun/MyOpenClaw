@@ -35,6 +35,9 @@ def estimate_messages(messages: Iterable[Any]) -> int:
         total += estimate_text(getattr(message, "tool_name", "") or "")
         for block in getattr(message, "content", []) or []:
             total += _estimate_block(block)
+        total += estimate_text(
+            _dump_schema(getattr(message, "structured_content", None))
+        )
     return total
 
 
@@ -59,6 +62,7 @@ def request_char_count(request: Any) -> int:
         for block in getattr(message, "content", []) or []:
             total += len(getattr(block, "text", "") or "")
             total += len(_dump_schema(getattr(block, "arguments", None)))
+        total += len(_dump_schema(getattr(message, "structured_content", None)))
     for tool in request.tools:
         total += len(tool.name) + len(tool.description)
         total += len(_dump_schema(tool.input_schema))
@@ -70,9 +74,8 @@ def _estimate_block(block: Any) -> int:
     if block_type == "image":
         return IMAGE_TOKEN_COST
     if block_type == "tool_call":
-        return (
-            estimate_text(getattr(block, "name", "") or "")
-            + estimate_text(_dump_schema(getattr(block, "arguments", None)))
+        return estimate_text(getattr(block, "name", "") or "") + estimate_text(
+            _dump_schema(getattr(block, "arguments", None))
         )
     return estimate_text(getattr(block, "text", "") or "")
 

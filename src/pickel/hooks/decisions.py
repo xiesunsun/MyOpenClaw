@@ -37,6 +37,7 @@ class PostToolBatchDecision:
 @dataclass
 class TurnEndDecision:
     """观察者；无控制动作。"""
+
     pass
 
 
@@ -86,14 +87,6 @@ def merge_pre_tool_decisions(
             args = dict(d.updated_arguments)
     reasons = [d.reason for d in decisions if d.reason]
     feedbacks = [d.feedback_text for d in decisions if d.feedback_text]
-    # v1: ask 按 deny 处理
-    if action == "ask":
-        return PreToolUseDecision(
-            action="deny",
-            updated_arguments=args,
-            reason=reasons[0] if reasons else "需要确认（第一版未接 UI）",
-            feedback_text="\n".join(feedbacks) if feedbacks else None,
-        )
     return PreToolUseDecision(
         action=action,
         updated_arguments=args,

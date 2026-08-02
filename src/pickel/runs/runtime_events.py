@@ -16,6 +16,10 @@ import base64
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, TypeAlias
 
+from pickel.conversations.agent_message import (
+    ToolResultMessage,
+    agent_message_to_dict,
+)
 from pickel.conversations.message import ToolCall
 from pickel.conversations.content_blocks import content_blocks_to_list
 from pickel.runs.turn_usage import TurnUsage
@@ -110,6 +114,11 @@ class ToolCallStarted(RuntimeEventBase):
     batch_id: str = ""
     call_index: int = 0
     total_calls: int = 0
+    tool_source: str | None = None
+    tool_origin: str | None = None
+    validation: str = "passed"
+    hook_action: str | None = None
+    confirmation: str = "not_requested"
 
     def _payload(self) -> dict[str, Any]:
         return {
@@ -117,6 +126,11 @@ class ToolCallStarted(RuntimeEventBase):
             "batch_id": self.batch_id,
             "call_index": self.call_index,
             "total_calls": self.total_calls,
+            "tool_source": self.tool_source,
+            "tool_origin": self.tool_origin,
+            "validation": self.validation,
+            "hook_action": self.hook_action,
+            "confirmation": self.confirmation,
         }
 
 
@@ -128,9 +142,15 @@ class ToolCallCompleted(RuntimeEventBase):
 
     tool_call: ToolCall | None = None
     tool_result: ToolExecutionResult | None = None
+    tool_result_message: ToolResultMessage | None = None
     batch_id: str = ""
     call_index: int = 0
     total_calls: int = 0
+    tool_source: str | None = None
+    tool_origin: str | None = None
+    validation: str = "passed"
+    hook_action: str | None = None
+    confirmation: str = "not_requested"
 
     def _payload(self) -> dict[str, Any]:
         return {
@@ -138,9 +158,19 @@ class ToolCallCompleted(RuntimeEventBase):
             "tool_result": (
                 _tool_result_to_dict(self.tool_result) if self.tool_result else None
             ),
+            "tool_result_message": (
+                agent_message_to_dict(self.tool_result_message)
+                if self.tool_result_message
+                else None
+            ),
             "batch_id": self.batch_id,
             "call_index": self.call_index,
             "total_calls": self.total_calls,
+            "tool_source": self.tool_source,
+            "tool_origin": self.tool_origin,
+            "validation": self.validation,
+            "hook_action": self.hook_action,
+            "confirmation": self.confirmation,
         }
 
 

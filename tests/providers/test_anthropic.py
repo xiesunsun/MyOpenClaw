@@ -150,6 +150,18 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("thinking", messages[3]["content"][0]["type"])
         self.assertEqual("Done.", messages[3]["content"][1]["text"])
 
+    def test_tool_result_preserves_structured_content(self) -> None:
+        block = AnthropicProvider._tool_result_block(
+            ToolResultMessage(
+                tool_call_id="call-1",
+                tool_name="lookup",
+                content=[TextContent(text="found")],
+                structured_content={"id": 7},
+            )
+        )
+
+        self.assertIn('structured_content: {"id":7}', block["content"])
+
     def test_build_messages_marks_error_tool_results(self) -> None:
         messages = AnthropicProvider._build_messages(
             [

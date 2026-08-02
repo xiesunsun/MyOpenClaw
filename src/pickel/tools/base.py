@@ -35,6 +35,12 @@ class ToolExecutionContext:
 
 @dataclass
 class ToolExecutionResult:
+    """工具执行结果。
+
+    ``content``、``content_blocks``、``structured_content`` 和 ``is_error``
+    构成模型可见合同；``metadata`` 与 ``error`` 只服务 Runtime 和观测系统。
+    """
+
     content: str
     is_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -42,6 +48,10 @@ class ToolExecutionResult:
     # 新字段放在末尾，避免破坏外部 extension 的位置参数调用。
     content_blocks: list[ToolResultContent] = field(default_factory=list)
     structured_content: Any | None = None
+
+    def __post_init__(self) -> None:
+        if self.error is not None:
+            self.is_error = True
 
 
 class BaseTool:

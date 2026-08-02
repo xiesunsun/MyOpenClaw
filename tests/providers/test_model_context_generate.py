@@ -159,7 +159,11 @@ class ModelContextGenerateTests(unittest.TestCase):
         self.assertEqual("c1", contents[2].parts[0].function_response.id)
         self.assertEqual("c2", contents[2].parts[1].function_response.id)
         self.assertEqual(
-            {"output": "a.py\nb.py"},
+            {
+                "content": [{"type": "text", "text": "a.py\nb.py"}],
+                "structured_content": None,
+                "is_error": False,
+            },
             contents[2].parts[0].function_response.response,
         )
 

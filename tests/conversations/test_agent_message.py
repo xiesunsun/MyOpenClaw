@@ -33,7 +33,7 @@ def test_user_message_with_image_round_trip():
         ]
     )
     payload = agent_message_to_dict(msg)
-    assert payload["payload_version"] == 1
+    assert payload["payload_version"] == 2
     assert payload["content"][1]["type"] == "image"
     restored = agent_message_from_dict(payload)
     assert restored == msg
@@ -67,6 +67,23 @@ def test_tool_result_message_round_trip():
         tool_name="read_file",
         content=[TextContent(text="ok")],
         is_error=False,
+        structured_content={"count": 1},
     )
     restored = agent_message_from_dict(agent_message_to_dict(msg))
     assert restored == msg
+
+
+def test_v1_tool_result_message_remains_readable():
+    restored = agent_message_from_dict(
+        {
+            "payload_version": 1,
+            "role": "tool",
+            "tool_call_id": "c1",
+            "tool_name": "read_file",
+            "content": [{"type": "text", "text": "ok"}],
+            "is_error": False,
+        }
+    )
+
+    assert isinstance(restored, ToolResultMessage)
+    assert restored.structured_content is None

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from pickel.conversations.agent_message import ToolResultMessage
+from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.message import ToolCall
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
@@ -26,8 +28,13 @@ def _envelope() -> EventEnvelope:
 
 def test_每个事件类型有唯一的_event_type():
     types = [
-        TurnStarted, StepStarted, ToolCallStarted, ToolCallCompleted,
-        AssistantMessageEvent, TurnCompleted, TurnFailed,
+        TurnStarted,
+        StepStarted,
+        ToolCallStarted,
+        ToolCallCompleted,
+        AssistantMessageEvent,
+        TurnCompleted,
+        TurnFailed,
     ]
     values = [cls.EVENT_TYPE for cls in types]
 
@@ -62,13 +69,23 @@ def test_所有事件都能_json_序列化():
         ToolCallStarted(
             envelope=_envelope(),
             tool_call=ToolCall(id="c1", name="echo", arguments={"text": "x"}),
-            batch_id="b1", call_index=0, total_calls=2,
+            batch_id="b1",
+            call_index=0,
+            total_calls=2,
         ),
         ToolCallCompleted(
             envelope=_envelope(),
             tool_call=ToolCall(id="c1", name="echo", arguments={"text": "x"}),
             tool_result=ToolExecutionResult(content="x"),
-            batch_id="b1", call_index=0, total_calls=2,
+            tool_result_message=ToolResultMessage(
+                tool_call_id="c1",
+                tool_name="echo",
+                content=[TextContent(text="x")],
+                structured_content={"value": "x"},
+            ),
+            batch_id="b1",
+            call_index=0,
+            total_calls=2,
         ),
         AssistantMessageEvent(envelope=_envelope(), text="done"),
         TurnCompleted(envelope=_envelope(), usage=TurnUsage(steps=1), elapsed_ms=120),
@@ -86,7 +103,9 @@ def test_thought_signature_为_bytes_时仍可序列化():
         tool_call=ToolCall(
             id="c1", name="echo", arguments={}, thought_signature=b"\x00\x01\xff"
         ),
-        batch_id="b1", call_index=0, total_calls=1,
+        batch_id="b1",
+        call_index=0,
+        total_calls=1,
     )
 
     data = event.to_dict()
@@ -100,10 +119,29 @@ def test_tool_call_completed_携带失败信息():
         envelope=_envelope(),
         tool_call=ToolCall(id="c1", name="missing", arguments={}),
         tool_result=ToolExecutionResult(content="not found", is_error=True),
-        batch_id="b1", call_index=0, total_calls=1,
+        batch_id="b1",
+        call_index=0,
+        total_calls=1,
     )
 
     assert event.to_dict()["tool_result"]["is_error"] is True
+
+
+def test_tool_call_completed_携带模型实际看到的结果消息():
+    event = ToolCallCompleted(
+        envelope=_envelope(),
+        tool_result=ToolExecutionResult(content="ok", metadata={"runtime": True}),
+        tool_result_message=ToolResultMessage(
+            tool_call_id="c1",
+            tool_name="lookup",
+            content=[TextContent(text="ok")],
+            structured_content={"id": 7},
+        ),
+    )
+
+    payload = event.to_dict()
+    assert payload["tool_result"]["metadata"] == {"runtime": True}
+    assert payload["tool_result_message"]["structured_content"] == {"id": 7}
 
 
 def test_turn_completed_携带_usage_合计():
@@ -116,8 +154,10 @@ def test_turn_completed_携带_usage_合计():
 
 def test_turn_failed_不携带_traceback_到_dict_之外的地方():
     event = TurnFailed(
-        envelope=_envelope(), error_type="ValueError",
-        message="boom", traceback_text="line1\nline2",
+        envelope=_envelope(),
+        error_type="ValueError",
+        message="boom",
+        traceback_text="line1\nline2",
     )
     data = event.to_dict()
 
@@ -134,11 +174,19 @@ def test_delta_事件的_event_type_唯一且不与既有冲突():
     )
 
     new_types = [
-        ThinkingDeltaEvent, TextDeltaEvent, ToolCallArgsDeltaEvent, TurnInterrupted,
+        ThinkingDeltaEvent,
+        TextDeltaEvent,
+        ToolCallArgsDeltaEvent,
+        TurnInterrupted,
     ]
     old_types = [
-        TurnStarted, StepStarted, ToolCallStarted, ToolCallCompleted,
-        AssistantMessageEvent, TurnCompleted, TurnFailed,
+        TurnStarted,
+        StepStarted,
+        ToolCallStarted,
+        ToolCallCompleted,
+        AssistantMessageEvent,
+        TurnCompleted,
+        TurnFailed,
     ]
     values = [cls.EVENT_TYPE for cls in new_types + old_types]
 

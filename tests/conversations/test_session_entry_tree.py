@@ -26,7 +26,9 @@ def test_append_chain_and_active_path():
         AssistantMessage(content=[ToolCallContent(id="c1", name="t", arguments={})])
     )
     t = session.append_tool_result(
-        ToolResultMessage(tool_call_id="c1", tool_name="t", content=[TextContent(text="ok")])
+        ToolResultMessage(
+            tool_call_id="c1", tool_name="t", content=[TextContent(text="ok")]
+        )
     )
     path = session.active_path()
     assert [e.entry_id for e in path] == [u.entry_id, a.entry_id, t.entry_id]
@@ -53,7 +55,7 @@ def test_message_payload_is_versioned_agent_message():
     msg = UserMessage(content=[TextContent(text="hello")])
     entry = session.append_user(msg)
     assert entry.payload == agent_message_to_dict(msg)
-    assert entry.payload["payload_version"] == 1
+    assert entry.payload["payload_version"] == 2
     assert entry.payload["role"] == "user"
 
 

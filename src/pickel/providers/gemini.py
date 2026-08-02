@@ -20,6 +20,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ImageContent,
     TextContent,
     ThinkingContent,
     ToolCallContent,
@@ -289,16 +290,33 @@ class GeminiProvider(Provider):
     @staticmethod
     def _text_from_blocks(blocks: list[Any]) -> str:
         parts = [
-            block.text for block in blocks if isinstance(block, TextContent) and block.text
+            block.text
+            for block in blocks
+            if isinstance(block, TextContent) and block.text
         ]
         return "\n".join(parts)
 
     @staticmethod
     def _function_response_payload(message: ToolResultMessage) -> dict[str, Any]:
-        text = GeminiProvider._text_from_blocks(list(message.content))
-        if message.is_error:
-            return {"error": text}
-        return {"output": text}
+        content: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, TextContent):
+                content.append({"type": "text", "text": block.text})
+            elif isinstance(block, ImageContent):
+                image: dict[str, Any] = {
+                    "type": "image",
+                    "media_type": block.media_type,
+                }
+                if block.data_base64 is not None:
+                    image["data_base64"] = block.data_base64
+                if block.url is not None:
+                    image["url"] = block.url
+                content.append(image)
+        return {
+            "content": content,
+            "structured_content": message.structured_content,
+            "is_error": message.is_error,
+        }
 
     def _response_to_assistant_message(
         self, response: types.GenerateContentResponse

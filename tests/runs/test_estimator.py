@@ -55,6 +55,17 @@ def test_estimate_messages_empty_is_zero():
     assert estimate_messages([]) == 0
 
 
+def test_estimate_messages_counts_structured_tool_result():
+    plain = ToolResultMessage(tool_call_id="c1", tool_name="lookup")
+    structured = ToolResultMessage(
+        tool_call_id="c1",
+        tool_name="lookup",
+        structured_content={"value": "x" * 400},
+    )
+
+    assert estimate_messages([structured]) > estimate_messages([plain])
+
+
 def test_estimate_messages_handles_image_without_text():
     messages = [UserMessage(content=[ImageContent(media_type="image/png", url="x")])]
 

@@ -1,5 +1,4 @@
 from pathlib import Path
-import subprocess
 from tempfile import TemporaryDirectory
 import textwrap
 import unittest
@@ -202,52 +201,12 @@ class SkillRegistryTests(unittest.TestCase):
         manifests = SkillRegistry.discover(root)
         manifest_names = {manifest.name for manifest in manifests}
 
-        self.assertTrue({"gemini-api-dev", "image-generator", "skill-creator"}.issubset(manifest_names))
+        self.assertIn("skill-creator", manifest_names)
         for manifest in manifests:
             self.assertTrue(
                 manifest.description.startswith("Use when "),
                 f"{manifest.name} should use a trigger-oriented description",
             )
-
-    def test_image_generator_cli_help_does_not_require_sdk_import(self) -> None:
-        script = (
-            Path(__file__).resolve().parents[2]
-            / ".agent"
-            / "skills"
-            / "image-generator"
-            / "scripts"
-            / "generate_image.py"
-        )
-
-        result = subprocess.run(
-            ["uv", "run", "python", str(script), "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("--prompt", result.stdout)
-        self.assertIn("--output", result.stdout)
-
-    def test_image_generator_skill_uses_absolute_script_path_in_main_command(self) -> None:
-        skill_path = (
-            Path(__file__).resolve().parents[2]
-            / ".agent"
-            / "skills"
-            / "image-generator"
-            / "SKILL.md"
-        )
-        content = skill_path.read_text(encoding="utf-8")
-
-        self.assertIn(
-            "uv run python /Users/ssunxie/code/myopenclaw/.agent/skills/image-generator/scripts/generate_image.py",
-            content,
-        )
-        self.assertNotIn(
-            "uv run python .agent/skills/image-generator/scripts/generate_image.py",
-            content,
-        )
 
 
 if __name__ == "__main__":

@@ -39,10 +39,9 @@ class MergeRulesTests(unittest.TestCase):
         )
         self.assertEqual("deny", d.action)
 
-    def test_ask_treated_as_deny(self) -> None:
+    def test_ask_is_preserved_for_runtime_confirmation(self) -> None:
         d = merge_pre_tool_decisions([PreToolUseDecision(action="ask")])
-        self.assertEqual("deny", d.action)
-        self.assertIn("确认", d.reason or "")
+        self.assertEqual("ask", d.action)
 
     def test_updated_arguments_last_wins(self) -> None:
         d = merge_pre_tool_decisions(

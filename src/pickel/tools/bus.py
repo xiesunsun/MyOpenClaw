@@ -66,11 +66,15 @@ class ToolSnapshot:
 
     entries: tuple[ToolEntry, ...]
 
-    def find(self, name: str) -> BaseTool | None:
+    def get(self, name: str) -> ToolEntry | None:
         for entry in self.entries:
             if entry.name == name:
-                return entry.tool
+                return entry
         return None
+
+    def find(self, name: str) -> BaseTool | None:
+        entry = self.get(name)
+        return entry.tool if entry is not None else None
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -125,7 +129,9 @@ class ToolBus:
         """注册工具，返回最终名。同来源同 origin 视为重新注册（保留 enabled）。"""
         name = qualified_name(tool.spec.name, source, origin)
         existing = self._entries.get(name)
-        if existing is not None and (existing.source is not source or existing.origin != origin):
+        if existing is not None and (
+            existing.source is not source or existing.origin != origin
+        ):
             raise ToolNameConflictError(
                 f"Tool '{name}' already registered by source '{existing.source}'"
             )

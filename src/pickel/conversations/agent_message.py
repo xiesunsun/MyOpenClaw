@@ -1,4 +1,4 @@
-"""AgentMessage 联合类型与序列化合同（payload_version=1）。
+"""AgentMessage 联合类型与序列化合同。
 
 message entry 的 payload 即版本化 AgentMessage，不再依赖 SessionMessage 落盘。
 """
@@ -17,7 +17,8 @@ from pickel.conversations.content_blocks import (
     content_blocks_to_list,
 )
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
+SUPPORTED_PAYLOAD_VERSIONS = frozenset({1, 2})
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,8 @@ class ToolResultMessage:
     tool_name: str
     content: list[ToolResultContent] = field(default_factory=list)
     is_error: bool = False
+    # 工具返回给模型的结构化数据。运行时诊断仍留在 ToolExecutionResult。
+    structured_content: Any | None = None
     role: Literal["tool"] = "tool"
 
 
@@ -165,6 +168,7 @@ def agent_message_to_dict(message: AgentMessage) -> dict[str, Any]:
             "tool_name": message.tool_name,
             "content": content_blocks_to_list(list(message.content)),
             "is_error": message.is_error,
+            "structured_content": message.structured_content,
         }
     raise TypeError(f"不支持的 AgentMessage 类型: {type(message)!r}")
 
@@ -175,9 +179,10 @@ def agent_message_from_dict(data: dict[str, Any]) -> AgentMessage:
         raise TypeError("AgentMessage payload 必须是 dict")
 
     version = data.get("payload_version")
-    if version != PAYLOAD_VERSION:
+    if version not in SUPPORTED_PAYLOAD_VERSIONS:
         raise ValueError(
-            f"不支持的 payload_version: {version!r}（当前支持 {PAYLOAD_VERSION}）"
+            f"不支持的 payload_version: {version!r}"
+            f"（当前支持 {sorted(SUPPORTED_PAYLOAD_VERSIONS)}）"
         )
 
     role = data.get("role")
@@ -197,6 +202,9 @@ def agent_message_from_dict(data: dict[str, Any]) -> AgentMessage:
             tool_name=data["tool_name"],
             content=_as_tool_result_content(blocks),
             is_error=bool(data.get("is_error", False)),
+            structured_content=(
+                data.get("structured_content") if version >= 2 else None
+            ),
         )
     raise ValueError(f"未知 AgentMessage role: {role!r}")
 

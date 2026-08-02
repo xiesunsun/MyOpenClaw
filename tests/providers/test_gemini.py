@@ -79,16 +79,19 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual("echo", contents[1].parts[1].function_call.name)
         self.assertIsNotNone(contents[2].parts[0].function_response)
         self.assertEqual(
-            {"output": "pong"}, contents[2].parts[0].function_response.response
+            {
+                "content": [{"type": "text", "text": "pong"}],
+                "structured_content": None,
+                "is_error": False,
+            },
+            contents[2].parts[0].function_response.response,
         )
 
     def test_build_contents_maps_error_tool_results(self) -> None:
         contents = GeminiProvider._build_contents(
             [
                 AssistantMessage(
-                    content=[
-                        ToolCallContent(id="call-1", name="echo", arguments={})
-                    ]
+                    content=[ToolCallContent(id="call-1", name="echo", arguments={})]
                 ),
                 ToolResultMessage(
                     tool_call_id="call-1",
@@ -99,8 +102,28 @@ class GeminiProviderTests(unittest.TestCase):
             ]
         )
         self.assertEqual(
-            {"error": "failed"}, contents[1].parts[0].function_response.response
+            {
+                "content": [{"type": "text", "text": "failed"}],
+                "structured_content": None,
+                "is_error": True,
+            },
+            contents[1].parts[0].function_response.response,
         )
+
+    def test_build_contents_preserves_structured_tool_result(self) -> None:
+        contents = GeminiProvider._build_contents(
+            [
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="lookup",
+                    content=[TextContent(text="found")],
+                    structured_content={"id": 7},
+                )
+            ]
+        )
+
+        response = contents[0].parts[0].function_response.response
+        self.assertEqual({"id": 7}, response["structured_content"])
 
     def test_build_contents_aggregates_multiple_tool_results(self) -> None:
         contents = GeminiProvider._build_contents(
@@ -227,9 +250,7 @@ class GeminiProviderTests(unittest.TestCase):
             "request_dict"
         ]
         self.assertIn("generateContentRequest", request_dict)
-        self.assertIn(
-            "systemInstruction", request_dict["generateContentRequest"]
-        )
+        self.assertIn("systemInstruction", request_dict["generateContentRequest"])
 
     def test_count_context_tokens_serializes_tools_and_thought_signatures(self) -> None:
         provider = GeminiProvider(model="gemini-test")

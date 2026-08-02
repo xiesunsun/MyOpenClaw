@@ -18,6 +18,11 @@ from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
 from pickel.runs.event_bus import EventBus
+from pickel.runs.host_call_types import (
+    CONFIRMATION_CALL,
+    ConfirmationAnswer,
+)
+from pickel.runs.host_calls import HostCallRouter
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     RequestDigestEvent,
@@ -40,7 +45,9 @@ from pickel.tools.shell import LocalBashOperations
 
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
-        block.text for block in message.content if isinstance(block, TextContent) and block.text
+        block.text
+        for block in message.content
+        if isinstance(block, TextContent) and block.text
     )
 
 
@@ -108,6 +115,29 @@ class DelayEchoTool(BaseTool):
         return ToolExecutionResult(content=str(arguments["text"]))
 
 
+class InvalidOutputTool(BaseTool):
+    spec = ToolSpec(
+        name="echo",
+        description="Return structured text",
+        input_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    )
+
+    async def execute(self, arguments, context):
+        return ToolExecutionResult(
+            content="bad result",
+            structured_content={"text": 7},
+        )
+
+
 def _agent() -> Agent:
     return Agent(
         agent_id="Pickle",
@@ -154,7 +184,9 @@ def _tool_result_texts(session: Session) -> list[str]:
     return texts
 
 
-def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: ReActStrategy) -> Run:
+def _run(
+    *, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: ReActStrategy
+) -> Run:
     return Run(
         agent=agent,
         provider=provider,
@@ -172,6 +204,168 @@ def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: R
 
 
 class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_output_schema_becomes_model_correctable_error(self) -> None:
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "valid"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[InvalidOutputTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        session = Session.create(agent_id="Pickle")
+
+        await run.turn(session=session, user_text="hello")
+
+        self.assertIn("工具结果不符合 output_schema", _tool_result_texts(session)[0])
+
+    async def test_invalid_arguments_are_rejected_before_hook_and_execution(
+        self,
+    ) -> None:
+        hooks = RecordingHooks()
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": 7},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        run.lifecycle_hooks = hooks
+        session = Session.create(agent_id="Pickle")
+
+        await run.turn(session=session, user_text="hello")
+
+        self.assertEqual([], hooks.pre_arguments)
+        self.assertIn("工具参数不符合 schema", _tool_result_texts(session)[0])
+
+    async def test_hook_modified_arguments_are_validated_again(self) -> None:
+        class InvalidReplacement:
+            async def pre_tool_use(self, event):
+                return PreToolUseDecision(updated_arguments={"text": 7})
+
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "valid"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        run.lifecycle_hooks = LifecycleHooks(handlers=[InvalidReplacement()])
+        session = Session.create(agent_id="Pickle")
+
+        await run.turn(session=session, user_text="hello")
+
+        self.assertIn("Hook 修改后的工具参数", _tool_result_texts(session)[0])
+
+    async def test_ask_executes_only_after_confirmation_accepts(self) -> None:
+        class Ask:
+            async def pre_tool_use(self, event):
+                return PreToolUseDecision(action="ask", reason="需要确认")
+
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "accepted"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        run.lifecycle_hooks = LifecycleHooks(handlers=[Ask()])
+        router = HostCallRouter()
+        router.register(
+            CONFIRMATION_CALL,
+            lambda _request, _context: ConfirmationAnswer(decision="accept"),
+        )
+        session = Session.create(agent_id="Pickle")
+
+        await run.turn(
+            session=session,
+            user_text="hello",
+            host_calls=router.client,
+        )
+
+        self.assertEqual(["accepted"], _tool_result_texts(session))
+
+    async def test_ask_without_confirmation_handler_is_safely_denied(self) -> None:
+        class Ask:
+            async def pre_tool_use(self, event):
+                return PreToolUseDecision(action="ask", reason="需要确认")
+
+        run = _run(
+            agent=_agent(),
+            provider=StubProvider(
+                responses=[
+                    AssistantMessage(
+                        content=[
+                            ToolCallContent(
+                                id="call-1",
+                                name="echo",
+                                arguments={"text": "must-not-run"},
+                            )
+                        ]
+                    ),
+                    AssistantMessage(content=[TextContent(text="done")]),
+                ]
+            ),
+            tools=[DelayEchoTool()],
+            strategy=ReActStrategy(max_steps=2),
+        )
+        run.lifecycle_hooks = LifecycleHooks(handlers=[Ask()])
+        session = Session.create(agent_id="Pickle")
+
+        await run.turn(session=session, user_text="hello")
+
+        self.assertEqual(
+            ["工具调用未获得用户确认：需要确认"],
+            _tool_result_texts(session),
+        )
+
     async def test_tool_events_use_effective_arguments_after_hook(self) -> None:
         class ReplaceArguments:
             async def pre_tool_use(self, event):
@@ -213,8 +407,13 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("hooked", started.tool_call.arguments["text"])
         self.assertEqual("hooked", completed.tool_call.arguments["text"])
         self.assertEqual("hooked", completed.tool_result.content)
+        self.assertEqual("builtin", completed.tool_source)
+        self.assertEqual("allow", completed.hook_action)
+        self.assertEqual("passed", completed.validation)
 
-    async def test_runner_emits_batch_aware_events_for_started_and_completed_calls(self) -> None:
+    async def test_runner_emits_batch_aware_events_for_started_and_completed_calls(
+        self,
+    ) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -287,7 +486,9 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("fast", step_events[5].tool_result.content)
         self.assertEqual("done", step_events[8].text)
 
-    async def test_runner_emits_completed_event_with_is_error_for_failing_call(self) -> None:
+    async def test_runner_emits_completed_event_with_is_error_for_failing_call(
+        self,
+    ) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -436,9 +637,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(2, provider.calls)
         final = [e for e in events if isinstance(e, AssistantMessageEvent)][-1]
-        self.assertEqual(
-            "Reached the maximum number of reasoning steps.", final.text
-        )
+        self.assertEqual("Reached the maximum number of reasoning steps.", final.text)
         # 真实 generate 只发生了 2 次，合成的 max_msg 不得让合计变成 3
         self.assertEqual(provider.calls, final.usage.steps)
         self.assertEqual(200, final.usage.input_tokens)
@@ -465,7 +664,9 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
 
         await run.turn(session=session, user_text="hello", bus=bus)
 
-        assistant_event = [e for e in events if isinstance(e, AssistantMessageEvent)][-1]
+        assistant_event = [e for e in events if isinstance(e, AssistantMessageEvent)][
+            -1
+        ]
         turn_completed = [e for e in events if isinstance(e, TurnCompleted)][-1]
         self.assertEqual(assistant_event.usage, turn_completed.usage)
         self.assertEqual(2, turn_completed.usage.steps)

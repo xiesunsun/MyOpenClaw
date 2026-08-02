@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
@@ -279,6 +280,18 @@ class AnthropicProvider(Provider):
                 content.append({"type": "text", "text": item.text})
             elif isinstance(item, ImageContent):
                 content.append(AnthropicProvider._image_content_block(item))
+        if message.structured_content is not None:
+            content.append(
+                {
+                    "type": "text",
+                    "text": "structured_content: "
+                    + json.dumps(
+                        message.structured_content,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
         wire_content: str | list[dict[str, Any]]
         if content and all(item["type"] == "text" for item in content):
             wire_content = "\n".join(str(item["text"]) for item in content)

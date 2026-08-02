@@ -19,7 +19,11 @@ from pickel.conversations.agent_message import (
     ModelResponseMetadata,
     ToolResultMessage,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import (
+    TextContent,
+    ToolCallContent,
+    content_blocks_to_list,
+)
 from pickel.conversations.message import ToolCall
 from pickel.conversations.session import Session
 from pickel.hooks.events import (
@@ -43,7 +47,17 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.runs.estimator import request_char_count
-from pickel.runs.host_calls import HostCallClient
+from pickel.runs.host_call_types import (
+    CONFIRMATION_CALL,
+    ConfirmationAnswer,
+    ConfirmationRequest,
+    HostCallSource,
+)
+from pickel.runs.host_calls import (
+    HostCallClient,
+    HostCallCompleted,
+    HostCallContext,
+)
 from pickel.runs.event_bus import EventBus
 from pickel.runs.run import Run
 from pickel.runs.runtime_events import (
@@ -61,10 +75,12 @@ from pickel.runs.runtime_events import (
 from pickel.runs.strategy.base import ExecutionStrategy
 from pickel.runs.turn_state import TurnState
 from pickel.runs.turn_usage import last_turn_usage
+from pickel.runs.tool_result import build_tool_result_message
 from pickel.runs.usage_anchor import context_fingerprint
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
-from pickel.tools.bus import ToolSnapshot
+from pickel.tools.bus import ToolEntry, ToolSnapshot, ToolSource
+from pickel.tools.validation import validate_tool_arguments, validate_tool_result
 
 
 class ReActStrategy(ExecutionStrategy):
@@ -284,26 +300,61 @@ class ReActStrategy(ExecutionStrategy):
             # 串行按调用顺序：PreToolUse → 执行或合成 → append_tool_result → PostToolUse
             try:
                 for call_index, tool_call in enumerate(tool_calls):
-                    pre = await run.lifecycle_hooks.pre_tool_use(
-                        PreToolUseEvent(
-                            session_id=session.session_id,
-                            turn_id=turn.turn_id,
-                            step_index=step_index,
-                            tool_name=tool_call.name,
-                            tool_call_id=tool_call.id,
-                            arguments=dict(tool_call.arguments),
+                    entry = (
+                        turn.tool_snapshot.get(tool_call.name)
+                        if turn.tool_snapshot is not None
+                        else None
+                    )
+                    result: ToolExecutionResult | None = None
+                    pre = None
+                    validation_stage = "passed"
+                    args = dict(tool_call.arguments)
+                    if entry is None:
+                        validation_stage = "tool_not_found"
+                        result = self._validation_failure(
+                            f"Tool '{tool_call.name}' is not available.",
+                            error_type="ToolNotAvailable",
                         )
-                    )
-                    args = (
-                        dict(pre.updated_arguments)
-                        if pre.updated_arguments is not None
-                        else dict(tool_call.arguments)
-                    )
+                    else:
+                        invalid = validate_tool_arguments(entry.tool, args)
+                        if invalid is not None:
+                            validation_stage = "arguments"
+                            result = self._validation_failure(
+                                f"工具参数不符合 schema：{invalid}",
+                                error_type="ToolArgumentsInvalid",
+                            )
+                        else:
+                            pre = await run.lifecycle_hooks.pre_tool_use(
+                                PreToolUseEvent(
+                                    session_id=session.session_id,
+                                    turn_id=turn.turn_id,
+                                    step_index=step_index,
+                                    tool_name=tool_call.name,
+                                    tool_call_id=tool_call.id,
+                                    arguments=dict(args),
+                                    tool_source=entry.source.value,
+                                    tool_origin=entry.origin,
+                                )
+                            )
+                            if pre.updated_arguments is not None:
+                                args = dict(pre.updated_arguments)
+                            invalid = validate_tool_arguments(entry.tool, args)
+                            if invalid is not None:
+                                validation_stage = "hook_arguments"
+                                result = self._validation_failure(
+                                    f"Hook 修改后的工具参数不符合 schema：{invalid}",
+                                    error_type="ToolArgumentsInvalid",
+                                )
                     effective_call = ToolCallContent(
                         id=tool_call.id,
                         name=tool_call.name,
                         arguments=args,
                         thought_signature=tool_call.thought_signature,
+                    )
+                    confirmation = (
+                        "pending"
+                        if result is None and pre is not None and pre.action == "ask"
+                        else "not_requested"
                     )
                     await self._emit(
                         bus,
@@ -313,6 +364,11 @@ class ReActStrategy(ExecutionStrategy):
                             batch_id=batch_id,
                             call_index=call_index,
                             total_calls=len(tool_calls),
+                            tool_source=entry.source.value if entry else None,
+                            tool_origin=entry.origin if entry else None,
+                            validation=validation_stage,
+                            hook_action=pre.action if pre else None,
+                            confirmation=confirmation,
                         ),
                     )
                     tool_timer = SpanTimer(
@@ -321,21 +377,54 @@ class ReActStrategy(ExecutionStrategy):
                         attributes={
                             "tool_name": tool_call.name,
                             "tool_call_id": tool_call.id,
+                            "tool_source": entry.source.value if entry else None,
+                            "tool_origin": entry.origin if entry else None,
+                            "validation": validation_stage,
+                            "hook_action": pre.action if pre else None,
                         },
                     )
-                    if pre.action == "deny":
-                        reason = pre.reason or "工具调用被 Hook 拒绝"
+                    denied_reason: str | None = None
+                    denied_type = "ToolDenied"
+                    if result is None and pre is not None and pre.action == "deny":
+                        denied_reason = pre.reason or "工具调用被 Hook 拒绝"
+                    elif result is None and pre is not None and pre.action == "ask":
+                        assert entry is not None
+                        accepted = await self._confirm_tool_call(
+                            host_calls=host_calls,
+                            entry=entry,
+                            tool_call=effective_call,
+                            reason=pre.reason,
+                            session_id=session.session_id,
+                            turn_id=turn.turn_id,
+                            step_index=step_index,
+                        )
+                        if accepted:
+                            confirmation = "accepted"
+                        else:
+                            confirmation = "declined_or_unavailable"
+                            denied_type = "ToolConfirmationDeclined"
+                            denied_reason = "工具调用未获得用户确认"
+                            if pre.reason:
+                                denied_reason += f"：{pre.reason}"
+
+                    if result is not None:
+                        tool_timer.finish(status="error", error=result.error)
+                    elif denied_reason is not None:
                         result = ToolExecutionResult(
-                            content=reason,
+                            content=denied_reason,
                             is_error=True,
                             error=ErrorInfo(
                                 kind="denied",
-                                type="ToolDenied",
-                                message=reason,
+                                type=denied_type,
+                                message=denied_reason,
                                 retryable=False,
                             ),
                         )
-                        tool_timer.finish(status="denied")
+                        tool_timer.finish(
+                            status="denied",
+                            attributes={"confirmation": confirmation},
+                            error=result.error,
+                        )
                     else:
                         try:
                             result = await self._execute_tool_call(
@@ -352,20 +441,11 @@ class ReActStrategy(ExecutionStrategy):
                             raise
                         tool_timer.finish(
                             status="error" if result.is_error else "ok",
+                            attributes={"confirmation": confirmation},
                             error=result.error,
                         )
-                    result_entry = session.append_tool_result(
-                        ToolResultMessage(
-                            tool_call_id=tool_call.id,
-                            tool_name=tool_call.name,
-                            content=(
-                                list(result.content_blocks)
-                                if result.content_blocks
-                                else [TextContent(text=result.content)]
-                            ),
-                            is_error=result.is_error,
-                        )
-                    )
+                    result_message = build_tool_result_message(effective_call, result)
+                    result_entry = session.append_tool_result(result_message)
                     self._flush_entry(run, session, result_entry, identity=identity)
                     step.completed_tool_call_ids.append(tool_call.id)
                     batch_outcomes.append(
@@ -382,9 +462,15 @@ class ReActStrategy(ExecutionStrategy):
                             envelope=envelope(step_index),
                             tool_call=self._event_tool_call(effective_call),
                             tool_result=copy.deepcopy(result),
+                            tool_result_message=copy.deepcopy(result_message),
                             batch_id=batch_id,
                             call_index=call_index,
                             total_calls=len(tool_calls),
+                            tool_source=entry.source.value if entry else None,
+                            tool_origin=entry.origin if entry else None,
+                            validation=validation_stage,
+                            hook_action=pre.action if pre else None,
+                            confirmation=confirmation,
                         ),
                     )
                     post = await run.lifecycle_hooks.post_tool_use(
@@ -397,6 +483,8 @@ class ReActStrategy(ExecutionStrategy):
                             arguments=dict(effective_call.arguments),
                             result_content=result.content,
                             is_error=result.is_error,
+                            tool_source=entry.source.value if entry else "",
+                            tool_origin=entry.origin if entry else None,
                         )
                     )
                     if post.feedback_text:
@@ -665,8 +753,8 @@ class ReActStrategy(ExecutionStrategy):
         host_calls: HostCallClient | None,
     ) -> ToolExecutionResult:
         # 按 ToolEntry.name 查找：模型看到的名字（含命名空间前缀）就是查找键
-        tool = snapshot.find(tool_call.name) if snapshot is not None else None
-        if tool is None:
+        entry = snapshot.get(tool_call.name) if snapshot is not None else None
+        if entry is None:
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' is not available.",
                 is_error=True,
@@ -685,13 +773,88 @@ class ReActStrategy(ExecutionStrategy):
             host_calls=host_calls,
         )
         try:
-            return await tool.execute(tool_call.arguments, exec_context)
+            result = await entry.tool.execute(tool_call.arguments, exec_context)
+            invalid = validate_tool_result(entry.tool, result)
+            if invalid is not None:
+                return self._validation_failure(
+                    f"工具结果不符合 output_schema：{invalid}",
+                    error_type="ToolResultInvalid",
+                    metadata={
+                        "invalid_result": {
+                            "content": result.content,
+                            "content_blocks": content_blocks_to_list(
+                                result.content_blocks
+                            ),
+                            "structured_content": result.structured_content,
+                            "is_error": result.is_error,
+                            "metadata": copy.deepcopy(result.metadata),
+                        }
+                    },
+                )
+            return result
         except Exception as exc:  # noqa: BLE001 — 工具失败转错误结果
             return ToolExecutionResult(
                 content=f"Tool '{tool_call.name}' failed: {exc}",
                 is_error=True,
                 error=ErrorInfo.from_exception(exc, kind="exception"),
             )
+
+    @staticmethod
+    def _validation_failure(
+        message: str,
+        *,
+        error_type: str,
+        metadata: dict | None = None,
+    ) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            content=message,
+            is_error=True,
+            metadata=dict(metadata or {}),
+            error=ErrorInfo(
+                kind="validation",
+                type=error_type,
+                message=message,
+                retryable=False,
+            ),
+        )
+
+    @staticmethod
+    async def _confirm_tool_call(
+        *,
+        host_calls: HostCallClient | None,
+        entry: ToolEntry,
+        tool_call: ToolCallContent,
+        reason: str | None,
+        session_id: str,
+        turn_id: str,
+        step_index: int,
+    ) -> bool:
+        if host_calls is None or not host_calls.supports(CONFIRMATION_CALL):
+            return False
+        source_kind = "mcp" if entry.source is ToolSource.MCP else "tool"
+        outcome = await host_calls.call(
+            CONFIRMATION_CALL,
+            ConfirmationRequest(
+                source=HostCallSource(
+                    kind=source_kind,
+                    name=entry.origin or entry.name,
+                    operation=entry.name,
+                ),
+                title=f"确认执行工具 {entry.name}",
+                message=reason or f"工具 {entry.name} 请求执行",
+            ),
+            HostCallContext(
+                session_id=session_id,
+                turn_id=turn_id,
+                step_index=step_index,
+                tool_call_id=tool_call.id,
+            ),
+        )
+        return (
+            isinstance(outcome, HostCallCompleted)
+            and isinstance(outcome.value, ConfirmationAnswer)
+            and outcome.value.decision == "accept"
+        )
 
     @staticmethod
     def _event_tool_call(tool_call: ToolCallContent) -> ToolCall:

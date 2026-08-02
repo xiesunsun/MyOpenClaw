@@ -1,4 +1,4 @@
-"""MCP 工具 → BaseTool 代理。schema 直传，结果拍平为文本。"""
+"""MCP 工具 → BaseTool 代理，保留 schema、内容块与结构化结果。"""
 
 from __future__ import annotations
 
