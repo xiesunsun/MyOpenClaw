@@ -29,6 +29,7 @@ from pickel.tools.base import (
 from pickel.tools.bus import ToolActivation, ToolSource, bus_with
 from pickel.tools.policy import FullAccessPathPolicy
 from pickel.tools.shell import LocalBashOperations
+from tests.runs.helpers import user_message
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -195,7 +196,7 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await run.turn(
             session=session,
-            user_text="hello",
+            user_message=user_message("hello"),
         )
 
         self.assertEqual("assistant reply", _assistant_text(result))
@@ -244,7 +245,7 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         await run.turn(
             session=session,
-            user_text="hello",
+            user_message=user_message("hello"),
         )
 
         contents = session.active_path()[1].payload.get("content") or []
@@ -297,7 +298,7 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await run.turn(
             session=session,
-            user_text="hello",
+            user_message=user_message("hello"),
         )
 
         self.assertEqual("done", _assistant_text(result))
@@ -395,11 +396,11 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         first_result = await run.turn(
             session=session,
-            user_text="first user",
+            user_message=user_message("first user"),
         )
         second_result = await run.turn(
             session=session,
-            user_text="second user",
+            user_message=user_message("second user"),
         )
 
         self.assertEqual("first answer", _assistant_text(first_result))
@@ -451,7 +452,7 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TimeoutError):
             await run.turn(
                 session=session,
-                user_text="hello",
+                user_message=user_message("hello"),
             )
 
         self.assertEqual(["user"], _entry_roles(session))

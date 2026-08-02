@@ -181,12 +181,13 @@ class Run:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: "EventBus | None" = None,
         observer: Observer | None = None,
         host_calls: "HostCallClient | None" = None,
+        turn_id: str | None = None,
     ) -> AssistantMessage:
-        turn_id = str(uuid4())
+        turn_id = turn_id or str(uuid4())
         identity = ObservationIdentity(session_id=session.session_id, turn_id=turn_id)
         with observation_scope(observer):
             timer = SpanTimer(
@@ -202,7 +203,7 @@ class Run:
                 with span_scope(timer.span_id):
                     reply, outcome = await self._execute_turn(
                         session=session,
-                        user_text=user_text,
+                        user_message=user_message,
                         bus=bus,
                         turn_id=turn_id,
                         host_calls=host_calls,
@@ -227,7 +228,7 @@ class Run:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: "EventBus | None",
         turn_id: str,
         host_calls: "HostCallClient | None",
@@ -246,6 +247,11 @@ class Run:
             if bus is not None:
                 await bus.emit(event)
 
+        user_text = "\n".join(
+            block.text
+            for block in user_message.content
+            if isinstance(block, TextContent)
+        )
         await emit(TurnStarted(envelope=envelope(), user_text=user_text))
         started = time.perf_counter()
         end_reason = "failed"
@@ -272,9 +278,7 @@ class Run:
                 )
                 return blocked, "blocked"
 
-            user_entry = session.append_user(
-                UserMessage(content=[TextContent(text=user_text)])
-            )
+            user_entry = session.append_user(user_message)
             if self.session_service is not None:
                 flush_timer = SpanTimer(
                     "pickel.session.append",

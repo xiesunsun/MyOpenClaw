@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from pickel.app.boot import Boot
 from pickel.app.host_call_recorder import SessionHostCallRecorder
 from pickel.app.runtime_models import (
     AgentInfo,
     ContextInspection,
+    ConversationRequest,
     ConversationClosedError,
     ModelInfo,
     McpInspection,
@@ -19,9 +22,12 @@ from pickel.app.runtime_models import (
     PendingSkillInfo,
     ReloadResult,
     RuntimeSnapshot,
+    RuntimeErrorInfo,
     SkillActionResult,
     ToolInfo,
     TurnInProgressError,
+    TurnRequest,
+    TurnResult,
 )
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
@@ -48,7 +54,12 @@ from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_bus import RuntimeBus
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
-from pickel.runs.runtime_events import RuntimeEventHandler
+from pickel.runs.runtime_events import (
+    RuntimeEventHandler,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 from pickel.runs.trace_sink import (
     JsonlTraceSink,
     TraceOptions,
@@ -143,23 +154,67 @@ class RuntimeConversation:
     def closed(self) -> bool:
         return self._closed
 
-    async def turn(self, text: str) -> AssistantMessage:
+    async def turn(self, request: TurnRequest) -> TurnResult:
         if self._closed:
             raise ConversationClosedError("Conversation 已关闭")
         if self._turn_running:
             raise TurnInProgressError("当前 Conversation 已有 turn 正在执行")
         self._turn_running = True
+        started = time.perf_counter()
+        turn_id = str(uuid4())
+        outcome = "completed"
+        usage = None
+        elapsed_ms = 0
+
+        def capture(event) -> None:
+            nonlocal turn_id, outcome, usage, elapsed_ms
+            if isinstance(event, TurnStarted):
+                turn_id = event.envelope.turn_id
+            elif isinstance(event, TurnCompleted):
+                turn_id = event.envelope.turn_id
+                outcome = event.outcome
+                usage = event.usage
+                elapsed_ms = event.elapsed_ms
+            elif isinstance(event, TurnFailed):
+                turn_id = event.envelope.turn_id
+
+        unsubscribe = self._bus.subscribe(capture)
         try:
             kwargs = {
                 "session": self._session,
-                "user_text": text,
+                "user_message": request.message,
                 "bus": self._bus,
             }
             if isinstance(self._run, Run):
                 kwargs["observer"] = self._trace_sink
                 kwargs["host_calls"] = self._runtime_bus.host_calls.client
-            return await self._run.turn(**kwargs)
+                kwargs["turn_id"] = turn_id
+            try:
+                reply = await self._run.turn(**kwargs)
+            except Exception as exc:  # noqa: BLE001 — Application 返回稳定失败结果
+                return TurnResult(
+                    status="failed",
+                    session_id=self._session.session_id,
+                    turn_id=turn_id,
+                    message=None,
+                    usage=usage,
+                    elapsed_ms=elapsed_ms
+                    or round((time.perf_counter() - started) * 1000),
+                    error=RuntimeErrorInfo(
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    ),
+                )
+            return TurnResult(
+                status="blocked" if outcome == "blocked" else "completed",
+                session_id=self._session.session_id,
+                turn_id=turn_id,
+                message=reply,
+                usage=usage,
+                elapsed_ms=elapsed_ms or round((time.perf_counter() - started) * 1000),
+            )
         finally:
+            unsubscribe()
             self._turn_running = False
 
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
@@ -429,29 +484,25 @@ class RuntimeHost:
             diagnostics=snapshot.diagnostics,
         )
 
-    def start(self, agent_id: str | None = None) -> RuntimeConversation:
-        agent, run = self._boot.build_run(agent_id=agent_id)
-        service = self._boot.build_session_service(agent_id=agent.agent_id)
-        session = service.start(
-            agent_id=agent.agent_id,
-            cwd=str(Path.cwd().resolve()),
-        )
-        run.session_service = service
-        return self.attach(
-            agent=agent,
-            run=run,
-            session=session,
-            session_service=service,
-        )
-
-    def resume(self, session_id: str) -> RuntimeConversation:
-        service = self._boot.build_session_service()
-        session = service.resume(session_id=session_id)
-        service = self._boot.build_session_service(agent_id=session.agent_id)
-        agent, run = self._boot.build_run(
-            agent_id=session.agent_id,
-            session_service=service,
-        )
+    def open_conversation(self, request: ConversationRequest) -> RuntimeConversation:
+        cwd = str((request.cwd or Path.cwd()).resolve())
+        if request.session_id is not None:
+            lookup_service = self._boot.build_session_service()
+            session = lookup_service.resume(session_id=request.session_id)
+            service = self._boot.build_session_service(agent_id=session.agent_id)
+            agent, run = self._boot.build_run(
+                agent_id=session.agent_id,
+                session_service=service,
+            )
+        else:
+            agent, run = self._boot.build_run(agent_id=request.agent_id)
+            if request.persistence == "persistent":
+                service = self._boot.build_session_service(agent_id=agent.agent_id)
+                session = service.start(agent_id=agent.agent_id, cwd=cwd)
+                run.session_service = service
+            else:
+                service = None
+                session = Session.create(agent_id=agent.agent_id, cwd=cwd)
         return self.attach(
             agent=agent,
             run=run,

@@ -41,6 +41,7 @@ from pickel.tools.base import (
 )
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.tools.shell import LocalBashOperations
+from tests.runs.helpers import user_message
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -226,7 +227,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
         session = Session.create(agent_id="Pickle")
 
-        await run.turn(session=session, user_text="hello")
+        await run.turn(session=session, user_message=user_message("hello"))
 
         self.assertIn("工具结果不符合 output_schema", _tool_result_texts(session)[0])
 
@@ -256,7 +257,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         run.lifecycle_hooks = hooks
         session = Session.create(agent_id="Pickle")
 
-        await run.turn(session=session, user_text="hello")
+        await run.turn(session=session, user_message=user_message("hello"))
 
         self.assertEqual([], hooks.pre_arguments)
         self.assertIn("工具参数不符合 schema", _tool_result_texts(session)[0])
@@ -288,7 +289,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         run.lifecycle_hooks = LifecycleHooks(handlers=[InvalidReplacement()])
         session = Session.create(agent_id="Pickle")
 
-        await run.turn(session=session, user_text="hello")
+        await run.turn(session=session, user_message=user_message("hello"))
 
         self.assertIn("Hook 修改后的工具参数", _tool_result_texts(session)[0])
 
@@ -326,7 +327,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
 
         await run.turn(
             session=session,
-            user_text="hello",
+            user_message=user_message("hello"),
             host_calls=router.client,
         )
 
@@ -359,7 +360,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         run.lifecycle_hooks = LifecycleHooks(handlers=[Ask()])
         session = Session.create(agent_id="Pickle")
 
-        await run.turn(session=session, user_text="hello")
+        await run.turn(session=session, user_message=user_message("hello"))
 
         self.assertEqual(
             ["工具调用未获得用户确认：需要确认"],
@@ -398,7 +399,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(events.append)
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         started = next(event for event in events if isinstance(event, ToolCallStarted))
         completed = next(
@@ -454,7 +455,9 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda event: events.append(event))
 
-        result = await run.turn(session=session, user_text="hello", bus=bus)
+        result = await run.turn(
+            session=session, user_message=user_message("hello"), bus=bus
+        )
 
         self.assertEqual("done", _assistant_text(result))
         # 工具串行执行以保留 PreToolUse 控制点
@@ -524,7 +527,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda event: events.append(event))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         failure = next(
             event
@@ -575,7 +578,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda event: events.append(event))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         self.assertTrue(events)
         self.assertEqual(list(range(len(events))), [e.envelope.seq for e in events])
@@ -633,7 +636,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda event: events.append(event))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         self.assertEqual(2, provider.calls)
         final = [e for e in events if isinstance(e, AssistantMessageEvent)][-1]
@@ -662,7 +665,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda event: events.append(event))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         assistant_event = [e for e in events if isinstance(e, AssistantMessageEvent)][
             -1
@@ -685,7 +688,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        await run.turn(session=session, user_text="hello", bus=None)
+        await run.turn(session=session, user_message=user_message("hello"), bus=None)
 
         request = await prepare(
             run=run,
@@ -748,7 +751,7 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
 
         bus.subscribe(hijack)
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         # 工具按原参数执行，落盘的 tool_result 是原参数的结果
         self.assertEqual(["ORIGINAL"], _tool_result_texts(session))

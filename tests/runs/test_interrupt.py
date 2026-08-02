@@ -31,6 +31,7 @@ from pickel.tools.base import (
 )
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.tools.shell import LocalBashOperations
+from tests.runs.helpers import user_message
 
 
 class _HangingTool(BaseTool):
@@ -122,7 +123,9 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         run = self._run(_ToolCallProvider(), [_HangingTool()])
         bus = EventBus()
 
-        task = asyncio.create_task(run.turn(session=session, user_text="hi", bus=bus))
+        task = asyncio.create_task(
+            run.turn(session=session, user_message=user_message("hi"), bus=bus)
+        )
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -150,7 +153,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         run = self._run(_ToolCallProvider(), [_HangingTool()])
 
         task = asyncio.create_task(
-            run.turn(session=session, user_text="hi", bus=EventBus())
+            run.turn(session=session, user_message=user_message("hi"), bus=EventBus())
         )
         await asyncio.sleep(0.05)
         task.cancel()
@@ -168,7 +171,9 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda e: events.append(e))
 
-        task = asyncio.create_task(run.turn(session=session, user_text="hi", bus=bus))
+        task = asyncio.create_task(
+            run.turn(session=session, user_message=user_message("hi"), bus=bus)
+        )
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -187,7 +192,9 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda e: events.append(e))
 
-        task = asyncio.create_task(run.turn(session=session, user_text="hi", bus=bus))
+        task = asyncio.create_task(
+            run.turn(session=session, user_message=user_message("hi"), bus=bus)
+        )
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -206,7 +213,9 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda e: events.append(e))
 
-        task = asyncio.create_task(run.turn(session=session, user_text="hi", bus=bus))
+        task = asyncio.create_task(
+            run.turn(session=session, user_message=user_message("hi"), bus=bus)
+        )
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -227,7 +236,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
         run = self._run(_ToolCallProvider(), [_HangingTool()])
 
         task = asyncio.create_task(
-            run.turn(session=session, user_text="hi", bus=EventBus())
+            run.turn(session=session, user_message=user_message("hi"), bus=EventBus())
         )
         await asyncio.sleep(0.05)
         task.cancel()

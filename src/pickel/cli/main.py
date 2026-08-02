@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from pathlib import Path
 
 import typer
@@ -6,10 +7,14 @@ from rich.console import Console
 from rich.table import Table
 
 from pickel.app.boot import Boot
+from pickel.app.application import RuntimeApplication
 from pickel.cli.chat import ChatLoop
+from pickel.cli.query import QuerySurface
+from pickel.cli.query_input import read_query_input
+from pickel.app.runtime_models import ConversationRequest, TurnRequest
 from pickel.config.loader import Config
 from pickel.conversations.service import SessionNotFoundError
-from pickel.extensions_host.loader import load_extensions, load_extensions_async
+from pickel.extensions_host.loader import load_extensions
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 
@@ -41,28 +46,25 @@ def _boot() -> Boot:
     return _finish_boot(app_config, tool_bus, result)
 
 
-async def _boot_async() -> Boot:
-    """chat 的启动路径：extension 装载发生在 chat 自己的事件循环里。
-
-    MCP 连接由背景任务持有——若在临时 asyncio.run 里装载，
-    进入 chat 循环时连接已随旧循环死掉，首次调用只能靠重连兜住。
-    """
-    app_config, tool_bus = _prepare_boot()
-    result = await load_extensions_async(tool_bus=tool_bus, app_config=app_config)
-    return _finish_boot(app_config, tool_bus, result)
-
-
 def _run_chat(
     *,
     agent: str | None,
     session_id: str | None,
 ) -> None:
     async def _main() -> None:
-        await ChatLoop.from_boot(
-            boot=await _boot_async(),
-            agent_id=agent,
-            session_id=session_id,
-        ).run()
+        async with RuntimeApplication.open(cwd=Path.cwd()) as runtime:
+            for warning in runtime.warnings:
+                typer.secho(
+                    f"Extension load error: {warning}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+            assert runtime.host is not None
+            await ChatLoop.from_host(
+                host=runtime.host,
+                agent_id=agent,
+                session_id=session_id,
+            ).run()
 
     try:
         asyncio.run(_main())
@@ -83,14 +85,96 @@ def _run_chat(
         raise
 
 
+def _run_query(
+    *,
+    query: str,
+    agent: str | None,
+    session_id: str | None,
+    ephemeral: bool,
+    output_format: str,
+) -> None:
+    if output_format not in {"text", "json", "jsonl"}:
+        typer.echo("--output-format 须为 text、json 或 jsonl", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        user_message = read_query_input(query, sys.stdin).to_user_message()
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    async def _main():
+        async with RuntimeApplication.open(cwd=Path.cwd()) as runtime:
+            for warning in runtime.warnings:
+                typer.secho(
+                    f"Extension load error: {warning}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+            assert runtime.host is not None
+            conversation = runtime.host.open_conversation(
+                ConversationRequest(
+                    agent_id=agent,
+                    session_id=session_id,
+                    persistence="ephemeral" if ephemeral else "persistent",
+                    cwd=Path.cwd(),
+                )
+            )
+            return await QuerySurface(
+                stdout=sys.stdout,
+                output_format=output_format,  # type: ignore[arg-type]
+            ).run(
+                conversation=conversation,
+                request=TurnRequest(message=user_message),
+            )
+
+    try:
+        result = asyncio.run(_main())
+    except SessionNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc).strip("'"), err=True)
+        raise typer.Exit(code=2) from exc
+    except KeyboardInterrupt as exc:
+        raise typer.Exit(code=130) from exc
+
+    if result.status == "blocked":
+        raise typer.Exit(code=3)
+    if result.status == "failed":
+        if result.error is not None:
+            typer.echo(
+                f"{result.error.error_type}: {result.error.message}",
+                err=True,
+            )
+        raise typer.Exit(code=1)
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
     agent: str | None = typer.Option(None, "--agent"),
     session_id: str | None = typer.Option(None, "--session-id"),
+    query: str | None = typer.Option(None, "--query", "-q"),
+    output_format: str = typer.Option("text", "--output-format"),
+    ephemeral: bool = typer.Option(False, "--ephemeral"),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
+    if query is not None:
+        _run_query(
+            query=query,
+            agent=agent,
+            session_id=session_id,
+            ephemeral=ephemeral,
+            output_format=output_format,
+        )
+        return
+    if output_format != "text" or ephemeral:
+        typer.echo(
+            "--output-format 与 --ephemeral 只能和 -q/--query 一起使用", err=True
+        )
+        raise typer.Exit(code=2)
     _run_chat(agent=agent, session_id=session_id)
 
 
@@ -105,8 +189,12 @@ def chat(
 @app.command()
 def observe(
     session: list[str] = typer.Option([], "--session", help="指定 session_id，可多次"),
-    out: Path = typer.Option(Path("pickel-observe.html"), "--out", help="输出 HTML 路径"),
-    limit: int = typer.Option(20, "--limit", help="无 --session 时导出最近 N 个含消息的会话"),
+    out: Path = typer.Option(
+        Path("pickel-observe.html"), "--out", help="输出 HTML 路径"
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="无 --session 时导出最近 N 个含消息的会话"
+    ),
 ) -> None:
     """导出会话执行轨迹为自包含 HTML 观测平台。"""
     from datetime import datetime, timezone
@@ -122,9 +210,7 @@ def observe(
 
     repository = SQLiteSessionRepository(sessions_db_path())
     if session:
-        sessions = [
-            loaded for sid in session if (loaded := repository.load(sid))
-        ]
+        sessions = [loaded for sid in session if (loaded := repository.load(sid))]
     else:
         sessions = collect_previews(repository, limit=limit)
     if not sessions:
@@ -132,9 +218,7 @@ def observe(
         raise typer.Exit(code=1)
 
     trajectories = [
-        collect_trajectory(
-            item, enhancement=read_trace(trace_path(item.session_id))
-        )
+        collect_trajectory(item, enhancement=read_trace(trace_path(item.session_id)))
         for item in sessions
     ]
     out.write_text(

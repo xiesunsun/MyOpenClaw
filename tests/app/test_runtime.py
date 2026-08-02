@@ -2,11 +2,16 @@ import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from pickel.agents.agent import Agent
 from pickel.app.runtime import RuntimeConversation, RuntimeHost
-from pickel.app.runtime_models import TurnInProgressError
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.app.runtime_models import (
+    ConversationRequest,
+    TurnInProgressError,
+    TurnRequest,
+)
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.runs.runtime_events import AssistantMessageEvent
@@ -60,10 +65,11 @@ class _Run:
         self.skill_store = None
         self.bash_operations = _BashOperations()
 
-    async def turn(self, *, session, user_text, bus):
+    async def turn(self, *, session, user_message, bus):
         self.started.set()
         if self.wait:
             await self.release.wait()
+        user_text = user_message.content[0].text
         reply = AssistantMessage(content=[TextContent(text=user_text)])
         await bus.emit(
             AssistantMessageEvent(
@@ -86,6 +92,10 @@ def _agent() -> Agent:
 
 
 class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _request(text: str) -> TurnRequest:
+        return TurnRequest(message=UserMessage(content=[TextContent(text=text)]))
+
     async def test_turn_uses_owned_bus_and_assigns_monotonic_seq(self) -> None:
         agent = _agent()
         conversation = RuntimeConversation(
@@ -96,9 +106,11 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
         events = []
         conversation.subscribe(events.append)
 
-        await conversation.turn("one")
-        await conversation.turn("two")
+        first = await conversation.turn(self._request("one"))
+        second = await conversation.turn(self._request("two"))
 
+        self.assertEqual("completed", first.status)
+        self.assertEqual("completed", second.status)
         self.assertEqual(["one", "two"], [item.text for item in events])
         self.assertEqual([0, 1], [item.envelope.seq for item in events])
 
@@ -110,11 +122,11 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
             run=run,
             session=Session.create(agent_id=agent.agent_id),
         )
-        first = asyncio.create_task(conversation.turn("one"))
+        first = asyncio.create_task(conversation.turn(self._request("one")))
         await run.started.wait()
 
         with self.assertRaises(TurnInProgressError):
-            await conversation.turn("two")
+            await conversation.turn(self._request("two"))
 
         run.release.set()
         await first
@@ -214,3 +226,33 @@ class RuntimeHostMcpInspectionTests(unittest.TestCase):
 
         self.assertFalse(inspection.available)
         self.assertEqual((), inspection.servers)
+
+
+class RuntimeHostConversationTests(unittest.TestCase):
+    def test_ephemeral_conversation_does_not_build_session_service(self) -> None:
+        agent = _agent()
+        run = _Run(agent)
+        boot = SimpleNamespace(
+            app_config=SimpleNamespace(observability=SimpleNamespace(trace=None)),
+            extensions=ExtensionRegistry(),
+            extension_result=None,
+            build_run=lambda agent_id=None: (agent, run),
+            build_session_service=Mock(
+                side_effect=AssertionError("不应创建持久化服务")
+            ),
+        )
+
+        conversation = RuntimeHost(boot).open_conversation(
+            ConversationRequest(
+                agent_id=agent.agent_id,
+                persistence="ephemeral",
+                cwd=Path("/tmp/pickel"),
+            )
+        )
+
+        self.assertIsNone(conversation.session_service)
+        self.assertEqual(str(Path("/tmp/pickel").resolve()), conversation.session.cwd)
+
+    def test_resume_rejects_conflicting_agent(self) -> None:
+        with self.assertRaisesRegex(ValueError, "不能同时指定 agent_id"):
+            ConversationRequest(agent_id="A", session_id="session-1")

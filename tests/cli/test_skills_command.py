@@ -7,6 +7,7 @@ import unittest
 from rich.console import Console
 
 from pickel.cli.chat import ChatLoop
+from pickel.app.runtime import RuntimeConversation
 from pickel.skills.store import SkillStore, SkillWriteRequest
 
 _BODY = "---\nname: demo\ndescription: Demo skill.\n---\n\n# Demo\n"
@@ -23,7 +24,9 @@ class SkillsCommandTests(unittest.TestCase):
         loop = ChatLoop.__new__(ChatLoop)
         self._output = StringIO()
         loop.console = Console(file=self._output, width=200, no_color=True)
-        loop._run = SimpleNamespace(skill_store=store)
+        conversation = RuntimeConversation.__new__(RuntimeConversation)
+        conversation._run = SimpleNamespace(skill_store=store)
+        loop._conversation = conversation
         return loop
 
     def _printed(self, loop: ChatLoop) -> str:

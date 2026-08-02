@@ -33,6 +33,7 @@ from pickel.runs.runtime_events import (
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.tools.shell import LocalBashOperations
+from tests.runs.helpers import user_message
 
 
 def _reply() -> AssistantMessage:
@@ -96,7 +97,9 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         events = []
         bus.subscribe(lambda e: events.append(e))
-        await _run(provider).turn(session=session, user_text="hi", bus=bus)
+        await _run(provider).turn(
+            session=session, user_message=user_message("hi"), bus=bus
+        )
         return events
 
     async def test_文本增量被转成_text_delta_事件(self) -> None:

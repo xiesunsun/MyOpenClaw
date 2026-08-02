@@ -40,6 +40,7 @@ from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolActivation, bus_with
 from rich.console import Console
 from rich.text import Text
+from tests.cli.helpers import chat_loop
 
 
 def _assistant_body_prints(console: Mock, text: str) -> list:
@@ -52,6 +53,14 @@ def _assistant_body_prints(console: Mock, text: str) -> list:
 
 
 def _assistant_text(message: AssistantMessage) -> str:
+    return "\n".join(
+        block.text
+        for block in message.content
+        if isinstance(block, TextContent) and block.text
+    )
+
+
+def _user_text(message: UserMessage) -> str:
     return "\n".join(
         block.text
         for block in message.content
@@ -92,10 +101,10 @@ class StubRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        session.append_user(user_message)
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
         if bus is not None:
@@ -114,10 +123,10 @@ class SilentRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        session.append_user(user_message)
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
         return reply
@@ -128,10 +137,10 @@ class ErrorRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        session.append_user(user_message)
         # 真 Run 在失败前也已经发过事件；桩照做，否则「失败轮不退订渲染器」
         # 这种回归在后续轮次里没有任何可观测痕迹。StepStarted 在 E3 已不上
         # 屏，可观测痕迹靠流式 delta。
@@ -152,14 +161,14 @@ class RecordingRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        self.started.append(user_text)
-        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        self.started.append(_user_text(user_message))
+        session.append_user(user_message)
         reply = _text_assistant("runtime reply")
         session.append_assistant(reply)
-        self.completed.append(user_text)
+        self.completed.append(_user_text(user_message))
         return reply
 
 
@@ -206,10 +215,10 @@ class StubToolRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
-        session.append_user(UserMessage(content=[TextContent(text=user_text)]))
+        session.append_user(user_message)
         if bus is not None:
             await bus.emit(StepStarted(envelope=EventEnvelope(step_index=1)))
         tool_call = ToolCall(
@@ -279,7 +288,7 @@ class StubContextRun:
         self,
         *,
         session: Session,
-        user_text: str,
+        user_message: UserMessage,
         bus: EventBus | None = None,
     ) -> AssistantMessage:
         raise AssertionError("turn should not be called")
@@ -342,7 +351,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=agent,
             run=StubRun(),
             session=session,
@@ -350,13 +359,13 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         result = await loop.handle_user_input("hello")
 
-        self.assertEqual("runtime reply", _assistant_text(result))
+        self.assertEqual("runtime reply", _assistant_text(result.message))
         self.assertEqual(2, loop._message_count())
 
     async def test_chat_loop_creates_session_from_conversation_layer(self) -> None:
         agent = self._build_agent()
 
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=agent,
             run=StubRun(),
         )
@@ -369,7 +378,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=agent,
             run=StubToolRun(),
             session=session,
@@ -377,11 +386,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         bus, _, _unsubscribe = loop.create_event_bus()
-        result = await loop.handle_user_input("hello", bus=bus)
+        result = await loop.handle_user_input("hello")
 
         rendered = console.export_text()
 
-        self.assertEqual("final reply", _assistant_text(result))
+        self.assertEqual("final reply", _assistant_text(result.message))
         self.assertIn("⏺ read_file", rendered)
         self.assertIn("path=", rendered)
         self.assertIn("running", rendered)
@@ -403,7 +412,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         prompt_reader = AsyncMock(return_value="hello")
         prompt_reader_cls.return_value = prompt_reader
 
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=StubRun(),
         )
@@ -418,7 +427,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["hello", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -438,7 +447,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["hello", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=StubRun(),  # 发 AssistantMessageEvent 且 usage=None
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -518,7 +527,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         )
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["hello", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=agent,
             run=run,
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -559,7 +568,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=StubRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -578,11 +587,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, titles.count("Assistant"))
         self.assertNotIn("You", titles)
 
-    async def test_run_renders_full_traceback_when_turn_fails(self) -> None:
+    async def test_run_renders_stable_runtime_error_when_turn_fails(self) -> None:
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["hello", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=ErrorRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -593,14 +602,14 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         await loop.run()
 
         rendered = console.export_text()
-        self.assertIn("Traceback (most recent call last):", rendered)
+        self.assertNotIn("Traceback (most recent call last):", rendered)
         self.assertIn("ValueError: boom", rendered)
 
     async def test_run_flushes_new_messages_after_turn(self) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
         session_service = FakeSessionService()
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -623,7 +632,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         session = Session.create(agent_id="Pickle", session_id="session-1")
         session.append_user(UserMessage(content=[TextContent(text="previous")]))
         session.append_assistant(_text_assistant("old reply"))
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=session,
@@ -641,7 +650,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         console = Mock()
         submitted_inputs = iter(["/exit"])
         session_service = FakeSessionService()
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -663,7 +672,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
                 patch("pickel.cli.chat.trace_path", return_value=trace_file),
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=self._build_agent(),
                     run=StubRun(),
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -704,7 +713,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=_interrupt_first_turn_at_await(created),
                 ),
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=self._build_agent(),
                     run=run,
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -734,7 +743,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             "pickel.cli.chat.asyncio.create_task",
             side_effect=_interrupt_first_turn_at_await(created),
         ):
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=self._build_agent(),
                 run=RecordingRun(),
                 session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -751,7 +760,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_trace_standard_by_default_builds_sink(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PICKEL_TRACE", None)
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=self._build_agent(),
                 run=StubRun(),
                 session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -773,7 +782,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
                 patch("pickel.cli.chat.trace_path", return_value=trace_file),
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=self._build_agent(),
                     run=StubRun(),
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -796,7 +805,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         """bus 长命后，每轮的渲染器必须退订，否则第 N 轮打印 N 遍。"""
         console = Mock()
         submitted_inputs = iter(["one", "two", "three", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=StubRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -812,7 +821,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         """异常路径的退订只由 finally 保证，挪出去就是「一轮失败后越印越多」。"""
         console = Mock()
         submitted_inputs = iter(["one", "two", "three", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=ErrorRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -891,7 +900,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(
                 os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=agent,
                     run=run,
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1008,7 +1017,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(
                 os.environ, {"PICKEL_TRACE": "full", "PICKEL_HOME": str(home)}
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=agent,
                     run=run,
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1075,7 +1084,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=lambda session_id: traces / f"{session_id}.jsonl",
                 ),
             ):
-                loop = ChatLoop(
+                loop = chat_loop(
                     agent=self._build_agent(),
                     run=StubRun(),
                     session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1107,11 +1116,11 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {"PICKEL_TRACE": "1"}),
             patch(
-                "pickel.cli.chat.JsonlTraceSink",
+                "tests.cli.helpers.JsonlTraceSink",
                 side_effect=PermissionError("Permission denied: ~/.pickel/traces"),
             ),
         ):
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=self._build_agent(),
                 run=StubRun(),
                 session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1127,7 +1136,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["/help", "/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1143,7 +1152,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
     def test_mcp_command_renders_discovered_and_active_tool_counts(self) -> None:
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
-        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop = chat_loop(agent=self._build_agent(), run=SilentRun(), console=console)
         loop._host = Mock()
         loop._host.inspect_mcp.return_value = McpInspection(
             available=True,
@@ -1173,7 +1182,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
     def test_mcp_server_detail_renders_error_and_diagnostics(self) -> None:
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
-        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop = chat_loop(agent=self._build_agent(), run=SilentRun(), console=console)
         loop._host = Mock()
         loop._host.inspect_mcp.return_value = McpInspection(
             available=True,
@@ -1205,7 +1214,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
-        loop = ChatLoop(agent=self._build_agent(), run=SilentRun(), console=console)
+        loop = chat_loop(agent=self._build_agent(), run=SilentRun(), console=console)
         loop._host = Mock()
         loop._host.inspect_mcp.side_effect = (
             McpInspection(available=False),
@@ -1226,7 +1235,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["/exit"])
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1243,7 +1252,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
     def _context_loop(self, *, session, console, inputs, run=None):
         agent = self._build_agent()
-        return ChatLoop(
+        return chat_loop(
             agent=agent,
             run=run if run is not None else StubContextRun(agent),
             session=session,
@@ -1359,7 +1368,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         console = Console(file=output, force_terminal=False, width=120, record=True)
         submitted_inputs = iter(["/session", "/exit"])
         session_service = FakeSessionService()
-        loop = ChatLoop(
+        loop = chat_loop(
             agent=self._build_agent(),
             run=SilentRun(),
             session=Session.create(agent_id="Pickle", session_id="session-1"),
@@ -1374,7 +1383,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session-1", rendered)
         self.assertIn("runtime reply", rendered)
 
-    async def test_from_boot_uses_react_max_steps_from_app_config(self) -> None:
+    async def test_from_host_uses_react_max_steps_from_app_config(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "agents" / "Pickle").mkdir(parents=True)
@@ -1401,10 +1410,13 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                     """).strip())
 
             from pickel.app.boot import Boot
+            from pickel.app.runtime import RuntimeHost
             from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
-            loop = ChatLoop.from_boot(
-                boot=Boot.from_config(app_config_from_yaml_file(config_path))
+            loop = ChatLoop.from_host(
+                host=RuntimeHost(
+                    Boot.from_config(app_config_from_yaml_file(config_path))
+                )
             )
 
             self.assertEqual(16, loop._run.strategy.max_steps)

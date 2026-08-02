@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.runs.turn_usage import TurnUsage
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,50 @@ class RuntimeSnapshot:
     last_message: str | None
     model_id: str
     thinking: str | None
+
+
+@dataclass(frozen=True)
+class ConversationRequest:
+    """打开一个 Runtime Conversation 所需的界面无关参数。"""
+
+    agent_id: str | None = None
+    session_id: str | None = None
+    persistence: Literal["persistent", "ephemeral"] = "persistent"
+    cwd: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.session_id is not None and self.agent_id is not None:
+            raise ValueError("恢复 session 时不能同时指定 agent_id")
+        if self.session_id is not None and self.persistence == "ephemeral":
+            raise ValueError("ephemeral Conversation 不能恢复持久化 session")
+        if self.persistence not in {"persistent", "ephemeral"}:
+            raise ValueError(f"未知 persistence: {self.persistence}")
+
+
+@dataclass(frozen=True)
+class TurnRequest:
+    """一次用户 turn；所有 Surface 都提交同一份消息合同。"""
+
+    message: UserMessage
+
+
+@dataclass(frozen=True)
+class RuntimeErrorInfo:
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """Runtime Application 的稳定 turn 结果。"""
+
+    status: Literal["completed", "blocked", "failed"]
+    session_id: str
+    turn_id: str
+    message: AssistantMessage | None
+    usage: TurnUsage | None
+    elapsed_ms: int
+    error: RuntimeErrorInfo | None = None
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from typer.testing import CliRunner
 
@@ -42,6 +42,27 @@ class MainSessionsCliTests(unittest.TestCase):
         self.assertIn("session-1", result.stdout)
         self.assertIn("hello", result.stdout)
         fake_service.list_sessions.assert_called_once_with(all_sessions=False)
+
+    def test_query_option_dispatches_query_surface(self) -> None:
+        with patch("pickel.cli.main._run_query") as run_query:
+            result = self.runner.invoke(
+                app,
+                ["-q", "你是谁？", "--output-format", "json", "--ephemeral"],
+            )
+
+        self.assertEqual(0, result.exit_code)
+        run_query.assert_called_once_with(
+            query="你是谁？",
+            agent=None,
+            session_id=None,
+            ephemeral=True,
+            output_format="json",
+        )
+
+    def test_query_only_options_require_query(self) -> None:
+        result = self.runner.invoke(app, ["--ephemeral"])
+        self.assertEqual(2, result.exit_code)
+        self.assertIn("只能和 -q/--query 一起使用", result.stderr)
 
     def test_sessions_command_all_flag_passes_all_sessions_true(self) -> None:
         fake_service = Mock()
@@ -106,10 +127,13 @@ class MainSessionsCliTests(unittest.TestCase):
                 fake_boot = Mock()
                 fake_boot.build_session_service.return_value = service
 
-                with patch(
-                    "pickel.conversations.service.Path.cwd",
-                    return_value=proj_a.resolve(),
-                ), patch("pickel.cli.main._boot", return_value=fake_boot):
+                with (
+                    patch(
+                        "pickel.conversations.service.Path.cwd",
+                        return_value=proj_a.resolve(),
+                    ),
+                    patch("pickel.cli.main._boot", return_value=fake_boot),
+                ):
                     default_result = self.runner.invoke(
                         app,
                         ["sessions"],
@@ -133,13 +157,18 @@ class MainSessionsCliTests(unittest.TestCase):
     def test_session_id_option_resumes_existing_session(self) -> None:
         fake_loop = Mock()
         fake_loop.run = AsyncMock(return_value=None)
-        fake_boot = Mock()
+        fake_host = Mock()
+        runtime = MagicMock()
+        runtime.__aenter__ = AsyncMock(return_value=runtime)
+        runtime.__aexit__ = AsyncMock(return_value=None)
+        runtime.host = fake_host
+        runtime.warnings = ()
 
         with (
-            patch("pickel.cli.main._boot_async", AsyncMock(return_value=fake_boot)),
+            patch("pickel.cli.main.RuntimeApplication.open", return_value=runtime),
             patch(
-                "pickel.cli.main.ChatLoop.from_boot", return_value=fake_loop
-            ) as from_boot,
+                "pickel.cli.main.ChatLoop.from_host", return_value=fake_loop
+            ) as from_host,
         ):
             result = self.runner.invoke(
                 app,
@@ -147,8 +176,8 @@ class MainSessionsCliTests(unittest.TestCase):
             )
 
         self.assertEqual(0, result.exit_code)
-        from_boot.assert_called_once_with(
-            boot=fake_boot,
+        from_host.assert_called_once_with(
+            host=fake_host,
             agent_id=None,
             session_id="session-1",
         )
@@ -205,9 +234,7 @@ class MainSessionsCliTests(unittest.TestCase):
                 }
             }
             home.mkdir()
-            (home / "settings.json").write_text(
-                json.dumps(settings), encoding="utf-8"
-            )
+            (home / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
             (home / "models.json").write_text(json.dumps(models), encoding="utf-8")
             (home / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
 
@@ -219,9 +246,7 @@ class MainSessionsCliTests(unittest.TestCase):
             env = {**os.environ, "PICKEL_HOME": str(home)}
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch(
-                    "pickel.cli.main.Path.cwd", return_value=project.resolve()
-                ),
+                patch("pickel.cli.main.Path.cwd", return_value=project.resolve()),
                 patch(
                     "pickel.config.loader.Path.cwd",
                     return_value=project.resolve(),

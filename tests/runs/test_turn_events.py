@@ -23,6 +23,7 @@ from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.shell import LocalBashOperations
+from tests.runs.helpers import user_message
 
 
 class _Provider(Provider):
@@ -83,7 +84,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(lambda e: events.append(e))
 
         await _run(_Provider(reply=_reply())).turn(
-            session=session, user_text="hello", bus=bus
+            session=session, user_message=user_message("hello"), bus=bus
         )
 
         self.assertIsInstance(events[0], TurnStarted)
@@ -97,7 +98,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(lambda e: events.append(e))
 
         await _run(_Provider(reply=_reply())).turn(
-            session=session, user_text="hello", bus=bus
+            session=session, user_message=user_message("hello"), bus=bus
         )
 
         self.assertIsInstance(events[-1], TurnCompleted)
@@ -112,7 +113,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(lambda e: events.append(e))
 
         await _run(_Provider(reply=_reply())).turn(
-            session=session, user_text="hello", bus=bus
+            session=session, user_message=user_message("hello"), bus=bus
         )
 
         turn_ids = {e.envelope.turn_id for e in events}
@@ -127,7 +128,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await _run(_Provider(error=ValueError("boom"))).turn(
-                session=session, user_text="hello", bus=bus
+                session=session, user_message=user_message("hello"), bus=bus
             )
 
         failed = [e for e in events if isinstance(e, TurnFailed)]
@@ -144,7 +145,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await _run(_Provider(error=ValueError("boom"))).turn(
-                session=session, user_text="hello", bus=bus
+                session=session, user_message=user_message("hello"), bus=bus
             )
 
         self.assertFalse([e for e in events if isinstance(e, TurnCompleted)])
@@ -164,7 +165,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda e: events.append(e))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
 
@@ -196,11 +197,11 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
         events = []
         bus.subscribe(lambda e: events.append(e))
 
-        await run.turn(session=session, user_text="hello", bus=bus)
+        await run.turn(session=session, user_message=user_message("hello"), bus=bus)
         completed = [e for e in events if isinstance(e, TurnCompleted)]
         self.assertEqual(1, completed[0].usage.steps)
 
-        await run.turn(session=session, user_text="blocked", bus=bus)
+        await run.turn(session=session, user_message=user_message("blocked"), bus=bus)
 
         completed = [e for e in events if isinstance(e, TurnCompleted)]
         self.assertEqual(2, len(completed))

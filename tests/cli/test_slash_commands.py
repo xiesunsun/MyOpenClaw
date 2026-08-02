@@ -18,6 +18,7 @@ from pickel.runs.run import Run
 from pickel.shared.model_config import ModelConfig, ModelSelection
 from rich.console import Console
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
+from tests.cli.helpers import chat_loop
 
 
 def _write_project(root: Path, *, agents: dict[str, str] | None = None) -> Path:
@@ -27,14 +28,11 @@ def _write_project(root: Path, *, agents: dict[str, str] | None = None) -> Path:
         agent_dir.mkdir(parents=True, exist_ok=True)
         (agent_dir / "AGENT.md").write_text(behavior, encoding="utf-8")
         (agent_dir / "agent.yaml").write_text(
-            textwrap.dedent(
-                f"""
+            textwrap.dedent(f"""
                 workspace_path: workspace
                 behavior_path: agents/{agent_id}
                 tools: []
-                """
-            ).strip()
-            + "\n",
+                """).strip() + "\n",
             encoding="utf-8",
         )
     (root / "workspace").mkdir(exist_ok=True)
@@ -44,8 +42,7 @@ def _write_project(root: Path, *, agents: dict[str, str] | None = None) -> Path:
         for aid in agents
     )
     config_path.write_text(
-        textwrap.dedent(
-            """
+        textwrap.dedent("""
             default_agent: Pickle
             default_llm:
               provider: anthropic
@@ -71,11 +68,7 @@ def _write_project(root: Path, *, agents: dict[str, str] | None = None) -> Path:
                     max_output_tokens: 512
                     provider_options: {}
             agents:
-            """
-        ).strip()
-        + "\n"
-        + agent_block
-        + "\n",
+            """).strip() + "\n" + agent_block + "\n",
         encoding="utf-8",
     )
     return config_path
@@ -93,11 +86,12 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
         agent, run = boot.build_run(agent_id="Pickle")
         session = Session.create(agent_id="Pickle", session_id="sess-1")
         submitted = iter(inputs or ["/exit"])
-        return ChatLoop(
+        return chat_loop(
             agent=agent,
             run=run,
             session=session,
-            console=console or Console(file=StringIO(), force_terminal=False, width=120),
+            console=console
+            or Console(file=StringIO(), force_terminal=False, width=120),
             input_reader=lambda _: next(submitted),
             boot=boot,
             app_config=boot.app_config,
@@ -138,7 +132,9 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             with patch("pickel.runs.run.create_llm_provider", return_value=MagicMock()):
                 await loop.run()
-            self.assertEqual("xhigh", loop._run.environ.provider_options.get("thinking"))
+            self.assertEqual(
+                "xhigh", loop._run.environ.provider_options.get("thinking")
+            )
             self.assertEqual(
                 "xhigh",
                 loop._run.agent.model_config.provider_options.get("thinking"),
@@ -195,11 +191,13 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
                 return fake_ss
 
             def build_run(*, agent_id=None, session_service=None):
-                a, r = boot.build_run(agent_id=agent_id, session_service=session_service)
+                a, r = boot.build_run(
+                    agent_id=agent_id, session_service=session_service
+                )
                 return a, r
 
             boot.build_session_service = build_ss  # type: ignore[method-assign]
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=agent,
                 run=run,
                 session=session,
@@ -247,7 +245,7 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
 
             fake_ss = FakeSessionService()
             submitted = iter(["/new", "/exit"])
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=agent,
                 run=run,
                 session=session,
@@ -281,11 +279,13 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
 
             session = Session.create(agent_id="Pickle", session_id="sess-keep")
             submitted = iter(["/reload", "/exit"])
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=agent,
                 run=run,
                 session=session,
-                console=Console(file=StringIO(), force_terminal=False, width=120, record=True),
+                console=Console(
+                    file=StringIO(), force_terminal=False, width=120, record=True
+                ),
                 input_reader=lambda _: next(submitted),
                 boot=boot,
                 app_config=boot.app_config,
@@ -305,10 +305,10 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 loop._run.environ.llm,
             )
-            self.assertEqual("xhigh", loop._run.environ.provider_options.get("thinking"))
             self.assertEqual(
-                "google/gemini", loop._run.agent.model_config.provider
+                "xhigh", loop._run.environ.provider_options.get("thinking")
             )
+            self.assertEqual("google/gemini", loop._run.agent.model_config.provider)
 
     async def test_command_args_not_lowercased(self) -> None:
         """_handle_command 不得把参数整体 lower。"""
@@ -329,7 +329,7 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
                 def close(self, *, session: Session) -> None:
                     pass
 
-            loop = ChatLoop(
+            loop = chat_loop(
                 agent=agent,
                 run=run,
                 session=session,

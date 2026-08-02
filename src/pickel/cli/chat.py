@@ -4,11 +4,16 @@ import asyncio
 import inspect
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from pickel.app.boot import Boot
 from pickel.app.runtime import RuntimeConversation, RuntimeHost
-from pickel.app.runtime_models import McpServerInfo
+from pickel.app.runtime_models import (
+    ConversationRequest,
+    McpServerInfo,
+    TurnRequest,
+    TurnResult,
+)
 from pickel.cli.context_renderer import ContextRenderer
 from pickel.cli.host_call_handlers import CliHostCallHandlers
 from pickel.cli.slash import (
@@ -18,55 +23,36 @@ from pickel.cli.slash import (
 )
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
-from pickel.conversations.service import SessionService
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.session import Session
 from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.cli.render.message import render_error, render_header, render_system
 from pickel.runs.event_bus import EventBus
-from pickel.runs.trace_sink import JsonlTraceSink, trace_path
-from pickel.runs.run import Run
+from pickel.runs.trace_sink import trace_path
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
-
-if TYPE_CHECKING:
-    from pickel.agents.agent import Agent
 
 
 class ChatLoop:
     def __init__(
         self,
-        agent: "Agent",
-        agent_id: str | None = None,
-        run: Run | None = None,
-        session: Session | None = None,
+        *,
+        conversation: RuntimeConversation,
+        host: RuntimeHost | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str | Awaitable[str]] | None = None,
         context_renderer: ContextRenderer | None = None,
-        session_service: SessionService | None = None,
-        boot: Boot | None = None,
-        app_config: AppConfig | None = None,
     ) -> None:
-        resolved_agent_id = agent_id or agent.agent_id
-        resolved_session = session or Session.create(agent_id=resolved_agent_id)
         self.console = console or Console()
         self._prompt_input_reader: PromptToolkitInputReader | None = None
         self.input_reader = input_reader or self._default_input_reader
         self._context_renderer = context_renderer or ContextRenderer()
-        self._host = RuntimeHost(boot) if boot is not None else None
-        self._conversation = RuntimeConversation(
-            agent=agent,
-            run=run,
-            session=resolved_session,
-            session_service=session_service,
-            app_config=app_config or (boot.app_config if boot is not None else None),
-            # 测试与嵌入方长期从 CLI 注入 trace 路径；能力本身仍归 Conversation。
-            trace_path_resolver=trace_path,
-            trace_sink_factory=JsonlTraceSink,
-        )
+        self._host = host
+        self._conversation = conversation
         self._host_call_handler_leases = []
         self._attach_host_call_handlers()
         self._fallback_message_count = self._read_session_message_count()
@@ -74,38 +60,26 @@ class ChatLoop:
         self._slash_completer = SlashCompleter(self._slash_registry, self)
 
     @classmethod
-    def from_boot(
+    def from_host(
         cls,
-        boot: Boot,
+        *,
+        host: RuntimeHost,
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> "ChatLoop":
-        if session_id is not None:
-            session_service = boot.build_session_service()
-            session = session_service.resume(session_id=session_id)
-            agent, run = boot.build_run(agent_id=session.agent_id)
-            session_service = boot.build_session_service(agent_id=session.agent_id)
-        else:
-            agent, run = boot.build_run(agent_id=agent_id)
-            session_service = boot.build_session_service(agent_id=agent.agent_id)
-            # 新会话绑定当前工作目录，供 sessions 列表默认过滤
-            session = session_service.start(
-                agent_id=agent.agent_id,
-                cwd=str(Path.cwd().resolve()),
+        conversation = host.open_conversation(
+            ConversationRequest(
+                agent_id=agent_id,
+                session_id=session_id,
+                cwd=Path.cwd(),
             )
-        if run.session_service is None:
-            run.session_service = session_service
+        )
         return cls(
-            agent=agent,
-            agent_id=agent.agent_id,
-            run=run,
-            session=session,
-            session_service=session_service,
-            boot=boot,
-            app_config=boot.app_config,
+            host=host,
+            conversation=conversation,
         )
 
-    # 兼容现有嵌入方的只读属性；状态真源只有 RuntimeConversation。
+    # Surface 只读取 Conversation 状态，不持有第二份副本。
     @property
     def agent(self):
         return self._conversation.agent
@@ -120,16 +94,7 @@ class ChatLoop:
 
     @property
     def _run(self):
-        if hasattr(self, "_conversation"):
-            return self._conversation._run
-        return self.__dict__.get("_legacy_run")
-
-    @_run.setter
-    def _run(self, value) -> None:
-        if hasattr(self, "_conversation"):
-            self._conversation._run = value
-        else:
-            self.__dict__["_legacy_run"] = value
+        return self._conversation._run
 
     @property
     def _session_service(self):
@@ -160,18 +125,14 @@ class ChatLoop:
     async def handle_user_input(
         self,
         text: str,
-        bus: "EventBus | None" = None,
-    ) -> AssistantMessage:
+    ) -> TurnResult:
         if self._run is None:
             raise ValueError("Run 未提供")
-        # bus 参数只为旧嵌入方兼容；正常路径始终使用 Conversation 自有 bus。
-        if bus is not None and bus is not self._conversation.event_bus:
-            return await self._run.turn(
-                session=self.session,
-                user_text=text,
-                bus=bus,
+        return await self._conversation.turn(
+            TurnRequest(
+                message=UserMessage(content=[TextContent(text=text)]),
             )
-        return await self._conversation.turn(text)
+        )
 
     def create_event_bus(
         self,
@@ -701,8 +662,8 @@ class ChatLoop:
             await self._loop()
         finally:
             self._close_trace_sink()
-            if self._host is not None:
-                await self._host.shutdown()
+            if not self._conversation.closed:
+                self._conversation.detach()
 
     async def _loop(self) -> None:
         while True:
@@ -728,10 +689,17 @@ class ChatLoop:
                 continue
 
             self._fallback_message_count += 1
-            bus, _event_renderer, unsubscribe_renderer = self.create_event_bus()
-            task = asyncio.create_task(self.handle_user_input(user_input, bus=bus))
+            _bus, _event_renderer, unsubscribe_renderer = self.create_event_bus()
+            task = asyncio.create_task(self.handle_user_input(user_input))
             try:
-                await task
+                result = await task
+                if result.status == "failed":
+                    error = result.error
+                    self._render_error_message(
+                        f"{error.error_type}: {error.message}"
+                        if error is not None
+                        else "Runtime 执行失败"
+                    )
                 self._conversation.flush()
             except KeyboardInterrupt:
                 task.cancel()
