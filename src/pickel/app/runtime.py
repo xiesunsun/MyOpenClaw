@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -14,18 +16,22 @@ from pickel.app.host_call_recorder import SessionHostCallRecorder
 from pickel.app.runtime_models import (
     AgentInfo,
     ContextInspection,
-    ConversationRequest,
     ConversationClosedError,
-    ModelInfo,
+    ConversationRequest,
     McpInspection,
     McpServerInfo,
+    ModelInfo,
+    NoActiveTurnError,
+    PendingInputConflictError,
+    PendingInputNotFoundError,
     PendingSkillInfo,
     ReloadResult,
-    RuntimeSnapshot,
     RuntimeErrorInfo,
+    RuntimeSnapshot,
     SkillActionResult,
     ToolInfo,
     TurnInProgressError,
+    TurnMismatchError,
     TurnRequest,
     TurnResult,
 )
@@ -51,13 +57,17 @@ from pickel.extensions_host.loader import (
     teardown_extensions,
 )
 from pickel.runs.event_bus import EventBus
-from pickel.runs.runtime_bus import RuntimeBus
 from pickel.runs.measure import measure
 from pickel.runs.run import Run
+from pickel.runs.runtime_bus import RuntimeBus
 from pickel.runs.runtime_events import (
+    PendingInputCancelled,
+    PendingInputQueued,
+    PendingInputUpdated,
     RuntimeEventHandler,
     TurnCompleted,
     TurnFailed,
+    TurnInterrupted,
     TurnStarted,
 )
 from pickel.runs.trace_sink import (
@@ -66,8 +76,17 @@ from pickel.runs.trace_sink import (
     trace_mode,
     trace_path,
 )
+from pickel.runs.turn_mailbox import (
+    PendingInput,
+    TurnMailbox,
+    TurnMailboxClosedError,
+)
+from pickel.runs.turn_mailbox import (
+    PendingInputConflictError as MailboxPendingInputConflictError,
+)
 from pickel.runs.turn_usage import last_turn_usage, session_usage
 from pickel.runs.usage_anchor import resolve_anchor
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.model_config import ModelSelection
 from pickel.skills.store import SkillStoreError
 
@@ -75,6 +94,15 @@ if TYPE_CHECKING:
     from pickel.agents.agent import Agent
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _TurnExecution:
+    """RuntimeConversation 私有的活动 turn 资源句柄。"""
+
+    turn_id: str
+    task: asyncio.Task[Any]
+    mailbox: TurnMailbox
 
 
 class RuntimeConversation:
@@ -109,7 +137,9 @@ class RuntimeConversation:
         )
         self._bus = self._runtime_bus.events
         self._closed = False
-        self._turn_running = False
+        self._execution: _TurnExecution | None = None
+        self._follow_ups: list[PendingInput] = []
+        self._control_lock = asyncio.Lock()
         self._trace_sink: JsonlTraceSink | None = None
         self._unsubscribe_trace: Callable[[], None] | None = None
         self._open_trace()
@@ -154,20 +184,95 @@ class RuntimeConversation:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def active_turn_id(self) -> str | None:
+        execution = self._execution
+        return execution.turn_id if execution is not None else None
+
     async def turn(self, request: TurnRequest) -> TurnResult:
         if self._closed:
             raise ConversationClosedError("Conversation 已关闭")
-        if self._turn_running:
-            raise TurnInProgressError("当前 Conversation 已有 turn 正在执行")
-        self._turn_running = True
-        started = time.perf_counter()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("turn 必须运行在 asyncio.Task 中")
         turn_id = str(uuid4())
+        async with self._control_lock:
+            if self._execution is not None:
+                raise TurnInProgressError("当前 Conversation 已有 turn 正在执行")
+            self._execution = _TurnExecution(
+                turn_id=turn_id,
+                task=task,
+                mailbox=TurnMailbox(turn_id),
+            )
+
+        current_request = request
+        pending_input: PendingInput | None = None
+        last_result: TurnResult | None = None
+        try:
+            while True:
+                execution = self._execution
+                assert execution is not None
+                last_result = await self._execute_turn(
+                    current_request,
+                    turn_id=execution.turn_id,
+                    mailbox=execution.mailbox,
+                    pending_input=pending_input,
+                )
+
+                cancelled: tuple[PendingInput, ...] = ()
+                async with self._control_lock:
+                    if last_result.status != "completed":
+                        cancelled = (
+                            *await execution.mailbox.close_and_drain(),
+                            *self._follow_ups,
+                        )
+                        self._follow_ups.clear()
+                        self._execution = None
+                    elif not self._follow_ups:
+                        cancelled = await execution.mailbox.close_and_drain()
+                        self._execution = None
+                    else:
+                        pending_input = self._follow_ups.pop(0)
+                        next_turn_id = str(uuid4())
+                        self._execution = _TurnExecution(
+                            turn_id=next_turn_id,
+                            task=task,
+                            mailbox=TurnMailbox(next_turn_id),
+                        )
+                        current_request = TurnRequest(message=pending_input.message)
+                        continue
+                for item in cancelled:
+                    await self._emit_pending_event(PendingInputCancelled, item)
+                return last_result
+        finally:
+            cancelled: tuple[PendingInput, ...] = ()
+            async with self._control_lock:
+                if self._execution is not None and self._execution.task is task:
+                    cancelled = (
+                        *await self._execution.mailbox.close_and_drain(),
+                        *self._follow_ups,
+                    )
+                    self._follow_ups.clear()
+                    self._execution = None
+            for item in cancelled:
+                await self._emit_pending_event(PendingInputCancelled, item)
+
+    async def _execute_turn(
+        self,
+        request: TurnRequest,
+        *,
+        turn_id: str,
+        mailbox: TurnMailbox,
+        pending_input: PendingInput | None,
+    ) -> TurnResult:
+        started = time.perf_counter()
         outcome = "completed"
         usage = None
         elapsed_ms = 0
+        interrupted_seen = False
 
         def capture(event) -> None:
-            nonlocal turn_id, outcome, usage, elapsed_ms
+            nonlocal turn_id, outcome, usage, elapsed_ms, interrupted_seen
             if isinstance(event, TurnStarted):
                 turn_id = event.envelope.turn_id
             elif isinstance(event, TurnCompleted):
@@ -177,6 +282,8 @@ class RuntimeConversation:
                 elapsed_ms = event.elapsed_ms
             elif isinstance(event, TurnFailed):
                 turn_id = event.envelope.turn_id
+            elif isinstance(event, TurnInterrupted):
+                interrupted_seen = True
 
         unsubscribe = self._bus.subscribe(capture)
         try:
@@ -189,8 +296,23 @@ class RuntimeConversation:
                 kwargs["observer"] = self._trace_sink
                 kwargs["host_calls"] = self._runtime_bus.host_calls.client
                 kwargs["turn_id"] = turn_id
+                kwargs["turn_input"] = mailbox
+                kwargs["pending_input"] = pending_input
             try:
                 reply = await self._run.turn(**kwargs)
+            except asyncio.CancelledError:
+                if not interrupted_seen:
+                    await self._bus.emit(
+                        TurnInterrupted(
+                            envelope=EventEnvelope(
+                                session_id=self._session.session_id,
+                                turn_id=turn_id,
+                            ),
+                            at_step=0,
+                            partial_text="",
+                        )
+                    )
+                raise
             except Exception as exc:  # noqa: BLE001 — Application 返回稳定失败结果
                 return TurnResult(
                     status="failed",
@@ -215,7 +337,190 @@ class RuntimeConversation:
             )
         finally:
             unsubscribe()
-            self._turn_running = False
+
+    async def steer(
+        self,
+        request: TurnRequest,
+        *,
+        expected_turn_id: str,
+    ) -> PendingInput:
+        async with self._control_lock:
+            execution = self._require_execution(expected_turn_id)
+            try:
+                item = await execution.mailbox.add(request.message)
+            except TurnMailboxClosedError as exc:
+                raise TurnInProgressError(str(exc)) from exc
+        await self._emit_pending_event(PendingInputQueued, item)
+        return item
+
+    async def follow_up(
+        self,
+        request: TurnRequest,
+        *,
+        expected_turn_id: str,
+    ) -> PendingInput:
+        async with self._control_lock:
+            self._require_execution(expected_turn_id)
+            item = PendingInput.create(
+                message=request.message,
+                delivery="follow_up",
+                target_turn_id=expected_turn_id,
+            )
+            self._follow_ups.append(item)
+        await self._emit_pending_event(PendingInputQueued, item)
+        return item
+
+    async def update_pending(
+        self,
+        input_id: str,
+        request: TurnRequest,
+        *,
+        expected_revision: int,
+    ) -> PendingInput:
+        async with self._control_lock:
+            execution = self._execution
+            if execution is not None:
+                try:
+                    updated = await execution.mailbox.update(
+                        input_id,
+                        request.message,
+                        expected_revision=expected_revision,
+                    )
+                except MailboxPendingInputConflictError as exc:
+                    raise PendingInputConflictError(str(exc)) from exc
+                if updated is not None:
+                    item = updated
+                else:
+                    item = self._update_follow_up(
+                        input_id,
+                        request.message,
+                        expected_revision=expected_revision,
+                    )
+            else:
+                item = self._update_follow_up(
+                    input_id,
+                    request.message,
+                    expected_revision=expected_revision,
+                )
+        await self._emit_pending_event(PendingInputUpdated, item)
+        return item
+
+    async def cancel_pending(
+        self,
+        input_id: str,
+        *,
+        expected_revision: int,
+    ) -> bool:
+        async with self._control_lock:
+            execution = self._execution
+            if execution is not None:
+                try:
+                    removed = await execution.mailbox.cancel(
+                        input_id,
+                        expected_revision=expected_revision,
+                    )
+                except MailboxPendingInputConflictError as exc:
+                    raise PendingInputConflictError(str(exc)) from exc
+                if removed is None:
+                    removed = self._cancel_follow_up(
+                        input_id,
+                        expected_revision=expected_revision,
+                    )
+            else:
+                removed = self._cancel_follow_up(
+                    input_id,
+                    expected_revision=expected_revision,
+                )
+        await self._emit_pending_event(PendingInputCancelled, removed)
+        return True
+
+    async def pending_inputs(self) -> tuple[PendingInput, ...]:
+        async with self._control_lock:
+            steering = (
+                await self._execution.mailbox.snapshot()
+                if self._execution is not None
+                else ()
+            )
+            return (*steering, *self._follow_ups)
+
+    async def interrupt(
+        self,
+        *,
+        expected_turn_id: str,
+    ) -> tuple[PendingInput, ...]:
+        async with self._control_lock:
+            execution = self._require_execution(expected_turn_id)
+            steering = await execution.mailbox.close_and_drain()
+            returned = (*steering, *self._follow_ups)
+            self._follow_ups.clear()
+            execution.task.cancel()
+            return returned
+
+    def _require_execution(self, expected_turn_id: str) -> _TurnExecution:
+        execution = self._execution
+        if execution is None:
+            raise NoActiveTurnError("当前 Conversation 没有正在执行的 turn")
+        if execution.turn_id != expected_turn_id:
+            raise TurnMismatchError(
+                f"活动 turn 不匹配：expected={expected_turn_id}, "
+                f"actual={execution.turn_id}"
+            )
+        return execution
+
+    def _update_follow_up(
+        self,
+        input_id: str,
+        message: UserMessage,
+        *,
+        expected_revision: int,
+    ) -> PendingInput:
+        for index, item in enumerate(self._follow_ups):
+            if item.input_id != input_id:
+                continue
+            if item.revision != expected_revision:
+                raise PendingInputConflictError(
+                    f"待执行输入版本不匹配：expected={expected_revision}, "
+                    f"actual={item.revision}"
+                )
+            updated = replace(
+                item,
+                content=tuple(message.content),
+                revision=item.revision + 1,
+            )
+            self._follow_ups[index] = updated
+            return updated
+        raise PendingInputNotFoundError(f"待执行输入不存在：{input_id}")
+
+    def _cancel_follow_up(
+        self,
+        input_id: str,
+        *,
+        expected_revision: int,
+    ) -> PendingInput:
+        for index, item in enumerate(self._follow_ups):
+            if item.input_id != input_id:
+                continue
+            if item.revision != expected_revision:
+                raise PendingInputConflictError(
+                    f"待执行输入版本不匹配：expected={expected_revision}, "
+                    f"actual={item.revision}"
+                )
+            return self._follow_ups.pop(index)
+        raise PendingInputNotFoundError(f"待执行输入不存在：{input_id}")
+
+    async def _emit_pending_event(self, event_type, item: PendingInput) -> None:
+        await self._bus.emit(
+            event_type(
+                envelope=EventEnvelope(
+                    session_id=self._session.session_id,
+                    turn_id=item.target_turn_id,
+                ),
+                input_id=item.input_id,
+                delivery=item.delivery,
+                target_turn_id=item.target_turn_id,
+                revision=item.revision,
+            )
+        )
 
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
         return self._bus.subscribe(handler)

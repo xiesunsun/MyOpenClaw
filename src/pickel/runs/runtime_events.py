@@ -20,8 +20,8 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     agent_message_to_dict,
 )
-from pickel.conversations.message import ToolCall
 from pickel.conversations.content_blocks import content_blocks_to_list
+from pickel.conversations.message import ToolCall
 from pickel.runs.turn_usage import TurnUsage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
@@ -293,6 +293,51 @@ class TurnInterrupted(RuntimeEventBase):
 
     def _payload(self) -> dict[str, Any]:
         return {"at_step": self.at_step, "partial_text": self.partial_text}
+
+
+@dataclass(frozen=True)
+class PendingInputQueued(RuntimeEventBase):
+    EVENT_TYPE: ClassVar[str] = "pending_input_queued"
+
+    input_id: str = ""
+    delivery: str = "steer"
+    target_turn_id: str = ""
+    revision: int = 1
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "input_id": self.input_id,
+            "delivery": self.delivery,
+            "target_turn_id": self.target_turn_id,
+            "revision": self.revision,
+        }
+
+
+@dataclass(frozen=True)
+class PendingInputUpdated(PendingInputQueued):
+    EVENT_TYPE: ClassVar[str] = "pending_input_updated"
+
+
+@dataclass(frozen=True)
+class PendingInputCancelled(PendingInputQueued):
+    EVENT_TYPE: ClassVar[str] = "pending_input_cancelled"
+
+
+@dataclass(frozen=True)
+class PendingInputDelivered(PendingInputQueued):
+    EVENT_TYPE: ClassVar[str] = "pending_input_delivered"
+
+
+@dataclass(frozen=True)
+class PendingInputRejected(PendingInputQueued):
+    EVENT_TYPE: ClassVar[str] = "pending_input_rejected"
+
+    reason: str = ""
+
+    def _payload(self) -> dict[str, Any]:
+        payload = super()._payload()
+        payload["reason"] = self.reason
+        return payload
 
 
 RuntimeEventHandler: TypeAlias = Callable[[RuntimeEventBase], Awaitable[None] | None]

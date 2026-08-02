@@ -9,8 +9,9 @@ from pickel.conversations.session import Session
 
 if TYPE_CHECKING:
     from pickel.runs.event_bus import EventBus
-    from pickel.runs.run import Run
     from pickel.runs.host_calls import HostCallClient
+    from pickel.runs.run import Run
+    from pickel.runs.turn_mailbox import TurnInputReader
 
 
 class ExecutionStrategy(ABC):
@@ -25,6 +26,7 @@ class ExecutionStrategy(ABC):
         turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
         host_calls: "HostCallClient | None" = None,
+        turn_input: "TurnInputReader | None" = None,
     ) -> AssistantMessage:
         """推进 turn 内 step 循环，返回最终 AssistantMessage。
 

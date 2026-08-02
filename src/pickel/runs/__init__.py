@@ -1,6 +1,11 @@
 from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
+    PendingInputCancelled,
+    PendingInputDelivered,
+    PendingInputQueued,
+    PendingInputRejected,
+    PendingInputUpdated,
     RuntimeEventBase,
     RuntimeEventHandler,
     StepStarted,
@@ -28,6 +33,11 @@ __all__ = [
     "FinishReason",
     "GenerateRequest",
     "GenerateResult",
+    "PendingInputCancelled",
+    "PendingInputDelivered",
+    "PendingInputQueued",
+    "PendingInputRejected",
+    "PendingInputUpdated",
     "ReActStrategy",
     "Run",
     "RuntimeEventBase",
@@ -55,6 +65,8 @@ def __getattr__(name: str):
     if name in {"ExecutionStrategy", "ReActStrategy"}:
         from pickel.runs.strategy import ExecutionStrategy, ReActStrategy
 
-        return {"ExecutionStrategy": ExecutionStrategy, "ReActStrategy": ReActStrategy}[name]
+        return {"ExecutionStrategy": ExecutionStrategy, "ReActStrategy": ReActStrategy}[
+            name
+        ]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

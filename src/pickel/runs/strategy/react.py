@@ -47,6 +47,7 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.runs.estimator import request_char_count
+from pickel.runs.event_bus import EventBus
 from pickel.runs.host_call_types import (
     CONFIRMATION_CALL,
     ConfirmationAnswer,
@@ -58,7 +59,6 @@ from pickel.runs.host_calls import (
     HostCallCompleted,
     HostCallContext,
 )
-from pickel.runs.event_bus import EventBus
 from pickel.runs.run import Run
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
@@ -73,9 +73,10 @@ from pickel.runs.runtime_events import (
     TurnInterrupted,
 )
 from pickel.runs.strategy.base import ExecutionStrategy
+from pickel.runs.tool_result import build_tool_result_message
+from pickel.runs.turn_mailbox import TurnInputReader
 from pickel.runs.turn_state import TurnState
 from pickel.runs.turn_usage import last_turn_usage
-from pickel.runs.tool_result import build_tool_result_message
 from pickel.runs.usage_anchor import context_fingerprint
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
@@ -99,6 +100,7 @@ class ReActStrategy(ExecutionStrategy):
         turn_id: str | None = None,
         initial_hook_feedback: list[HookFeedback] | None = None,
         host_calls: HostCallClient | None = None,
+        turn_input: TurnInputReader | None = None,
     ) -> AssistantMessage:
         turn = TurnState() if turn_id is None else TurnState(turn_id=turn_id)
         # turn 边界快照：整个 turn 的所有 step 共用同一份工具集。
@@ -289,6 +291,19 @@ class ReActStrategy(ExecutionStrategy):
                         usage=last_turn_usage(session),
                     ),
                 )
+                steered = await self._deliver_steering(
+                    run=run,
+                    session=session,
+                    bus=bus,
+                    turn=turn,
+                    turn_input=turn_input,
+                    finishing=True,
+                )
+                if steered:
+                    step_timer.finish(
+                        attributes={"tool_call_count": 0, "steered": True}
+                    )
+                    continue
                 turn.final_assistant_entry_id = entry.entry_id
                 turn.status = "completed"
                 step_timer.finish(attributes={"tool_call_count": 0})
@@ -528,6 +543,14 @@ class ReActStrategy(ExecutionStrategy):
                 )
                 turn.step_hook_feedback.append(fb)
                 turn.hook_feedback.append(fb)
+            await self._deliver_steering(
+                run=run,
+                session=session,
+                bus=bus,
+                turn=turn,
+                turn_input=turn_input,
+                finishing=False,
+            )
             step_timer.finish(attributes={"tool_call_count": len(tool_calls)})
 
         # max steps
@@ -552,6 +575,47 @@ class ReActStrategy(ExecutionStrategy):
             ),
         )
         return max_msg
+
+    async def _deliver_steering(
+        self,
+        *,
+        run: Run,
+        session: Session,
+        bus: EventBus | None,
+        turn: TurnState,
+        turn_input: TurnInputReader | None,
+        finishing: bool,
+    ) -> bool:
+        """在工具批后或结束前交付至多一条有效 steering。"""
+        if turn_input is None:
+            return False
+
+        take = (
+            turn_input.finish_or_take_steering
+            if finishing
+            else turn_input.take_steering
+        )
+        while True:
+            item = await take()
+            if item is None:
+                return False
+            try:
+                accepted, feedback, _reason = await run.deliver_user_prompt(
+                    session=session,
+                    user_message=item.message,
+                    bus=bus,
+                    turn_id=turn.turn_id,
+                    source="steer",
+                    pending_input=item,
+                )
+            except BaseException:
+                await turn_input.put_back(item)
+                raise
+            if not accepted:
+                continue
+            turn.step_hook_feedback.extend(feedback)
+            turn.hook_feedback.extend(feedback)
+            return True
 
     def _complete_pending_tool_calls(
         self,

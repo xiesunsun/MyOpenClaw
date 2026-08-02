@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pickel.shared.event_envelope import EventIdentity
 
@@ -19,6 +19,8 @@ class HookEventBase(EventIdentity):
 @dataclass(frozen=True)
 class UserPromptSubmitEvent(HookEventBase):
     prompt: str = ""
+    source: Literal["initial", "steer", "follow_up"] = "initial"
+    pending_input_id: str | None = None
 
 
 @dataclass(frozen=True)

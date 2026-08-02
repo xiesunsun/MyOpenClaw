@@ -30,7 +30,13 @@ from pickel.observe.records import (
 )
 from pickel.providers import create_llm_provider
 from pickel.providers.base import Provider
-from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
+from pickel.runs.runtime_events import (
+    PendingInputDelivered,
+    PendingInputRejected,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 from pickel.runs.turn_usage import last_turn_usage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.file_access import FileAccessMode
@@ -53,6 +59,7 @@ if TYPE_CHECKING:
     from pickel.runs.event_bus import EventBus
     from pickel.runs.host_calls import HostCallClient
     from pickel.runs.strategy.base import ExecutionStrategy
+    from pickel.runs.turn_mailbox import PendingInput, TurnInputReader
 
 
 @dataclass
@@ -186,6 +193,8 @@ class Run:
         observer: Observer | None = None,
         host_calls: "HostCallClient | None" = None,
         turn_id: str | None = None,
+        turn_input: "TurnInputReader | None" = None,
+        pending_input: "PendingInput | None" = None,
     ) -> AssistantMessage:
         turn_id = turn_id or str(uuid4())
         identity = ObservationIdentity(session_id=session.session_id, turn_id=turn_id)
@@ -207,6 +216,8 @@ class Run:
                         bus=bus,
                         turn_id=turn_id,
                         host_calls=host_calls,
+                        turn_input=turn_input,
+                        pending_input=pending_input,
                     )
             except asyncio.CancelledError:
                 timer.finish(status="cancelled", attributes={"outcome": "cancelled"})
@@ -232,6 +243,8 @@ class Run:
         bus: "EventBus | None",
         turn_id: str,
         host_calls: "HostCallClient | None",
+        turn_input: "TurnInputReader | None",
+        pending_input: "PendingInput | None",
     ) -> tuple[AssistantMessage, str]:
         """turn 边界：UserPromptSubmit hook → 写 user → strategy.execute。"""
         if session.agent_id != self.agent.agent_id:
@@ -247,26 +260,25 @@ class Run:
             if bus is not None:
                 await bus.emit(event)
 
-        user_text = "\n".join(
-            block.text
-            for block in user_message.content
-            if isinstance(block, TextContent)
-        )
+        user_text = self._user_text(user_message)
         await emit(TurnStarted(envelope=envelope(), user_text=user_text))
         started = time.perf_counter()
         end_reason = "failed"
         try:
-            decision = await self.lifecycle_hooks.user_prompt_submit(
-                UserPromptSubmitEvent(
-                    session_id=session.session_id,
-                    turn_id=turn_id,
-                    prompt=user_text,
-                )
+            accepted, prompt_feedback, blocked_reason = await self.deliver_user_prompt(
+                session=session,
+                user_message=user_message,
+                bus=bus,
+                turn_id=turn_id,
+                source=(
+                    pending_input.delivery if pending_input is not None else "initial"
+                ),
+                pending_input=pending_input,
             )
-            if decision.action == "block":
+            if not accepted:
                 end_reason = "blocked"
                 blocked = AssistantMessage(
-                    content=[TextContent(text=decision.reason or "请求被 Hook 阻止")]
+                    content=[TextContent(text=blocked_reason or "请求被 Hook 阻止")]
                 )
                 await emit(
                     TurnCompleted(
@@ -278,42 +290,14 @@ class Run:
                 )
                 return blocked, "blocked"
 
-            user_entry = session.append_user(user_message)
-            if self.session_service is not None:
-                flush_timer = SpanTimer(
-                    "pickel.session.append",
-                    ObservationIdentity(session_id=session.session_id, turn_id=turn_id),
-                    attributes={"entry_type": user_entry.entry_type, "entry_count": 1},
-                )
-                try:
-                    self.session_service.flush_new_entries(
-                        session=session,
-                        entries=[user_entry],
-                    )
-                except Exception as exc:
-                    flush_timer.finish(
-                        status="error",
-                        error=ErrorInfo.from_exception(exc, kind="storage"),
-                    )
-                    raise
-                flush_timer.finish()
-
             reply = await self.strategy.execute(
                 run=self,
                 session=session,
                 bus=bus,
                 turn_id=turn_id,
                 host_calls=host_calls,
-                initial_hook_feedback=(
-                    [
-                        HookFeedback(
-                            source_event="UserPromptSubmit",
-                            text=decision.feedback_text,
-                        )
-                    ]
-                    if decision.feedback_text
-                    else None
-                ),
+                turn_input=turn_input,
+                initial_hook_feedback=prompt_feedback or None,
             )
             end_reason = "completed"
             await emit(
@@ -345,6 +329,94 @@ class Run:
                     reason=end_reason,
                 )
             )
+
+    async def deliver_user_prompt(
+        self,
+        *,
+        session: Session,
+        user_message: UserMessage,
+        bus: "EventBus | None",
+        turn_id: str,
+        source: str,
+        pending_input: "PendingInput | None" = None,
+    ) -> tuple[bool, list[HookFeedback], str | None]:
+        """Hook 校验后把一条用户输入写成 Session 事实。"""
+
+        user_text = self._user_text(user_message)
+        decision = await self.lifecycle_hooks.user_prompt_submit(
+            UserPromptSubmitEvent(
+                session_id=session.session_id,
+                turn_id=turn_id,
+                prompt=user_text,
+                source=source,
+                pending_input_id=(
+                    pending_input.input_id if pending_input is not None else None
+                ),
+            )
+        )
+        envelope = EventEnvelope(session_id=session.session_id, turn_id=turn_id)
+        if decision.action == "block":
+            if bus is not None and pending_input is not None:
+                await bus.emit(
+                    PendingInputRejected(
+                        envelope=envelope,
+                        input_id=pending_input.input_id,
+                        delivery=pending_input.delivery,
+                        target_turn_id=pending_input.target_turn_id,
+                        revision=pending_input.revision,
+                        reason=decision.reason or "请求被 Hook 阻止",
+                    )
+                )
+            return False, [], decision.reason
+
+        user_entry = session.append_user(user_message)
+        if self.session_service is not None:
+            flush_timer = SpanTimer(
+                "pickel.session.append",
+                ObservationIdentity(session_id=session.session_id, turn_id=turn_id),
+                attributes={"entry_type": user_entry.entry_type, "entry_count": 1},
+            )
+            try:
+                self.session_service.flush_new_entries(
+                    session=session,
+                    entries=[user_entry],
+                )
+            except Exception as exc:
+                flush_timer.finish(
+                    status="error",
+                    error=ErrorInfo.from_exception(exc, kind="storage"),
+                )
+                raise
+            flush_timer.finish()
+
+        if bus is not None and pending_input is not None:
+            await bus.emit(
+                PendingInputDelivered(
+                    envelope=envelope,
+                    input_id=pending_input.input_id,
+                    delivery=pending_input.delivery,
+                    target_turn_id=pending_input.target_turn_id,
+                    revision=pending_input.revision,
+                )
+            )
+
+        feedback = (
+            [
+                HookFeedback(
+                    source_event="UserPromptSubmit",
+                    text=decision.feedback_text,
+                )
+            ]
+            if decision.feedback_text
+            else []
+        )
+        return True, feedback, None
+
+    @staticmethod
+    def _user_text(message: UserMessage) -> str:
+        return "\n".join(
+            block.text for block in message.content if isinstance(block, TextContent)
+        )
 
     def get_tool_execution_context(
         self,

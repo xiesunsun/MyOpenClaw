@@ -32,9 +32,10 @@ class TurnState:
     step_hook_feedback: list[HookFeedback] = field(default_factory=list)
 
     def hook_feedback_for_current_step(self) -> list[HookFeedback]:
-        return list(self.step_hook_feedback)
+        feedback = list(self.step_hook_feedback)
+        self.step_hook_feedback.clear()
+        return feedback
 
     def begin_step(self, step_index: int) -> StepState:
-        self.step_hook_feedback = []
         self.current_step = StepState(step_index=step_index)
         return self.current_step

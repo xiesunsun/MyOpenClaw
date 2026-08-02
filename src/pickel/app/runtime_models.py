@@ -158,6 +158,22 @@ class TurnInProgressError(RuntimeApplicationError):
     pass
 
 
+class NoActiveTurnError(RuntimeApplicationError):
+    pass
+
+
+class TurnMismatchError(RuntimeApplicationError):
+    pass
+
+
+class PendingInputNotFoundError(RuntimeApplicationError):
+    pass
+
+
+class PendingInputConflictError(RuntimeApplicationError):
+    pass
+
+
 # 仅供类型检查，避免运行时循环导入。
 from typing import TYPE_CHECKING
 
