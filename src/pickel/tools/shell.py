@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
-from enum import StrEnum
 import os
-from pathlib import Path
 import pty
 import re
 import select
@@ -12,6 +9,9 @@ import signal
 import subprocess
 import termios
 import time
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -72,7 +72,7 @@ class BashOperations(Protocol):
     def close(self, session_id: str) -> None: ...
 
 
-class PtyShellProcess:
+class _PtyProcess:
     def __init__(
         self,
         shell_program: str = "/bin/bash",
@@ -262,19 +262,19 @@ class PtyShellProcess:
         return [self.shell_program]
 
 
-class PersistentShell:
+class BashSession:
     def __init__(
         self,
         *,
         workspace_path: Path,
-        process: PtyShellProcess | None = None,
+        process: _PtyProcess | None = None,
         default_timeout_ms: int = 120000,
         output_dir: Path | None = None,
         limits: OutputLimits | None = None,
         sandbox: SandboxPolicy | None = None,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
-        self.process = process or PtyShellProcess(sandbox=sandbox)
+        self.process = process or _PtyProcess(sandbox=sandbox)
         self.default_timeout_ms = default_timeout_ms
         self._last_cwd = self.workspace_path
         self._running = False
@@ -476,49 +476,22 @@ class PersistentShell:
         return f"__pickel_marker='{marker}'; {{ :\n{command}\n}}{redirect}\n"
 
 
-class ShellSessionManager:
+class LocalBashOperations:
+    """本地持久 Bash 后端；每个 agent session 对应一个 PTY Bash。"""
+
     def __init__(
         self,
+        *,
         shell_program: str = "/bin/bash",
         sandbox: SandboxPolicy | None = None,
     ) -> None:
         self.shell_program = shell_program
         self.sandbox = sandbox
-        self._sessions: dict[str, PersistentShell] = {}
+        self._sessions: dict[str, BashSession] = {}
 
     def __del__(self) -> None:
         for session_id in list(self._sessions):
             self.close(session_id)
-
-    def get_or_create(self, session_id: str, workspace_path: Path) -> PersistentShell:
-        shell = self._sessions.get(session_id)
-        if shell is None:
-            workspace = workspace_path.resolve()
-            shell = PersistentShell(
-                workspace_path=workspace,
-                process=PtyShellProcess(
-                    shell_program=self.shell_program, sandbox=self.sandbox
-                ),
-                output_dir=workspace / ".pickel" / "shell-output" / session_id,
-            )
-            self._sessions[session_id] = shell
-        return shell
-
-    def close(self, session_id: str) -> None:
-        shell = self._sessions.pop(session_id, None)
-        if shell is not None:
-            shell.terminate()
-
-
-class LocalBashOperations:
-    """基于现有持久 PTY 的本地 Bash 实现。
-
-    ``ShellSessionManager`` 暂时只作为本实现的内部兼容层；Builtin Tool 与
-    Run 不应依赖它的任务管理接口。
-    """
-
-    def __init__(self, sessions: ShellSessionManager | None = None) -> None:
-        self._sessions = sessions or ShellSessionManager()
 
     async def exec(
         self,
@@ -528,7 +501,7 @@ class LocalBashOperations:
         command: str,
         timeout: float | None = None,
     ) -> ShellExecutionResult:
-        shell = self._sessions.get_or_create(session_id, workspace_path)
+        shell = self._get_or_create(session_id, workspace_path)
         timeout_ms = None if timeout is None else max(1, int(timeout * 1000))
         result = await asyncio.to_thread(shell.exec, command, timeout_ms)
         if not result.timed_out:
@@ -554,7 +527,26 @@ class LocalBashOperations:
         )
 
     def close(self, session_id: str) -> None:
-        self._sessions.close(session_id)
+        shell = self._sessions.pop(session_id, None)
+        if shell is not None:
+            shell.terminate()
+
+    def _get_or_create(self, session_id: str, workspace_path: Path) -> BashSession:
+        shell = self._sessions.get(session_id)
+        if shell is not None:
+            return shell
+
+        workspace = workspace_path.resolve()
+        shell = BashSession(
+            workspace_path=workspace,
+            process=_PtyProcess(
+                shell_program=self.shell_program,
+                sandbox=self.sandbox,
+            ),
+            output_dir=workspace / ".pickel" / "shell-output" / session_id,
+        )
+        self._sessions[session_id] = shell
+        return shell
 
 
 def _join_output(first: str, second: str) -> str:

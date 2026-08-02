@@ -1,8 +1,8 @@
-from pathlib import Path
 import platform
 import shutil
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 from uuid import uuid4
 
@@ -10,10 +10,9 @@ from pickel.tools.base import ToolExecutionContext
 from pickel.tools.sandbox import SandboxPolicy, SandboxSettings
 from pickel.tools.services import ToolServices
 from pickel.tools.shell import (
+    BashSession,
     BashTool,
     LocalBashOperations,
-    PersistentShell,
-    ShellSessionManager,
     ShellStatus,
 )
 
@@ -32,7 +31,7 @@ class SandboxSpawnTests(unittest.IsolatedAsyncioTestCase):
     async def test_env_is_filtered_even_without_os_sandbox(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            shell = PersistentShell(workspace_path=tmp, sandbox=_policy(tmp))
+            shell = BashSession(workspace_path=tmp, sandbox=_policy(tmp))
             try:
                 with mock.patch.dict(
                     "os.environ", {"PROBE_API_KEY": "leak", "PROBE_PLAIN": "fine"}
@@ -54,8 +53,8 @@ class SandboxSpawnTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(HAS_BWRAP, "bubblewrap not installed")
 class BubblewrapShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    def _shell(self, tmp: Path) -> PersistentShell:
-        return PersistentShell(workspace_path=tmp, sandbox=_policy(tmp))
+    def _shell(self, tmp: Path) -> BashSession:
+        return BashSession(workspace_path=tmp, sandbox=_policy(tmp))
 
     async def test_workspace_is_writable_and_system_is_not(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -129,7 +128,7 @@ class SeatbeltShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 home=Path.home() / ".pickel",
                 project_root=root,
             )
-            shell = PersistentShell(workspace_path=workspace, sandbox=policy)
+            shell = BashSession(workspace_path=workspace, sandbox=policy)
             outside = Path.home() / f".pickel-seatbelt-write-probe-{uuid4().hex}"
             try:
                 shell.start()
@@ -153,7 +152,7 @@ class SeatbeltShellIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_python_stderr_and_persistent_shell_survive_seatbelt(self) -> None:
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            shell = PersistentShell(
+            shell = BashSession(
                 workspace_path=workspace,
                 sandbox=_policy(workspace, strict=True),
             )
@@ -178,12 +177,12 @@ class SandboxMetadataTests(unittest.IsolatedAsyncioTestCase):
     async def test_exec_metadata_reports_sandbox_state(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            manager = ShellSessionManager(sandbox=_policy(tmp))
+            manager = LocalBashOperations(sandbox=_policy(tmp))
             context = ToolExecutionContext(
                 agent_id="Pickle",
                 session_id="s",
                 workspace_path=tmp,
-                services=ToolServices(bash=LocalBashOperations(manager)),
+                services=ToolServices(bash=manager),
             )
             try:
                 result = await BashTool().execute({"command": "echo hi"}, context)

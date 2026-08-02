@@ -1,14 +1,12 @@
 workspace_path: pickle_workspace
 tools:
-  - list_directory
-  - glob_search
-  - grep_search
-  - read_file
-  - read_many_files
-  - replace
-  - write_file
+  - ls
+  - glob
+  - grep
+  - read
+  - edit
+  - write
   - bash
-  - skill_manage
   - mcp__tavily__*
 file_access_mode: full
 llm:

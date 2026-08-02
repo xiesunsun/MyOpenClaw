@@ -285,7 +285,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
         tool = EchoTool()
         session = Session.create(agent_id="Pickle")
         session.append_user(UserMessage(content=[TextContent(text="hi")]))
-        from pickel.tools.shell import ShellSessionManager
+        from pickel.tools.shell import LocalBashOperations
 
         bus = bus_with([tool])
         run = Run(
@@ -298,7 +298,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
             session_service=None,
             file_access_policy=None,
             workspace_files=None,
-            shell_session_manager=ShellSessionManager(),
+            bash_operations=LocalBashOperations(),
             unit_window=5,
             strategy=ReActStrategy(max_steps=3),
         )

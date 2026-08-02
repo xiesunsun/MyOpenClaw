@@ -35,7 +35,7 @@ from pickel.tools.base import (
     ToolSpec,
 )
 from pickel.tools.bus import ToolActivation, bus_with
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -165,7 +165,7 @@ def _run(*, agent: Agent, provider: Provider, tools: list[BaseTool], strategy: R
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=5,
         strategy=strategy,
     )

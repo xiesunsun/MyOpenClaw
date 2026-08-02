@@ -43,9 +43,9 @@ flowchart LR
     Ops --> Local["LocalBashOperations"]
     Ops -. future .-> SSH["SshBashOperations"]
     Ops -. future .-> Container["ContainerBashOperations"]
-    Local --> Manager["ShellSessionManager"]
-    Manager --> Shell["PersistentShell"]
-    Shell --> PTY["PtyShellProcess"]
+    Local --> Session["BashSession"]
+    Session -. spawn .-> Sandbox["SandboxPolicy"]
+    Session --> PTY["Persistent Bash + PTY"]
 ```
 
 `BashOperations` 是 Runtime 与执行环境之间的最小接口：
@@ -55,7 +55,7 @@ async def exec(*, session_id, workspace_path, command, timeout=None): ...
 def close(session_id): ...
 ```
 
-`LocalBashOperations` 复用 `ShellSessionManager -> PersistentShell -> PtyShellProcess`。Manager 只负责按 session 复用和关闭 Shell；PTY 只负责本地进程与终端语义。它们都是本地实现细节，不进入工具合同。
+`LocalBashOperations` 直接持有 `session_id -> BashSession`，负责复用和关闭本地会话。`BashSession` 负责持久 Bash、PTY、marker、进程组、信号和输出协议；PTY 进程对象只是它的私有实现，不再构成独立架构层。`SandboxPolicy` 只在启动进程时包装命令，不是工具执行链的下一层。
 
 ## 4. 行为语义
 
@@ -74,7 +74,7 @@ def close(session_id): ...
 
 ## 6. 迁移结果
 
-- builtin catalog 和默认 agent 配置只注册 `bash`。
+- builtin catalog 和默认 agent 配置只注册一个 Shell 类工具：`bash`。
 - `shell_exec`、`shell_wait`、`shell_stdin`、`shell_interrupt`、`shell_tasks`、`shell_output`、`shell_kill`、`shell_restart`、`shell_close` 及其 Runtime 专用任务代码已经删除。
 - 后台任务只使用 Bash 原生语义；Runtime 不维护第二套任务状态。
 - PTY 核心保留，因为持久 cwd、stderr 分离、输出截断和超时恢复仍由它稳定提供。

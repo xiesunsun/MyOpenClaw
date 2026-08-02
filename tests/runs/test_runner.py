@@ -10,21 +10,32 @@ from pickel.conversations.agent_message import (
     ModelResponseMetadata,
     ModelUsage,
 )
-from pickel.conversations.content_blocks import TextContent, ThinkingContent, ToolCallContent
+from pickel.conversations.content_blocks import (
+    TextContent,
+    ThinkingContent,
+    ToolCallContent,
+)
 from pickel.conversations.session import Session
 from pickel.hooks.lifecycle import NoopLifecycleHooks
 from pickel.providers.base import Provider
 from pickel.runs import ReActStrategy, Run
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
 from pickel.tools.bus import ToolActivation, ToolSource, bus_with
 from pickel.tools.policy import FullAccessPathPolicy
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
-        block.text for block in message.content if isinstance(block, TextContent) and block.text
+        block.text
+        for block in message.content
+        if isinstance(block, TextContent) and block.text
     )
 
 
@@ -35,7 +46,10 @@ def _entry_roles(session: Session) -> list[str | None]:
 class StubProvider(Provider):
     def __init__(self, responses: list[AssistantMessage] | None = None) -> None:
         self.contexts: list[ModelContext] = []
-        self.responses = list(responses or [AssistantMessage(content=[TextContent(text="assistant reply")])])
+        self.responses = list(
+            responses
+            or [AssistantMessage(content=[TextContent(text="assistant reply")])]
+        )
 
     @classmethod
     def from_config(cls, config: ModelConfig) -> "StubProvider":
@@ -120,7 +134,7 @@ def _run(
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=unit_window,
         strategy=strategy or ReActStrategy(),
     )
@@ -169,7 +183,9 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
                         finish_message="Model stopped normally.",
                         provider_response_id="resp-1",
                         provider_model_version="gemini-3-flash-preview-001",
-                        usage=ModelUsage(input_tokens=3, output_tokens=5, total_tokens=8),
+                        usage=ModelUsage(
+                            input_tokens=3, output_tokens=5, total_tokens=8
+                        ),
                     ),
                 )
             ]
@@ -199,7 +215,9 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("STOP", metadata.get("finish_reason"))
         self.assertEqual("resp-1", metadata.get("provider_response_id"))
 
-    async def test_runner_persists_provider_thinking_blocks_on_assistant_messages(self) -> None:
+    async def test_runner_persists_provider_thinking_blocks_on_assistant_messages(
+        self,
+    ) -> None:
         agent = Agent(
             agent_id="Pickle",
             workspace_path=Path("/tmp/pickle"),
@@ -284,7 +302,9 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("done", _assistant_text(result))
         self.assertEqual(2, len(provider.contexts))
-        self.assertEqual(["echo"], [tool_def.name for tool_def in provider.contexts[0].tools])
+        self.assertEqual(
+            ["echo"], [tool_def.name for tool_def in provider.contexts[0].tools]
+        )
         self.assertEqual(2, len(tool.calls))
         self.assertEqual("Pickle", tool.calls[0][1].agent_id)
         self.assertEqual(
@@ -297,13 +317,18 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             for block in (assistant_payload.get("content") or [])
             if block.get("type") == "tool_call"
         ]
-        self.assertEqual(["call-slow", "call-fast"], [call["id"] for call in tool_calls])
+        self.assertEqual(
+            ["call-slow", "call-fast"], [call["id"] for call in tool_calls]
+        )
         tool_results = [
             entry.payload
             for entry in session.active_path()
             if entry.payload.get("role") == "tool"
         ]
-        self.assertEqual(["call-slow", "call-fast"], [item.get("tool_call_id") for item in tool_results])
+        self.assertEqual(
+            ["call-slow", "call-fast"],
+            [item.get("tool_call_id") for item in tool_results],
+        )
         self.assertEqual(
             ["slow", "fast"],
             [
@@ -327,7 +352,9 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
         second_ctx_roles = [message.role for message in provider.contexts[1].messages]
         self.assertIn("tool", second_ctx_roles)
         tool_msgs = [m for m in provider.contexts[1].messages if m.role == "tool"]
-        self.assertEqual(["call-slow", "call-fast"], [m.tool_call_id for m in tool_msgs])
+        self.assertEqual(
+            ["call-slow", "call-fast"], [m.tool_call_id for m in tool_msgs]
+        )
 
     async def test_runner_keeps_recent_turn_history_raw_on_next_turn(self) -> None:
         agent = Agent(
@@ -395,10 +422,14 @@ class ReActStrategyTests(unittest.IsolatedAsyncioTestCase):
             ["first user", "", "", "first answer", "second user"],
             texts,
         )
-        self.assertTrue(any(message.role == "tool" for message in history_request.messages))
+        self.assertTrue(
+            any(message.role == "tool" for message in history_request.messages)
+        )
 
     @unittest.skip("OpenViking session recall multi-step reuse deferred to Task 12")
-    async def test_session_recall_is_retrieved_once_and_reused_across_react_steps(self) -> None:
+    async def test_session_recall_is_retrieved_once_and_reused_across_react_steps(
+        self,
+    ) -> None:
         return
 
     async def test_runner_applies_provider_timeout_seconds_to_generate(self) -> None:

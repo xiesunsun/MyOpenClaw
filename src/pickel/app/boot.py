@@ -3,22 +3,22 @@ from pathlib import Path
 from pickel.agents.agent import Agent
 from pickel.agents.behavior_loader import BehaviorLoader
 from pickel.agents.skills import SkillRegistry
-from pickel.conversations.service import SessionService
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import home_dir, sessions_db_path
 from pickel.context.assembler import ContextAssembler
+from pickel.conversations.service import SessionService
 from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
-from pickel.skills.store import SkillStore
-from pickel.shared.file_access import FileAccessMode
-from pickel.tools.bus import ToolBus
-from pickel.tools.sandbox import SandboxPolicy
-from pickel.tools.shell import ShellSessionManager
-from pickel.tools.catalog import install_builtin_tools
 from pickel.runs import ReActStrategy
 from pickel.runs.run import Run
+from pickel.shared.file_access import FileAccessMode
+from pickel.skills.store import SkillStore
+from pickel.tools.bus import ToolBus
+from pickel.tools.catalog import install_builtin_tools
+from pickel.tools.sandbox import SandboxPolicy
+from pickel.tools.shell import LocalBashOperations
 
 
 class Boot:
@@ -141,7 +141,7 @@ class Boot:
             lifecycle_hooks=LifecycleHooks(
                 handlers=self.resolve_hook_handlers(agent.agent_id)
             ),
-            shell_session_manager=ShellSessionManager(sandbox=self.sandbox_policy),
+            bash_operations=LocalBashOperations(sandbox=self.sandbox_policy),
         )
         return agent, run
 

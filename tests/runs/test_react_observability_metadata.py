@@ -29,7 +29,7 @@ from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
 from pickel.runs.usage_anchor import context_fingerprint, resolve_anchor
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 class RecordingProvider(Provider):
@@ -91,7 +91,7 @@ def _run(provider, hooks=None) -> Run:
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=5,
         strategy=ReActStrategy(max_steps=2),
     )

@@ -1,18 +1,17 @@
 import asyncio
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
-from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.bus import ToolBus
+from pickel.tools.catalog import install_builtin_tools
+from pickel.tools.services import ToolServices
 from pickel.tools.shell import (
+    BashSession,
     BashTool,
     LocalBashOperations,
-    PersistentShell,
     ShellExecutionResult,
-    ShellSessionManager,
     ShellStatus,
     _dangerous_command_reason,
 )
@@ -76,8 +75,8 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("staging", result.structured_content["environment"])
 
     async def test_bash_uses_replaceable_operations_and_persists_cwd(self) -> None:
-        manager = ShellSessionManager()
-        bash = LocalBashOperations(manager)
+        manager = LocalBashOperations()
+        bash = manager
         tool = BashTool()
 
         with TemporaryDirectory() as tmpdir:
@@ -103,8 +102,8 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_bash_nonzero_exit_is_command_result_not_tool_error(self) -> None:
-        manager = ShellSessionManager()
-        bash = LocalBashOperations(manager)
+        manager = LocalBashOperations()
+        bash = manager
         tool = BashTool()
 
         with TemporaryDirectory() as tmpdir:
@@ -125,8 +124,8 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(7, result.structured_content["exit_code"])
 
     async def test_bash_timeout_stops_foreground_and_keeps_shell_usable(self) -> None:
-        manager = ShellSessionManager()
-        bash = LocalBashOperations(manager)
+        manager = LocalBashOperations()
+        bash = manager
         tool = BashTool()
 
         with TemporaryDirectory() as tmpdir:
@@ -182,7 +181,7 @@ class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             out_dir = workspace / ".pickel" / "shell-output" / "s1"
-            shell = PersistentShell(
+            shell = BashSession(
                 workspace_path=workspace,
                 output_dir=out_dir,
                 limits=OutputLimits(
@@ -206,7 +205,7 @@ class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_output_not_truncated(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
+            shell = BashSession(workspace_path=Path(tmpdir))
             try:
                 result = shell.exec("echo short")
             finally:
@@ -219,7 +218,7 @@ class OutputLimitTests(unittest.IsolatedAsyncioTestCase):
 class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
     async def test_stderr_is_separated_from_stdout(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
+            shell = BashSession(workspace_path=Path(tmpdir))
             try:
                 result = shell.exec("echo out-line; echo err-line >&2")
             finally:
@@ -230,14 +229,14 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("err-line", result.stderr)
 
     async def test_tool_content_appends_stderr_block(self) -> None:
-        manager = ShellSessionManager()
+        manager = LocalBashOperations()
         tool = BashTool()
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path(tmpdir),
-                services=ToolServices(bash=LocalBashOperations(manager)),
+                services=ToolServices(bash=manager),
             )
             try:
                 result = await tool.execute(
@@ -254,7 +253,7 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
 class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_returns_partial_output_and_keeps_session(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
+            shell = BashSession(workspace_path=Path(tmpdir))
             try:
                 result = shell.exec("echo before-sleep; sleep 30", timeout_ms=500)
 
@@ -268,7 +267,7 @@ class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exec_while_pending_raises(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            shell = PersistentShell(workspace_path=Path(tmpdir))
+            shell = BashSession(workspace_path=Path(tmpdir))
             try:
                 shell.exec("sleep 30", timeout_ms=300)
                 with self.assertRaises(RuntimeError):
@@ -279,7 +278,7 @@ class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
 
 class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
     async def test_exec_does_not_block_event_loop(self) -> None:
-        manager = ShellSessionManager()
+        manager = LocalBashOperations()
         tool = BashTool()
         ticks = 0
 
@@ -294,7 +293,7 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path(tmpdir),
-                services=ToolServices(bash=LocalBashOperations(manager)),
+                services=ToolServices(bash=manager),
             )
             ticker_task = asyncio.create_task(ticker())
             try:
@@ -359,14 +358,14 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("blocked", result.content.lower())
 
     async def test_tool_allows_harmless_rm_in_workspace(self) -> None:
-        manager = ShellSessionManager()
+        manager = LocalBashOperations()
         tool = BashTool()
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
                 session_id="session-1",
                 workspace_path=Path(tmpdir),
-                services=ToolServices(bash=LocalBashOperations(manager)),
+                services=ToolServices(bash=manager),
             )
             try:
                 await tool.execute({"command": "mkdir -p ./build"}, context)

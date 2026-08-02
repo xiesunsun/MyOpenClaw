@@ -1,8 +1,8 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 import unittest.mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
@@ -65,8 +65,8 @@ class SandboxWiringTests(unittest.TestCase):
             self.assertTrue(policy.strict)
             self.assertEqual(root.resolve(), policy.project_root.resolve())
 
-    def test_build_run_passes_policy_to_shell_manager(self) -> None:
-        # Run.open 会构造 provider（需要 key），只验证注入的 manager 带上了 policy
+    def test_build_run_passes_policy_to_local_bash(self) -> None:
+        # Run.open 会构造 provider（需要 key），只验证注入的本地后端带上了 policy
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             boot = self._boot(root)
@@ -80,6 +80,6 @@ class SandboxWiringTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     boot.build_run()
 
-            manager = captured["shell_session_manager"]
-            self.assertIsNotNone(manager.sandbox)
-            self.assertTrue(manager.sandbox.strict)
+            bash = captured["bash_operations"]
+            self.assertIsNotNone(bash.sandbox)
+            self.assertTrue(bash.sandbox.strict)

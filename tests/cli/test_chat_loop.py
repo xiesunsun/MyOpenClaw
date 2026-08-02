@@ -15,7 +15,7 @@ from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.hooks.lifecycle import NoopLifecycleHooks
 from pickel.runs import ReActStrategy, Run
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
@@ -53,7 +53,9 @@ def _assistant_body_prints(console: Mock, text: str) -> list:
 
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
-        block.text for block in message.content if isinstance(block, TextContent) and block.text
+        block.text
+        for block in message.content
+        if isinstance(block, TextContent) and block.text
     )
 
 
@@ -66,7 +68,9 @@ def _model_metadata() -> ModelResponseMetadata:
     )
 
 
-def _text_assistant(text: str, *, metadata: MessageMetadata | None = None) -> AssistantMessage:
+def _text_assistant(
+    text: str, *, metadata: MessageMetadata | None = None
+) -> AssistantMessage:
     model_meta = None
     if metadata is not None:
         from pickel.conversations.agent_message import ModelResponseMetadata
@@ -309,7 +313,9 @@ class FakeSessionService:
             last_message="runtime reply",
         )
 
-    def flush_new_entries(self, *, session: Session, entries: list[SessionEntry]) -> None:
+    def flush_new_entries(
+        self, *, session: Session, entries: list[SessionEntry]
+    ) -> None:
         self.flush_calls.append([entry.entry_id for entry in entries])
 
     def close(self, *, session: Session) -> None:
@@ -331,7 +337,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             tool_ids=[],
         )
 
-    async def test_handle_user_input_delegates_to_coordinator_and_updates_session_count(self) -> None:
+    async def test_handle_user_input_delegates_to_coordinator_and_updates_session_count(
+        self,
+    ) -> None:
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
         loop = ChatLoop(
@@ -355,7 +363,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Pickle", loop.session.agent_id)
 
-    async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(self) -> None:
+    async def test_handle_user_input_renders_tool_batch_progress_before_final_reply(
+        self,
+    ) -> None:
         agent = self._build_agent()
         session = Session.create(agent_id="Pickle", session_id="session-1")
         console = Console(file=StringIO(), force_terminal=False, width=120, record=True)
@@ -387,7 +397,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("╭", rendered)  # 无 Panel
 
     @patch("pickel.cli.chat.PromptToolkitInputReader")
-    async def test_chat_loop_uses_prompt_toolkit_reader_by_default(self, prompt_reader_cls: Mock) -> None:
+    async def test_chat_loop_uses_prompt_toolkit_reader_by_default(
+        self, prompt_reader_cls: Mock
+    ) -> None:
         prompt_reader = AsyncMock(return_value="hello")
         prompt_reader_cls.return_value = prompt_reader
 
@@ -500,7 +512,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             session_service=None,
             file_access_policy=None,
             workspace_files=None,
-            shell_session_manager=ShellSessionManager(),
+            bash_operations=LocalBashOperations(),
             unit_window=5,
             strategy=ReActStrategy(max_steps=4),
         )
@@ -526,8 +538,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("done", rendered)
         # 两步合计：input 100+100=200、output 10+10=20、elapsed 100+100ms=0.2s
         self.assertIn(
-            "google/gemini / gemini-3-flash-preview · 200→20"
-            " · cache r0/w0 · 0.2s",
+            "google/gemini / gemini-3-flash-preview · 200→20" " · cache r0/w0 · 0.2s",
             rendered,
         )
         # 顺序：工具行 < ok < 思考行 < footer；正文 settle 后一份
@@ -542,7 +553,10 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             sum(1 for line in rendered.splitlines() if line.strip() == "done"),
             "settle 后最终正文只一份",
         )
-    async def test_run_does_not_duplicate_final_reply_after_assistant_event(self) -> None:
+
+    async def test_run_does_not_duplicate_final_reply_after_assistant_event(
+        self,
+    ) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
         loop = ChatLoop(
@@ -555,7 +569,10 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await loop.run()
 
-        titles = [getattr(call.args[0], "title", None) for call in console.print.call_args_list]
+        titles = [
+            getattr(call.args[0], "title", None)
+            for call in console.print.call_args_list
+        ]
         self.assertEqual(1, len(_assistant_body_prints(console, "runtime reply")))
         # chat.py 的 fallback（Panel "Assistant"）不得再画一遍
         self.assertEqual(0, titles.count("Assistant"))
@@ -597,7 +614,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         # ChatLoop post-turn flush is empty (run already checkpoint-flushed via session_service).
         self.assertEqual([[]], session_service.flush_calls)
 
-    async def test_run_uses_existing_message_count_as_local_flush_start_index(self) -> None:
+    async def test_run_uses_existing_message_count_as_local_flush_start_index(
+        self,
+    ) -> None:
         console = Mock()
         submitted_inputs = iter(["hello", "/exit"])
         session_service = FakeSessionService()
@@ -771,7 +790,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([0, 1, 2], seqs)
 
-    async def test_turn_renderer_is_unsubscribed_so_later_turns_render_once(self) -> None:
+    async def test_turn_renderer_is_unsubscribed_so_later_turns_render_once(
+        self,
+    ) -> None:
         """bus 长命后，每轮的渲染器必须退订，否则第 N 轮打印 N 遍。"""
         console = Mock()
         submitted_inputs = iter(["one", "two", "three", "/exit"])
@@ -858,7 +879,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 session_service=None,
                 file_access_policy=None,
                 workspace_files=None,
-                shell_session_manager=ShellSessionManager(),
+                bash_operations=LocalBashOperations(),
                 unit_window=5,
                 strategy=ReActStrategy(max_steps=4),
             )
@@ -867,7 +888,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             )
             submitted_inputs = iter(["hello", "/exit"])
             # 不 patch trace_path：走真实实现（PICKEL_HOME 改写 home_dir）
-            with patch.dict(os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}):
+            with patch.dict(
+                os.environ, {"PICKEL_TRACE": "1", "PICKEL_HOME": str(home)}
+            ):
                 loop = ChatLoop(
                     agent=agent,
                     run=run,
@@ -901,9 +924,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(range(9)), [record["seq"] for record in records])
         self.assertEqual({"session-1"}, {record["session_id"] for record in records})
         self.assertEqual(1, len({record["turn_id"] for record in records}))
-        self.assertEqual(
-            {"text": "hi"}, records[3]["tool_call"]["arguments"]
-        )
+        self.assertEqual({"text": "hi"}, records[3]["tool_call"]["arguments"])
         self.assertEqual("hi", records[4]["tool_result"]["content"])
         self.assertEqual("done", records[7]["text"])
         # 同一 turn 的两个事件必须给出同一份 usage
@@ -923,15 +944,16 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("hi", rendered)
         self.assertIn("done", rendered)
         self.assertIn(
-            "google/gemini / gemini-3-flash-preview · 200→20"
-            " · cache r0/w0 · 0.2s",
+            "google/gemini / gemini-3-flash-preview · 200→20" " · cache r0/w0 · 0.2s",
             rendered,
         )
         # 工具行先于最终正文；Step 行不再上屏
         self.assertLess(rendered.index("⏺ echo"), rendered.rindex("done"))
         self.assertNotIn("Step 1", rendered)
 
-    async def test_真实_run_流式_provider_trace_中_delta_先于_assistant_message_且_seq_连续(self) -> None:
+    async def test_真实_run_流式_provider_trace_中_delta_先于_assistant_message_且_seq_连续(
+        self,
+    ) -> None:
         """组装层集成（流式）：真 Run + 流式 fake provider + ChatLoop + trace sink。
 
         tests/runs/test_react_streaming.py 只看 bus 上的事件对象，这条钉住
@@ -978,12 +1000,14 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 session_service=None,
                 file_access_policy=None,
                 workspace_files=None,
-                shell_session_manager=ShellSessionManager(),
+                bash_operations=LocalBashOperations(),
                 unit_window=5,
                 strategy=ReActStrategy(max_steps=4),
             )
             submitted_inputs = iter(["hello", "/exit"])
-            with patch.dict(os.environ, {"PICKEL_TRACE": "full", "PICKEL_HOME": str(home)}):
+            with patch.dict(
+                os.environ, {"PICKEL_TRACE": "full", "PICKEL_HOME": str(home)}
+            ):
                 loop = ChatLoop(
                     agent=agent,
                     run=run,
@@ -1022,7 +1046,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(last_delta, kinds.index("assistant_message"))
         # 全事件 seq 连续（0..n-1）；seq 由 bus 按事件分配，
         # 连续即证明 trace 行数与事件数一致——没有事件被 sink 吞掉
-        self.assertEqual(list(range(len(records))), [record["seq"] for record in records])
+        self.assertEqual(
+            list(range(len(records))), [record["seq"] for record in records]
+        )
         spans = [
             json.loads(line)
             for line in lines
@@ -1064,7 +1090,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 (traces / "session-1.jsonl").read_text(encoding="utf-8").splitlines()[0]
             )
             second = json.loads(
-                (traces / f"{new_session_id}.jsonl").read_text(encoding="utf-8").splitlines()[0]
+                (traces / f"{new_session_id}.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
             )
 
         self.assertNotEqual("session-1", new_session_id)
@@ -1353,9 +1381,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
             (root / "workspace").mkdir()
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     react_max_steps: 16
                     default_llm:
@@ -1372,9 +1398,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             from pickel.app.boot import Boot
             from tests.helpers.yaml_app_config import app_config_from_yaml_file

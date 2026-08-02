@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
 from pickel.tools.file_errors import FileToolError
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
+
+DEFAULT_READ_LINES = 2_000
+DEFAULT_READ_CHARS = 50_000
 
 
 def _require_workspace_files(context: ToolExecutionContext) -> WorkspaceFileService:
@@ -14,10 +22,14 @@ def _require_workspace_files(context: ToolExecutionContext) -> WorkspaceFileServ
     return context.services.workspace_files
 
 
-def _truncate_text(text: str, max_chars: int | None) -> tuple[str, bool]:
-    if max_chars is None or len(text) <= max_chars:
+def _truncate_read(text: str) -> tuple[str, bool]:
+    if len(text) <= DEFAULT_READ_CHARS:
         return text, False
-    return text[:max_chars], True
+    marker = (
+        f"\n[Output truncated at {DEFAULT_READ_CHARS} characters. "
+        "Use a smaller limit or bash for unusually long lines.]"
+    )
+    return text[: DEFAULT_READ_CHARS - len(marker)] + marker, True
 
 
 class BaseFileTool(BaseTool):
@@ -28,28 +40,39 @@ class BaseFileTool(BaseTool):
         return ToolExecutionResult(content=str(exc), is_error=True)
 
 
-class ListDirectoryTool(BaseFileTool):
+class LsTool(BaseFileTool):
     spec = ToolSpec(
-        name="list_directory",
-        description="List files and directories in the workspace.",
+        name="ls",
+        description=(
+            "List one directory in the workspace. Returns paths sorted alphabetically; "
+            "directories end with '/'. Includes hidden entries."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory path relative to the workspace root."},
-                "recursive": {"type": "boolean", "description": "Whether to recursively list descendants."},
-                "include_hidden": {"type": "boolean", "description": "Whether to include hidden files and directories."},
-                "max_entries": {"type": "integer", "description": "Maximum number of entries to return."},
+                "path": {
+                    "type": "string",
+                    "description": "Directory to list. Defaults to the workspace root.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum entries to return. Defaults to 500.",
+                },
             },
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
             result = _require_workspace_files(context).list_directory(
                 path=str(arguments.get("path", ".")),
-                recursive=bool(arguments.get("recursive", False)),
-                include_hidden=bool(arguments.get("include_hidden", False)),
-                max_entries=int(arguments.get("max_entries", 200)),
+                recursive=False,
+                include_hidden=True,
+                max_entries=int(arguments.get("limit", 500)),
             )
             return ToolExecutionResult(
                 content=self.formatter.format_directory_listing(result),
@@ -63,32 +86,45 @@ class ListDirectoryTool(BaseFileTool):
             return self._error_result(exc)
 
 
-class GlobSearchTool(BaseFileTool):
+class GlobTool(BaseFileTool):
     spec = ToolSpec(
-        name="glob_search",
+        name="glob",
         description="Find workspace paths matching a glob pattern.",
         input_schema={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Glob pattern to match."},
-                "base_path": {"type": "string", "description": "Directory path relative to the workspace root."},
-                "max_results": {"type": "integer", "description": "Maximum number of matches to return."},
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern, for example '**/*.py'.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search. Defaults to the workspace root.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum paths to return. Defaults to 1,000.",
+                },
             },
             "required": ["pattern"],
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
             result = _require_workspace_files(context).glob_search(
                 pattern=str(arguments["pattern"]),
-                base_path=str(arguments.get("base_path", ".")),
-                max_results=int(arguments.get("max_results", 200)),
+                base_path=str(arguments.get("path", ".")),
+                max_results=int(arguments.get("limit", 1_000)),
             )
             return ToolExecutionResult(
                 content=self.formatter.format_glob_search(result),
                 metadata={
-                    "base_path": result.base_path,
+                    "path": result.base_path,
                     "pattern": result.pattern,
                     "returned_count": len(result.matches),
                     "truncated": result.truncated,
@@ -98,35 +134,57 @@ class GlobSearchTool(BaseFileTool):
             return self._error_result(exc)
 
 
-class GrepSearchTool(BaseFileTool):
+class GrepTool(BaseFileTool):
     spec = ToolSpec(
-        name="grep_search",
-        description="Search workspace files for content matches.",
+        name="grep",
+        description=(
+            "Search workspace file contents with a regular expression. Returns "
+            "path:line:text matches."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
-                "base_path": {"type": "string", "description": "Directory path relative to the workspace root."},
-                "glob_pattern": {"type": "string", "description": "Optional filename glob filter."},
-                "case_sensitive": {"type": "boolean", "description": "Whether matching is case-sensitive."},
-                "max_results": {"type": "integer", "description": "Maximum number of hits to return."},
+                "pattern": {
+                    "type": "string",
+                    "description": "Regular expression to search for.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search. Defaults to the workspace root.",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Optional filename glob filter, for example '*.py'.",
+                },
+                "ignore_case": {
+                    "type": "boolean",
+                    "description": "Use case-insensitive matching. Defaults to false.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum matches to return. Defaults to 100.",
+                },
             },
             "required": ["pattern"],
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
             result = _require_workspace_files(context).grep_search(
                 pattern=str(arguments["pattern"]),
-                base_path=str(arguments.get("base_path", ".")),
+                base_path=str(arguments.get("path", ".")),
                 glob_pattern=(
-                    str(arguments["glob_pattern"])
-                    if arguments.get("glob_pattern") is not None
+                    str(arguments["glob"])
+                    if arguments.get("glob") is not None
                     else None
                 ),
-                case_sensitive=bool(arguments.get("case_sensitive", False)),
-                max_results=int(arguments.get("max_results", 100)),
+                case_sensitive=not bool(arguments.get("ignore_case", False)),
+                max_results=int(arguments.get("limit", 100)),
             )
             return ToolExecutionResult(
                 content=self.formatter.format_grep_search(result),
@@ -140,114 +198,87 @@ class GrepSearchTool(BaseFileTool):
             return self._error_result(exc)
 
 
-class ReadFileTool(BaseFileTool):
+class ReadTool(BaseFileTool):
     spec = ToolSpec(
-        name="read_file",
-        description="Read a text file from the workspace with line numbers.",
+        name="read",
+        description=(
+            "Read a text file with line numbers. Use offset and limit for large files, "
+            "and continue from the offset reported in truncated results."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to the file to read."},
-                "start_line": {"type": "integer", "description": "1-indexed first line to read."},
-                "end_line": {"type": "integer", "description": "1-indexed last line to read."},
-                "max_chars": {"type": "integer", "description": "Maximum number of characters to return."},
+                "path": {"type": "string", "description": "File to read."},
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First line to read, 1-indexed. Defaults to 1.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        f"Maximum lines to read. Defaults to {DEFAULT_READ_LINES}."
+                    ),
+                },
             },
             "required": ["path"],
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
+            offset = int(arguments.get("offset", 1))
+            limit = int(arguments.get("limit", DEFAULT_READ_LINES))
             result = _require_workspace_files(context).read_file(
                 path=str(arguments["path"]),
-                start_line=max(int(arguments.get("start_line", 1)), 1),
-                end_line=(
-                    int(arguments["end_line"])
-                    if arguments.get("end_line") is not None
-                    else None
-                ),
+                start_line=offset,
+                end_line=offset + limit - 1,
             )
-            content, truncated = _truncate_text(
-                self.formatter.format_file_read(result),
-                arguments.get("max_chars"),
+            content, chars_truncated = _truncate_read(
+                self.formatter.format_file_read(result)
             )
             return ToolExecutionResult(
                 content=content,
                 metadata={
                     "path": result.path,
-                    "start_line": result.start_line,
+                    "offset": result.start_line,
                     "end_line": result.end_line,
-                    "truncated": truncated,
+                    "total_lines": result.total_lines,
+                    "truncated": result.truncated or chars_truncated,
                 },
             )
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
 
-class ReadManyFilesTool(BaseFileTool):
+class EditTool(BaseFileTool):
     spec = ToolSpec(
-        name="read_many_files",
-        description="Read multiple text files from the workspace in a single call.",
+        name="edit",
+        description=(
+            "Edit one file by replacing an exact, unique text span. Returns a unified diff."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Paths to the files to read.",
+                "path": {"type": "string", "description": "File to edit."},
+                "old_text": {
+                    "type": "string",
+                    "description": "Exact text to replace. It must occur exactly once.",
                 },
-                "start_line": {"type": "integer", "description": "1-indexed first line to read."},
-                "end_line": {"type": "integer", "description": "1-indexed last line to read."},
-                "max_chars": {"type": "integer", "description": "Maximum number of characters to return."},
-            },
-            "required": ["paths"],
-        },
-    )
-
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
-        try:
-            paths = [str(path) for path in arguments["paths"]]
-            result = _require_workspace_files(context).read_many_files(
-                paths=paths,
-                start_line=max(int(arguments.get("start_line", 1)), 1),
-                end_line=(
-                    int(arguments["end_line"])
-                    if arguments.get("end_line") is not None
-                    else None
-                ),
-            )
-            content, truncated = _truncate_text(
-                self.formatter.format_multi_file_read(result),
-                arguments.get("max_chars"),
-            )
-            return ToolExecutionResult(
-                content=content,
-                metadata={
-                    "paths": [file_result.path for file_result in result.files],
-                    "returned_count": len(result.files),
-                    "truncated": truncated,
-                },
-            )
-        except (FileToolError, RuntimeError, ValueError) as exc:
-            return self._error_result(exc)
-
-
-class ReplaceTool(BaseFileTool):
-    spec = ToolSpec(
-        name="replace",
-        description="Replace exactly one matching text span in a workspace file.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Path to the file to modify."},
-                "old_text": {"type": "string", "description": "Exact text to replace. Must match exactly once."},
                 "new_text": {"type": "string", "description": "Replacement text."},
             },
             "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
             result = _require_workspace_files(context).replace_exact(
                 path=str(arguments["path"]),
@@ -266,31 +297,31 @@ class ReplaceTool(BaseFileTool):
             return self._error_result(exc)
 
 
-class WriteFileTool(BaseFileTool):
+class WriteTool(BaseFileTool):
     spec = ToolSpec(
-        name="write_file",
-        description="Create or overwrite a text file in the workspace.",
+        name="write",
+        description=(
+            "Create or completely overwrite a text file. Creates parent directories. "
+            "Use edit for localized changes."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to the file to write."},
-                "content": {"type": "string", "description": "Full file contents to write."},
-                "if_exists": {
-                    "type": "string",
-                    "enum": ["overwrite", "error"],
-                    "description": "What to do if the file already exists.",
-                },
+                "path": {"type": "string", "description": "File to write."},
+                "content": {"type": "string", "description": "Complete file content."},
             },
             "required": ["path", "content"],
+            "additionalProperties": False,
         },
     )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         try:
             result = _require_workspace_files(context).write_file(
                 path=str(arguments["path"]),
                 content=str(arguments["content"]),
-                if_exists=str(arguments.get("if_exists", "overwrite")),
             )
             return ToolExecutionResult(
                 content=self.formatter.format_write_file(result),

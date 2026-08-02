@@ -1,34 +1,27 @@
 from pickel.tools.base import BaseTool
-from pickel.tools.builtin import echo, tool_set_active
 from pickel.tools.bus import ToolBus, ToolSource
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_tools import (
-    GlobSearchTool,
-    GrepSearchTool,
-    ListDirectoryTool,
-    ReadFileTool,
-    ReadManyFilesTool,
-    ReplaceTool,
-    WriteFileTool,
+    EditTool,
+    GlobTool,
+    GrepTool,
+    LsTool,
+    ReadTool,
+    WriteTool,
 )
-from pickel.tools.skill_manage import SkillManageTool
 from pickel.tools.shell import BashTool
 
 
 def builtin_tools() -> list[BaseTool]:
     formatter = FileToolFormatter()
     return [
-        echo,
-        tool_set_active,
-        ListDirectoryTool(formatter),
-        GlobSearchTool(formatter),
-        GrepSearchTool(formatter),
-        ReadFileTool(formatter),
-        ReadManyFilesTool(formatter),
-        ReplaceTool(formatter),
-        WriteFileTool(formatter),
+        LsTool(formatter),
+        GlobTool(formatter),
+        GrepTool(formatter),
+        ReadTool(formatter),
+        EditTool(formatter),
+        WriteTool(formatter),
         BashTool(),
-        SkillManageTool(),
     ]
 
 

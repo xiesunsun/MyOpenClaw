@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-from tempfile import NamedTemporaryFile
+import difflib
 import fnmatch
 import re
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from pickel.tools.file_errors import (
     FileNotWritableError,
@@ -17,7 +18,6 @@ from pickel.tools.file_models import (
     GlobMatch,
     GlobSearchResult,
     GrepSearchResult,
-    MultiFileReadResult,
     ReplaceResult,
     SearchHit,
     WriteFileResult,
@@ -26,7 +26,9 @@ from pickel.tools.policy import FileAccessPolicy
 
 
 def _write_text_atomic(path: Path, content: str) -> None:
-    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+    with NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
         handle.write(content)
         temp_path = Path(handle.name)
     temp_path.replace(path)
@@ -59,7 +61,9 @@ class WorkspaceFileService:
         truncated = False
         iterator = directory_path.rglob("*") if recursive else directory_path.iterdir()
         for entry in sorted(iterator, key=lambda candidate: candidate.as_posix()):
-            if not include_hidden and any(part.startswith(".") for part in entry.relative_to(directory_path).parts):
+            if not include_hidden and any(
+                part.startswith(".") for part in entry.relative_to(directory_path).parts
+            ):
                 continue
             entries.append(
                 DirectoryEntry(
@@ -90,7 +94,9 @@ class WorkspaceFileService:
 
         matches: list[GlobMatch] = []
         truncated = False
-        for candidate in sorted(directory_path.glob(pattern), key=lambda candidate: candidate.as_posix()):
+        for candidate in sorted(
+            directory_path.glob(pattern), key=lambda candidate: candidate.as_posix()
+        ):
             matches.append(GlobMatch(path=self._to_workspace_relative(candidate)))
             if len(matches) >= max_results:
                 truncated = True
@@ -120,10 +126,14 @@ class WorkspaceFileService:
         hits: list[SearchHit] = []
         truncated = False
 
-        for candidate in sorted(directory_path.rglob("*"), key=lambda candidate: candidate.as_posix()):
+        for candidate in sorted(
+            directory_path.rglob("*"), key=lambda candidate: candidate.as_posix()
+        ):
             if not candidate.is_file():
                 continue
-            if glob_pattern is not None and not fnmatch.fnmatch(candidate.name, glob_pattern):
+            if glob_pattern is not None and not fnmatch.fnmatch(
+                candidate.name, glob_pattern
+            ):
                 continue
             self.access_policy.assert_file_readable(candidate)
             try:
@@ -160,27 +170,17 @@ class WorkspaceFileService:
         self.access_policy.assert_file_readable(file_path)
         lines = file_path.read_text(encoding=self.default_encoding).splitlines()
         normalized_start = max(start_line, 1)
-        normalized_end = len(lines) if end_line is None else max(end_line, normalized_start - 1)
-        selected_lines = lines[normalized_start - 1:normalized_end]
+        normalized_end = (
+            len(lines) if end_line is None else max(end_line, normalized_start - 1)
+        )
+        selected_lines = lines[normalized_start - 1 : normalized_end]
         return FileReadResult(
             path=self._to_workspace_relative(file_path),
             start_line=normalized_start,
             end_line=normalized_start + max(len(selected_lines) - 1, 0),
+            total_lines=len(lines),
             lines=selected_lines,
-        )
-
-    def read_many_files(
-        self,
-        *,
-        paths: list[str],
-        start_line: int = 1,
-        end_line: int | None = None,
-    ) -> MultiFileReadResult:
-        return MultiFileReadResult(
-            files=[
-                self.read_file(path=path, start_line=start_line, end_line=end_line)
-                for path in paths
-            ]
+            truncated=normalized_end < len(lines),
         )
 
     def replace_exact(
@@ -202,18 +202,31 @@ class WorkspaceFileService:
         current_content = file_path.read_text(encoding=self.default_encoding)
         match_count = current_content.count(old_text)
         if match_count == 0:
-            raise NoReplacementMatchError(f"No exact match found in {self._to_workspace_relative(file_path)}")
+            raise NoReplacementMatchError(
+                f"No exact match found in {self._to_workspace_relative(file_path)}"
+            )
         if match_count > 1:
             raise MultipleReplacementMatchesError(
                 f"Found {match_count} exact matches in {self._to_workspace_relative(file_path)}"
             )
 
         next_content = current_content.replace(old_text, new_text, 1)
+        relative_path = self._to_workspace_relative(file_path)
+        diff = "".join(
+            difflib.unified_diff(
+                current_content.splitlines(keepends=True),
+                next_content.splitlines(keepends=True),
+                fromfile=relative_path,
+                tofile=relative_path,
+                n=3,
+            )
+        )
         _write_text_atomic(file_path, next_content)
         return ReplaceResult(
-            path=self._to_workspace_relative(file_path),
+            path=relative_path,
             match_count=1,
             bytes_written=len(next_content.encode(self.default_encoding)),
+            diff=diff,
         )
 
     def write_file(
@@ -221,16 +234,12 @@ class WorkspaceFileService:
         *,
         path: str,
         content: str,
-        if_exists: str = "overwrite",
     ) -> WriteFileResult:
         file_path = self.access_policy.resolve_path(path, self.workspace_root)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         self.access_policy.assert_file_writable(file_path)
         if file_path.exists() and file_path.is_dir():
             raise FileNotWritableError(f"Path is a directory: {file_path}")
-        if file_path.exists() and if_exists == "error":
-            raise FileNotWritableError(f"File already exists: {file_path}")
-        if if_exists not in {"overwrite", "error"}:
-            raise FileNotWritableError(f"Unsupported if_exists mode: {if_exists}")
 
         existed = file_path.exists()
         _write_text_atomic(file_path, content)

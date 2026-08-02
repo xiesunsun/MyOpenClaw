@@ -14,10 +14,11 @@ class InstallBuiltinToolsTests(unittest.TestCase):
         install_builtin_tools(bus)
 
         names = bus.list_names(source=ToolSource.BUILTIN)
-        self.assertIn("read_file", names)
+        self.assertIn("read", names)
         self.assertIn("bash", names)
         self.assertNotIn("shell_exec", names)
-        self.assertIn("echo", names)
+        self.assertNotIn("echo", names)
+        self.assertNotIn("tool_set_active", names)
         self.assertEqual(sorted(names), sorted(bus.list_names()))
 
     def test_install_is_idempotent(self) -> None:
@@ -36,7 +37,7 @@ class BootToolBusTests(unittest.TestCase):
 
         boot = Boot.from_config(SimpleNamespace())
 
-        self.assertIn("read_file", boot.tool_bus.list_names())
+        self.assertIn("read", boot.tool_bus.list_names())
 
     def test_boot_reuses_injected_bus(self) -> None:
         from pickel.app.boot import Boot

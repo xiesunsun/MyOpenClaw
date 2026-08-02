@@ -19,8 +19,13 @@ from pickel.tools.bus import ToolActivation, bus_with
 from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
+from pickel.tools.shell import LocalBashOperations
 
 
 class FakeProvider(Provider):
@@ -46,7 +51,9 @@ class EchoTool(BaseTool):
             input_schema={"type": "object", "properties": {"text": {"type": "string"}}},
         )
 
-    async def execute(self, arguments, context: ToolExecutionContext) -> ToolExecutionResult:
+    async def execute(
+        self, arguments, context: ToolExecutionContext
+    ) -> ToolExecutionResult:
         return ToolExecutionResult(content=str(arguments.get("text", "")))
 
 
@@ -54,7 +61,9 @@ class EchoTool(BaseTool):
 class SpySessionService:
     flushes: list[list[str]] = field(default_factory=list)
 
-    def flush_new_entries(self, *, session: Session, entries: list[SessionEntry]) -> None:
+    def flush_new_entries(
+        self, *, session: Session, entries: list[SessionEntry]
+    ) -> None:
         self.flushes.append([e.entry_id for e in entries])
 
 
@@ -99,11 +108,13 @@ class ReactCheckpointTests(unittest.TestCase):
             session_service=spy,  # type: ignore[arg-type]
             file_access_policy=None,
             workspace_files=None,
-            shell_session_manager=ShellSessionManager(),
+            bash_operations=LocalBashOperations(),
             unit_window=5,
             strategy=ReActStrategy(max_steps=4),
         )
-        final = asyncio.run(ReActStrategy(max_steps=4).execute(run=run, session=session))
+        final = asyncio.run(
+            ReActStrategy(max_steps=4).execute(run=run, session=session)
+        )
         self.assertEqual("done", final.content[0].text)
 
         roles = []
@@ -120,7 +131,9 @@ class ReactCheckpointTests(unittest.TestCase):
         first_assistant = session.entries[1]
         self.assertEqual("assistant", first_assistant.payload.get("role"))
         contents = first_assistant.payload.get("content") or []
-        self.assertTrue(any(c.get("type") == "tool_call" for c in contents if isinstance(c, dict)))
+        self.assertTrue(
+            any(c.get("type") == "tool_call" for c in contents if isinstance(c, dict))
+        )
 
 
 if __name__ == "__main__":

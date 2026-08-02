@@ -1,13 +1,13 @@
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
-from pickel.tools.services import ToolServices
 from pickel.tools.base import ToolExecutionContext
-from pickel.tools.catalog import builtin_tools, install_builtin_tools
+from pickel.tools.bus import ToolBus
+from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import WorkspacePathAccessPolicy
-from pickel.tools.bus import ToolBus
+from pickel.tools.services import ToolServices
 
 
 class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
@@ -18,31 +18,25 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         tools = [
             bus.get(name).tool
             for name in [
-                "echo",
-                "list_directory",
-                "glob_search",
-                "grep_search",
-                "read_file",
-                "read_many_files",
-                "replace",
-                "write_file",
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
                 "bash",
-                "skill_manage",
             ]
         ]
 
         self.assertEqual(
             [
-                "echo",
-                "list_directory",
-                "glob_search",
-                "grep_search",
-                "read_file",
-                "read_many_files",
-                "replace",
-                "write_file",
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
                 "bash",
-                "skill_manage",
             ],
             [tool.spec.name for tool in tools],
         )
@@ -50,7 +44,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_builtin_read_tool_reads_relative_path_from_workspace(self) -> None:
         bus = ToolBus()
         install_builtin_tools(bus)
-        read_tool = bus.get("read_file").tool
+        read_tool = bus.get("read").tool
 
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -71,7 +65,6 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertIn("File: note.txt", result.content)
         self.assertIn("1: hello", result.content)
         self.assertIn("2: world", result.content)
         self.assertFalse(result.is_error)

@@ -1,18 +1,18 @@
 """进程级沙箱策略：Linux Bubblewrap、macOS Seatbelt 与环境过滤。
 
-接线点只有一个——PtyShellProcess.spawn。前台 shell 与后台任务共用它，
+接线点只有一个——BashSession 启动 PTY 进程时。前台 shell 与后台任务共用它，
 所以一处生效即全覆盖。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import fnmatch
 import logging
 import platform
-from pathlib import Path
 import shutil
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 

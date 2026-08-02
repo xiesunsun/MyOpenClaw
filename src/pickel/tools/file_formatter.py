@@ -5,7 +5,6 @@ from pickel.tools.file_models import (
     FileReadResult,
     GlobSearchResult,
     GrepSearchResult,
-    MultiFileReadResult,
     ReplaceResult,
     WriteFileResult,
 )
@@ -13,48 +12,43 @@ from pickel.tools.file_models import (
 
 class FileToolFormatter:
     def format_directory_listing(self, result: DirectoryListing) -> str:
-        lines = [f"Directory listing for {result.base_path}:"]
+        lines: list[str] = []
         for entry in result.entries:
             suffix = "/" if entry.entry_type == "directory" else ""
-            lines.append(f"- {entry.path}{suffix}")
+            lines.append(f"{entry.path}{suffix}")
         if result.truncated:
-            lines.append("[truncated]")
+            lines.append("[Result limit reached. Use a narrower path.]")
         return "\n".join(lines)
 
     def format_glob_search(self, result: GlobSearchResult) -> str:
-        lines = [f"Glob matches for {result.pattern!r} in {result.base_path}:"]
+        lines: list[str] = []
         for match in result.matches:
-            lines.append(f"- {match.path}")
+            lines.append(match.path)
         if result.truncated:
-            lines.append("[truncated]")
+            lines.append("[Result limit reached. Use a narrower pattern or path.]")
         return "\n".join(lines)
 
     def format_grep_search(self, result: GrepSearchResult) -> str:
-        lines = [f"Search hits for {result.pattern!r}:"]
+        lines: list[str] = []
         for hit in result.hits:
-            lines.append(f"{hit.path}:{hit.line_number}: {hit.line_text}")
+            lines.append(f"{hit.path}:{hit.line_number}:{hit.line_text}")
         if result.truncated:
-            lines.append("[truncated]")
+            lines.append("[Result limit reached. Use a narrower pattern or path.]")
         return "\n".join(lines)
 
     def format_file_read(self, result: FileReadResult) -> str:
-        lines = [f"File: {result.path}"]
+        lines: list[str] = []
         for index, line in enumerate(result.lines, start=result.start_line):
             lines.append(f"{index}: {line}")
         if result.truncated:
-            lines.append("[truncated]")
+            lines.append(
+                f"[Showing lines {result.start_line}-{result.end_line} of "
+                f"{result.total_lines}. Use offset={result.end_line + 1} to continue.]"
+            )
         return "\n".join(lines)
 
-    def format_multi_file_read(self, result: MultiFileReadResult) -> str:
-        chunks: list[str] = []
-        for file_result in result.files:
-            chunks.append(self.format_file_read(file_result))
-        if result.truncated:
-            chunks.append("[truncated]")
-        return "\n\n".join(chunks)
-
     def format_replace(self, result: ReplaceResult) -> str:
-        return f"Replaced {result.match_count} exact match in {result.path}"
+        return result.diff or f"Edited {result.path}"
 
     def format_write_file(self, result: WriteFileResult) -> str:
         action = "created" if result.created else "overwritten"

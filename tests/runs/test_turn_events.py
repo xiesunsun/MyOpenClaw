@@ -22,7 +22,7 @@ from pickel.runs.event_bus import EventBus
 from pickel.runs.runtime_events import TurnCompleted, TurnFailed, TurnStarted
 from pickel.tools.bus import ToolActivation, bus_with
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 class _Provider(Provider):
@@ -44,7 +44,8 @@ def _reply() -> AssistantMessage:
     return AssistantMessage(
         content=[TextContent(text="done")],
         metadata=ModelResponseMetadata(
-            provider="fake", model="fake-1",
+            provider="fake",
+            model="fake-1",
             usage=ModelUsage(input_tokens=100, output_tokens=10),
         ),
     )
@@ -68,7 +69,7 @@ def _run(provider) -> Run:
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=5,
         strategy=ReActStrategy(max_steps=2),
     )
@@ -167,7 +168,9 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([e for e in events if isinstance(e, TurnFailed)])
 
-    async def test_hook_阻断轮的_turn_completed_usage_为_None_不泄漏上一轮(self) -> None:
+    async def test_hook_阻断轮的_turn_completed_usage_为_None_不泄漏上一轮(
+        self,
+    ) -> None:
         """阻断轮没发生任何模型调用，usage 必须是 None。
 
         若照搬成功路径去 last_turn_usage(session)，Session 里还留着上一轮的

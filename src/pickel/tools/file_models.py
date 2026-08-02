@@ -50,13 +50,8 @@ class FileReadResult:
     path: str
     start_line: int
     end_line: int
+    total_lines: int
     lines: list[str] = field(default_factory=list)
-    truncated: bool = False
-
-
-@dataclass(frozen=True)
-class MultiFileReadResult:
-    files: list[FileReadResult] = field(default_factory=list)
     truncated: bool = False
 
 
@@ -65,6 +60,7 @@ class ReplaceResult:
     path: str
     match_count: int
     bytes_written: int
+    diff: str
 
 
 @dataclass(frozen=True)

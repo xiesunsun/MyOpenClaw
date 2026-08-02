@@ -32,7 +32,7 @@ from pickel.runs.runtime_events import (
 )
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.bus import ToolActivation, bus_with
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 def _reply() -> AssistantMessage:
@@ -84,7 +84,7 @@ def _run(provider) -> Run:
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=5,
         strategy=ReActStrategy(max_steps=2),
     )
@@ -115,9 +115,7 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
         """增量必须先到，否则 UI 无法边生成边显示。"""
         events = await self._collect(_StreamingProvider())
         kinds = [type(e).__name__ for e in events]
-        last_delta = max(
-            i for i, k in enumerate(kinds) if k.endswith("DeltaEvent")
-        )
+        last_delta = max(i for i, k in enumerate(kinds) if k.endswith("DeltaEvent"))
         assistant = kinds.index("AssistantMessageEvent")
 
         self.assertLess(last_delta, assistant)
@@ -135,9 +133,7 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_seq_在_delta_之间仍然连续(self) -> None:
         events = await self._collect(_StreamingProvider())
 
-        self.assertEqual(
-            list(range(len(events))), [e.envelope.seq for e in events]
-        )
+        self.assertEqual(list(range(len(events))), [e.envelope.seq for e in events])
 
     async def test_只调用一次_stream(self) -> None:
         provider = _StreamingProvider()
@@ -159,9 +155,7 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
         deltas = [e for e in events if type(e).__name__.endswith("DeltaEvent")]
 
         self.assertEqual([], deltas)
-        self.assertTrue(
-            any(isinstance(e, AssistantMessageEvent) for e in events)
-        )
+        self.assertTrue(any(isinstance(e, AssistantMessageEvent) for e in events))
 
 
 if __name__ == "__main__":

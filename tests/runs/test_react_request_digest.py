@@ -24,7 +24,7 @@ from pickel.runs.run import Run
 from pickel.runs.strategy.react import ReActStrategy
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.bus import ToolActivation, bus_with
-from pickel.tools.shell import ShellSessionManager
+from pickel.tools.shell import LocalBashOperations
 
 
 class RecordingProvider(Provider):
@@ -59,7 +59,7 @@ def _run(provider) -> Run:
         session_service=None,
         file_access_policy=None,
         workspace_files=None,
-        shell_session_manager=ShellSessionManager(),
+        bash_operations=LocalBashOperations(),
         unit_window=5,
         strategy=ReActStrategy(max_steps=2),
     )
@@ -79,9 +79,7 @@ def _reply() -> AssistantMessage:
 class RequestDigestEventTests(unittest.TestCase):
     def _execute(self) -> list:
         session = Session.create(agent_id="Pickle")
-        session.append_user(
-            UserMessage(content=[TextContent(text="hi SECRET-QUERY")])
-        )
+        session.append_user(UserMessage(content=[TextContent(text="hi SECRET-QUERY")]))
         bus = EventBus()
         events = []
         bus.subscribe(events.append)
@@ -119,12 +117,8 @@ class RequestDigestEventTests(unittest.TestCase):
         events = self._execute()
 
         types = [e.EVENT_TYPE for e in events]
-        self.assertLess(
-            types.index("step_started"), types.index("request_digest")
-        )
-        self.assertLess(
-            types.index("request_digest"), types.index("assistant_message")
-        )
+        self.assertLess(types.index("step_started"), types.index("request_digest"))
+        self.assertLess(types.index("request_digest"), types.index("assistant_message"))
 
 
 if __name__ == "__main__":

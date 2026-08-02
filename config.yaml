@@ -41,13 +41,12 @@ agents:
       provider: anthropic
       model: claude-jupiter-v1-p
     tools:
-      - list_directory
-      - glob_search
-      - grep_search
-      - read_file
-      - read_many_files
-      - replace
-      - write_file
+      - ls
+      - glob
+      - grep
+      - read
+      - edit
+      - write
       - bash
 extensions:
   openviking:
