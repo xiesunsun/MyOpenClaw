@@ -1,5 +1,7 @@
 # Query → Context → Chat Completion 升级设计
 
+> **后续命名说明（2026-08-10）**：本文记录该阶段的数据流与实现决策；其中 `Run`、`TurnState`、`StepState`、`SessionEntry`、`ContextAssembler` 等目标态名称，已由 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md) 替代。除命名和对应职责拆分外，本文其他历史结论不因该说明自动变更。
+
 **初稿日期**：2026-07-12  
 **更新日期**：2026-07-19  
 **状态**：设计合同（与实现计划对齐）；未进入实现  

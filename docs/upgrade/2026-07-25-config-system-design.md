@@ -1,5 +1,7 @@
 # 配置系统升级设计
 
+> **后续命名说明（2026-08-10）**：本文的配置分层结论保持不变；运行层的 `Agent`、`Run`、`SessionEntry` 等目标态名称，已由 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md) 替代。
+
 **状态**：设计稿（修订）；**产品名确认 pickel**  
 **范围**：配置分层、全局会话库与目录过滤、实体命名、与现有模块衔接  
 **标杆**：pi（settings / models / auth 拆分）、Claude Code / Codex（全局会话 + 按目录过滤）

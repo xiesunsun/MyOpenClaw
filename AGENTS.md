@@ -34,6 +34,54 @@
 - 良好文档归档习惯，遵循软件工程开发文档撰写标准，尽量使用架构图，表格、html网页等信息密度高的可阅读性强的载体呈现，先写文档后做开发，开发验收完成后校对文档，确保文档和实现一致
 - 遵循计算机软件开发第一公理，“项目的需求都已经有人早已想到，并且实现好的了”，所以分析需求、设计方案，解决问题时，尽可能深度调研，一定能够获得类似的参考代码和解决方案
 
+## 设计文档路由（渐进式披露，强制）
+
+不要在每次任务中读取全部 `docs/`。先根据改动范围命中文档，只完整读取命中的文档及其直接引用；没有命中则以本文件和现有代码为准。
+
+### 文档优先级
+
+发生冲突时按以下顺序处理：
+
+1. 用户在当前任务中的明确要求；
+2. 本 `AGENTS.md`；
+3. [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md)；
+4. 命中的领域设计文档；
+5. 历史实现计划和旧代码。
+
+历史文档可以解释现状和演进原因，但其中的旧实体名、旧方法名和旧职责边界不能覆盖最新命名约束。
+
+### 第一层：何时读取命名合同
+
+任务涉及下列任一内容时，修改代码或设计前必须完整读取 [`docs/upgrade/2026-08-10-agent-runtime-naming.md`](docs/upgrade/2026-08-10-agent-runtime-naming.md)：
+
+- 新增、删除或重命名实体、方法、字段、事件、模块；
+- 修改 `Agent`、`Run`、`Turn`、`Step`、`Session`、`Operation`、`Runtime` 的职责；
+- 重构 `ReActStrategy`、`ExecutionStrategy`、`ContextAssembler` 或 `prepare()`；
+- 设计持久化状态、Operation 恢复、Artifact、多模态或多 Agent；
+- 评审代码是否出现同义类型、资源袋或上帝对象。
+
+普通缺陷修复、文案修改、测试数据调整且不改变上述合同的，不必读取该文档。
+
+### 第二层：按领域继续读取
+
+读取命名合同后，仅在任务命中对应领域时继续读取：
+
+| 任务范围 | 必读文档 | 用途 |
+| --- | --- | --- |
+| Session 树、消息持久化、Context 投影、Tool Loop 数据流 | [`Query → Context → Chat Completion 升级设计`](docs/upgrade/2026-07-12-query-context-harness.md) | 理解当前数据流、消息合同和历史边界；名称以命名合同为准 |
+| `prepare`、ModelContext、System Prompt、Skill/Recall 热加载 | [`模型请求组装升级设计`](docs/upgrade/2026-07-25-request-prepare-design.md) | 理解当前请求组装阶段；目标入口和组件名称以命名合同为准 |
+| Config、Settings、Agent 加载、目录与 Session 库位置 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 理解配置分层和路径合同；运行层名称以命名合同为准 |
+| RuntimeBus、HostCall、交互队列、Runtime 与 Host 边界 | [`Runtime I/O 总线与宿主调用设计`](docs/upgrade/2026-07-31-runtime-interaction-design.md) | 保护已实施的 I/O 边界，避免 Runtime 直接依赖 UI |
+| SQLite Session 表、字段和迁移 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 理解现有数据库实体；若目标实体已在命名合同中重命名，先按目标名设计迁移 |
+| Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 保持 Provider Adapter 边界和 Anthropic 协议语义 |
+
+### 使用要求
+
+- 开始实现前，在工作计划中写明本任务命中了哪些文档；未命中的文档不要为了“了解全貌”继续展开。
+- 领域文档与代码不一致时，先判断文档描述的是历史现状还是目标合同；不能静默选择其中一方。
+- 设计仍未对齐时只在对话中讨论，不把推测写成新的权威文档。
+- 实现验收后校对本任务命中的文档；更新原文，不另建同主题 v2/v3。
+
 ## 文档约束（强制）
 
 写仓库内文档（`docs/**`、设计稿、升级说明等）必须遵守：

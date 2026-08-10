@@ -1,5 +1,7 @@
 # 模型请求组装（prepare / Request）升级设计
 
+> **后续命名说明（2026-08-10）**：本文记录当前 `prepare` 请求链路的阶段设计；后续重构中的 `AgentRuntime`、`AgentRun`、`ModelStep`、`ModelContextBuilder` 等名称与职责，以 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md) 为准。
+
 **状态**：设计稿（修订，待审阅）  
 **分支**：`feature/context-request-prepare-design`  
 **范围**：Request 组装、热重载与 slash 边界、与现代码映射  
