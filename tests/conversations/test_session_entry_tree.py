@@ -55,7 +55,7 @@ def test_message_payload_is_versioned_agent_message():
     msg = UserMessage(content=[TextContent(text="hello")])
     entry = session.append_user(msg)
     assert entry.payload == agent_message_to_dict(msg)
-    assert entry.payload["payload_version"] == 2
+    assert entry.payload["payload_version"] == 3
     assert entry.payload["role"] == "user"
 
 

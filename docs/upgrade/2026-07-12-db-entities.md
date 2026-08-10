@@ -29,6 +29,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `NamedReference` | 以追加新版本移动 | 指向 Node 或 Object 的具名指针 |
 | `ConversationEntry` | 不落库 | Node 与 Object 解析后的读取视图 |
 | `SessionOperation` | 否 | Session 接受的工作身份；状态内容见 Operation 恢复合同 |
+| `Artifact` | 否 | 多模态二进制的内容寻址元数据；字节不进入 SQLite |
 
 ## 2. 共享 commit_sequence
 
@@ -125,6 +126,19 @@ Package Snapshot 直接从 Pickel 现有 `AppConfig / AgentConfig / ModelConfig 
 ### 3.7 `session_operations`
 
 Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_commit_sequence)` 关联接受它的 `StorageCommit`，以 `agent_package_version_id` 关联冻结的 Package。状态不覆盖此行，而是通过 `operation/<operation_id>/state` NamedReference 指向不可变 State；完整字段和转换约束见 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。
+
+### 3.8 `artifacts` 与 BlobStore
+
+| 列 | 类型 | 含义 |
+| --- | --- | --- |
+| `artifact_id` | TEXT PK | `artifact_<sha256>` 稳定身份 |
+| `digest` | TEXT | Blob 字节 SHA-256 |
+| `media_type` | TEXT | Provider-neutral MIME type |
+| `size_bytes` | INTEGER | Blob 大小 |
+| `blob_key` | TEXT | BlobStore 内部内容寻址键 |
+| `created_at` | TEXT | UTC ISO8601 |
+
+SQLite 只保存不可变元数据；实际字节由 `BlobStore` 保存。默认本地实现使用 `sha256/<前两位>/<剩余 digest>`，以后可以替换为对象存储而不改变 `ArtifactReference` 和消息 schema。消息 payload v3 使用 `ArtifactBlock(artifact=ArtifactReference)`，禁止直接持久化 base64、临时 URL 或 Provider 文件 ID。Blob 先写、元数据后写，失败可能留下可 GC 的孤立 Blob，但绝不能留下指向不存在 Blob 的已提交消息。
 
 ## 4. StorageTransaction
 

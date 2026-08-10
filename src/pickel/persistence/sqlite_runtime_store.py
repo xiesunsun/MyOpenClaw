@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pickel.artifacts.artifact import Artifact
 from pickel.agents.agent_package import (
     AgentPackageVersion,
     agent_package_digest,
@@ -29,7 +30,7 @@ from pickel.persistence.storage_transaction import (
     StorageTransaction,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
@@ -78,6 +79,45 @@ class SQLiteRuntimeStore:
         if row is None:
             raise LookupError(f"ConversationSession 不存在: {session_id}")
         return int(row["current_commit_sequence"])
+
+    def insert_artifact(self, artifact: Artifact) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?",
+                (artifact.artifact_id,),
+            ).fetchone()
+            if existing is not None:
+                if self._artifact_from_row(existing) == artifact:
+                    return
+                raise StorageIntegrityError(
+                    f"Artifact ID 已存在但内容不同: {artifact.artifact_id}"
+                )
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, digest, media_type, size_bytes,
+                    blob_key, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact.artifact_id,
+                    artifact.digest,
+                    artifact.media_type,
+                    artifact.size_bytes,
+                    artifact.blob_key,
+                    artifact.created_at.isoformat(),
+                ),
+            )
+
+    def load_artifact(self, artifact_id: str) -> Artifact | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+        return self._artifact_from_row(row) if row is not None else None
 
     def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
         self._ensure_schema()
@@ -753,7 +793,7 @@ class SQLiteRuntimeStore:
     @staticmethod
     def _schema_sql() -> str:
         return """
-            PRAGMA user_version = 7;
+            PRAGMA user_version = 8;
 
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
@@ -776,6 +816,17 @@ class SQLiteRuntimeStore:
 
             CREATE INDEX idx_agent_package_versions_agent
             ON agent_package_versions(agent_id, created_at DESC);
+
+            CREATE TABLE artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                digest TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+                blob_key TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_artifacts_digest ON artifacts(digest);
 
             CREATE TABLE session_operations (
                 operation_id TEXT PRIMARY KEY,
@@ -890,6 +941,17 @@ class SQLiteRuntimeStore:
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
             status=str(row["status"]),
             title=str(row["title"]) if row["title"] is not None else None,
+        )
+
+    @staticmethod
+    def _artifact_from_row(row: sqlite3.Row) -> Artifact:
+        return Artifact(
+            artifact_id=str(row["artifact_id"]),
+            digest=str(row["digest"]),
+            media_type=str(row["media_type"]),
+            size_bytes=int(row["size_bytes"]),
+            blob_key=str(row["blob_key"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
         )
 
     @staticmethod

@@ -7,6 +7,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     ImageContent,
     TextContent,
     ThinkingContent,
@@ -15,6 +16,7 @@ from pickel.conversations.content_blocks import (
 from pickel.conversations.session import Session
 
 __all__ = [
+    "ArtifactBlock",
     "AgentMessage",
     "AssistantMessage",
     "ImageContent",

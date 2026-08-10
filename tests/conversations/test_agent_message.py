@@ -1,3 +1,4 @@
+from pickel.artifacts.artifact import ArtifactReference
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -8,6 +9,7 @@ from pickel.conversations.agent_message import (
     agent_message_to_dict,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     ImageContent,
     TextContent,
     ThinkingContent,
@@ -33,10 +35,27 @@ def test_user_message_with_image_round_trip():
         ]
     )
     payload = agent_message_to_dict(msg)
-    assert payload["payload_version"] == 2
+    assert payload["payload_version"] == 3
     assert payload["content"][1]["type"] == "image"
     restored = agent_message_from_dict(payload)
     assert restored == msg
+
+
+def test_user_message_with_artifact_reference_round_trip():
+    reference = ArtifactReference(
+        artifact_id="artifact_1",
+        digest="a" * 64,
+        media_type="image/png",
+        size_bytes=42,
+        display_name="chart.png",
+    )
+    msg = UserMessage(content=[ArtifactBlock(artifact=reference, alt_text="chart")])
+
+    payload = agent_message_to_dict(msg)
+
+    assert payload["content"][0]["type"] == "artifact"
+    assert payload["content"][0]["artifact"]["artifact_id"] == "artifact_1"
+    assert agent_message_from_dict(payload) == msg
 
 
 def test_assistant_with_thinking_and_tool_calls_round_trip():

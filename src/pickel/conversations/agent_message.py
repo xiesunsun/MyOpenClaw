@@ -17,8 +17,8 @@ from pickel.conversations.content_blocks import (
     content_blocks_to_list,
 )
 
-PAYLOAD_VERSION = 2
-SUPPORTED_PAYLOAD_VERSIONS = frozenset({1, 2})
+PAYLOAD_VERSION = 3
+SUPPORTED_PAYLOAD_VERSIONS = frozenset({1, 2, 3})
 
 
 @dataclass(frozen=True)

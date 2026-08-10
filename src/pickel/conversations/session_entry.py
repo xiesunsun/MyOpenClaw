@@ -1,7 +1,7 @@
 """SessionEntry：append-only 对话树节点。
 
 payload 为已版本化的 JSON-ready dict：
-- message：agent_message_to_dict 结果（payload_version=2，读取兼容 v1）
+- message：agent_message_to_dict 结果（payload_version=3，读取兼容 v1/v2）
 - compaction：含 summary / first_kept_entry_id 等（payload_version=1）
 """
 
@@ -16,7 +16,7 @@ ENTRY_TYPE_COMPACTION = "compaction"
 ENTRY_TYPE_HOST_CALL_REQUEST = "host_call_request"
 ENTRY_TYPE_HOST_CALL_RESPONSE = "host_call_response"
 
-MESSAGE_PAYLOAD_VERSION = 2
+MESSAGE_PAYLOAD_VERSION = 3
 COMPACTION_PAYLOAD_VERSION = 1
 HOST_CALL_PAYLOAD_VERSION = 1
 

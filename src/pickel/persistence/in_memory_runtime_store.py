@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from uuid import uuid4
 
+from pickel.artifacts.artifact import Artifact
 from pickel.agents.agent_package import (
     AgentPackageVersion,
     agent_package_digest,
@@ -35,12 +36,28 @@ class InMemoryRuntimeStore:
     def __init__(self) -> None:
         self._sessions: dict[str, ConversationSession] = {}
         self._agent_package_versions: dict[str, tuple[str, dict, datetime]] = {}
+        self._artifacts: dict[str, Artifact] = {}
         self._operations: dict[str, SessionOperation] = {}
         self._commits: dict[tuple[str, int], StorageCommit] = {}
         self._objects: dict[str, ImmutableObject] = {}
         self._nodes: dict[str, ConversationNode] = {}
         self._references: dict[tuple[str, str], list[NamedReference]] = {}
         self._lock = RLock()
+
+    def insert_artifact(self, artifact: Artifact) -> None:
+        with self._lock:
+            existing = self._artifacts.get(artifact.artifact_id)
+            if existing is not None:
+                if existing == artifact:
+                    return
+                raise StorageIntegrityError(
+                    f"Artifact ID 已存在但内容不同: {artifact.artifact_id}"
+                )
+            self._artifacts[artifact.artifact_id] = artifact
+
+    def load_artifact(self, artifact_id: str) -> Artifact | None:
+        with self._lock:
+            return self._artifacts.get(artifact_id)
 
     def create_conversation_session(
         self,

@@ -258,7 +258,7 @@ def test_schema_version_mismatch_fails_without_modifying_database(
         connection.execute("CREATE TABLE legacy (id TEXT)")
 
     store = SQLiteRuntimeStore(db_path)
-    with pytest.raises(UnsupportedStorageSchemaError, match="需要 7"):
+    with pytest.raises(UnsupportedStorageSchemaError, match="需要 8"):
         store.load_current_commit_sequence("session-1")
 
     with sqlite3.connect(db_path) as connection:

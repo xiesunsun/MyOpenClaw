@@ -98,7 +98,7 @@ class OperationService:
         )
         user_object_id = transaction.insert_immutable_object(
             object_type="agent_message",
-            schema_version=2,
+            schema_version=3,
             content=agent_message_to_dict(user_message),
         )
         transaction.append_conversation_node(
@@ -247,7 +247,7 @@ class OperationService:
             )
             message_object_id = transaction.insert_immutable_object(
                 object_type="agent_message",
-                schema_version=2,
+                schema_version=3,
                 content=agent_message_to_dict(appended_message),
             )
             transaction.append_conversation_node(

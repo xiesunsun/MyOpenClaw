@@ -117,7 +117,7 @@ class ConversationService:
         return self._append_object(
             session_id=session_id,
             object_type="agent_message",
-            schema_version=2,
+            schema_version=3,
             content=agent_message_to_dict(message),
         )
 
@@ -130,7 +130,7 @@ class ConversationService:
         return self._append_object(
             session_id=session_id,
             object_type="agent_message",
-            schema_version=2,
+            schema_version=3,
             content=agent_message_to_dict(message),
         )
 
@@ -143,7 +143,7 @@ class ConversationService:
         return self._append_object(
             session_id=session_id,
             object_type="agent_message",
-            schema_version=2,
+            schema_version=3,
             content=agent_message_to_dict(message),
         )
 
