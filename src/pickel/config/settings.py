@@ -134,7 +134,9 @@ def set_default_llm(
             else discover_project_root(Path.cwd())
         )
         if root is None:
-            raise ValueError("未找到项目根（含 .pickel 或 agents 目录），无法写项目 settings")
+            raise ValueError(
+                "未找到项目根（含 .pickel 或 agents 目录），无法写项目 settings"
+            )
         path = settings_path(root / ".pickel")
 
     patch = {

@@ -25,14 +25,12 @@ class OpenVikingBypassStore:
     def _ensure_schema(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS integration_openviking_sessions (
                     session_id TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL
                 )
-                """
-            )
+                """)
 
     def get(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

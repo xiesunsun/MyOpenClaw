@@ -96,9 +96,7 @@ class ContextRenderer:
             self._row("◆", "System prompt", system.tokens if system else 0, max_tokens)
         )
         lines.append(
-            self._row(
-                "◆", "Messages", messages.tokens if messages else 0, max_tokens
-            )
+            self._row("◆", "Messages", messages.tokens if messages else 0, max_tokens)
         )
         free = usage.free_tokens if usage.free_tokens is not None else 0
         lines.append(self._row("◇", "Free", free, max_tokens, style="dim"))
@@ -125,9 +123,7 @@ class ContextRenderer:
             )
         )
         if other is not None and other.tokens > 0:
-            lines.append(
-                self._row("◈", "Other", other.tokens, max_tokens)
-            )
+            lines.append(self._row("◈", "Other", other.tokens, max_tokens))
 
         lines.append(Text(""))
         source = _SOURCE_LABELS.get(usage.total_source, "estimated · 本地估计")
@@ -220,5 +216,3 @@ def _occupied_cells(total_tokens: int, max_input_tokens: int | None) -> int:
     ratio = max(0.0, min(1.0, total_tokens / max_input_tokens))
     filled = round(_GRID_CELLS * ratio)
     return max(1, min(_GRID_CELLS, filled))
-
-

@@ -205,9 +205,7 @@ class SkillStore:
         except OSError as exc:
             # 配置里的 skills 目录可能指向别的机器的路径（跨机器带过来的
             # settings.json），原始 OSError 会一路冒到 CLI 顶层崩掉会话
-            raise SkillStoreError(
-                f"Cannot write skill to {path}: {exc}"
-            ) from exc
+            raise SkillStoreError(f"Cannot write skill to {path}: {exc}") from exc
         return path
 
     def _stage(self, request: SkillWriteRequest, target: str) -> str:

@@ -20,7 +20,9 @@ class BehaviorLoader:
         if not behavior_path.exists():
             raise FileNotFoundError(f"Behavior path not found: {behavior_path}")
         if not behavior_path.is_dir():
-            raise ValueError(f"Behavior path must be a directory or file: {behavior_path}")
+            raise ValueError(
+                f"Behavior path must be a directory or file: {behavior_path}"
+            )
 
         for candidate_name in cls.CANDIDATE_FILES:
             candidate = behavior_path / candidate_name

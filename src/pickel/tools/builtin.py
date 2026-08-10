@@ -88,5 +88,8 @@ async def tool_set_active(
         changes.append(f"enabled {', '.join(sorted(set(to_enable)))}")
     return ToolExecutionResult(
         content=f"Tool activation updated ({'; '.join(changes)}). Takes effect next turn.",
-        metadata={"disabled": sorted(set(to_disable)), "enabled": sorted(set(to_enable))},
+        metadata={
+            "disabled": sorted(set(to_disable)),
+            "enabled": sorted(set(to_enable)),
+        },
     )

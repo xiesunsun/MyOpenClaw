@@ -27,4 +27,3 @@ class NoReplacementMatchError(FileToolError):
 
 class MultipleReplacementMatchesError(FileToolError):
     """Raised when an exact replacement target matches multiple locations."""
-

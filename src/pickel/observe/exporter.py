@@ -38,7 +38,7 @@ def export_html(
     items = tuple(sessions)
     if not items:
         raise ValueError("没有可导出的会话")
-    destination = (out.expanduser() if out is not None else default_report_path(items))
+    destination = out.expanduser() if out is not None else default_report_path(items)
     trajectories = [
         collect_trajectory(
             item,

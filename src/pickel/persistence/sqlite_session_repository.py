@@ -101,9 +101,7 @@ class SQLiteSessionRepository(SessionRepository):
             entry_records=entry_rows,
         )
 
-    def list(
-        self, *, limit: int = 20, cwd: str | None = None
-    ) -> list[SessionPreview]:
+    def list(self, *, limit: int = 20, cwd: str | None = None) -> list[SessionPreview]:
         """按 updated_at 降序列会话预览。
 
         message_count / last_message 以各 session 的 active_path 为准
@@ -277,15 +275,16 @@ class SQLiteSessionRepository(SessionRepository):
         self._ensure_schema()
         with self._connect() as connection:
             # 依赖 FK ON DELETE CASCADE；显式开 foreign_keys
-            connection.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
 
     def _ensure_schema(self) -> None:
         if self._schema_initialized and self._db_path.exists():
             return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.executescript(
-                """
+            connection.executescript("""
                 PRAGMA user_version = 3;
 
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -321,8 +320,7 @@ class SQLiteSessionRepository(SessionRepository):
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_cwd_updated
                 ON sessions(cwd, updated_at);
-                """
-            )
+                """)
         self._schema_initialized = True
 
     def _connect(self) -> sqlite3.Connection:

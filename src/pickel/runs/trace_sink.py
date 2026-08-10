@@ -269,9 +269,7 @@ class JsonlTraceSink:
                 self._flush()
                 continue
             barriers = [
-                item.flush_barrier
-                for item in batch
-                if item.flush_barrier is not None
+                item.flush_barrier for item in batch if item.flush_barrier is not None
             ]
             try:
                 lines = [

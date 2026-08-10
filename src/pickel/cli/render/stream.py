@@ -42,9 +42,7 @@ class StreamRenderer:
                 self.console.print()
             self.console.print(Text("· 思考中……", style="dim"))
             self._state = _THINKING
-        self.console.print(
-            text, end="", style="dim", highlight=False, markup=False
-        )
+        self.console.print(text, end="", style="dim", highlight=False, markup=False)
 
     def on_text(self, text: str) -> None:
         if self._state == _THINKING:

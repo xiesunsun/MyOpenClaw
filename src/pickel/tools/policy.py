@@ -33,11 +33,17 @@ class WorkspacePathAccessPolicy(FileAccessPolicy):
     def resolve_path(self, path: str, workspace_path: Path) -> Path:
         candidate = Path(path)
         resolved_workspace = workspace_path.resolve()
-        resolved_path = candidate.resolve() if candidate.is_absolute() else (resolved_workspace / candidate).resolve()
+        resolved_path = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (resolved_workspace / candidate).resolve()
+        )
         try:
             resolved_path.relative_to(resolved_workspace)
         except ValueError as exc:
-            raise PathOutsideWorkspaceError(f"Path '{path}' is outside the workspace") from exc
+            raise PathOutsideWorkspaceError(
+                f"Path '{path}' is outside the workspace"
+            ) from exc
         return resolved_path
 
     def assert_file_readable(self, path: Path) -> None:
@@ -64,7 +70,11 @@ class FullAccessPathPolicy(FileAccessPolicy):
     def resolve_path(self, path: str, workspace_path: Path) -> Path:
         candidate = Path(path)
         resolved_workspace = workspace_path.resolve()
-        return candidate.resolve() if candidate.is_absolute() else (resolved_workspace / candidate).resolve()
+        return (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (resolved_workspace / candidate).resolve()
+        )
 
     def assert_file_readable(self, path: Path) -> None:
         if not path.exists():
