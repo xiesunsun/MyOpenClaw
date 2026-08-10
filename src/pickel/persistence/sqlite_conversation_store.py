@@ -171,22 +171,77 @@ class SQLiteConversationStore:
                 session_id=session_id,
                 reference_name="conversation/active",
             )
-        active_node_id = None
-        if reference_row is not None:
-            if str(reference_row["target_kind"]) != "node":
-                raise StorageIntegrityError("conversation/active 必须指向 node")
-            active_node_id = str(reference_row["target_id"])
-        return ConversationSession(
-            session_id=str(row["session_id"]),
-            agent_id=str(row["agent_id"]),
-            cwd=str(row["cwd"]),
-            current_sequence=int(row["current_sequence"]),
-            active_node_id=active_node_id,
-            created_at=datetime.fromisoformat(str(row["created_at"])),
-            updated_at=datetime.fromisoformat(str(row["updated_at"])),
-            status=str(row["status"]),
-            title=str(row["title"]) if row["title"] is not None else None,
-        )
+        return self._session_from_row(row, reference_row=reference_row)
+
+    def list_conversation_sessions(
+        self,
+        *,
+        limit: int = 20,
+        cwd: str | None = None,
+    ) -> list[ConversationSession]:
+        if limit <= 0:
+            return []
+        self._ensure_schema()
+        with self._connect() as connection:
+            if cwd is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    ORDER BY updated_at DESC, session_id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE cwd = ?
+                    ORDER BY updated_at DESC, session_id ASC
+                    LIMIT ?
+                    """,
+                    (cwd, limit),
+                ).fetchall()
+            sessions: list[ConversationSession] = []
+            for row in rows:
+                reference_row = self._find_reference_row(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    reference_name="conversation/active",
+                )
+                sessions.append(
+                    self._session_from_row(row, reference_row=reference_row)
+                )
+        return sessions
+
+    def archive_conversation_session(
+        self,
+        *,
+        session_id: str,
+        archived_at: datetime,
+    ) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE sessions
+                SET status = 'archived', updated_at = ?
+                WHERE session_id = ?
+                """,
+                (archived_at.isoformat(), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"ConversationSession 不存在: {session_id}")
+
+    def delete_conversation_session(self, *, session_id: str) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"ConversationSession 不存在: {session_id}")
 
     def begin_storage_transaction(
         self,
@@ -691,6 +746,29 @@ class SQLiteConversationStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @staticmethod
+    def _session_from_row(
+        row: sqlite3.Row,
+        *,
+        reference_row: sqlite3.Row | None,
+    ) -> ConversationSession:
+        active_node_id = None
+        if reference_row is not None:
+            if str(reference_row["target_kind"]) != "node":
+                raise StorageIntegrityError("conversation/active 必须指向 node")
+            active_node_id = str(reference_row["target_id"])
+        return ConversationSession(
+            session_id=str(row["session_id"]),
+            agent_id=str(row["agent_id"]),
+            cwd=str(row["cwd"]),
+            current_sequence=int(row["current_sequence"]),
+            active_node_id=active_node_id,
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            status=str(row["status"]),
+            title=str(row["title"]) if row["title"] is not None else None,
+        )
 
     @staticmethod
     def _object_from_row(row: sqlite3.Row) -> ImmutableObject:

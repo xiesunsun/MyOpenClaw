@@ -17,6 +17,10 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.conversation_node import ConversationEntry
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.conversations.conversation_store import ConversationStore
+from pickel.conversations.session_preview import (
+    SessionPreview,
+    build_conversation_preview,
+)
 
 ACTIVE_CONVERSATION_REFERENCE = "conversation/active"
 
@@ -67,6 +71,42 @@ class ConversationService:
     ) -> list[ConversationEntry]:
         self.load_conversation_session(session_id)
         return self._store.list_active_branch_entries(session_id=session_id)
+
+    def list_conversation_previews(
+        self,
+        *,
+        limit: int = 20,
+        cwd: str | None = None,
+        all_sessions: bool = False,
+    ) -> list[SessionPreview]:
+        normalized_cwd = None if all_sessions else self._normalize_cwd(cwd)
+        sessions = self._store.list_conversation_sessions(
+            limit=limit,
+            cwd=normalized_cwd,
+        )
+        return [self.build_conversation_preview(session) for session in sessions]
+
+    def build_conversation_preview(
+        self,
+        session: ConversationSession,
+    ) -> SessionPreview:
+        return build_conversation_preview(
+            session=session,
+            entries=self._store.list_active_branch_entries(
+                session_id=session.session_id
+            ),
+        )
+
+    def archive_conversation_session(self, *, session_id: str) -> None:
+        self.load_conversation_session(session_id)
+        self._store.archive_conversation_session(
+            session_id=session_id,
+            archived_at=self._now(),
+        )
+
+    def delete_conversation_session(self, *, session_id: str) -> None:
+        self.load_conversation_session(session_id)
+        self._store.delete_conversation_session(session_id=session_id)
 
     def append_user_message(
         self,

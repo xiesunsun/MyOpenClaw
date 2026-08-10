@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from pickel.conversations.conversation_node import ConversationEntry
+from pickel.conversations.conversation_session import ConversationSession
+
 
 def _normalize_whitespace(value: str) -> str:
     return " ".join(value.split())
@@ -71,3 +74,29 @@ class SessionPreview:
     def __post_init__(self) -> None:
         normalized = _truncate(_normalize_whitespace(self.last_message))
         object.__setattr__(self, "last_message", normalized)
+
+
+def build_conversation_preview(
+    *,
+    session: ConversationSession,
+    entries: list[ConversationEntry],
+) -> SessionPreview:
+    """从会话只读视图和活动分支事实投影展示封面。"""
+    message_entries = [
+        entry for entry in entries if entry.object.object_type == "agent_message"
+    ]
+    last_message = ""
+    if message_entries:
+        last_message = preview_text_from_message_payload(
+            message_entries[-1].object.content
+        )
+    return SessionPreview(
+        session_id=session.session_id,
+        agent_id=session.agent_id,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        status=session.status,
+        message_count=len(message_entries),
+        last_message=last_message,
+        cwd=session.cwd,
+    )

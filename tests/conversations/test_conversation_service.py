@@ -130,3 +130,35 @@ def test_load_missing_conversation_raises_domain_error(tmp_path: Path) -> None:
 
     with pytest.raises(ConversationNotFoundError, match="missing"):
         service.load_conversation_session("missing")
+
+
+def test_preview_archive_and_delete_use_conversation_facts(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    session = service.create_conversation_session(
+        agent_id="Pickle",
+        cwd=str(tmp_path),
+    )
+    service.append_user_message(
+        session_id=session.session_id,
+        message=UserMessage(content=[TextContent(text="hello")]),
+    )
+    service.append_host_call_request(
+        session_id=session.session_id,
+        content={"call_id": "host-1"},
+    )
+    service.append_assistant_message(
+        session_id=session.session_id,
+        message=AssistantMessage(content=[TextContent(text="final answer")]),
+    )
+
+    previews = service.list_conversation_previews(cwd=str(tmp_path))
+    assert len(previews) == 1
+    assert previews[0].message_count == 2
+    assert previews[0].last_message == "final answer"
+
+    service.archive_conversation_session(session_id=session.session_id)
+    assert service.load_conversation_session(session.session_id).status == "archived"
+
+    service.delete_conversation_session(session_id=session.session_id)
+    with pytest.raises(ConversationNotFoundError, match="session-1"):
+        service.load_conversation_session(session.session_id)

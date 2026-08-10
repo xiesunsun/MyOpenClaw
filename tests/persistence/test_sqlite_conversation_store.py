@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -265,3 +266,39 @@ def test_schema_version_mismatch_fails_without_modifying_database(
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE name = 'legacy'"
         ).fetchone()
+
+
+def test_list_archive_and_delete_conversation_sessions(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.create_conversation_session(
+        session_id="session-2",
+        agent_id="Reviewer",
+        cwd="/tmp/other",
+        created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+
+    assert [
+        session.session_id for session in store.list_conversation_sessions(limit=10)
+    ] == ["session-2", "session-1"]
+    assert [
+        session.session_id
+        for session in store.list_conversation_sessions(
+            limit=10,
+            cwd="/tmp/project",
+        )
+    ] == ["session-1"]
+
+    archived_at = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    store.archive_conversation_session(
+        session_id="session-1",
+        archived_at=archived_at,
+    )
+    archived = store.load_conversation_session("session-1")
+    assert archived is not None
+    assert archived.status == "archived"
+    assert archived.updated_at == archived_at
+
+    store.delete_conversation_session(session_id="session-1")
+    assert store.load_conversation_session("session-1") is None
+    with pytest.raises(LookupError, match="session-1"):
+        store.delete_conversation_session(session_id="session-1")

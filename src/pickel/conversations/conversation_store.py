@@ -27,6 +27,22 @@ class ConversationStore(Protocol):
         session_id: str,
     ) -> ConversationSession | None: ...
 
+    def list_conversation_sessions(
+        self,
+        *,
+        limit: int = 20,
+        cwd: str | None = None,
+    ) -> list[ConversationSession]: ...
+
+    def archive_conversation_session(
+        self,
+        *,
+        session_id: str,
+        archived_at: datetime,
+    ) -> None: ...
+
+    def delete_conversation_session(self, *, session_id: str) -> None: ...
+
     def begin_storage_transaction(
         self,
         *,
