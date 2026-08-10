@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.agents.behavior_loader import BehaviorLoader
-from pickel.agents.skills import SkillRegistry
+from pickel.agents.agent_package import LoadedAgentPackage
+from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import home_dir, sessions_db_path
 from pickel.context.model_context_builder import ModelContextBuilder
@@ -13,7 +13,6 @@ from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.runs import ReActStrategy
 from pickel.runs.run import Run
-from pickel.shared.file_access import FileAccessMode
 from pickel.skills.store import SkillStore
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -37,6 +36,10 @@ class Boot:
             install_builtin_tools(tool_bus)
         self.tool_bus = tool_bus
         self.extensions = extensions or ExtensionRegistry()
+        self._agent_package_builder = AgentPackageBuilder(
+            app_config=app_config,
+            tool_bus=tool_bus,
+        )
         # CLI 装载入口回填 LoadResult，供 ChatLoop 在 /reload 时 teardown 旧 extension
         self.extension_result = None
         self._sandbox_policy: SandboxPolicy | None = None
@@ -77,51 +80,17 @@ class Boot:
         return self.extensions.session_syncs(self._scope(agent_id))
 
     def resolve_agent(self, agent_id: str | None = None) -> Agent:
-        resolved_agent_id = agent_id or self.app_config.default_agent
-        agent_config = self.app_config.get_agent_config(resolved_agent_id)
-        behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
-        file_access_mode = self.app_config.resolve_file_access_mode(resolved_agent_id)
-        skills_path = self._resolve_agent_skills_path(resolved_agent_id)
-        # 初始列表；构建 ModelContext 时会重新发现非空 skills_path
-        skills = SkillRegistry.discover(skills_path)
+        return self.resolve_loaded_agent_package(agent_id).agent
 
-        return Agent(
-            agent_id=resolved_agent_id,
-            workspace_path=agent_config.workspace_path,
-            behavior_path=agent_config.behavior_path,
-            behavior_instruction=behavior_instruction,
-            model_config=self.app_config.resolve_model_config(agent_config.llm),
-            tool_ids=list(agent_config.tools),
-            file_access_mode=file_access_mode.value,
-            skills=skills,
-            skills_path=skills_path,
-        )
+    def resolve_loaded_agent_package(
+        self,
+        agent_id: str | None = None,
+    ) -> LoadedAgentPackage:
+        return self._agent_package_builder.build_loaded_agent_package(agent_id)
 
     def _resolve_agent_skills_path(self, agent_id: str) -> Path | None:
-        """解析并校验 skills 目录路径；不在此冻结 discover 结果。"""
-        agent_config = self.app_config.get_agent_config(agent_id)
-        skills_path = self.app_config.resolve_skills_path(agent_id)
-        if skills_path is None:
-            return None
-        if (
-            skills_path.exists()
-            and self.app_config.resolve_file_access_mode(agent_id)
-            != FileAccessMode.FULL
-            and not self._is_within_workspace(skills_path, agent_config.workspace_path)
-        ):
-            raise ValueError(
-                f"Skills path '{skills_path}' is outside workspace '{agent_config.workspace_path}' "
-                "and requires file_access_mode: full"
-            )
-        return skills_path
-
-    @staticmethod
-    def _is_within_workspace(path: Path, workspace_path: Path) -> bool:
-        try:
-            path.resolve().relative_to(workspace_path.resolve())
-        except ValueError:
-            return False
-        return True
+        """复用 AgentPackageBuilder 的 Pickel 设置路径解析。"""
+        return self._agent_package_builder.resolve_skills_path(agent_id)
 
     def build_run(
         self,

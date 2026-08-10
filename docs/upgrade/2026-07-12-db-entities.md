@@ -3,8 +3,8 @@
 **初稿日期**：2026-07-12
 **更新日期**：2026-08-11
 **状态**：目标合同（阶段 1 实施中）
-**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用和原子提交
-**不在范围**：Operation 状态字段、Agent Package、Artifact 字节存储、多 Agent 调度
+**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Agent Package Version 和原子提交
+**不在范围**：Operation 状态字段、Artifact 字节存储、多 Agent 调度
 
 本文定义持久化事实和事务边界。实体名称遵循 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md)；旧 `SessionEntry`、`leaf_id` 和 `session_entries` 合同已被本文替代。
 
@@ -108,6 +108,18 @@ NamedReference 的移动通过追加版本表达，不覆盖旧行。
 
 主键：`(session_id, reference_name, sequence)`。当前 Reference 是同名行中 sequence 最大的一条。
 
+### 3.6 `agent_package_versions`
+
+| 列 | 类型 | 约束 | 含义 |
+| --- | --- | --- | --- |
+| `package_version_id` | TEXT | PK | `agentpkg_<digest>` |
+| `digest` | TEXT | UNIQUE | Snapshot 内容 SHA-256 |
+| `agent_id` | TEXT | NOT NULL | Pickel 设置中的 Agent ID |
+| `content_json` | TEXT | NOT NULL | 不含密钥的完整 Package Snapshot |
+| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
+
+Package Snapshot 直接从 Pickel 现有 `AppConfig / AgentConfig / ModelConfig / Skill / ToolBus` 解析；不引入第二套配置文件。相同内容重复插入幂等，ID 相同但内容不同必须失败。
+
 ## 4. StorageTransaction
 
 唯一写边界：
@@ -201,7 +213,7 @@ Context、Session Preview 与 OpenViking 都消费同一个活动分支读取接
 
 ## 9. Schema 策略
 
-新 schema 使用 `PRAGMA user_version = 4`。
+阶段 1 基础 schema 为 v4；加入 `agent_package_versions` 后当前 schema 使用 `PRAGMA user_version = 5`。
 
 - Runtime 不提供 v3/v4 双读或双写。
 - 当前预发布阶段默认使用新库。

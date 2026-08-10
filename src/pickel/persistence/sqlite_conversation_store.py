@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pickel.agents.agent_package import (
+    AgentPackageVersion,
+    agent_package_digest,
+    agent_package_version_from_content,
+)
 from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.persistence.immutable_object import (
@@ -23,7 +28,7 @@ from pickel.persistence.storage_transaction import (
     StorageTransaction,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
@@ -72,6 +77,82 @@ class SQLiteConversationStore:
         if row is None:
             raise LookupError(f"ConversationSession 不存在: {session_id}")
         return int(row["current_sequence"])
+
+    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
+        self._ensure_schema()
+        content = version.content_dict()
+        if agent_package_digest(content) != version.digest:
+            raise StorageIntegrityError(
+                f"AgentPackageVersion digest 校验失败: {version.package_version_id}"
+            )
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT digest, content_json
+                FROM agent_package_versions
+                WHERE package_version_id = ?
+                """,
+                (version.package_version_id,),
+            ).fetchone()
+            content_json = json.dumps(
+                content,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if existing is not None:
+                if (
+                    str(existing["digest"]) == version.digest
+                    and str(existing["content_json"]) == content_json
+                ):
+                    return
+                raise StorageIntegrityError(
+                    "AgentPackageVersion ID 已存在但内容不同: "
+                    f"{version.package_version_id}"
+                )
+            connection.execute(
+                """
+                INSERT INTO agent_package_versions (
+                    package_version_id, digest, agent_id, content_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    version.package_version_id,
+                    version.digest,
+                    version.agent_id,
+                    content_json,
+                    version.created_at.isoformat(),
+                ),
+            )
+
+    def load_agent_package_version(
+        self,
+        package_version_id: str,
+    ) -> AgentPackageVersion | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT package_version_id, digest, content_json, created_at
+                FROM agent_package_versions
+                WHERE package_version_id = ?
+                """,
+                (package_version_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        content = json.loads(str(row["content_json"]))
+        if not isinstance(content, dict):
+            raise StorageIntegrityError("AgentPackageVersion content 不是 JSON object")
+        try:
+            return agent_package_version_from_content(
+                package_version_id=str(row["package_version_id"]),
+                digest=str(row["digest"]),
+                content=content,
+                created_at=datetime.fromisoformat(str(row["created_at"])),
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise StorageIntegrityError(str(exc)) from exc
 
     def load_conversation_session(
         self,
@@ -514,7 +595,7 @@ class SQLiteConversationStore:
     @staticmethod
     def _schema_sql() -> str:
         return """
-            PRAGMA user_version = 4;
+            PRAGMA user_version = 5;
 
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
@@ -526,6 +607,17 @@ class SQLiteConversationStore:
                 status TEXT NOT NULL,
                 title TEXT
             );
+
+            CREATE TABLE agent_package_versions (
+                package_version_id TEXT PRIMARY KEY,
+                digest TEXT NOT NULL UNIQUE,
+                agent_id TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_agent_package_versions_agent
+            ON agent_package_versions(agent_id, created_at DESC);
 
             CREATE TABLE storage_commits (
                 session_id TEXT NOT NULL,

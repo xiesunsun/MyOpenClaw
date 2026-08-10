@@ -179,11 +179,33 @@ Session 回答「这本对话存了什么」；Environ 回答「这个进程此�
 
 | 名称 | 职责 |
 |------|------|
-| **Session** | 一本对话（全局库中的一行封面） |
-| **SessionEntry** | 对话树节点（已有） |
-| **Sessions** | 对 `sessions.db` 的读写与列表过滤 |
+| **ConversationSession** | 一本对话的身份和当前提交视图 |
+| **ConversationNode** | 对话树中的不可变位置 |
+| **ConversationEntry** | Node 与内容解析后的只读投影 |
+| **ConversationStore** | `sessions.db` 的持久化窄接口 |
 
-### 4.3 废弃 / 禁止的命名
+### 4.3 Agent Package Snapshot
+
+Pickel 设置始终是唯一可编辑源，不增加 `package.yaml` 或第二套 Agent 配置。
+
+```text
+AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
+                              ↓ resolve
+                       AgentDefinition
+                              ↓ freeze
+                    AgentPackageVersion
+                              ↓ load implementations
+                     LoadedAgentPackage
+```
+
+- `AgentDefinition` 保存现有设置解析后的来源和选择。
+- `AgentPackageVersion` 冻结 behavior、无密钥模型参数、Skill 全文和工具 schema；ID 为内容 digest。
+- `LoadedAgentPackage` 持有进程内 ToolSnapshot、SkillManifest 和现阶段运行对象，不能直接持久化。
+- `api_key`、token、password、authorization 等秘密不得进入 Snapshot；只记录所需秘密名称。
+- 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。
+- 当前新 Runtime 的验收 Provider 为 Anthropic；已有其他 Provider 设置不扩展新能力。
+
+### 4.4 废弃 / 禁止的命名
 
 | 不要用 | 原因 | 用 |
 |--------|------|-----|
