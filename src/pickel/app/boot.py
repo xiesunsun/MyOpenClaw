@@ -6,6 +6,7 @@ from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.config.app_config import AppConfig
 from pickel.artifacts.artifact_service import ArtifactService
 from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.config.paths import (
     artifact_blobs_path,
     home_dir,
@@ -20,6 +21,7 @@ from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
+from pickel.persistence.runtime_store import RuntimeStore
 from pickel.operations.operation_service import OperationService
 from pickel.providers.anthropic import AnthropicProvider
 from pickel.runs import ReActStrategy
@@ -139,6 +141,8 @@ class Boot:
     def build_agent_runtime(
         self,
         agent_id: str | None = None,
+        *,
+        store: RuntimeStore | None = None,
     ) -> tuple[LoadedAgentPackage, AgentRuntime]:
         """从当前 Pickel 设置装配一个冻结 Package 的新 Runtime。"""
         loaded = self.resolve_loaded_agent_package(agent_id)
@@ -147,11 +151,15 @@ class Boot:
                 "新 Agent Runtime 当前只支持 Anthropic Provider: "
                 f"{loaded.version.model.provider}"
             )
-        store = self._resolved_runtime_store()
-        store.insert_agent_package_version(loaded.version)
+        resolved_store = store or self._resolved_runtime_store()
+        resolved_store.insert_agent_package_version(loaded.version)
         artifact_service = ArtifactService(
-            artifact_store=store,
-            blob_store=FilesystemBlobStore(artifact_blobs_path()),
+            artifact_store=resolved_store,
+            blob_store=(
+                FilesystemBlobStore(artifact_blobs_path())
+                if store is None
+                else InMemoryBlobStore()
+            ),
         )
         provider = AnthropicProvider.from_config(
             loaded.agent.model_config,
@@ -181,8 +189,8 @@ class Boot:
             ),
             artifact_service=artifact_service,
         )
-        operation_service = OperationService(store)
-        conversation_service = ConversationService(store)
+        operation_service = OperationService(resolved_store)
+        conversation_service = ConversationService(resolved_store)
         effects = RuntimeEffects(
             bindings=bindings,
             operation_service=operation_service,
@@ -199,8 +207,12 @@ class Boot:
             operation_driver=driver,
         )
 
-    def build_conversation_service(self) -> ConversationService:
-        return ConversationService(self._resolved_runtime_store())
+    def build_conversation_service(
+        self,
+        *,
+        store: RuntimeStore | None = None,
+    ) -> ConversationService:
+        return ConversationService(store or self._resolved_runtime_store())
 
     def _resolved_runtime_store(self) -> SQLiteRuntimeStore:
         if self._runtime_store is None:
