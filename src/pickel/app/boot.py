@@ -4,20 +4,41 @@ from pickel.agents.agent import Agent
 from pickel.agents.agent_package import LoadedAgentPackage
 from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.config.app_config import AppConfig
-from pickel.config.paths import home_dir, sessions_db_path
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
+from pickel.config.paths import (
+    artifact_blobs_path,
+    home_dir,
+    runtime_db_path,
+    sessions_db_path,
+)
+from pickel.conversations.conversation_service import ConversationService
 from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.service import SessionService
 from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
+from pickel.operations.operation_service import OperationService
+from pickel.providers.anthropic import AnthropicProvider
 from pickel.runs import ReActStrategy
 from pickel.runs.run import Run
+from pickel.runtime.agent_runtime import AgentRuntime
+from pickel.runtime.operation_driver import OperationDriver
+from pickel.runtime.runtime_bindings import RuntimeBindings
+from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.sandbox import SandboxPolicy
 from pickel.tools.shell import LocalBashOperations
+from pickel.tools.file_service import WorkspaceFileService
+from pickel.tools.policy import (
+    FullAccessPathPolicy,
+    WorkspacePathAccessPolicy,
+)
+from pickel.tools.services import ToolServices
 
 
 class Boot:
@@ -43,6 +64,7 @@ class Boot:
         # CLI 装载入口回填 LoadResult，供 ChatLoop 在 /reload 时 teardown 旧 extension
         self.extension_result = None
         self._sandbox_policy: SandboxPolicy | None = None
+        self._runtime_store: SQLiteRuntimeStore | None = None
 
     @property
     def sandbox_policy(self) -> SandboxPolicy:
@@ -113,6 +135,79 @@ class Boot:
             bash_operations=LocalBashOperations(sandbox=self.sandbox_policy),
         )
         return agent, run
+
+    def build_agent_runtime(
+        self,
+        agent_id: str | None = None,
+    ) -> tuple[LoadedAgentPackage, AgentRuntime]:
+        """从当前 Pickel 设置装配一个冻结 Package 的新 Runtime。"""
+        loaded = self.resolve_loaded_agent_package(agent_id)
+        if loaded.version.model.provider != "anthropic":
+            raise ValueError(
+                "新 Agent Runtime 当前只支持 Anthropic Provider: "
+                f"{loaded.version.model.provider}"
+            )
+        store = self._resolved_runtime_store()
+        store.insert_agent_package_version(loaded.version)
+        artifact_service = ArtifactService(
+            artifact_store=store,
+            blob_store=FilesystemBlobStore(artifact_blobs_path()),
+        )
+        provider = AnthropicProvider.from_config(
+            loaded.agent.model_config,
+            artifact_service=artifact_service,
+        )
+        workspace_files = WorkspaceFileService(
+            workspace_root=loaded.agent.workspace,
+            access_policy=(
+                FullAccessPathPolicy()
+                if loaded.definition.file_access_mode == "full"
+                else WorkspacePathAccessPolicy()
+            ),
+        )
+        bash = LocalBashOperations(sandbox=self.sandbox_policy)
+        bindings = RuntimeBindings(
+            agent_package_version=loaded.version,
+            provider=provider,
+            tool_snapshot=loaded.tool_snapshot,
+            lifecycle_hooks=LifecycleHooks(
+                handlers=self.resolve_hook_handlers(loaded.version.agent_id)
+            ),
+            recall_sources=tuple(self.resolve_recall_sources(loaded.version.agent_id)),
+            tool_services=ToolServices(
+                workspace_files=workspace_files,
+                bash=bash,
+                skill_store=self._build_skill_store(loaded.version.agent_id),
+            ),
+            artifact_service=artifact_service,
+        )
+        operation_service = OperationService(store)
+        conversation_service = ConversationService(store)
+        effects = RuntimeEffects(
+            bindings=bindings,
+            operation_service=operation_service,
+        )
+        driver = OperationDriver(
+            bindings=bindings,
+            operation_service=operation_service,
+            conversation_service=conversation_service,
+            runtime_effects=effects,
+        )
+        return loaded, AgentRuntime(
+            bindings=bindings,
+            operation_service=operation_service,
+            operation_driver=driver,
+        )
+
+    def build_conversation_service(self) -> ConversationService:
+        return ConversationService(self._resolved_runtime_store())
+
+    def _resolved_runtime_store(self) -> SQLiteRuntimeStore:
+        if self._runtime_store is None:
+            path = runtime_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_store = SQLiteRuntimeStore(path)
+        return self._runtime_store
 
     def _build_skill_store(self, agent_id: str) -> SkillStore | None:
         """没有 skills 目录的 agent 拿不到 store —— skill_manage 会据此报错。"""

@@ -19,6 +19,43 @@ from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
 class BootTests(unittest.TestCase):
+    def test_build_agent_runtime_uses_current_pickel_settings_snapshot(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "agents" / "Pickle").mkdir(parents=True)
+            (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
+            (root / "workspace").mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(textwrap.dedent("""
+                    default_agent: Pickle
+                    react_max_steps: 12
+                    context_cli_turn_window: 6
+                    default_llm:
+                      provider: anthropic
+                      model: claude-test
+                    providers:
+                      anthropic:
+                        models:
+                          claude-test:
+                            max_output_tokens: 1024
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                """).strip())
+
+            with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+                loaded, runtime = Boot.from_config(
+                    app_config_from_yaml_file(config_path)
+                ).build_agent_runtime()
+
+            version = runtime.bindings.agent_package_version
+            self.assertEqual(loaded.version, version)
+            self.assertEqual(12, version.runtime.max_model_steps)
+            self.assertEqual(6, version.runtime.context_unit_window)
+            self.assertEqual("anthropic", version.model.provider)
+
     def test_resolve_agent_loads_behavior_and_declared_defaults(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

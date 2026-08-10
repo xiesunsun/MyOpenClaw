@@ -64,7 +64,12 @@ class AnthropicProvider(Provider):
         self.client = self._build_client()
 
     @classmethod
-    def from_config(cls, config: ModelConfig) -> "AnthropicProvider":
+    def from_config(
+        cls,
+        config: ModelConfig,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> "AnthropicProvider":
         return cls(
             model=config.model,
             api_key=config.api_key,
@@ -72,6 +77,7 @@ class AnthropicProvider(Provider):
             temperature=config.temperature,
             max_output_tokens=config.max_output_tokens,
             provider_options=dict(config.provider_options),
+            artifact_service=artifact_service,
         )
 
     async def generate(self, context: ModelContext) -> AssistantMessage:

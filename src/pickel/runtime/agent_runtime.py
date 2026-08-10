@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pickel.conversations.agent_message import UserMessage
-from pickel.operations.operation_service import OperationService
+from pickel.operations.operation_service import AcceptedAgentRun, OperationService
 from pickel.runtime.operation_driver import (
     OperationDriveResult,
     OperationDriver,
@@ -39,15 +39,39 @@ class AgentRuntime:
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
     ) -> OperationDriveResult:
-        accepted = self._operation_service.accept_agent_run(
+        accepted = self.accept_agent_run(
+            session_id=session_id,
+            user_message=user_message,
+        )
+        return await self.drive_operation(
+            accepted.operation.operation_id,
+            host_calls=host_calls,
+            consume_delta=consume_delta,
+        )
+
+    def accept_agent_run(
+        self,
+        *,
+        session_id: str,
+        user_message: UserMessage,
+    ) -> AcceptedAgentRun:
+        return self._operation_service.accept_agent_run(
             session_id=session_id,
             agent_package_version_id=(
                 self._bindings.agent_package_version.package_version_id
             ),
             user_message=user_message,
         )
+
+    async def drive_operation(
+        self,
+        operation_id: str,
+        *,
+        host_calls: HostCallClient | None = None,
+        consume_delta: StreamDeltaConsumer | None = None,
+    ) -> OperationDriveResult:
         return await self._operation_driver.drive_operation(
-            accepted.operation.operation_id,
+            operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,
         )
@@ -65,7 +89,7 @@ class AgentRuntime:
             != self._bindings.agent_package_version.package_version_id
         ):
             raise ValueError("AgentRuntime Package 与 SessionOperation 绑定版本不匹配")
-        return await self._operation_driver.drive_operation(
+        return await self.drive_operation(
             operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,

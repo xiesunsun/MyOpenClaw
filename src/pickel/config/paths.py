@@ -10,6 +10,7 @@ _HOME_DIR_NAME = ".pickel"
 _PROJECT_MARKER = ".pickel"
 _AGENTS_DIR = "agents"
 _SESSIONS_DB = "sessions.db"
+_RUNTIME_DB = "runtime.db"
 
 
 def home_dir() -> Path:
@@ -23,6 +24,16 @@ def home_dir() -> Path:
 def sessions_db_path() -> Path:
     """全局会话库路径：{home_dir}/sessions.db。"""
     return home_dir() / _SESSIONS_DB
+
+
+def runtime_db_path() -> Path:
+    """Agent Runtime v4+ 原子存储路径。"""
+    return home_dir() / _RUNTIME_DB
+
+
+def artifact_blobs_path() -> Path:
+    """默认本地 BlobStore 根目录。"""
+    return home_dir() / "artifacts" / "blobs"
 
 
 def discover_project_root(cwd: Path) -> Path | None:
