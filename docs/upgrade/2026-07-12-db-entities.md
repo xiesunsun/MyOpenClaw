@@ -3,8 +3,8 @@
 **初稿日期**：2026-07-12
 **更新日期**：2026-08-11
 **状态**：目标合同（阶段 1 实施中）
-**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Agent Package Version 和原子提交
-**不在范围**：Operation 状态字段、Artifact 字节存储、多 Agent 调度
+**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Agent Package Version、Operation 身份和原子提交
+**不在范围**：Operation 状态内容、Artifact 字节存储、多 Agent 调度
 
 本文定义持久化事实和事务边界。实体名称遵循 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md)；旧 `SessionEntry`、`leaf_id` 和 `session_entries` 合同已被本文替代。
 
@@ -14,7 +14,8 @@
 ConversationSession
 ├── StorageCommit(sequence)
 ├── ConversationNode ──► ImmutableObject
-└── NamedReference ─────► ConversationNode | ImmutableObject
+├── NamedReference ─────► ConversationNode | ImmutableObject
+└── SessionOperation ───► AgentPackageVersion
 
 ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落库）
 ```
@@ -27,6 +28,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `ConversationNode` | 否 | Object 在会话树中的位置 |
 | `NamedReference` | 以追加新版本移动 | 指向 Node 或 Object 的具名指针 |
 | `ConversationEntry` | 不落库 | Node 与 Object 解析后的读取视图 |
+| `SessionOperation` | 否 | Session 接受的工作身份；状态内容见 Operation 恢复合同 |
 
 ## 2. 共享 sequence
 
@@ -119,6 +121,10 @@ NamedReference 的移动通过追加版本表达，不覆盖旧行。
 | `created_at` | TEXT | NOT NULL | UTC ISO8601 |
 
 Package Snapshot 直接从 Pickel 现有 `AppConfig / AgentConfig / ModelConfig / Skill / ToolBus` 解析；不引入第二套配置文件。相同内容重复插入幂等，ID 相同但内容不同必须失败。
+
+### 3.7 `session_operations`
+
+Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_sequence)` 关联接受它的 `StorageCommit`，以 `agent_package_version_id` 关联冻结的 Package。状态不覆盖此行，而是通过 `operation/<operation_id>/state` NamedReference 指向不可变 State；完整字段和转换约束见 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。
 
 ## 4. StorageTransaction
 
@@ -215,7 +221,7 @@ Context、Session Preview 与 OpenViking 都消费同一个活动分支读取接
 
 ## 9. Schema 策略
 
-阶段 1 基础 schema 为 v4；加入 `agent_package_versions` 后当前 schema 使用 `PRAGMA user_version = 5`。
+阶段 1 基础 schema 为 v4；加入 `agent_package_versions` 后为 v5；加入 `session_operations` 后当前 schema 使用 `PRAGMA user_version = 6`。
 
 - Runtime 不提供 v3/v4 双读或双写。
 - 当前预发布阶段默认使用新库。

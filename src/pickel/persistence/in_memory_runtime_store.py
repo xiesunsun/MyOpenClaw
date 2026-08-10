@@ -8,8 +8,14 @@ from datetime import datetime, timezone
 from threading import RLock
 from uuid import uuid4
 
+from pickel.agents.agent_package import (
+    AgentPackageVersion,
+    agent_package_digest,
+    agent_package_version_from_content,
+)
 from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.immutable_object import (
     ImmutableObject,
     immutable_object_digest,
@@ -23,11 +29,13 @@ from pickel.persistence.storage_transaction import (
 )
 
 
-class InMemoryConversationStore:
-    """用于非持久会话；不改变 Conversation 领域的读写语义。"""
+class InMemoryRuntimeStore:
+    """用于非持久 Runtime；与 SQLite 实现遵循相同领域合同。"""
 
     def __init__(self) -> None:
         self._sessions: dict[str, ConversationSession] = {}
+        self._agent_package_versions: dict[str, tuple[str, dict, datetime]] = {}
+        self._operations: dict[str, SessionOperation] = {}
         self._commits: dict[tuple[str, int], StorageCommit] = {}
         self._objects: dict[str, ImmutableObject] = {}
         self._nodes: dict[str, ConversationNode] = {}
@@ -150,6 +158,71 @@ class InMemoryConversationStore:
                 for key, value in self._references.items()
                 if key[0] != session_id
             }
+            self._operations = {
+                key: value
+                for key, value in self._operations.items()
+                if value.session_id != session_id
+            }
+
+    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
+        content = version.content_dict()
+        if agent_package_digest(content) != version.digest:
+            raise StorageIntegrityError(
+                f"AgentPackageVersion digest 校验失败: {version.package_version_id}"
+            )
+        copied = self._copy_content(content)
+        with self._lock:
+            existing = self._agent_package_versions.get(version.package_version_id)
+            if existing is not None:
+                if existing[0] == version.digest and existing[1] == copied:
+                    return
+                raise StorageIntegrityError(
+                    "AgentPackageVersion ID 已存在但内容不同: "
+                    f"{version.package_version_id}"
+                )
+            self._agent_package_versions[version.package_version_id] = (
+                version.digest,
+                copied,
+                version.created_at,
+            )
+
+    def load_agent_package_version(
+        self,
+        package_version_id: str,
+    ) -> AgentPackageVersion | None:
+        with self._lock:
+            stored = self._agent_package_versions.get(package_version_id)
+            if stored is None:
+                return None
+            digest, content, created_at = stored
+            return agent_package_version_from_content(
+                package_version_id=package_version_id,
+                digest=digest,
+                content=self._copy_content(content),
+                created_at=created_at,
+            )
+
+    def load_session_operation(
+        self,
+        operation_id: str,
+    ) -> SessionOperation | None:
+        with self._lock:
+            return self._operations.get(operation_id)
+
+    def list_session_operations(
+        self,
+        *,
+        session_id: str,
+    ) -> list[SessionOperation]:
+        with self._lock:
+            return sorted(
+                (
+                    operation
+                    for operation in self._operations.values()
+                    if operation.session_id == session_id
+                ),
+                key=lambda item: (item.accepted_sequence, item.operation_id),
+            )
 
     def begin_storage_transaction(
         self,
@@ -290,10 +363,22 @@ class InMemoryConversationStore:
                 )
                 for command in transaction.reference_moves
             ]
+            staged_operations = {
+                command.operation_id: SessionOperation(
+                    operation_id=command.operation_id,
+                    session_id=transaction.session_id,
+                    operation_type=command.operation_type,  # type: ignore[arg-type]
+                    agent_package_version_id=command.agent_package_version_id,
+                    accepted_sequence=sequence,
+                    created_at=committed_at,
+                )
+                for command in transaction.operation_creates
+            }
 
             self._commits[(transaction.session_id, sequence)] = commit
             self._objects.update(staged_objects)
             self._nodes.update(staged_nodes)
+            self._operations.update(staged_operations)
             for reference in staged_references:
                 self._references.setdefault(
                     (reference.session_id, reference.reference_name), []
@@ -310,6 +395,7 @@ class InMemoryConversationStore:
             transaction.object_inserts
             or transaction.node_appends
             or transaction.reference_moves
+            or transaction.operation_creates
         ):
             raise StorageIntegrityError("StorageTransaction 不能为空")
 
@@ -319,6 +405,11 @@ class InMemoryConversationStore:
             raise StorageIntegrityError("同一事务包含重复 object_id")
         if len(node_ids) != len(set(node_ids)):
             raise StorageIntegrityError("同一事务包含重复 node_id")
+        operation_ids = [
+            command.operation_id for command in transaction.operation_creates
+        ]
+        if len(operation_ids) != len(set(operation_ids)):
+            raise StorageIntegrityError("同一事务包含重复 operation_id")
         duplicate_object = next(
             (object_id for object_id in object_ids if object_id in self._objects),
             None,
@@ -331,6 +422,15 @@ class InMemoryConversationStore:
         )
         if duplicate_node is not None:
             raise StorageIntegrityError(f"ConversationNode 写入失败: {duplicate_node}")
+        for command in transaction.operation_creates:
+            if command.operation_id in self._operations:
+                raise StorageIntegrityError(
+                    f"SessionOperation 已存在: {command.operation_id}"
+                )
+            if command.agent_package_version_id not in self._agent_package_versions:
+                raise StorageIntegrityError(
+                    "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
+                )
 
         staged_object_ids = set(object_ids)
         staged_node_ids = set(node_ids)

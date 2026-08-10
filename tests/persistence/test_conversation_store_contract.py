@@ -6,18 +6,16 @@ from pathlib import Path
 import pytest
 
 from pickel.conversations.conversation_store import ConversationStore
-from pickel.persistence.in_memory_conversation_store import (
-    InMemoryConversationStore,
-)
-from pickel.persistence.sqlite_conversation_store import SQLiteConversationStore
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.persistence.storage_transaction import StorageConflictError
 
 
 @pytest.fixture(params=["memory", "sqlite"])
 def store(request, tmp_path: Path) -> ConversationStore:
     factories: dict[str, Callable[[], ConversationStore]] = {
-        "memory": InMemoryConversationStore,
-        "sqlite": lambda: SQLiteConversationStore(tmp_path / "conversation.db"),
+        "memory": InMemoryRuntimeStore,
+        "sqlite": lambda: SQLiteRuntimeStore(tmp_path / "conversation.db"),
     }
     result = factories[request.param]()
     result.create_conversation_session(

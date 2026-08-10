@@ -50,6 +50,13 @@ class _MoveReference:
     expected_current_sequence: int | None
 
 
+@dataclass(frozen=True)
+class _CreateSessionOperation:
+    operation_id: str
+    operation_type: str
+    agent_package_version_id: str
+
+
 class _StorageTransactionCommitter(Protocol):
     def _commit_storage_transaction(
         self,
@@ -75,6 +82,7 @@ class StorageTransaction:
         self.object_inserts: list[_InsertObject] = []
         self.node_appends: list[_AppendNode] = []
         self.reference_moves: list[_MoveReference] = []
+        self.operation_creates: list[_CreateSessionOperation] = []
         self._committed = False
 
     def insert_immutable_object(
@@ -144,6 +152,29 @@ class StorageTransaction:
                 target_kind=target_kind,
                 target_id=target_id,
                 expected_current_sequence=expected_current_sequence,
+            )
+        )
+
+    def create_session_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_type: str,
+        agent_package_version_id: str,
+    ) -> None:
+        """把 Operation 身份加入本次接受事务。"""
+        self._ensure_open()
+        if not operation_id:
+            raise ValueError("operation_id 不能为空")
+        if operation_type != "agent_run":
+            raise ValueError(f"不支持的 operation_type: {operation_type}")
+        if not agent_package_version_id:
+            raise ValueError("agent_package_version_id 不能为空")
+        self.operation_creates.append(
+            _CreateSessionOperation(
+                operation_id=operation_id,
+                operation_type=operation_type,
+                agent_package_version_id=agent_package_version_id,
             )
         )
 

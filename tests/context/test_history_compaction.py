@@ -12,12 +12,12 @@ from pickel.context.projection import ConversationProjector
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.conversation_service import ConversationService
-from pickel.persistence.sqlite_conversation_store import SQLiteConversationStore
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 
 
 def _conversation(tmp_path: Path) -> tuple[ConversationService, str]:
     service = ConversationService(
-        SQLiteConversationStore(tmp_path / "conversations.db"),
+        SQLiteRuntimeStore(tmp_path / "conversations.db"),
         session_id_factory=lambda: "session-1",
     )
     session = service.create_conversation_session(agent_id="Pickle")

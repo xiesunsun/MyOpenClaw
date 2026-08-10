@@ -16,6 +16,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.immutable_object import (
     ImmutableObject,
     immutable_object_digest,
@@ -28,15 +29,15 @@ from pickel.persistence.storage_transaction import (
     StorageTransaction,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
     pass
 
 
-class SQLiteConversationStore:
-    """Conversation 持久化事实的 SQLite 实现。"""
+class SQLiteRuntimeStore:
+    """Runtime 持久化窄接口的 SQLite 组合实现。"""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
@@ -153,6 +154,38 @@ class SQLiteConversationStore:
             )
         except (TypeError, ValueError, KeyError) as exc:
             raise StorageIntegrityError(str(exc)) from exc
+
+    def load_session_operation(
+        self,
+        operation_id: str,
+    ) -> SessionOperation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_operations
+                WHERE operation_id = ?
+                """,
+                (operation_id,),
+            ).fetchone()
+        return self._operation_from_row(row) if row is not None else None
+
+    def list_session_operations(
+        self,
+        *,
+        session_id: str,
+    ) -> list[SessionOperation]:
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM session_operations
+                WHERE session_id = ?
+                ORDER BY accepted_sequence ASC, operation_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._operation_from_row(row) for row in rows]
 
     def load_conversation_session(
         self,
@@ -377,6 +410,12 @@ class SQLiteConversationStore:
             )
             self._insert_objects(connection, transaction, sequence, committed_at)
             self._insert_nodes(connection, transaction, sequence, committed_at)
+            self._insert_operations(
+                connection,
+                transaction,
+                sequence,
+                committed_at,
+            )
             self._insert_references(connection, transaction, sequence)
             connection.execute(
                 """
@@ -402,6 +441,7 @@ class SQLiteConversationStore:
             transaction.object_inserts
             or transaction.node_appends
             or transaction.reference_moves
+            or transaction.operation_creates
         ):
             raise StorageIntegrityError("StorageTransaction 不能为空")
         staged_object_ids = [
@@ -412,6 +452,31 @@ class SQLiteConversationStore:
             raise StorageIntegrityError("同一事务包含重复 object_id")
         if len(staged_node_ids) != len(set(staged_node_ids)):
             raise StorageIntegrityError("同一事务包含重复 node_id")
+        staged_operation_ids = [
+            command.operation_id for command in transaction.operation_creates
+        ]
+        if len(staged_operation_ids) != len(set(staged_operation_ids)):
+            raise StorageIntegrityError("同一事务包含重复 operation_id")
+        for command in transaction.operation_creates:
+            existing = connection.execute(
+                "SELECT 1 FROM session_operations WHERE operation_id = ?",
+                (command.operation_id,),
+            ).fetchone()
+            if existing is not None:
+                raise StorageIntegrityError(
+                    f"SessionOperation 已存在: {command.operation_id}"
+                )
+            package = connection.execute(
+                """
+                SELECT 1 FROM agent_package_versions
+                WHERE package_version_id = ?
+                """,
+                (command.agent_package_version_id,),
+            ).fetchone()
+            if package is None:
+                raise StorageIntegrityError(
+                    "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
+                )
 
         for command in transaction.node_appends:
             if command.object_id not in staged_object_ids and not self._object_exists(
@@ -587,6 +652,31 @@ class SQLiteConversationStore:
             )
 
     @staticmethod
+    def _insert_operations(
+        connection: sqlite3.Connection,
+        transaction: StorageTransaction,
+        sequence: int,
+        created_at: datetime,
+    ) -> None:
+        for command in transaction.operation_creates:
+            connection.execute(
+                """
+                INSERT INTO session_operations (
+                    operation_id, session_id, operation_type,
+                    agent_package_version_id, accepted_sequence, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    command.operation_id,
+                    transaction.session_id,
+                    command.operation_type,
+                    command.agent_package_version_id,
+                    sequence,
+                    created_at.isoformat(),
+                ),
+            )
+
+    @staticmethod
     def _find_reference_row(
         connection: sqlite3.Connection,
         *,
@@ -650,7 +740,7 @@ class SQLiteConversationStore:
     @staticmethod
     def _schema_sql() -> str:
         return """
-            PRAGMA user_version = 5;
+            PRAGMA user_version = 6;
 
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
@@ -673,6 +763,23 @@ class SQLiteConversationStore:
 
             CREATE INDEX idx_agent_package_versions_agent
             ON agent_package_versions(agent_id, created_at DESC);
+
+            CREATE TABLE session_operations (
+                operation_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL CHECK(operation_type IN ('agent_run')),
+                agent_package_version_id TEXT NOT NULL,
+                accepted_sequence INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id, accepted_sequence)
+                    REFERENCES storage_commits(session_id, sequence)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (agent_package_version_id)
+                    REFERENCES agent_package_versions(package_version_id)
+            );
+
+            CREATE INDEX idx_session_operations_session_sequence
+            ON session_operations(session_id, accepted_sequence);
 
             CREATE TABLE storage_commits (
                 session_id TEXT NOT NULL,
@@ -792,6 +899,17 @@ class SQLiteConversationStore:
             content=content,
             created_session_id=str(row["created_session_id"]),
             created_sequence=int(row["created_sequence"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+        )
+
+    @staticmethod
+    def _operation_from_row(row: sqlite3.Row) -> SessionOperation:
+        return SessionOperation(
+            operation_id=str(row["operation_id"]),
+            session_id=str(row["session_id"]),
+            operation_type=str(row["operation_type"]),  # type: ignore[arg-type]
+            agent_package_version_id=str(row["agent_package_version_id"]),
+            accepted_sequence=int(row["accepted_sequence"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
         )
 

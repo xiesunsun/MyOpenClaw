@@ -6,7 +6,7 @@ from pathlib import Path
 from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
-from pickel.persistence.sqlite_conversation_store import SQLiteConversationStore
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
@@ -164,7 +164,7 @@ def test_agent_package_version_round_trips_through_sqlite(tmp_path: Path) -> Non
         .build_loaded_agent_package()
         .version
     )
-    store = SQLiteConversationStore(tmp_path / "packages.db")
+    store = SQLiteRuntimeStore(tmp_path / "packages.db")
 
     store.insert_agent_package_version(version)
     store.insert_agent_package_version(version)

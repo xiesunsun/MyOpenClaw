@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from pickel.persistence.sqlite_conversation_store import (
-    SQLiteConversationStore,
+from pickel.persistence.sqlite_runtime_store import (
+    SQLiteRuntimeStore,
     UnsupportedStorageSchemaError,
 )
 from pickel.persistence.storage_transaction import (
@@ -16,8 +16,8 @@ from pickel.persistence.storage_transaction import (
 )
 
 
-def _store(tmp_path: Path) -> SQLiteConversationStore:
-    store = SQLiteConversationStore(tmp_path / "conversations.db")
+def _store(tmp_path: Path) -> SQLiteRuntimeStore:
+    store = SQLiteRuntimeStore(tmp_path / "conversations.db")
     store.create_conversation_session(
         session_id="session-1",
         agent_id="Pickle",
@@ -27,7 +27,7 @@ def _store(tmp_path: Path) -> SQLiteConversationStore:
 
 
 def _append_text(
-    store: SQLiteConversationStore,
+    store: SQLiteRuntimeStore,
     *,
     text: str,
     parent_node_id: str | None,
@@ -257,8 +257,8 @@ def test_schema_version_mismatch_fails_without_modifying_database(
         connection.execute("PRAGMA user_version = 3")
         connection.execute("CREATE TABLE legacy (id TEXT)")
 
-    store = SQLiteConversationStore(db_path)
-    with pytest.raises(UnsupportedStorageSchemaError, match="需要 5"):
+    store = SQLiteRuntimeStore(db_path)
+    with pytest.raises(UnsupportedStorageSchemaError, match="需要 6"):
         store.load_current_sequence("session-1")
 
     with sqlite3.connect(db_path) as connection:

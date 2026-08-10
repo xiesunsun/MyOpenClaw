@@ -15,12 +15,12 @@ from pickel.conversations.conversation_service import (
     ConversationNotFoundError,
     ConversationService,
 )
-from pickel.persistence.sqlite_conversation_store import SQLiteConversationStore
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 
 
 def _service(tmp_path: Path) -> ConversationService:
     return ConversationService(
-        SQLiteConversationStore(tmp_path / "conversations.db"),
+        SQLiteRuntimeStore(tmp_path / "conversations.db"),
         session_id_factory=lambda: "session-1",
         now=lambda: datetime(2026, 8, 11, tzinfo=timezone.utc),
     )
