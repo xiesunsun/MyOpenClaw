@@ -122,3 +122,69 @@ def test_terminal_agent_run_cannot_restart() -> None:
 
     with pytest.raises(StorageIntegrityError, match="状态转换"):
         machine.validate_agent_run_transition(current=current, next_state=restarted)
+
+
+def test_state_machine_drives_tool_call_through_persisted_intent() -> None:
+    machine = OperationStateMachine()
+    state = _state(revision=1, status="queued")
+
+    assert machine.decide_next_action(state).action == "start_model_step"
+    state = machine.start_model_step(state, step_id="step-1")
+    assert machine.decide_next_action(state).action == "record_model_request_intent"
+    state = machine.record_model_request_intent(state)
+    assert machine.decide_next_action(state).action == "execute_model_request"
+    state = machine.record_model_request_completed(
+        state,
+        assistant_message_node_id="assistant-node",
+    )
+    state = machine.prepare_tool_calls(
+        state,
+        tool_calls=(
+            ToolCallState(
+                tool_call_id="tool-1",
+                tool_name="echo",
+                arguments={"text": "hello"},
+                execution_state="ready",
+            ),
+        ),
+    )
+    decision = machine.decide_next_action(state)
+    assert decision.action == "record_tool_call_intent"
+    assert decision.tool_call_id == "tool-1"
+
+    state = machine.record_tool_call_intent(state, tool_call_id="tool-1")
+    assert machine.decide_next_action(state).action == "execute_tool_call"
+    state = machine.record_tool_call_completed(
+        state,
+        tool_call_id="tool-1",
+        result_message_node_id="result-node",
+        is_error=False,
+    )
+    state = machine.complete_model_step(state)
+    state = machine.finish_agent_run(
+        state,
+        final_assistant_node_id="assistant-node",
+    )
+
+    assert state.status == "succeeded"
+    assert state.current_step is None
+    assert state.completed_step_ids == ("step-1",)
+    assert machine.decide_next_action(state).action == "done"
+
+
+def test_prepare_no_tools_completes_model_step() -> None:
+    machine = OperationStateMachine()
+    state = _state(
+        revision=3,
+        step=_step("model_request_intent_recorded"),
+    )
+    state = machine.record_model_request_completed(
+        state,
+        assistant_message_node_id="assistant-node",
+    )
+
+    state = machine.prepare_tool_calls(state, tool_calls=())
+
+    assert state.current_step is not None
+    assert state.current_step.phase == "completed"
+    assert machine.decide_next_action(state).action == "finish_agent_run"

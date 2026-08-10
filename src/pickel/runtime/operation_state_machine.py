@@ -2,12 +2,34 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
+from typing import Literal
+
 from pickel.operations.agent_run_state import (
     AgentRunState,
     ModelStepState,
     ToolCallState,
 )
 from pickel.persistence.storage_transaction import StorageIntegrityError
+
+OperationAction = Literal[
+    "start_model_step",
+    "record_model_request_intent",
+    "execute_model_request",
+    "prepare_tool_calls",
+    "complete_model_step",
+    "record_tool_call_intent",
+    "execute_tool_call",
+    "finish_agent_run",
+    "pause",
+    "done",
+]
+
+
+@dataclass(frozen=True)
+class OperationDecision:
+    action: OperationAction
+    tool_call_id: str | None = None
 
 
 class OperationStateMachine:
@@ -45,6 +67,191 @@ class OperationStateMachine:
         "completed": {"completed"},
     }
 
+    def decide_next_action(self, state: AgentRunState) -> OperationDecision:
+        """只根据已持久化状态决定下一动作，不执行副作用。"""
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            return OperationDecision("done")
+        if state.status == "waiting":
+            return OperationDecision("pause")
+        step = state.current_step
+        if step is None:
+            return OperationDecision("start_model_step")
+        if step.phase in {"model_request_ready", "model_request_retry_scheduled"}:
+            return OperationDecision("record_model_request_intent")
+        if step.phase == "model_request_intent_recorded":
+            return OperationDecision("execute_model_request")
+        if step.phase == "model_request_completed":
+            return OperationDecision("prepare_tool_calls")
+        if step.phase in {"tool_calls_ready", "tool_calls_running"}:
+            for tool_call in step.tool_calls:
+                if tool_call.execution_state == "intent_recorded":
+                    return OperationDecision(
+                        "execute_tool_call",
+                        tool_call_id=tool_call.tool_call_id,
+                    )
+                if tool_call.execution_state == "ready":
+                    return OperationDecision(
+                        "record_tool_call_intent",
+                        tool_call_id=tool_call.tool_call_id,
+                    )
+            return OperationDecision("complete_model_step")
+        if step.phase == "completed":
+            return OperationDecision("finish_agent_run")
+        raise StorageIntegrityError(f"无法决定 AgentRun 下一动作: {step.phase}")
+
+    def start_model_step(
+        self,
+        state: AgentRunState,
+        *,
+        step_id: str,
+    ) -> AgentRunState:
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="running",
+            current_step=ModelStepState(
+                step_id=step_id,
+                step_sequence=len(state.completed_step_ids) + 1,
+                phase="model_request_ready",
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def record_model_request_intent(self, state: AgentRunState) -> AgentRunState:
+        step = self._require_step(
+            state,
+            phase=("model_request_ready", "model_request_retry_scheduled"),
+        )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(step, phase="model_request_intent_recorded"),
+        )
+        return self._validated(state, next_state)
+
+    def record_model_request_completed(
+        self,
+        state: AgentRunState,
+        *,
+        assistant_message_node_id: str,
+    ) -> AgentRunState:
+        step = self._require_step(state, phase="model_request_intent_recorded")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(
+                step,
+                phase="model_request_completed",
+                assistant_message_node_id=assistant_message_node_id,
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def prepare_tool_calls(
+        self,
+        state: AgentRunState,
+        *,
+        tool_calls: tuple[ToolCallState, ...],
+    ) -> AgentRunState:
+        step = self._require_step(state, phase="model_request_completed")
+        if any(call.execution_state != "ready" for call in tool_calls):
+            raise StorageIntegrityError("新 ToolCallState 必须从 ready 开始")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(
+                step,
+                phase="tool_calls_ready" if tool_calls else "completed",
+                tool_calls=tool_calls,
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def record_tool_call_intent(
+        self,
+        state: AgentRunState,
+        *,
+        tool_call_id: str,
+    ) -> AgentRunState:
+        step = self._require_step(
+            state,
+            phase=("tool_calls_ready", "tool_calls_running"),
+        )
+        tool_calls = self._replace_tool_call(
+            step,
+            tool_call_id=tool_call_id,
+            expected_execution_state="ready",
+            replacement=lambda call: replace(call, execution_state="intent_recorded"),
+        )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(
+                step,
+                phase="tool_calls_running",
+                tool_calls=tool_calls,
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def record_tool_call_completed(
+        self,
+        state: AgentRunState,
+        *,
+        tool_call_id: str,
+        result_message_node_id: str,
+        is_error: bool,
+    ) -> AgentRunState:
+        step = self._require_step(state, phase="tool_calls_running")
+        tool_calls = self._replace_tool_call(
+            step,
+            tool_call_id=tool_call_id,
+            expected_execution_state="intent_recorded",
+            replacement=lambda call: replace(
+                call,
+                execution_state="completed",
+                result_message_node_id=result_message_node_id,
+                is_error=is_error,
+            ),
+        )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(step, tool_calls=tool_calls),
+        )
+        return self._validated(state, next_state)
+
+    def complete_model_step(self, state: AgentRunState) -> AgentRunState:
+        step = self._require_step(
+            state,
+            phase=("tool_calls_ready", "tool_calls_running"),
+        )
+        if any(call.execution_state != "completed" for call in step.tool_calls):
+            raise StorageIntegrityError("存在未完成 ToolCall，不能完成 ModelStep")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(step, phase="completed"),
+        )
+        return self._validated(state, next_state)
+
+    def finish_agent_run(
+        self,
+        state: AgentRunState,
+        *,
+        final_assistant_node_id: str,
+    ) -> AgentRunState:
+        step = self._require_step(state, phase="completed")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="succeeded",
+            current_step=None,
+            completed_step_ids=(*state.completed_step_ids, step.step_id),
+            final_assistant_node_id=final_assistant_node_id,
+        )
+        return self._validated(state, next_state)
+
     def create_initial_agent_run_state(
         self,
         *,
@@ -75,6 +282,55 @@ class OperationStateMachine:
             )
         self._validate_completed_steps(current=current, next_state=next_state)
         self._validate_current_step(current=current, next_state=next_state)
+
+    def _validated(
+        self,
+        current: AgentRunState,
+        next_state: AgentRunState,
+    ) -> AgentRunState:
+        self.validate_agent_run_transition(current=current, next_state=next_state)
+        return next_state
+
+    @staticmethod
+    def _require_step(
+        state: AgentRunState,
+        *,
+        phase: str | tuple[str, ...],
+    ) -> ModelStepState:
+        step = state.current_step
+        phases = (phase,) if isinstance(phase, str) else phase
+        if step is None or step.phase not in phases:
+            actual = step.phase if step is not None else "none"
+            raise StorageIntegrityError(
+                f"当前 ModelStep.phase 不符合转换要求: {actual}, expected={phases}"
+            )
+        return step
+
+    @staticmethod
+    def _replace_tool_call(
+        step: ModelStepState,
+        *,
+        tool_call_id: str,
+        expected_execution_state: str,
+        replacement,
+    ) -> tuple[ToolCallState, ...]:
+        found = False
+        tool_calls = []
+        for call in step.tool_calls:
+            if call.tool_call_id != tool_call_id:
+                tool_calls.append(call)
+                continue
+            found = True
+            if call.execution_state != expected_execution_state:
+                raise StorageIntegrityError(
+                    "ToolCallState 不符合转换要求: "
+                    f"{tool_call_id}={call.execution_state}, "
+                    f"expected={expected_execution_state}"
+                )
+            tool_calls.append(replacement(call))
+        if not found:
+            raise StorageIntegrityError(f"ToolCallState 不存在: {tool_call_id}")
+        return tuple(tool_calls)
 
     @staticmethod
     def _validate_identity_and_revision(
