@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pickel.persistence.conversation_node import ConversationEntry, ConversationNode
+from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
+from pickel.conversations.conversation_session import ConversationSession
 from pickel.persistence.immutable_object import (
     ImmutableObject,
     immutable_object_digest,
@@ -71,6 +72,40 @@ class SQLiteConversationStore:
         if row is None:
             raise LookupError(f"ConversationSession 不存在: {session_id}")
         return int(row["current_sequence"])
+
+    def load_conversation_session(
+        self,
+        session_id: str,
+    ) -> ConversationSession | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            reference_row = self._find_reference_row(
+                connection,
+                session_id=session_id,
+                reference_name="conversation/active",
+            )
+        active_node_id = None
+        if reference_row is not None:
+            if str(reference_row["target_kind"]) != "node":
+                raise StorageIntegrityError("conversation/active 必须指向 node")
+            active_node_id = str(reference_row["target_id"])
+        return ConversationSession(
+            session_id=str(row["session_id"]),
+            agent_id=str(row["agent_id"]),
+            cwd=str(row["cwd"]),
+            current_sequence=int(row["current_sequence"]),
+            active_node_id=active_node_id,
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            status=str(row["status"]),
+            title=str(row["title"]) if row["title"] is not None else None,
+        )
 
     def begin_storage_transaction(
         self,

@@ -82,6 +82,10 @@ def test_transaction_commits_object_node_reference_with_shared_sequence(
     assert reference is not None
     assert reference.sequence == 1
     assert reference.target_id == node_id
+    session = store.load_conversation_session("session-1")
+    assert session is not None
+    assert session.current_sequence == 1
+    assert session.active_node_id == node_id
 
 
 def test_active_branch_follows_reference_and_parent_chain(tmp_path: Path) -> None:
