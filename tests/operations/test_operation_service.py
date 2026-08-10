@@ -103,6 +103,56 @@ def _service(store: OperationStore) -> OperationService:
     )
 
 
+def _commit_model_response(
+    service: OperationService,
+    *,
+    accepted,
+    assistant_node_id: str = "assistant-node",
+) -> AgentRunState:
+    ready = AgentRunState(
+        operation_id=accepted.operation.operation_id,
+        revision=2,
+        status="running",
+        user_message_node_id=accepted.state.user_message_node_id,
+        current_step=ModelStepState(
+            step_id="step-1",
+            step_sequence=1,
+            phase="model_request_ready",
+        ),
+    )
+    service.commit_agent_run_state(state=ready)
+    intent_recorded = AgentRunState(
+        operation_id=ready.operation_id,
+        revision=3,
+        status="running",
+        user_message_node_id=ready.user_message_node_id,
+        current_step=ModelStepState(
+            step_id="step-1",
+            step_sequence=1,
+            phase="model_request_intent_recorded",
+        ),
+    )
+    service.commit_agent_run_state(state=intent_recorded)
+    completed = AgentRunState(
+        operation_id=ready.operation_id,
+        revision=4,
+        status="running",
+        user_message_node_id=ready.user_message_node_id,
+        current_step=ModelStepState(
+            step_id="step-1",
+            step_sequence=1,
+            phase="model_request_completed",
+            assistant_message_node_id=assistant_node_id,
+        ),
+    )
+    service.commit_agent_run_state(
+        state=completed,
+        appended_message=AssistantMessage(content=[TextContent(text="working")]),
+        appended_message_node_id=assistant_node_id,
+    )
+    return completed
+
+
 def test_accept_agent_run_is_one_atomic_commit(store: OperationStore) -> None:
     package = _package()
     accepted = _service(store).accept_agent_run(
@@ -190,24 +240,8 @@ def test_commit_message_and_state_share_commit_sequence(
         agent_package_version_id=_package().package_version_id,
         user_message=UserMessage(content=[TextContent(text="hello")]),
     )
-    next_state = AgentRunState(
-        operation_id=accepted.operation.operation_id,
-        revision=2,
-        status="running",
-        user_message_node_id=accepted.state.user_message_node_id,
-        current_step=ModelStepState(
-            step_id="step-1",
-            step_sequence=1,
-            phase="model_request_completed",
-            assistant_message_node_id="assistant-node",
-        ),
-    )
-
-    committed = service.commit_agent_run_state(
-        state=next_state,
-        appended_message=AssistantMessage(content=[TextContent(text="working")]),
-        appended_message_node_id="assistant-node",
-    )
+    next_state = _commit_model_response(service, accepted=accepted)
+    committed = service.load_agent_run_state(accepted.operation.operation_id)
 
     conversation_reference = store.find_named_reference(
         session_id="session-1",
@@ -217,12 +251,10 @@ def test_commit_message_and_state_share_commit_sequence(
         session_id="session-1",
         reference_name=operation_state_reference_name("operation-1"),
     )
-    assert committed.state == next_state
-    assert committed.appended_message_entry is not None
-    assert committed.appended_message_entry.node.sequence == 2
+    assert committed == next_state
     assert conversation_reference is not None
     assert state_reference is not None
-    assert conversation_reference.sequence == state_reference.sequence == 2
+    assert conversation_reference.sequence == state_reference.sequence == 4
 
 
 def test_recovery_preserves_unknown_tool_effect_without_replaying(
@@ -234,26 +266,31 @@ def test_recovery_preserves_unknown_tool_effect_without_replaying(
         agent_package_version_id=_package().package_version_id,
         user_message=UserMessage(content=[TextContent(text="hello")]),
     )
-    running = AgentRunState(
+    _commit_model_response(service, accepted=accepted)
+    tools_ready = AgentRunState(
         operation_id="operation-1",
-        revision=2,
+        revision=5,
         status="running",
         user_message_node_id=accepted.state.user_message_node_id,
         current_step=ModelStepState(
             step_id="step-1",
             step_sequence=1,
-            phase="model_request_completed",
+            phase="tool_calls_ready",
             assistant_message_node_id="assistant-node",
+            tool_calls=(
+                ToolCallState(
+                    tool_call_id="tool-1",
+                    tool_name="external_action",
+                    arguments={"target": "outside"},
+                    execution_state="ready",
+                ),
+            ),
         ),
     )
-    service.commit_agent_run_state(
-        state=running,
-        appended_message=AssistantMessage(content=[TextContent(text="calling tool")]),
-        appended_message_node_id="assistant-node",
-    )
+    service.commit_agent_run_state(state=tools_ready)
     waiting = AgentRunState(
         operation_id="operation-1",
-        revision=3,
+        revision=6,
         status="waiting",
         user_message_node_id=accepted.state.user_message_node_id,
         current_step=ModelStepState(

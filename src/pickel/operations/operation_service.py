@@ -21,6 +21,7 @@ from pickel.operations.agent_run_state import (
 from pickel.operations.operation_store import OperationStore
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.storage_transaction import StorageIntegrityError
+from pickel.runtime.operation_state_machine import OperationStateMachine
 
 ACTIVE_CONVERSATION_REFERENCE = "conversation/active"
 OPERATION_STATE_OBJECT_TYPE = "session_operation_state"
@@ -52,10 +53,12 @@ class OperationService:
         *,
         operation_id_factory: Callable[[], str] | None = None,
         node_id_factory: Callable[[], str] | None = None,
+        state_machine: OperationStateMachine | None = None,
     ) -> None:
         self._store = store
         self._operation_id_factory = operation_id_factory or (lambda: str(uuid4()))
         self._node_id_factory = node_id_factory or (lambda: str(uuid4()))
+        self._state_machine = state_machine or OperationStateMachine()
 
     def accept_agent_run(
         self,
@@ -113,10 +116,8 @@ class OperationService:
                 active_reference.sequence if active_reference is not None else None
             ),
         )
-        initial_state = AgentRunState(
+        initial_state = self._state_machine.create_initial_agent_run_state(
             operation_id=operation_id,
-            revision=1,
-            status="queued",
             user_message_node_id=user_message_node_id,
         )
         state_object_id = transaction.insert_immutable_object(
@@ -203,7 +204,10 @@ class OperationService:
     ) -> AgentRunProgressCommit:
         operation = self.load_session_operation(state.operation_id)
         current_state = self.load_agent_run_state(state.operation_id)
-        self._validate_next_state(current=current_state, next_state=state)
+        self._state_machine.validate_agent_run_transition(
+            current=current_state,
+            next_state=state,
+        )
         if (appended_message is None) != (appended_message_node_id is None):
             raise ValueError(
                 "appended_message 与 appended_message_node_id 必须同时提供"
@@ -283,41 +287,6 @@ class OperationService:
             state=self.load_agent_run_state(operation.operation_id),
             appended_message_entry=appended_entry,
         )
-
-    @staticmethod
-    def _validate_next_state(
-        *,
-        current: AgentRunState,
-        next_state: AgentRunState,
-    ) -> None:
-        if next_state.operation_id != current.operation_id:
-            raise StorageIntegrityError("AgentRunState.operation_id 不能改变")
-        if next_state.user_message_node_id != current.user_message_node_id:
-            raise StorageIntegrityError("AgentRunState.user_message_node_id 不能改变")
-        if next_state.revision != current.revision + 1:
-            raise StorageIntegrityError(
-                "AgentRunState.revision 必须连续递增: "
-                f"expected={current.revision + 1}, actual={next_state.revision}"
-            )
-        allowed = {
-            "queued": {"running", "failed", "cancelled"},
-            "running": {
-                "running",
-                "waiting",
-                "succeeded",
-                "failed",
-                "cancelled",
-            },
-            "waiting": {"running", "failed", "cancelled"},
-            "succeeded": set(),
-            "failed": set(),
-            "cancelled": set(),
-        }
-        if next_state.status not in allowed[current.status]:
-            raise StorageIntegrityError(
-                "非法 AgentRunState 状态转换: "
-                f"{current.status} -> {next_state.status}"
-            )
 
     def _find_active_entry(
         self,
