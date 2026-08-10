@@ -1,4 +1,4 @@
-"""prepare：阶段表组装 ModelContext。"""
+"""ModelContextBuilder：模型上下文的唯一构建路径。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ from pickel.agents.agent import Agent
 from pickel.agents.skills import SkillManifest, compose_system_instruction_parts
 from pickel.context.hook_feedback import HookFeedback
 from pickel.context.model_context import ModelContext
-from pickel.context.prepare import prepare, resolve_recalls
+from pickel.context.hook_feedback import append_hook_feedback
+from pickel.context.model_context_builder import (
+    ModelContextBuilder,
+    build_tool_definitions,
+)
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
@@ -19,7 +23,12 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
 from pickel.shared.model_config import ModelConfig
-from pickel.tools.base import BaseTool, ToolExecutionContext, ToolExecutionResult, ToolSpec
+from pickel.tools.base import (
+    BaseTool,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolSpec,
+)
 from pickel.tools.bus import ToolActivation, ToolBus, ToolSource, bus_with
 
 
@@ -67,7 +76,11 @@ def _snapshot(*tools):
     return bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
 
 
-def test_prepare_system_history_feedback_tools():
+def _build_model_context(**kwargs):
+    return ModelContextBuilder().build_model_context(**kwargs)
+
+
+def test_build_model_context_includes_system_history_feedback_and_tools():
     session = Session.create(agent_id="Pickle")
     session.append_user(UserMessage(content=[TextContent(text="old")]))
     session.append_assistant(AssistantMessage(content=[TextContent(text="old-a")]))
@@ -89,12 +102,12 @@ def test_prepare_system_history_feedback_tools():
     feedback = [HookFeedback(source_event="PostToolBatch", text="hook note")]
 
     ctx = asyncio.run(
-        prepare(
+        _build_model_context(
             run=run,
             session=session,
             hook_feedback=feedback,
             unit_window=2,
-            snapshot=_snapshot(),
+            tool_snapshot=_snapshot(),
         )
     )
 
@@ -106,9 +119,7 @@ def test_prepare_system_history_feedback_tools():
         if isinstance(message, UserMessage):
             texts.append(("user", message.content[0].text))
         elif isinstance(message, AssistantMessage):
-            tool_ids = [
-                b.id for b in message.content if isinstance(b, ToolCallContent)
-            ]
+            tool_ids = [b.id for b in message.content if isinstance(b, ToolCallContent)]
             texts.append(("assistant", tool_ids or message.content[0].text))
         elif isinstance(message, ToolResultMessage):
             texts.append(("tool", message.tool_call_id, message.content[0].text))
@@ -128,20 +139,20 @@ def _skill(name: str) -> "SkillManifest":
     )
 
 
-def test_prepare_system_sections_split_without_skills():
+def test_build_model_context_splits_system_sections_without_skills():
     """无 skills 时只有 behavior 一段。"""
     session = Session.create(agent_id="Pickle")
-    ctx = asyncio.run(prepare(run=_run(), session=session))
+    ctx = asyncio.run(_build_model_context(run=_run(), session=session))
 
     assert [s.name for s in ctx.system.sections] == ["behavior"]
 
 
-def test_prepare_system_sections_split_with_skills():
+def test_build_model_context_splits_system_sections_with_skills():
     """有 skills 时拆为 behavior / skills_guidance / skills_catalog 三段。"""
     session = Session.create(agent_id="Pickle")
     run = _run(agent=_agent(skills=[_skill("alpha"), _skill("beta")]))
 
-    ctx = asyncio.run(prepare(run=run, session=session))
+    ctx = asyncio.run(_build_model_context(run=run, session=session))
 
     assert [s.name for s in ctx.system.sections] == [
         "behavior",
@@ -153,48 +164,38 @@ def test_prepare_system_sections_split_with_skills():
     assert "beta" in ctx.system.sections[2].text
 
 
-def test_prepare_system_as_text_equals_full_instruction():
+def test_build_model_context_preserves_full_system_instruction():
     """分段后 provider 收到的 system 文本逐字节不变。"""
     session = Session.create(agent_id="Pickle")
 
     for skills in ([], [_skill("alpha")], [_skill("alpha"), _skill("beta")]):
         for behavior in ("You are Pickle.", ""):
             agent = _agent(behavior_instruction=behavior, skills=skills)
-            expected = compose_system_instruction_parts(behavior, skills).full_instruction
+            expected = compose_system_instruction_parts(
+                behavior, skills
+            ).full_instruction
 
-            ctx = asyncio.run(prepare(run=_run(agent=agent), session=session))
+            ctx = asyncio.run(
+                _build_model_context(run=_run(agent=agent), session=session)
+            )
 
             assert ctx.system.as_text() == expected
 
 
-def test_prepare_system_sections_skip_empty_behavior():
+def test_build_model_context_skips_empty_behavior_section():
     """behavior 为空时不产生空 section。"""
     session = Session.create(agent_id="Pickle")
     run = _run(agent=_agent(behavior_instruction="", skills=[_skill("alpha")]))
 
-    ctx = asyncio.run(prepare(run=run, session=session))
+    ctx = asyncio.run(_build_model_context(run=run, session=session))
 
-    assert [s.name for s in ctx.system.sections] == ["skills_guidance", "skills_catalog"]
-
-
-def test_resolve_recalls_empty_is_noop():
-    messages = [UserMessage(content=[TextContent(text="hi")])]
-    run = _run()
-    session = Session.create(agent_id="Pickle")
-    assert (
-        asyncio.run(
-            resolve_recalls(
-                messages=messages,
-                run=run,
-                session=session,
-                recall_sources=[],
-            )
-        )
-        == messages
-    )
+    assert [s.name for s in ctx.system.sections] == [
+        "skills_guidance",
+        "skills_catalog",
+    ]
 
 
-def test_prepare_with_recall_source_appends_messages():
+def test_build_model_context_appends_recall_messages():
     session = Session.create(agent_id="Pickle")
     session.append_user(UserMessage(content=[TextContent(text="hello")]))
 
@@ -203,7 +204,7 @@ def test_prepare_with_recall_source_appends_messages():
             return [UserMessage(content=[TextContent(text="recalled")])]
 
     ctx = asyncio.run(
-        prepare(
+        _build_model_context(
             run=_run(),
             session=session,
             recall_sources=[_FakeRecall()],
@@ -215,7 +216,7 @@ def test_prepare_with_recall_source_appends_messages():
     ]
 
 
-def test_prepare_recall_receives_current_user_text_from_session():
+def test_build_model_context_passes_current_user_text_to_recall():
     session = Session.create(agent_id="Pickle")
     session.append_user(UserMessage(content=[TextContent(text="query-me")]))
     seen: list[str] = []
@@ -226,7 +227,7 @@ def test_prepare_recall_receives_current_user_text_from_session():
             return []
 
     asyncio.run(
-        prepare(
+        _build_model_context(
             run=_run(),
             session=session,
             recall_sources=[_CaptureRecall()],
@@ -236,25 +237,21 @@ def test_prepare_recall_receives_current_user_text_from_session():
 
 
 def test_resolve_tools_uses_entry_name_over_spec_name():
-    from pickel.context.prepare import resolve_tools
-
     bus = ToolBus()
     bus.register(_EchoTool(), source=ToolSource.MCP, origin="github")
     snapshot = bus.snapshot(ToolActivation(allowed=frozenset({"mcp__github__echo"})))
 
-    definitions = resolve_tools(snapshot=snapshot)
+    definitions = build_tool_definitions(tool_snapshot=snapshot)
 
     assert [d.name for d in definitions] == ["mcp__github__echo"]
     assert definitions[0].description == "Echo text"
 
 
 def test_resolve_tools_returns_empty_for_missing_snapshot():
-    from pickel.context.prepare import resolve_tools
-
-    assert resolve_tools(snapshot=None) == []
+    assert build_tool_definitions(tool_snapshot=None) == []
 
 
-def test_failing_recall_source_does_not_break_the_turn():
+def test_failing_recall_source_does_not_break_model_context_build():
     class _BoomRecall:
         async def provide(self, *, run, session, current_user_text=""):
             raise RuntimeError("recall exploded")
@@ -266,9 +263,8 @@ def test_failing_recall_source_does_not_break_the_turn():
     session = Session.create(agent_id="Pickle")
     session.append_user(UserMessage(content=[TextContent(text="hi")]))
 
-    messages = asyncio.run(
-        resolve_recalls(
-            messages=[],
+    context = asyncio.run(
+        _build_model_context(
             run=_run(),
             session=session,
             recall_sources=[_BoomRecall(), _HealthyRecall()],
@@ -276,5 +272,20 @@ def test_failing_recall_source_does_not_break_the_turn():
     )
 
     # 坏的被跳过，好的仍然生效
-    assert len(messages) == 1
-    assert messages[0].content[0].text == "recalled"
+    assert [
+        message.content[0].text
+        for message in context.messages
+        if isinstance(message, UserMessage)
+    ] == ["hi", "recalled"]
+
+
+def test_append_hook_feedback_empty_is_noop():
+    messages = [UserMessage(content=[TextContent(text="hi")])]
+    assert append_hook_feedback(messages, []) == messages
+    assert (
+        append_hook_feedback(
+            messages,
+            [HookFeedback(source_event="x", text="")],
+        )
+        == messages
+    )

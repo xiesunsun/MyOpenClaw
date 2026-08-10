@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
     AssistantMessage,
@@ -130,7 +130,7 @@ def _run(
         provider=provider,
         tool_bus=bus,
         activation=ToolActivation(allowed=frozenset(bus.list_names())),
-        context_assembler=ContextAssembler(),
+        model_context_builder=ModelContextBuilder(),
         lifecycle_hooks=NoopLifecycleHooks(),
         session_service=None,
         file_access_policy=None,

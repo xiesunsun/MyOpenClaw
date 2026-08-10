@@ -1,6 +1,6 @@
 """Recall：窄召回源协议。
 
-prepare 的 resolve_recalls 对 recall_sources 逐源 await provide，
+ModelContextBuilder 对 recall_sources 逐源 await provide，
 将返回的消息拼入 history 之后、hook feedback 之前。
 OpenViking session recall 经 adapter 实现本协议。
 """

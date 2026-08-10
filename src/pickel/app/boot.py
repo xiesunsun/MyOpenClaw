@@ -5,7 +5,7 @@ from pickel.agents.behavior_loader import BehaviorLoader
 from pickel.agents.skills import SkillRegistry
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import home_dir, sessions_db_path
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.service import SessionService
 from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
@@ -82,7 +82,7 @@ class Boot:
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
         file_access_mode = self.app_config.resolve_file_access_mode(resolved_agent_id)
         skills_path = self._resolve_agent_skills_path(resolved_agent_id)
-        # 初始列表；prepare 在 skills_path 非空时会每 turn re-discover
+        # 初始列表；构建 ModelContext 时会重新发现非空 skills_path
         skills = SkillRegistry.discover(skills_path)
 
         return Agent(
@@ -135,7 +135,7 @@ class Boot:
             tool_bus=self.tool_bus,
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
             session_service=session_service,
-            context_assembler=ContextAssembler(),
+            model_context_builder=ModelContextBuilder(),
             unit_window=self.app_config.context_cli_turn_window,
             recall_sources=self.resolve_recall_sources(agent.agent_id),
             lifecycle_hooks=LifecycleHooks(

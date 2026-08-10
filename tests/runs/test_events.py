@@ -3,9 +3,8 @@ import unittest
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.context.model_context import ModelContext
-from pickel.context.prepare import prepare
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -193,7 +192,7 @@ def _run(
         provider=provider,
         tool_bus=(_bus := bus_with(tools)),
         activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-        context_assembler=ContextAssembler(),
+        model_context_builder=ModelContextBuilder(),
         lifecycle_hooks=NoopLifecycleHooks(),
         session_service=None,
         file_access_policy=None,
@@ -690,13 +689,13 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
 
         await run.turn(session=session, user_message=user_message("hello"), bus=None)
 
-        request = await prepare(
+        request = await run.model_context_builder.build_model_context(
             run=run,
             session=session,
             hook_feedback=[],
             unit_window=run.unit_window,
             recall_sources=[],
-            snapshot=run.tool_bus.snapshot(run.activation),
+            tool_snapshot=run.tool_bus.snapshot(run.activation),
         )
         anchor = resolve_anchor(
             session=session,

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from pickel.agents.agent import Agent
 from pickel.cli.context_renderer import ContextRenderer
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.hooks.lifecycle import NoopLifecycleHooks
@@ -281,7 +281,7 @@ class StubContextRun:
         self.tool_bus = bus_with([])
         self.activation = ToolActivation(allowed=frozenset())
         self.unit_window = 5
-        self.context_assembler = Mock()
+        self.model_context_builder = ModelContextBuilder()
         self.strategy = Mock()
 
     async def turn(
@@ -516,7 +516,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             provider=_StreamingToolProvider(),
             tool_bus=(_bus := bus_with([DelayEchoTool()])),
             activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-            context_assembler=ContextAssembler(),
+            model_context_builder=ModelContextBuilder(),
             lifecycle_hooks=NoopLifecycleHooks(),
             session_service=None,
             file_access_policy=None,
@@ -883,7 +883,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 tool_bus=(_bus := bus_with([DelayEchoTool()])),
                 activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-                context_assembler=ContextAssembler(),
+                model_context_builder=ModelContextBuilder(),
                 lifecycle_hooks=NoopLifecycleHooks(),
                 session_service=None,
                 file_access_policy=None,
@@ -1004,7 +1004,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 provider=_StreamingProvider(),
                 tool_bus=(_bus := bus_with([])),
                 activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-                context_assembler=ContextAssembler(),
+                model_context_builder=ModelContextBuilder(),
                 lifecycle_hooks=NoopLifecycleHooks(),
                 session_service=None,
                 file_access_policy=None,

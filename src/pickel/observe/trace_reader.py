@@ -176,7 +176,7 @@ def _build_metrics(spans: list[dict]) -> dict:
         "provider": "pickel.provider.request",
         "tool": "pickel.tool.execute",
         "hook": "pickel.hook.",
-        "context": "pickel.context.prepare",
+        "context": "pickel.model_context.build",
         "storage": "pickel.session.append",
     }
     result: dict[str, dict] = {}

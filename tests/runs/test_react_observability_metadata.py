@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.conversations.agent_message import (
     AssistantMessage,
@@ -86,7 +86,7 @@ def _run(provider, hooks=None) -> Run:
         provider=provider,  # type: ignore[arg-type]
         tool_bus=(_bus := bus_with([])),
         activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-        context_assembler=ContextAssembler(),
+        model_context_builder=ModelContextBuilder(),
         lifecycle_hooks=hooks or NoopLifecycleHooks(),
         session_service=None,
         file_access_policy=None,
@@ -166,8 +166,8 @@ class ReactObservabilityMetadataTests(unittest.TestCase):
             assistant.payload["metadata"]["hook_injected_chars"],
         )
 
-    def test_fingerprint_reflects_prepare_output_not_post_hook_request(self) -> None:
-        """指纹对应 prepare 输出（hook 前）。
+    def test_fingerprint_reflects_context_builder_output_not_post_hook_request(self) -> None:
+        """指纹对应 ModelContextBuilder 输出（hook 前）。
 
         `/context` 预览不跑 hook，若指纹记 hook 后的 Request，有 hook 时锚会永远失效。
         usage 仍是 hook 后的真实值——锚因此已包含 hook 注入量，

@@ -58,9 +58,9 @@ class ToolActivation:
 
 @dataclass(frozen=True)
 class ToolSnapshot:
-    """turn 内不可变的工具视图。prepare 与 react 的唯一来源。
+    """AgentRun 内不可变的工具视图。上下文构建与工具执行的唯一来源。
 
-    不提供 definitions()：ToolDefinition 属 context 层，转换留在 prepare.resolve_tools，
+    不提供 definitions()：ToolDefinition 属 context 层，转换留在 build_tool_definitions，
     避免 tools 层反向依赖 context 层。
     """
 

@@ -11,7 +11,7 @@ from pickel.extensions_host.loader import load_extensions
 from pickel.tools.bus import ToolBus
 from pickel.config.app_config import AppConfig
 from pickel.conversations.service import SessionService
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.session_sync import CompositeSessionSync, NoopSessionSync
 from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
@@ -161,7 +161,7 @@ class BootTests(unittest.TestCase):
 
             self.assertEqual(16, run.strategy.max_steps)
             self.assertIsNotNone(run)
-            self.assertIsInstance(run.context_assembler, ContextAssembler)
+            self.assertIsInstance(run.model_context_builder, ModelContextBuilder)
             self.assertEqual(7, run.unit_window)
 
     def test_build_run_wires_openviking_session_recall_when_enabled(self) -> None:
@@ -213,7 +213,7 @@ class BootTests(unittest.TestCase):
             ).build_run(agent_id="Pickle")
 
             self.assertIsNotNone(run)
-            self.assertIsInstance(run.context_assembler, ContextAssembler)
+            self.assertIsInstance(run.model_context_builder, ModelContextBuilder)
             self.assertFalse(hasattr(run, "session_recall_provider"))
             self.assertEqual(1, len(run.recall_sources))
             self.assertEqual(1234, run.recall_sources[0]._max_chars)

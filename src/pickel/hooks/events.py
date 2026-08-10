@@ -55,6 +55,6 @@ class TurnEndEvent(HookEventBase):
 
 @dataclass(frozen=True)
 class BeforeRequestEvent(HookEventBase):
-    """prepare 之后、provider.generate 之前；含拟发送 ModelContext 引用。"""
+    """ModelContext 构建之后、provider.generate 之前；含拟发送上下文引用。"""
 
     model_context: ModelContext | None = None

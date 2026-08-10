@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -107,7 +107,7 @@ class InterruptTests(unittest.IsolatedAsyncioTestCase):
             provider=provider,
             tool_bus=bus_obj,
             activation=ToolActivation(allowed=frozenset(bus_obj.list_names())),
-            context_assembler=ContextAssembler(),
+            model_context_builder=ModelContextBuilder(),
             lifecycle_hooks=NoopLifecycleHooks(),
             session_service=None,
             file_access_policy=None,

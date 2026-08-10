@@ -675,7 +675,7 @@ class ChatLoop:
     async def _render_context_command(self) -> None:
         """`/context` = ContextUsage 视图（设计 §7）。
 
-        展示「若现在进入下一 step，prepare 将发出的 Request」的估计占用，
+        展示「若现在进入下一 ModelStep，将发出的 Request」的估计占用，
         外加从 Session 派生的真实 API usage。只读：不跑 hook、不执行 recall、
         不写 Session。
         """
@@ -686,7 +686,7 @@ class ChatLoop:
             session_total=inspection.session_total,
             note=inspection.note,
             source_line=(
-                "Source: prepare preview · hooks skipped · recall skipped · no draft input"
+                "Source: context preview · hooks skipped · recall skipped · no draft input"
             ),
             turns=inspection.turns,
             tool_calls=inspection.tool_calls,

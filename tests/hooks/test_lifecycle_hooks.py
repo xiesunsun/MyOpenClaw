@@ -221,7 +221,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
         from pathlib import Path
 
         from pickel.agents.agent import Agent
-        from pickel.context.assembler import ContextAssembler
+        from pickel.context.model_context_builder import ModelContextBuilder
         from pickel.conversations.agent_message import AssistantMessage, UserMessage
         from pickel.conversations.content_blocks import TextContent, ToolCallContent
         from pickel.conversations.session import Session
@@ -292,7 +292,7 @@ class ReactHookIntegrationTests(unittest.TestCase):
             provider=FakeProvider(),  # type: ignore[arg-type]
             tool_bus=bus,
             activation=ToolActivation(allowed=frozenset(bus.list_names())),
-            context_assembler=ContextAssembler(),
+            model_context_builder=ModelContextBuilder(),
             lifecycle_hooks=LifecycleHooks(handlers=[DenyAllTools()]),
             session_service=None,
             file_access_policy=None,

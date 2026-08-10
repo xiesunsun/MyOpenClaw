@@ -148,7 +148,7 @@ class LifecycleHooks:
         return PostToolBatchDecision(feedback_text=merge_feedback_texts(texts))
 
     async def before_request(self, event: BeforeRequestEvent) -> BeforeRequestDecision:
-        """prepare 后、generate 前。合并：最后非 None model_context 覆盖；feedback 拼接。"""
+        """ModelContext 构建后、generate 前。最后一个非空上下文覆盖，反馈拼接。"""
         decisions: list[BeforeRequestDecision] = []
         effective_context = event.model_context
         for handler in self.handlers:

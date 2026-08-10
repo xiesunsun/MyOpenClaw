@@ -186,7 +186,7 @@ def compose_system_instruction_parts(
     """组装 system instruction 分段。
 
     skills 非空时，skills_guidance 默认取 load_templates() 的 skills_guidance；
-    也可由调用方显式传入以覆盖（便于测试与 prepare 管道注入）。
+    也可由调用方显式传入以覆盖（便于测试与 ModelContext 构建管道注入）。
     """
     base_instruction = behavior_instruction.strip()
     if not skills:

@@ -38,7 +38,6 @@ from pickel.app.runtime_models import (
 )
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
-from pickel.context.prepare import prepare
 from pickel.conversations.agent_message import (
     AssistantMessage,
     UserMessage,
@@ -705,13 +704,13 @@ class RuntimeConversation:
         try:
             snapshot = self._run.tool_bus.snapshot(self._run.activation)
             tool_defs = len(snapshot.entries)
-            request = await prepare(
+            request = await self._run.model_context_builder.build_model_context(
                 run=self._run,
                 session=self._session,
                 hook_feedback=[],
                 unit_window=self._run.unit_window,
                 recall_sources=[],
-                snapshot=snapshot,
+                tool_snapshot=snapshot,
             )
             model_config = self._run.agent.model_config
             usage = await measure(

@@ -7,7 +7,7 @@ from pathlib import Path
 from pickel.agents.agent import Agent
 from pickel.app.runtime import RuntimeConversation
 from pickel.app.runtime_models import TurnMismatchError, TurnRequest
-from pickel.context.assembler import ContextAssembler
+from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.agent_message import (
     AssistantMessage,
     UserMessage,
@@ -116,7 +116,7 @@ def _conversation(provider, hooks=None) -> RuntimeConversation:
         provider=provider,
         tool_bus=tool_bus,
         activation=ToolActivation(allowed=frozenset()),
-        context_assembler=ContextAssembler(),
+        model_context_builder=ModelContextBuilder(),
         lifecycle_hooks=hooks or NoopLifecycleHooks(),
         session_service=None,
         file_access_policy=None,
@@ -147,7 +147,7 @@ def _tool_conversation(provider, tool, hooks) -> RuntimeConversation:
         provider=provider,
         tool_bus=tool_bus,
         activation=ToolActivation(allowed=frozenset(tool_bus.list_names())),
-        context_assembler=ContextAssembler(),
+        model_context_builder=ModelContextBuilder(),
         lifecycle_hooks=hooks,
         session_service=None,
         file_access_policy=None,

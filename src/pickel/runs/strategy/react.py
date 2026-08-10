@@ -10,10 +10,8 @@ from dataclasses import replace
 from numbers import Real
 from uuid import uuid4
 
-from pickel.context.assembler import append_hook_feedback
-from pickel.context.hook_feedback import HookFeedback
+from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
 from pickel.context.model_context import ModelContext
-from pickel.context.prepare import prepare
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
@@ -129,29 +127,29 @@ class ReActStrategy(ExecutionStrategy):
                 step_index=step_index,
             )
             step_timer = SpanTimer("pickel.step", identity)
-            prepare_timer = SpanTimer("pickel.context.prepare", identity)
+            context_build_timer = SpanTimer("pickel.model_context.build", identity)
             try:
-                model_context = await prepare(
+                model_context = await run.model_context_builder.build_model_context(
                     run=run,
                     session=session,
                     hook_feedback=turn.hook_feedback_for_current_step(),
                     unit_window=run.unit_window,
                     recall_sources=run.recall_sources,
-                    snapshot=turn.tool_snapshot,
+                    tool_snapshot=turn.tool_snapshot,
                 )
             except Exception as exc:
-                prepare_timer.finish(
+                context_build_timer.finish(
                     status="error",
                     error=ErrorInfo.from_exception(exc, kind="context"),
                 )
                 raise
-            prepare_timer.finish(
+            context_build_timer.finish(
                 attributes={
                     "message_count": len(model_context.messages),
                     "tool_count": len(model_context.tools),
                 }
             )
-            # 指纹取 prepare 输出（hook 前）：/context 预览不跑 hook，
+            # 指纹取 ModelContextBuilder 输出（hook 前）：/context 预览不跑 hook，
             # 记 hook 后的 Request 会让有 hook 时锚永远失效。
             prepared_fingerprint = context_fingerprint(
                 model_context,

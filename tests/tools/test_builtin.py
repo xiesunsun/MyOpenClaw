@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pickel.context.prepare import resolve_tools
+from pickel.context.model_context_builder import build_tool_definitions
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import builtin_tools, install_builtin_tools
@@ -19,7 +19,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         snapshot = bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
         definitions = {
             definition.name: definition
-            for definition in resolve_tools(snapshot=snapshot)
+            for definition in build_tool_definitions(tool_snapshot=snapshot)
         }
 
         self.assertEqual(
