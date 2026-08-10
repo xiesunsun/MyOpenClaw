@@ -62,6 +62,8 @@ def test_conversation_runtime_drives_operation_and_projects_events() -> None:
         agent_runtime=_AgentRuntime(service),
         session=session,
         conversation_service=service,
+        runtime_store=store,
+        persistence="ephemeral",
         app_config=SimpleNamespace(),
     )
     events = []

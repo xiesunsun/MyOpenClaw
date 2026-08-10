@@ -46,6 +46,7 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.runtime.agent_runtime import AgentRuntime
+from pickel.persistence.runtime_store import RuntimeStore
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.shared.conversation_output import (
@@ -66,6 +67,8 @@ class ConversationRuntime:
         agent_runtime: AgentRuntime,
         session: ConversationSession,
         conversation_service: ConversationService,
+        runtime_store: RuntimeStore,
+        persistence: str,
         app_config: AppConfig,
         mode: ConversationMode = "batch",
     ) -> None:
@@ -73,6 +76,8 @@ class ConversationRuntime:
         self._agent_runtime = agent_runtime
         self._session = session
         self._conversation_service = conversation_service
+        self._runtime_store = runtime_store
+        self._persistence = persistence
         self._app_config = app_config
         self._mode = mode
         self._runtime_bus = RuntimeBus()
@@ -100,6 +105,15 @@ class ConversationRuntime:
     @property
     def mode(self) -> ConversationMode:
         return self._mode
+
+    @property
+    def persistence(self) -> str:
+        return self._persistence
+
+    @property
+    def runtime_store(self) -> RuntimeStore:
+        """供 RuntimeHost 在 reload 时保留 ephemeral 数据。"""
+        return self._runtime_store
 
     @property
     def event_bus(self) -> EventBus:

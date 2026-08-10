@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from pickel.app.boot import Boot
-from pickel.app.runtime import RuntimeHost
+from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import RuntimeLaunchRequest
 from pickel.config.loader import Config
-from pickel.config.paths import sessions_db_path
-from pickel.conversations.service import SessionNotFoundError
+from pickel.config.paths import runtime_db_path
+from pickel.conversations.conversation_service import ConversationNotFoundError
 from pickel.extensions_host.loader import (
     LoadResult,
     load_extensions_async,
@@ -17,7 +17,7 @@ from pickel.extensions_host.loader import (
 )
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
-from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
+from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 
 
 class RuntimeApplication:
@@ -68,9 +68,11 @@ class RuntimeApplication:
         session_id = self.request.session_id
         if session_id is None:
             return self.request.agent_ids
-        session = SQLiteSessionRepository(sessions_db_path()).load(session_id)
+        session = SQLiteRuntimeStore(runtime_db_path()).load_conversation_session(
+            session_id
+        )
         if session is None:
-            raise SessionNotFoundError(f"Session not found: {session_id}")
+            raise ConversationNotFoundError(f"ConversationSession 不存在: {session_id}")
         return (session.agent_id,)
 
     async def __aexit__(self, *_args: object) -> None:

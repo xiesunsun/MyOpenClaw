@@ -159,7 +159,7 @@ class SkillActionResult:
 
 @dataclass(frozen=True)
 class ReloadResult:
-    conversation: "RuntimeConversation"
+    conversation: "ConversationRuntime"
     warnings: tuple[str, ...] = ()
 
 
@@ -195,4 +195,4 @@ class PendingInputConflictError(RuntimeApplicationError):
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pickel.app.runtime import RuntimeConversation
+    from pickel.app.conversation_runtime import ConversationRuntime

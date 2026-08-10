@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from pickel.app.boot import Boot
-from pickel.app.runtime import RuntimeConversation, RuntimeHost
+from pickel.app.conversation_runtime import ConversationRuntime
+from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import (
     ConversationRequest,
     McpServerInfo,
@@ -27,13 +28,12 @@ from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextContent
-from pickel.conversations.session import Session
+from pickel.conversations.conversation_session import ConversationSession
 from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.cli.render.message import render_error, render_header, render_system
 from pickel.runs.event_bus import EventBus
-from pickel.runs.trace_sink import trace_path
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -43,7 +43,7 @@ class ChatLoop:
     def __init__(
         self,
         *,
-        conversation: RuntimeConversation,
+        conversation: ConversationRuntime,
         host: RuntimeHost | None = None,
         console: Console | None = None,
         input_reader: Callable[[str], str | Awaitable[str]] | None = None,
@@ -95,16 +95,8 @@ class ChatLoop:
         return self.agent.agent_id
 
     @property
-    def session(self) -> Session:
+    def session(self) -> ConversationSession:
         return self._conversation.session
-
-    @property
-    def _run(self):
-        return self._conversation._run
-
-    @property
-    def _session_service(self):
-        return self._conversation.session_service
 
     @property
     def _boot(self) -> Boot | None:
@@ -124,16 +116,10 @@ class ChatLoop:
     def _bus(self) -> EventBus:
         return self._conversation.event_bus
 
-    @property
-    def _trace_sink(self):
-        return self._conversation.trace_sink
-
     async def handle_user_input(
         self,
         text: str,
     ) -> TurnResult:
-        if self._run is None:
-            raise ValueError("Run 未提供")
         return await self._conversation.turn(
             TurnRequest(
                 message=UserMessage(content=[TextContent(text=text)]),
@@ -170,7 +156,7 @@ class ChatLoop:
         return await self._prompt_input_reader(prompt)
 
     def _read_session_message_count(self) -> int:
-        return len(self.session.entries)
+        return self._conversation.snapshot().message_count
 
     def _message_count(self) -> int:
         state_count = self._read_session_message_count()
@@ -249,10 +235,6 @@ class ChatLoop:
     def _close_session(self) -> None:
         self._conversation.archive()
 
-    def _close_trace_sink(self) -> None:
-        """兼容旧调用点；观察资源实际由 RuntimeConversation 持有。"""
-        self._conversation._close_trace()
-
     def _list_available_models(self) -> list[str]:
         if self._host is not None:
             return [item.model_id for item in self._host.list_models()]
@@ -265,9 +247,6 @@ class ChatLoop:
         ]
 
     def _handle_model_command(self, arg: str | None) -> None:
-        if self._run is None:
-            self._render_error_message("Run 未提供")
-            return
         if self._app_config is None:
             self._render_error_message("AppConfig 未提供，无法使用 /model")
             return
@@ -276,10 +255,7 @@ class ChatLoop:
             if not lines:
                 self._render_system_message("无可用模型。")
                 return
-            current = (
-                f"{self._run.agent.model_config.provider}/"
-                f"{self._run.agent.model_config.model}"
-            )
+            current = self._conversation.snapshot().model_id
             body = "Available models:\n" + "\n".join(lines) + f"\n\nCurrent: {current}"
             self._render_system_message(body)
             return
@@ -292,14 +268,11 @@ class ChatLoop:
             self._render_error_message(str(exc))
 
     def _handle_thinking_command(self, arg: str | None) -> None:
-        if self._run is None:
-            self._render_error_message("Run 未提供")
-            return
         if self._app_config is None:
             self._render_error_message("AppConfig 未提供，无法使用 /thinking")
             return
         if not arg:
-            current = self._run.environ.provider_options.get("thinking")
+            current = self._conversation.snapshot().thinking
             self._render_system_message(
                 f"thinking: {current if current is not None else '(unset)'}\n"
                 "Usage: /thinking <level>"
@@ -346,28 +319,10 @@ class ChatLoop:
             self._render_error_message(f"切换 agent 失败: {exc}")
 
     def _handle_new_command(self) -> None:
-        if self._host is not None:
-            self._conversation = self._host.new_session(self._conversation)
-        else:
-            session = Session.create(
-                agent_id=self.agent_id,
-                cwd=str(Path.cwd().resolve()),
-            )
-            service = self._session_service
-            if service is not None:
-                session = service.start(
-                    agent_id=self.agent_id,
-                    cwd=str(Path.cwd().resolve()),
-                )
-            self._conversation.detach()
-            self._conversation = RuntimeConversation(
-                agent=self.agent,
-                run=self._run,
-                session=session,
-                session_service=service,
-                app_config=self._app_config,
-                trace_path_resolver=trace_path,
-            )
+        if self._host is None:
+            self._render_error_message("RuntimeHost 未提供，无法创建新会话")
+            return
+        self._conversation = self._host.new_session(self._conversation)
         self._attach_host_call_handlers()
         self._attach_audio_output_handler()
         self._fallback_message_count = 0
@@ -376,8 +331,8 @@ class ChatLoop:
         )
 
     async def _handle_reload_command(self) -> None:
-        if self._run is None or self._host is None:
-            self._render_error_message("Run 未提供")
+        if self._host is None:
+            self._render_error_message("RuntimeHost 未提供")
             return
         try:
             app_config = Config.load(cwd=Path.cwd())
@@ -512,22 +467,16 @@ class ChatLoop:
 
     def _handle_skills_command(self, arg: str | None) -> None:
         conversation = getattr(self, "_conversation", None)
-        store = getattr(self._run, "skill_store", None)
         parts = (arg or "pending").split(maxsplit=1)
         action = parts[0].lower()
         pending_id = parts[1].strip() if len(parts) > 1 else None
 
         if action == "pending":
             records = (
-                conversation.list_pending_skills()
-                if conversation is not None
-                else tuple(store.list_pending()) if store is not None else ()
+                conversation.list_pending_skills() if conversation is not None else ()
             )
             if not records:
-                if getattr(self._run, "skill_store", None) is None:
-                    self._render_error_message("当前 agent 未配置 skills 目录")
-                else:
-                    self._render_system_message("没有待审的 skill 写入")
+                self._render_system_message("没有待审的 skill 写入")
                 return
             # box=None：E3 无边框排版，列对齐保留、框线不画
             table = Table(title="Pending skill writes", title_justify="left", box=None)
@@ -554,16 +503,14 @@ class ChatLoop:
             )
             if action == "diff":
                 self._render_system_message(f"diff {pending_id}")
-                diff = result.diff if result is not None else store.diff(pending_id)
+                diff = result.diff if result is not None else None
                 self.console.print(Text(diff or ""))
                 return
             if action == "approve":
-                path = result.path if result is not None else store.approve(pending_id)
+                path = result.path if result is not None else None
                 self._render_system_message(f"已批准，写入 {path}（下一轮对话生效）")
                 return
             if action == "reject":
-                if result is None:
-                    store.reject(pending_id)
                 self._render_system_message(f"已拒绝 {pending_id}")
                 return
         except SkillStoreError as exc:
@@ -702,7 +649,6 @@ class ChatLoop:
             self._render_header()
             await self._loop()
         finally:
-            self._close_trace_sink()
             self._close_audio_output_handler()
             if not self._conversation.closed:
                 self._conversation.detach()

@@ -17,7 +17,7 @@ from pickel.app.runtime_models import (
     TurnRequest,
 )
 from pickel.config.loader import Config
-from pickel.conversations.service import SessionNotFoundError
+from pickel.conversations.conversation_service import ConversationNotFoundError
 from pickel.extensions_host.loader import load_extensions
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -75,7 +75,7 @@ def _run_chat(
 
     try:
         asyncio.run(_main())
-    except SessionNotFoundError as exc:
+    except ConversationNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     except (KeyError, ValueError) as exc:
@@ -151,7 +151,7 @@ def _run_query(
 
     try:
         result = asyncio.run(_main())
-    except SessionNotFoundError as exc:
+    except ConversationNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     except (KeyError, ValueError) as exc:
@@ -256,7 +256,9 @@ def sessions(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    previews = boot.build_session_service().list_sessions(all_sessions=all_sessions)
+    previews = boot.build_conversation_service().list_conversation_previews(
+        all_sessions=all_sessions
+    )
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
     table.add_column("agent id")
@@ -285,12 +287,10 @@ def delete_session(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    lookup_service = boot.build_session_service()
+    service = boot.build_conversation_service()
     try:
-        session = lookup_service.resume(session_id=session_id)
-        delete_service = boot.build_session_service(agent_id=session.agent_id)
-        delete_service.delete(session_id=session_id)
-    except SessionNotFoundError as exc:
+        service.delete_conversation_session(session_id=session_id)
+    except ConversationNotFoundError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"Deleted session {session_id}")

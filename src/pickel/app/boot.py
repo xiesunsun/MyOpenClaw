@@ -221,6 +221,10 @@ class Boot:
             self._runtime_store = SQLiteRuntimeStore(path)
         return self._runtime_store
 
+    def runtime_store(self) -> SQLiteRuntimeStore:
+        """返回进程共享的新 Runtime 持久化入口。"""
+        return self._resolved_runtime_store()
+
     def _build_skill_store(self, agent_id: str) -> SkillStore | None:
         """没有 skills 目录的 agent 拿不到 store —— skill_manage 会据此报错。"""
         skills_path = self._resolve_agent_skills_path(agent_id)

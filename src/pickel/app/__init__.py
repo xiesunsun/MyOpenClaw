@@ -2,7 +2,8 @@
 
 from pickel.app.application import RuntimeApplication
 from pickel.app.boot import Boot
-from pickel.app.runtime import RuntimeConversation, RuntimeHost
+from pickel.app.conversation_runtime import ConversationRuntime
+from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import (
     AgentInfo,
     ContextInspection,
@@ -39,7 +40,7 @@ __all__ = [
     "PendingSkillInfo",
     "ReloadResult",
     "RuntimeApplication",
-    "RuntimeConversation",
+    "ConversationRuntime",
     "RuntimeHost",
     "RuntimeLaunchRequest",
     "RuntimeSnapshot",

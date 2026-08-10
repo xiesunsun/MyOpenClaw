@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal, TextIO
 
-from pickel.app.runtime import RuntimeConversation
+from pickel.app.conversation_runtime import ConversationRuntime
 from pickel.app.runtime_models import TurnRequest, TurnResult
 from pickel.cli.query_output import (
     encode_event_jsonl,
@@ -29,7 +29,7 @@ class NonInteractiveHostCalls:
     """无人值守策略：所有需要人类参与的调用均 fail closed。"""
 
     @staticmethod
-    def attach(conversation: RuntimeConversation) -> tuple[HostCallHandlerLease, ...]:
+    def attach(conversation: ConversationRuntime) -> tuple[HostCallHandlerLease, ...]:
         router = conversation.runtime_bus.host_calls
         return (
             router.register(
@@ -55,7 +55,7 @@ class QuerySurface:
     async def run(
         self,
         *,
-        conversation: RuntimeConversation,
+        conversation: ConversationRuntime,
         request: TurnRequest,
     ) -> TurnResult:
         leases = NonInteractiveHostCalls.attach(conversation)
