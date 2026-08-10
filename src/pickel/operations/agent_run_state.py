@@ -24,6 +24,7 @@ ModelStepPhase = Literal[
     "completed",
 ]
 ToolCallExecutionState = Literal["ready", "intent_recorded", "completed"]
+ToolCallExecutionPolicy = Literal["execute", "deny", "confirm"]
 
 _AGENT_RUN_STATUSES = {
     "queued",
@@ -43,6 +44,7 @@ _MODEL_STEP_PHASES = {
     "completed",
 }
 _TOOL_CALL_EXECUTION_STATES = {"ready", "intent_recorded", "completed"}
+_TOOL_CALL_EXECUTION_POLICIES = {"execute", "deny", "confirm"}
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class ToolCallState:
     tool_name: str
     arguments: dict[str, Any]
     execution_state: ToolCallExecutionState
+    execution_policy: ToolCallExecutionPolicy = "execute"
+    decision_reason: str | None = None
     result_message_node_id: str | None = None
     is_error: bool | None = None
 
@@ -58,6 +62,10 @@ class ToolCallState:
         if self.execution_state not in _TOOL_CALL_EXECUTION_STATES:
             raise ValueError(
                 f"不支持的 ToolCallState.execution_state: {self.execution_state}"
+            )
+        if self.execution_policy not in _TOOL_CALL_EXECUTION_POLICIES:
+            raise ValueError(
+                f"不支持的 ToolCallState.execution_policy: {self.execution_policy}"
             )
         if self.execution_state == "completed":
             if self.result_message_node_id is None or self.is_error is None:
@@ -75,6 +83,7 @@ class ModelStepState:
     assistant_message_node_id: str | None = None
     tool_calls: tuple[ToolCallState, ...] = ()
     retry_count: int = 0
+    post_tool_batch_hook_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.step_sequence < 1:
@@ -98,6 +107,7 @@ class AgentRunState:
     completed_step_ids: tuple[str, ...] = ()
     final_assistant_node_id: str | None = None
     error: dict[str, Any] | None = None
+    model_context_feedback: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.revision < 1:
@@ -132,6 +142,7 @@ class AgentRunState:
             "completed_step_ids": list(self.completed_step_ids),
             "final_assistant_node_id": self.final_assistant_node_id,
             "error": _copy_json_object(self.error) if self.error is not None else None,
+            "model_context_feedback": list(self.model_context_feedback),
         }
 
 
@@ -164,6 +175,9 @@ def agent_run_state_from_content(content: dict[str, Any]) -> AgentRunState:
             else None
         ),
         error=error,
+        model_context_feedback=tuple(
+            str(value) for value in content.get("model_context_feedback") or ()
+        ),
     )
 
 
@@ -179,12 +193,15 @@ def _model_step_to_dict(state: ModelStepState) -> dict[str, Any]:
                 "tool_name": tool_call.tool_name,
                 "arguments": _copy_json_object(tool_call.arguments),
                 "execution_state": tool_call.execution_state,
+                "execution_policy": tool_call.execution_policy,
+                "decision_reason": tool_call.decision_reason,
                 "result_message_node_id": tool_call.result_message_node_id,
                 "is_error": tool_call.is_error,
             }
             for tool_call in state.tool_calls
         ],
         "retry_count": state.retry_count,
+        "post_tool_batch_hook_completed": state.post_tool_batch_hook_completed,
     }
 
 
@@ -202,6 +219,14 @@ def _model_step_from_dict(content: dict[str, Any]) -> ModelStepState:
                 tool_name=str(value["tool_name"]),
                 arguments=arguments,
                 execution_state=str(value["execution_state"]),  # type: ignore[arg-type]
+                execution_policy=str(  # type: ignore[arg-type]
+                    value.get("execution_policy") or "execute"
+                ),
+                decision_reason=(
+                    str(value["decision_reason"])
+                    if value.get("decision_reason") is not None
+                    else None
+                ),
                 result_message_node_id=(
                     str(value["result_message_node_id"])
                     if value.get("result_message_node_id") is not None
@@ -225,6 +250,9 @@ def _model_step_from_dict(content: dict[str, Any]) -> ModelStepState:
         ),
         tool_calls=tuple(tool_calls),
         retry_count=int(content.get("retry_count") or 0),
+        post_tool_batch_hook_completed=bool(
+            content.get("post_tool_batch_hook_completed", False)
+        ),
     )
 
 

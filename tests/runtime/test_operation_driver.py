@@ -15,6 +15,12 @@ from pickel.agents.agent_package import (
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.conversation_service import ConversationService
+from pickel.hooks.decisions import (
+    PostToolBatchDecision,
+    PostToolUseDecision,
+    PreToolUseDecision,
+)
+from pickel.hooks.lifecycle import LifecycleHooks
 from pickel.operations.operation_service import OperationService
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.providers.base import Provider
@@ -35,6 +41,7 @@ class _Provider(Provider):
     def __init__(self, messages: list[AssistantMessage]) -> None:
         self.messages = list(messages)
         self.requests = 0
+        self.contexts = []
 
     @classmethod
     def from_config(cls, config):
@@ -45,6 +52,7 @@ class _Provider(Provider):
 
     async def stream(self, context):
         self.requests += 1
+        self.contexts.append(context)
         yield StreamCompleted(message=self.messages.pop(0))
 
 
@@ -61,6 +69,7 @@ class _EchoTool(BaseTool):
 
     def __init__(self) -> None:
         self.executions = 0
+        self.arguments = []
 
     async def execute(
         self,
@@ -68,7 +77,25 @@ class _EchoTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         self.executions += 1
+        self.arguments.append(dict(arguments))
         return ToolExecutionResult(content=str(arguments["text"]))
+
+
+class _Hooks:
+    def __init__(self) -> None:
+        self.completed = False
+
+    async def pre_tool_use(self, _event):
+        return PreToolUseDecision(updated_arguments={"text": "changed"})
+
+    async def post_tool_use(self, _event):
+        return PostToolUseDecision(feedback_text="tool feedback")
+
+    async def post_tool_batch(self, _event):
+        return PostToolBatchDecision(feedback_text="batch feedback")
+
+    async def turn_end(self, _event):
+        self.completed = True
 
 
 def _package() -> AgentPackageVersion:
@@ -196,3 +223,63 @@ def test_driver_runs_default_tool_loop_through_persisted_effects() -> None:
         "tool",
         "assistant",
     ]
+
+
+def test_driver_persists_hook_decisions_and_routes_hooks_through_effects() -> None:
+    store = InMemoryRuntimeStore()
+    store.create_conversation_session(
+        session_id="session-1",
+        agent_id="Pickle",
+        cwd="/project",
+    )
+    package = _package()
+    store.insert_agent_package_version(package)
+    operation_service = OperationService(store)
+    accepted = operation_service.accept_agent_run(
+        session_id="session-1",
+        agent_package_version_id=package.package_version_id,
+        user_message=UserMessage(content=[TextContent(text="hello")]),
+    )
+    provider = _Provider(
+        [
+            AssistantMessage(
+                content=[
+                    ToolCallContent(
+                        id="tool-1",
+                        name="echo",
+                        arguments={"text": "original"},
+                    )
+                ]
+            ),
+            AssistantMessage(content=[TextContent(text="done")]),
+        ]
+    )
+    tool = _EchoTool()
+    bus = ToolBus()
+    bus.register(tool, source=ToolSource.BUILTIN)
+    hooks = _Hooks()
+    bindings = RuntimeBindings(
+        agent_package_version=package,
+        provider=provider,
+        tool_snapshot=bus.snapshot(ToolActivation(allowed=frozenset({"echo"}))),
+        lifecycle_hooks=LifecycleHooks([hooks]),
+    )
+    effects = RuntimeEffects(
+        bindings=bindings,
+        operation_service=operation_service,
+    )
+    driver = OperationDriver(
+        bindings=bindings,
+        operation_service=operation_service,
+        conversation_service=ConversationService(store),
+        runtime_effects=effects,
+    )
+
+    result = asyncio.run(driver.drive_operation(accepted.operation.operation_id))
+
+    assert result.status == "succeeded"
+    assert tool.arguments == [{"text": "changed"}]
+    feedback_message = provider.contexts[1].messages[-1]
+    assert isinstance(feedback_message, UserMessage)
+    assert feedback_message.content[0].text == "tool feedback\n\nbatch feedback"
+    assert hooks.completed

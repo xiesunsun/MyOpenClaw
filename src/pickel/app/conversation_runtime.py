@@ -140,7 +140,7 @@ class ConversationRuntime:
         async with self._control_lock:
             if self._active_task is not None:
                 raise TurnInProgressError("当前 Conversation 已有 Operation 正在执行")
-            accepted = self._agent_runtime.accept_agent_run(
+            accepted = await self._agent_runtime.accept_agent_run(
                 session_id=self._session.session_id,
                 user_message=request.message,
             )

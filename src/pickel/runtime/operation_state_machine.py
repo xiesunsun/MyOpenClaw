@@ -21,6 +21,7 @@ OperationAction = Literal[
     "archive_model_step",
     "record_tool_call_intent",
     "execute_tool_call",
+    "invoke_post_tool_batch_hook",
     "finish_agent_run",
     "pause",
     "done",
@@ -95,7 +96,11 @@ class OperationStateMachine:
                         "record_tool_call_intent",
                         tool_call_id=tool_call.tool_call_id,
                     )
-            return OperationDecision("complete_model_step")
+            return OperationDecision(
+                "complete_model_step"
+                if step.post_tool_batch_hook_completed
+                else "invoke_post_tool_batch_hook"
+            )
         if step.phase == "completed":
             return OperationDecision(
                 "archive_model_step" if step.tool_calls else "finish_agent_run"
@@ -142,6 +147,7 @@ class OperationStateMachine:
         next_state = replace(
             state,
             revision=state.revision + 1,
+            model_context_feedback=(),
             current_step=replace(
                 step,
                 phase="model_request_completed",
@@ -220,6 +226,7 @@ class OperationStateMachine:
         tool_call_id: str,
         result_message_node_id: str,
         is_error: bool,
+        feedback_text: str | None = None,
     ) -> AgentRunState:
         step = self._require_step(state, phase="tool_calls_running")
         tool_calls = self._replace_tool_call(
@@ -237,6 +244,37 @@ class OperationStateMachine:
             state,
             revision=state.revision + 1,
             current_step=replace(step, tool_calls=tool_calls),
+            model_context_feedback=(
+                (*state.model_context_feedback, feedback_text)
+                if feedback_text
+                else state.model_context_feedback
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def record_post_tool_batch_hook_completed(
+        self,
+        state: AgentRunState,
+        *,
+        feedback_text: str | None = None,
+    ) -> AgentRunState:
+        step = self._require_step(
+            state,
+            phase=("tool_calls_ready", "tool_calls_running"),
+        )
+        if any(call.execution_state != "completed" for call in step.tool_calls):
+            raise StorageIntegrityError(
+                "所有 ToolCall 完成后才能记录 PostToolBatch Hook"
+            )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(step, post_tool_batch_hook_completed=True),
+            model_context_feedback=(
+                (*state.model_context_feedback, feedback_text)
+                if feedback_text
+                else state.model_context_feedback
+            ),
         )
         return self._validated(state, next_state)
 
@@ -247,6 +285,10 @@ class OperationStateMachine:
         )
         if any(call.execution_state != "completed" for call in step.tool_calls):
             raise StorageIntegrityError("存在未完成 ToolCall，不能完成 ModelStep")
+        if step.tool_calls and not step.post_tool_batch_hook_completed:
+            raise StorageIntegrityError(
+                "PostToolBatch Hook 尚未完成，不能完成 ModelStep"
+            )
         next_state = replace(
             state,
             revision=state.revision + 1,
@@ -299,12 +341,14 @@ class OperationStateMachine:
         *,
         operation_id: str,
         user_message_node_id: str,
+        model_context_feedback: tuple[str, ...] = (),
     ) -> AgentRunState:
         return AgentRunState(
             operation_id=operation_id,
             revision=1,
             status="queued",
             user_message_node_id=user_message_node_id,
+            model_context_feedback=model_context_feedback,
         )
 
     def validate_agent_run_transition(
@@ -478,6 +522,8 @@ class OperationStateMachine:
             next_state.tool_call_id != current.tool_call_id
             or next_state.tool_name != current.tool_name
             or next_state.arguments != current.arguments
+            or next_state.execution_policy != current.execution_policy
+            or next_state.decision_reason != current.decision_reason
         ):
             raise StorageIntegrityError("ToolCallState 身份和参数不能改变")
         if (

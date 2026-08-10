@@ -77,11 +77,13 @@ class OperationService:
         session_id: str,
         agent_package_version_id: str,
         user_message: UserMessage,
+        initial_model_context_feedback: tuple[str, ...] = (),
     ) -> AcceptedAgentRun:
         return self._accept_agent_run(
             session_id=session_id,
             agent_package_version_id=agent_package_version_id,
             user_message=user_message,
+            initial_model_context_feedback=initial_model_context_feedback,
         )
 
     def accept_delegated_agent_run(
@@ -173,6 +175,7 @@ class OperationService:
         session_id: str,
         agent_package_version_id: str,
         user_message: UserMessage,
+        initial_model_context_feedback: tuple[str, ...] = (),
         delegation: tuple[str, str, str, str | None] | None = None,
     ) -> AcceptedAgentRun:
         session = self._store.load_conversation_session(session_id)
@@ -243,6 +246,7 @@ class OperationService:
         initial_state = self._state_machine.create_initial_agent_run_state(
             operation_id=operation_id,
             user_message_node_id=user_message_node_id,
+            model_context_feedback=initial_model_context_feedback,
         )
         state_object_id = transaction.insert_immutable_object(
             object_type=OPERATION_STATE_OBJECT_TYPE,

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.operations.operation_service import AcceptedAgentRun, OperationService
+from pickel.hooks.events import UserPromptSubmitEvent
 from pickel.runtime.operation_driver import (
     OperationDriveResult,
     OperationDriver,
     StreamDeltaConsumer,
 )
 from pickel.runtime.runtime_bindings import RuntimeBindings
+from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runs.host_calls import HostCallClient
+
+
+class AgentRunBlockedError(RuntimeError):
+    pass
 
 
 class AgentRuntime:
@@ -22,10 +28,12 @@ class AgentRuntime:
         bindings: RuntimeBindings,
         operation_service: OperationService,
         operation_driver: OperationDriver,
+        runtime_effects: RuntimeEffects,
     ) -> None:
         self._bindings = bindings
         self._operation_service = operation_service
         self._operation_driver = operation_driver
+        self._effects = runtime_effects
 
     @property
     def bindings(self) -> RuntimeBindings:
@@ -39,7 +47,7 @@ class AgentRuntime:
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
     ) -> OperationDriveResult:
-        accepted = self.accept_agent_run(
+        accepted = await self.accept_agent_run(
             session_id=session_id,
             user_message=user_message,
         )
@@ -49,18 +57,37 @@ class AgentRuntime:
             consume_delta=consume_delta,
         )
 
-    def accept_agent_run(
+    async def accept_agent_run(
         self,
         *,
         session_id: str,
         user_message: UserMessage,
     ) -> AcceptedAgentRun:
+        user_text = "\n".join(
+            getattr(block, "text", "")
+            for block in user_message.content
+            if getattr(block, "text", "")
+        )
+        decision = await self._effects.invoke_hook(
+            "user_prompt_submit",
+            UserPromptSubmitEvent(
+                session_id=session_id,
+                prompt=user_text,
+                source="initial",
+            ),
+        )
+        if decision.action == "block":
+            raise AgentRunBlockedError(
+                decision.reason or "用户输入被 Lifecycle Hook 拒绝"
+            )
+        feedback = (decision.feedback_text,) if decision.feedback_text else ()
         return self._operation_service.accept_agent_run(
             session_id=session_id,
             agent_package_version_id=(
                 self._bindings.agent_package_version.package_version_id
             ),
             user_message=user_message,
+            initial_model_context_feedback=feedback,
         )
 
     async def drive_operation(

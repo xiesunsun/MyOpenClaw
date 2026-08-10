@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing, nullcontext
 from dataclasses import dataclass, replace
+from typing import Any
 
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
@@ -70,6 +71,16 @@ class RuntimeEffects:
             appended_message=appended_message,
             appended_message_node_id=appended_message_node_id,
         )
+
+    async def invoke_hook(self, hook_name: str, event: Any) -> Any:
+        """Lifecycle Hook 的唯一执行边界。"""
+        hook = getattr(self._bindings.lifecycle_hooks, hook_name, None)
+        if hook is None:
+            raise ValueError(f"未知 Lifecycle Hook: {hook_name}")
+        result = hook(event)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def execute_model_request(
         self,

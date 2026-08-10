@@ -20,7 +20,7 @@ class _AgentRuntime:
             tool_services=SimpleNamespace(skill_store=None),
         )
 
-    def accept_agent_run(self, *, session_id, user_message):
+    async def accept_agent_run(self, *, session_id, user_message):
         self._conversation_service.append_user_message(
             session_id=session_id,
             message=user_message,

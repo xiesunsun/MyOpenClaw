@@ -160,6 +160,8 @@ def test_state_machine_drives_tool_call_through_persisted_intent() -> None:
         result_message_node_id="result-node",
         is_error=False,
     )
+    assert machine.decide_next_action(state).action == "invoke_post_tool_batch_hook"
+    state = machine.record_post_tool_batch_hook_completed(state)
     state = machine.complete_model_step(state)
     state = machine.finish_agent_run(
         state,

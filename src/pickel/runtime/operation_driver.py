@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
+from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
@@ -17,12 +19,20 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.agent_run_state import AgentRunState, ToolCallState
 from pickel.operations.operation_service import OperationService
+from pickel.hooks.events import (
+    BeforeRequestEvent,
+    PostToolBatchEvent,
+    PostToolUseEvent,
+    PreToolUseEvent,
+    TurnEndEvent,
+)
 from pickel.providers.stream import StreamDelta
 from pickel.runtime.operation_state_machine import OperationStateMachine
 from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runs.host_calls import HostCallClient
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.validation import validate_tool_arguments
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
 
@@ -122,7 +132,36 @@ class OperationDriver:
                     conversation_entries=entries,
                     session_id=operation.session_id,
                     recall_sources=self._bindings.recall_sources,
+                    hook_feedback=tuple(
+                        HookFeedback(source_event="PersistedHookFeedback", text=text)
+                        for text in state.model_context_feedback
+                    ),
                 )
+                before = await self._effects.invoke_hook(
+                    "before_request",
+                    BeforeRequestEvent(
+                        session_id=operation.session_id,
+                        turn_id=operation.operation_id,
+                        step_index=step.step_sequence,
+                        model_context=context,
+                    ),
+                )
+                if before.model_context is not None:
+                    context = before.model_context
+                if before.feedback_text:
+                    context = ModelContext(
+                        system=context.system,
+                        messages=append_hook_feedback(
+                            context.messages,
+                            [
+                                HookFeedback(
+                                    source_event="BeforeRequest",
+                                    text=before.feedback_text,
+                                )
+                            ],
+                        ),
+                        tools=context.tools,
+                    )
                 result = await self._effects.execute_model_request(
                     state=state,
                     model_context=context,
@@ -145,20 +184,54 @@ class OperationDriver:
                     operation.session_id,
                     state,
                 )
-                tool_calls = tuple(
-                    ToolCallState(
-                        tool_call_id=block.id,
-                        tool_name=block.name,
-                        arguments=block.arguments,
-                        execution_state="ready",
+                tool_calls = []
+                for block in assistant.content:
+                    if not isinstance(block, ToolCallContent):
+                        continue
+                    entry = self._bindings.tool_snapshot.get(block.name)
+                    arguments = dict(block.arguments)
+                    action = "allow"
+                    reason = None
+                    if entry is not None:
+                        pre = await self._effects.invoke_hook(
+                            "pre_tool_use",
+                            PreToolUseEvent(
+                                session_id=operation.session_id,
+                                turn_id=operation.operation_id,
+                                step_index=state.current_step.step_sequence,
+                                tool_name=block.name,
+                                tool_call_id=block.id,
+                                arguments=arguments,
+                                tool_source=entry.source.value,
+                                tool_origin=entry.origin,
+                            ),
+                        )
+                        if pre.updated_arguments is not None:
+                            arguments = dict(pre.updated_arguments)
+                        action = pre.action
+                        reason = pre.reason
+                        invalid = validate_tool_arguments(entry.tool, arguments)
+                        if invalid is not None:
+                            action = "deny"
+                            reason = "Hook 修改后的工具参数不符合 schema：" f"{invalid}"
+                    tool_calls.append(
+                        ToolCallState(
+                            tool_call_id=block.id,
+                            tool_name=block.name,
+                            arguments=arguments,
+                            execution_state="ready",
+                            execution_policy=(
+                                "deny"
+                                if action == "deny"
+                                else "confirm" if action == "ask" else "execute"
+                            ),
+                            decision_reason=reason,
+                        )
                     )
-                    for block in assistant.content
-                    if isinstance(block, ToolCallContent)
-                )
                 state = self._commit(
                     self._state_machine.prepare_tool_calls(
                         state,
-                        tool_calls=tool_calls,
+                        tool_calls=tuple(tool_calls),
                     )
                 )
                 continue
@@ -184,14 +257,31 @@ class OperationDriver:
                     tool_call_id=decision.tool_call_id,
                     host_calls=host_calls,
                 )
+                tool_call = self._find_tool_call(state, decision.tool_call_id)
+                entry = self._bindings.tool_snapshot.get(tool_call.tool_name)
+                post = await self._effects.invoke_hook(
+                    "post_tool_use",
+                    PostToolUseEvent(
+                        session_id=operation.session_id,
+                        turn_id=operation.operation_id,
+                        step_index=state.current_step.step_sequence,
+                        tool_name=tool_call.tool_name,
+                        tool_call_id=tool_call.tool_call_id,
+                        arguments=dict(tool_call.arguments),
+                        result_content=result.content,
+                        is_error=result.is_error,
+                        tool_source=entry.source.value if entry is not None else "",
+                        tool_origin=entry.origin if entry is not None else None,
+                    ),
+                )
                 result_node_id = self._node_id_factory()
                 next_state = self._state_machine.record_tool_call_completed(
                     state,
                     tool_call_id=decision.tool_call_id,
                     result_message_node_id=result_node_id,
                     is_error=result.is_error,
+                    feedback_text=post.feedback_text,
                 )
-                tool_call = self._find_tool_call(state, decision.tool_call_id)
                 state = self._effects.commit_operation_state(
                     state=next_state,
                     appended_message=self._build_tool_result_message(
@@ -201,6 +291,33 @@ class OperationDriver:
                     appended_message_node_id=result_node_id,
                 ).state
                 owned_tool_intents.remove(decision.tool_call_id)
+                continue
+            if decision.action == "invoke_post_tool_batch_hook":
+                step = state.current_step
+                assert step is not None
+                outcomes = [
+                    {
+                        "tool_call_id": call.tool_call_id,
+                        "tool_name": call.tool_name,
+                        "is_error": call.is_error,
+                    }
+                    for call in step.tool_calls
+                ]
+                batch = await self._effects.invoke_hook(
+                    "post_tool_batch",
+                    PostToolBatchEvent(
+                        session_id=operation.session_id,
+                        turn_id=operation.operation_id,
+                        step_index=step.step_sequence,
+                        outcomes=outcomes,
+                    ),
+                )
+                state = self._commit(
+                    self._state_machine.record_post_tool_batch_hook_completed(
+                        state,
+                        feedback_text=batch.feedback_text,
+                    )
+                )
                 continue
             if decision.action == "complete_model_step":
                 state = self._commit(self._state_machine.complete_model_step(state))
@@ -229,6 +346,7 @@ class OperationDriver:
                         appended_message=message,
                         appended_message_node_id=node_id,
                     ).state
+                    await self._invoke_turn_end(operation.session_id, state)
                     return OperationDriveResult(
                         operation_id,
                         "succeeded",
@@ -253,6 +371,7 @@ class OperationDriver:
                         final_assistant_node_id=step.assistant_message_node_id,
                     )
                 )
+                await self._invoke_turn_end(operation.session_id, state)
                 return OperationDriveResult(
                     operation_id,
                     "succeeded",
@@ -263,6 +382,20 @@ class OperationDriver:
 
     def _commit(self, state: AgentRunState) -> AgentRunState:
         return self._effects.commit_operation_state(state=state).state
+
+    async def _invoke_turn_end(
+        self,
+        session_id: str,
+        state: AgentRunState,
+    ) -> None:
+        await self._effects.invoke_hook(
+            "turn_end",
+            TurnEndEvent(
+                session_id=session_id,
+                turn_id=state.operation_id,
+                reason=state.status,
+            ),
+        )
 
     @staticmethod
     def _has_unknown_tool_effect(state: AgentRunState) -> bool:
