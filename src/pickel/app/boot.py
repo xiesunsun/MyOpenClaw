@@ -5,7 +5,7 @@ from pickel.agents.agent_package import LoadedAgentPackage
 from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.config.app_config import AppConfig
 from pickel.config.paths import home_dir, sessions_db_path
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.service import SessionService
 from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
@@ -104,7 +104,7 @@ class Boot:
             tool_bus=self.tool_bus,
             strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
             session_service=session_service,
-            model_context_builder=ModelContextBuilder(),
+            model_context_builder=LegacyModelContextBuilder(),
             unit_window=self.app_config.context_cli_turn_window,
             recall_sources=self.resolve_recall_sources(agent.agent_id),
             lifecycle_hooks=LifecycleHooks(

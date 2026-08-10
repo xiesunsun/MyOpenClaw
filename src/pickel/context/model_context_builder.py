@@ -1,11 +1,12 @@
-"""模型上下文的唯一构建入口。"""
+"""Provider-neutral ModelContext 的唯一目标态构建入口。"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+import os
+from collections.abc import Mapping, Sequence
 
+from pickel.agents.agent_package import AgentPackageVersion, AgentSkillVersion
 from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
 from pickel.context.model_context import (
     ModelContext,
@@ -13,145 +14,143 @@ from pickel.context.model_context import (
     SystemSection,
     ToolDefinition,
 )
-from pickel.context.projection import project_messages
+from pickel.context.projection import ConversationProjector
 from pickel.context.recall import Recall
+from pickel.context.templates_loader import load_templates
 from pickel.context.window import apply_window
 from pickel.conversations.agent_message import AgentMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
-from pickel.tools.bus import ToolSnapshot
-
-if TYPE_CHECKING:
-    from pickel.conversations.session import Session
-    from pickel.runs.run import Run
+from pickel.conversations.conversation_node import ConversationEntry
 
 logger = logging.getLogger(__name__)
 
 
 class ModelContextBuilder:
-    """把运行配置、会话路径、召回、Hook 反馈和工具快照投影为模型输入。"""
+    """只从冻结 Package、持久化会话事实和显式旁路输入构造请求。"""
+
+    def __init__(
+        self,
+        projector: ConversationProjector | None = None,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        self._projector = projector or ConversationProjector()
+        self._environ = os.environ if environ is None else environ
 
     async def build_model_context(
         self,
         *,
-        run: Run,
-        session: Session,
-        hook_feedback: list[HookFeedback] | None = None,
-        unit_window: int | None = None,
-        recall_sources: Sequence[Recall] | None = None,
+        agent_package_version: AgentPackageVersion,
+        conversation_entries: Sequence[ConversationEntry],
+        session_id: str,
+        recall_sources: Sequence[Recall] = (),
+        hook_feedback: Sequence[HookFeedback] = (),
         current_user_text: str = "",
-        tool_snapshot: ToolSnapshot | None = None,
     ) -> ModelContext:
-        """构建一次模型调用的完整上下文。
-
-        ``tool_snapshot`` 由调用方在 AgentRun 开始时获取一次，同一 AgentRun
-        内的所有 ModelStep 共用它，保证工具定义和实际执行对象一致。
-        """
-        window = run.unit_window if unit_window is None else unit_window
-        system = self._build_system(run=run)
-        messages = self._build_history(session=session, unit_window=window)
+        messages = self._projector.project_conversation_messages(conversation_entries)
+        messages = apply_window(
+            messages,
+            unit_window=agent_package_version.runtime.context_unit_window,
+        )
         messages = await self._append_recalls(
             messages=messages,
-            run=run,
-            session=session,
-            recall_sources=recall_sources or [],
+            session_id=session_id,
+            recall_sources=recall_sources,
             current_user_text=current_user_text,
         )
-        messages = append_hook_feedback(messages, hook_feedback or [])
-        tools = build_tool_definitions(tool_snapshot=tool_snapshot)
-        return ModelContext(system=system, messages=messages, tools=tools)
-
-    @staticmethod
-    def _build_system(*, run: Run) -> SystemContent:
-        """按行为指令和当前技能清单构建具名 system sections。"""
-        # 惰性导入：避免 agents.skills -> context 包形成导入环。
-        from pickel.agents.skills import (
-            SkillRegistry,
-            compose_system_instruction_parts,
-        )
-
-        agent = run.agent
-        if agent.skills_path is not None:
-            skills = SkillRegistry.discover(agent.skills_path)
-        else:
-            skills = list(agent.skills)
-        parts = compose_system_instruction_parts(agent.behavior_instruction, skills)
-        return SystemContent(
-            sections=[
-                SystemSection(name=name, text=text)
-                for name, text in (
-                    ("behavior", parts.base_instruction),
-                    ("skills_guidance", parts.skills_guidance),
-                    ("skills_catalog", parts.skills_catalog),
+        return ModelContext(
+            system=self._build_system(agent_package_version),
+            messages=append_hook_feedback(messages, list(hook_feedback)),
+            tools=[
+                ToolDefinition(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
                 )
-                if text
-            ]
+                for tool in agent_package_version.tools
+            ],
         )
 
-    @staticmethod
-    def _build_history(
-        *,
-        session: Session,
-        unit_window: int,
-    ) -> list[AgentMessage]:
-        messages = project_messages(session.active_path())
-        return apply_window(messages, unit_window=unit_window)
+    def _build_system(self, version: AgentPackageVersion) -> SystemContent:
+        active_skills = [
+            skill for skill in version.skills if skill.status != "archived"
+        ]
+        sections = []
+        behavior = version.behavior_instruction.strip()
+        if behavior:
+            sections.append(SystemSection(name="behavior", text=behavior))
+        if active_skills:
+            sections.append(
+                SystemSection(
+                    name="skills_guidance",
+                    text=load_templates()["skills_guidance"],
+                )
+            )
+            sections.append(
+                SystemSection(
+                    name="skills_catalog",
+                    text=self._format_skill_catalog(active_skills),
+                )
+            )
+        return SystemContent(sections=sections)
+
+    def _format_skill_catalog(
+        self,
+        skills: Sequence[AgentSkillVersion],
+    ) -> str:
+        lines = ["Available skills:"]
+        for skill in skills:
+            marks = []
+            if skill.version:
+                marks.append(f"v{skill.version}")
+            if skill.status == "stale":
+                marks.append("stale")
+            missing = [
+                name for name in skill.required_env if not self._environ.get(name)
+            ]
+            if missing:
+                marks.append(f"unavailable: needs {', '.join(missing)}")
+            suffix = f" ({'; '.join(marks)})" if marks else ""
+            lines.append(
+                f"- {skill.name}: {skill.description} "
+                f"(read {skill.source_path}){suffix}"
+            )
+        return "\n".join(lines)
 
     async def _append_recalls(
         self,
         *,
         messages: list[AgentMessage],
-        run: Run,
-        session: Session,
+        session_id: str,
         recall_sources: Sequence[Recall],
         current_user_text: str,
     ) -> list[AgentMessage]:
-        """按顺序追加召回结果；单个旁路召回失败不阻断 AgentRun。"""
         if not recall_sources:
-            return list(messages)
-
-        user_text = current_user_text or self._current_user_text(session)
+            return messages
+        user_text = current_user_text or self._current_user_text(messages)
         result = list(messages)
         for source in recall_sources:
             try:
-                provided = await source.provide(
-                    run=run,
-                    session=session,
-                    current_user_text=user_text,
+                result.extend(
+                    await source.provide(
+                        session_id=session_id,
+                        current_user_text=user_text,
+                    )
                 )
             except Exception:
                 logger.exception("Recall source %s failed", type(source).__name__)
-                continue
-            result.extend(provided)
         return result
 
     @staticmethod
-    def _current_user_text(session: Session) -> str:
-        """从会话活动路径提取最后一条用户文本。"""
-        for message in reversed(project_messages(session.active_path())):
+    def _current_user_text(messages: Sequence[AgentMessage]) -> str:
+        for message in reversed(messages):
             if not isinstance(message, UserMessage):
                 continue
-            parts = [
+            text = [
                 block.text
                 for block in message.content
                 if isinstance(block, TextContent) and block.text
             ]
-            if parts:
-                return "\n".join(parts)
+            if text:
+                return "\n".join(text)
         return ""
-
-
-def build_tool_definitions(
-    *,
-    tool_snapshot: ToolSnapshot | None,
-) -> list[ToolDefinition]:
-    """将运行期工具快照转换为模型可见的工具定义。"""
-    if tool_snapshot is None:
-        return []
-    return [
-        ToolDefinition(
-            name=entry.name,
-            description=entry.tool.spec.description,
-            input_schema=entry.tool.spec.input_schema,
-        )
-        for entry in tool_snapshot.entries
-    ]

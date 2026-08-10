@@ -11,8 +11,8 @@ from pickel.agents.skills import SkillManifest, compose_system_instruction_parts
 from pickel.context.hook_feedback import HookFeedback
 from pickel.context.model_context import ModelContext
 from pickel.context.hook_feedback import append_hook_feedback
-from pickel.context.model_context_builder import (
-    ModelContextBuilder,
+from pickel.runs.legacy_model_context_builder import (
+    LegacyModelContextBuilder,
     build_tool_definitions,
 )
 from pickel.conversations.agent_message import (
@@ -77,7 +77,7 @@ def _snapshot(*tools):
 
 
 def _build_model_context(**kwargs):
-    return ModelContextBuilder().build_model_context(**kwargs)
+    return LegacyModelContextBuilder().build_model_context(**kwargs)
 
 
 def test_build_model_context_includes_system_history_feedback_and_tools():
@@ -200,7 +200,7 @@ def test_build_model_context_appends_recall_messages():
     session.append_user(UserMessage(content=[TextContent(text="hello")]))
 
     class _FakeRecall:
-        async def provide(self, *, run, session, current_user_text: str = ""):
+        async def provide(self, *, session_id, current_user_text: str = ""):
             return [UserMessage(content=[TextContent(text="recalled")])]
 
     ctx = asyncio.run(
@@ -222,7 +222,7 @@ def test_build_model_context_passes_current_user_text_to_recall():
     seen: list[str] = []
 
     class _CaptureRecall:
-        async def provide(self, *, run, session, current_user_text: str = ""):
+        async def provide(self, *, session_id, current_user_text: str = ""):
             seen.append(current_user_text)
             return []
 
@@ -253,11 +253,11 @@ def test_resolve_tools_returns_empty_for_missing_snapshot():
 
 def test_failing_recall_source_does_not_break_model_context_build():
     class _BoomRecall:
-        async def provide(self, *, run, session, current_user_text=""):
+        async def provide(self, *, session_id, current_user_text=""):
             raise RuntimeError("recall exploded")
 
     class _HealthyRecall:
-        async def provide(self, *, run, session, current_user_text=""):
+        async def provide(self, *, session_id, current_user_text=""):
             return [UserMessage(content=[TextContent(text="recalled")])]
 
     session = Session.create(agent_id="Pickle")

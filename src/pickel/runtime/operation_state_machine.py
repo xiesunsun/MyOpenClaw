@@ -18,6 +18,7 @@ OperationAction = Literal[
     "execute_model_request",
     "prepare_tool_calls",
     "complete_model_step",
+    "archive_model_step",
     "record_tool_call_intent",
     "execute_tool_call",
     "finish_agent_run",
@@ -63,7 +64,7 @@ class OperationStateMachine:
     }
     _ALLOWED_TOOL_CALL_TRANSITIONS = {
         "ready": {"intent_recorded"},
-        "intent_recorded": {"completed"},
+        "intent_recorded": {"intent_recorded", "completed"},
         "completed": {"completed"},
     }
 
@@ -96,7 +97,9 @@ class OperationStateMachine:
                     )
             return OperationDecision("complete_model_step")
         if step.phase == "completed":
-            return OperationDecision("finish_agent_run")
+            return OperationDecision(
+                "archive_model_step" if step.tool_calls else "finish_agent_run"
+            )
         raise StorageIntegrityError(f"无法决定 AgentRun 下一动作: {step.phase}")
 
     def start_model_step(
@@ -143,6 +146,22 @@ class OperationStateMachine:
                 step,
                 phase="model_request_completed",
                 assistant_message_node_id=assistant_message_node_id,
+            ),
+        )
+        return self._validated(state, next_state)
+
+    def schedule_model_request_retry(self, state: AgentRunState) -> AgentRunState:
+        step = self._require_step(
+            state,
+            phase="model_request_intent_recorded",
+        )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(
+                step,
+                phase="model_request_retry_scheduled",
+                retry_count=step.retry_count + 1,
             ),
         )
         return self._validated(state, next_state)
@@ -232,6 +251,29 @@ class OperationStateMachine:
             state,
             revision=state.revision + 1,
             current_step=replace(step, phase="completed"),
+        )
+        return self._validated(state, next_state)
+
+    def archive_completed_model_step(self, state: AgentRunState) -> AgentRunState:
+        step = self._require_step(state, phase="completed")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=None,
+            completed_step_ids=(*state.completed_step_ids, step.step_id),
+        )
+        return self._validated(state, next_state)
+
+    def pause_for_unknown_tool_effect(self, state: AgentRunState) -> AgentRunState:
+        step = self._require_step(state, phase="tool_calls_running")
+        if not any(
+            call.execution_state == "intent_recorded" for call in step.tool_calls
+        ):
+            raise StorageIntegrityError("只有未知 ToolCall intent 才能暂停 AgentRun")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="waiting",
         )
         return self._validated(state, next_state)
 

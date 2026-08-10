@@ -7,7 +7,6 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from pickel.context.session_recall import SessionRecallResult, SessionRecallSnippet
-from pickel.conversations.session import Session
 from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.extensions.openviking.context_client import OpenVikingContextClient
 from pickel.extensions.openviking.openviking_state import (
@@ -36,11 +35,11 @@ class OpenVikingSessionRecallProvider:
     async def recall(
         self,
         *,
-        session: Session,
+        session_id: str,
         current_user_text: str,
     ) -> SessionRecallResult:
         recall_config = self._config.session_recall
-        state = self._state_store.get_state(session.session_id)
+        state = self._state_store.get_state(session_id)
         remote_session_id = state.remote_session_id if state is not None else None
         if (
             not self._config.enabled

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from pickel.agents.agent import Agent
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
     AssistantMessage,
@@ -80,7 +80,7 @@ def _run(provider) -> Run:
         provider=provider,
         tool_bus=bus_obj,
         activation=ToolActivation(allowed=frozenset(bus_obj.list_names())),
-        model_context_builder=ModelContextBuilder(),
+        model_context_builder=LegacyModelContextBuilder(),
         lifecycle_hooks=NoopLifecycleHooks(),
         session_service=None,
         file_access_policy=None,

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.context.model_context import (
     ModelContext,
     SystemContent,
@@ -14,12 +16,14 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     ImageContent,
     TextContent,
     ThinkingContent,
     ToolCallContent,
 )
 from pickel.providers.anthropic import AnthropicProvider
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 
 
 class FakeAsyncMessageStream:
@@ -204,6 +208,29 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("image", content[1]["type"])
         self.assertEqual("base64", content[1]["source"]["type"])
         self.assertEqual("image/png", content[1]["source"]["media_type"])
+
+    def test_build_messages_resolves_artifact_reference_at_mapping_boundary(
+        self,
+    ) -> None:
+        service = ArtifactService(
+            artifact_store=InMemoryRuntimeStore(),
+            blob_store=InMemoryBlobStore(),
+        )
+        reference = service.create_artifact(
+            data=b"image",
+            media_type="image/png",
+            display_name="chart.png",
+        )
+
+        messages = AnthropicProvider._build_messages(
+            [UserMessage(content=[ArtifactBlock(artifact=reference)])],
+            artifact_service=service,
+        )
+
+        block = messages[0]["content"][0]
+        self.assertEqual("image", block["type"])
+        self.assertEqual("base64", block["source"]["type"])
+        self.assertEqual("aW1hZ2U=", block["source"]["data"])
 
     def test_build_messages_aggregates_consecutive_tool_results(self) -> None:
         messages = AnthropicProvider._build_messages(

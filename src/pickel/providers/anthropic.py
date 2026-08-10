@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
+from pickel.artifacts.artifact_service import ArtifactService
 from pickel.context.model_context import ModelContext, ToolDefinition
 from pickel.conversations.agent_message import (
     AgentMessage,
@@ -18,6 +20,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     ImageContent,
     TextContent,
     ThinkingContent,
@@ -48,6 +51,7 @@ class AnthropicProvider(Provider):
         temperature: float | None = None,
         max_output_tokens: int = 65536,
         provider_options: dict[str, Any] | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -55,6 +59,7 @@ class AnthropicProvider(Provider):
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
+        self.artifact_service = artifact_service
         self.cache_control = self._resolve_cache_control()
         self.client = self._build_client()
 
@@ -155,7 +160,10 @@ class AnthropicProvider(Provider):
         cache_control = getattr(self, "cache_control", None)
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": self._build_messages(context.messages),
+            "messages": self._build_messages(
+                context.messages,
+                artifact_service=getattr(self, "artifact_service", None),
+            ),
         }
         system_text = context.system.as_text()
         if system_text:
@@ -184,7 +192,11 @@ class AnthropicProvider(Provider):
         return params
 
     @staticmethod
-    def _build_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    def _build_messages(
+        messages: list[AgentMessage],
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> list[dict[str, Any]]:
         """将 AgentMessage 列表编码为 Anthropic messages。
 
         连续 ToolResultMessage 合成一条 user（多个 tool_result blocks）。
@@ -197,7 +209,10 @@ class AnthropicProvider(Provider):
                 payload.append(
                     {
                         "role": "user",
-                        "content": AnthropicProvider._user_content_blocks(message),
+                        "content": AnthropicProvider._user_content_blocks(
+                            message,
+                            artifact_service=artifact_service,
+                        ),
                     }
                 )
                 index += 1
@@ -214,7 +229,8 @@ class AnthropicProvider(Provider):
                 ):
                     tool_result_blocks.append(
                         AnthropicProvider._tool_result_block(
-                            messages[index]  # type: ignore[arg-type]
+                            messages[index],  # type: ignore[arg-type]
+                            artifact_service=artifact_service,
                         )
                     )
                     index += 1
@@ -227,7 +243,12 @@ class AnthropicProvider(Provider):
                 payload.append(
                     {
                         "role": "user",
-                        "content": [AnthropicProvider._tool_result_block(message)],
+                        "content": [
+                            AnthropicProvider._tool_result_block(
+                                message,
+                                artifact_service=artifact_service,
+                            )
+                        ],
                     }
                 )
                 index += 1
@@ -237,11 +258,24 @@ class AnthropicProvider(Provider):
         return payload
 
     @staticmethod
-    def _user_content_blocks(message: UserMessage) -> list[dict[str, Any]]:
+    def _user_content_blocks(
+        message: UserMessage,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for block in message.content:
             if isinstance(block, TextContent):
                 blocks.append({"type": "text", "text": block.text})
+            elif isinstance(block, ImageContent):
+                blocks.append(AnthropicProvider._image_content_block(block))
+            elif isinstance(block, ArtifactBlock):
+                blocks.append(
+                    AnthropicProvider._artifact_content_block(
+                        block,
+                        artifact_service=artifact_service,
+                    )
+                )
         if not blocks:
             blocks.append({"type": "text", "text": ""})
         return blocks
@@ -273,13 +307,24 @@ class AnthropicProvider(Provider):
         return blocks
 
     @staticmethod
-    def _tool_result_block(message: ToolResultMessage) -> dict[str, Any]:
+    def _tool_result_block(
+        message: ToolResultMessage,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
         for item in message.content:
             if isinstance(item, TextContent):
                 content.append({"type": "text", "text": item.text})
             elif isinstance(item, ImageContent):
                 content.append(AnthropicProvider._image_content_block(item))
+            elif isinstance(item, ArtifactBlock):
+                content.append(
+                    AnthropicProvider._artifact_content_block(
+                        item,
+                        artifact_service=artifact_service,
+                    )
+                )
         if message.structured_content is not None:
             content.append(
                 {
@@ -324,6 +369,38 @@ class AnthropicProvider(Provider):
         else:
             raise ValueError("ImageContent 必须包含 data_base64 或 url")
         return {"type": "image", "source": source}
+
+    @staticmethod
+    def _artifact_content_block(
+        block: ArtifactBlock,
+        *,
+        artifact_service: ArtifactService | None,
+    ) -> dict[str, Any]:
+        reference = block.artifact
+        if artifact_service is None:
+            raise ValueError(
+                "Anthropic ArtifactBlock 需要 RuntimeBindings.artifact_service"
+            )
+        data = base64.b64encode(artifact_service.load_artifact_bytes(reference)).decode(
+            "ascii"
+        )
+        source = {
+            "type": "base64",
+            "media_type": reference.media_type,
+            "data": data,
+        }
+        if reference.media_type in AnthropicProvider._IMAGE_MEDIA_TYPES:
+            return {"type": "image", "source": source}
+        if reference.media_type == "application/pdf":
+            result: dict[str, Any] = {"type": "document", "source": source}
+            if block.alt_text:
+                result["title"] = block.alt_text
+            return result
+        label = block.alt_text or reference.display_name or reference.artifact_id
+        return {
+            "type": "text",
+            "text": f"[Anthropic 不支持的 Artifact: {label} ({reference.media_type})]",
+        }
 
     @staticmethod
     def _build_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:

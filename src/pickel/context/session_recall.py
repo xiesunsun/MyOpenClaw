@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from pickel.conversations.session import Session
-
 
 @dataclass(frozen=True)
 class SessionRecallSnippet:
@@ -26,7 +24,7 @@ class SessionRecallProvider(Protocol):
     async def recall(
         self,
         *,
-        session: Session,
+        session_id: str,
         current_user_text: str,
     ) -> SessionRecallResult: ...
 

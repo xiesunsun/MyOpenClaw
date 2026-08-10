@@ -7,7 +7,7 @@ OpenViking session recall 经 adapter 实现本协议。
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from pickel.conversations.agent_message import AgentMessage
 
@@ -18,8 +18,7 @@ class Recall(Protocol):
     async def provide(
         self,
         *,
-        run: Any,
-        session: Any,
+        session_id: str,
         current_user_text: str = "",
     ) -> list[AgentMessage]:
         """返回待追加的消息（优先 AgentMessage）。"""

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from pickel.agents.agent import Agent
 from pickel.cli.context_renderer import ContextRenderer
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.hooks.lifecycle import NoopLifecycleHooks
@@ -269,7 +269,7 @@ class StubContextRun:
         self.tool_bus = bus_with([])
         self.activation = ToolActivation(allowed=frozenset())
         self.unit_window = 5
-        self.model_context_builder = ModelContextBuilder()
+        self.model_context_builder = LegacyModelContextBuilder()
         self.strategy = Mock()
 
     async def turn(
@@ -288,7 +288,7 @@ class ExplodingRecall:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def provide(self, *, run, session, current_user_text=""):
+    async def provide(self, *, session_id, current_user_text=""):
         self.calls += 1
         raise AssertionError("/context 不得执行 recall")
 
@@ -504,7 +504,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             provider=_StreamingToolProvider(),
             tool_bus=(_bus := bus_with([DelayEchoTool()])),
             activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-            model_context_builder=ModelContextBuilder(),
+            model_context_builder=LegacyModelContextBuilder(),
             lifecycle_hooks=NoopLifecycleHooks(),
             session_service=None,
             file_access_policy=None,
@@ -871,7 +871,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 tool_bus=(_bus := bus_with([DelayEchoTool()])),
                 activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-                model_context_builder=ModelContextBuilder(),
+                model_context_builder=LegacyModelContextBuilder(),
                 lifecycle_hooks=NoopLifecycleHooks(),
                 session_service=None,
                 file_access_policy=None,
@@ -995,7 +995,7 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 provider=_StreamingProvider(),
                 tool_bus=(_bus := bus_with([])),
                 activation=ToolActivation(allowed=frozenset(_bus.list_names())),
-                model_context_builder=ModelContextBuilder(),
+                model_context_builder=LegacyModelContextBuilder(),
                 lifecycle_hooks=NoopLifecycleHooks(),
                 session_service=None,
                 file_access_policy=None,

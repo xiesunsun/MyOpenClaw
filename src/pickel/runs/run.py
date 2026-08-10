@@ -13,7 +13,7 @@ from uuid import uuid4
 from pickel.agents.agent import Agent
 from pickel.config.environ import Environ
 from pickel.context.hook_feedback import HookFeedback
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
 from pickel.conversations.service import SessionService
@@ -70,7 +70,7 @@ class Run:
     provider: Provider
     tool_bus: ToolBus
     activation: ToolActivation
-    model_context_builder: ModelContextBuilder
+    model_context_builder: LegacyModelContextBuilder
     lifecycle_hooks: LifecycleHooks
     session_service: SessionService | None
     file_access_policy: FileAccessPolicy | None
@@ -90,7 +90,7 @@ class Run:
         strategy: ExecutionStrategy | None = None,
         session_service: SessionService | None = None,
         unit_window: int = 5,
-        model_context_builder: ModelContextBuilder | None = None,
+        model_context_builder: LegacyModelContextBuilder | None = None,
         lifecycle_hooks: LifecycleHooks | None = None,
         file_access_policy: FileAccessPolicy | None = None,
         bash_operations: BashOperations | None = None,
@@ -125,7 +125,9 @@ class Run:
             provider=resolved_provider,
             tool_bus=resolved_bus,
             activation=activation,
-            model_context_builder=model_context_builder or ModelContextBuilder(),
+            model_context_builder=(
+                model_context_builder or LegacyModelContextBuilder()
+            ),
             lifecycle_hooks=lifecycle_hooks or NoopLifecycleHooks(),
             session_service=session_service,
             file_access_policy=resolved_policy,

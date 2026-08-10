@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from pickel.agents.agent import Agent
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.session import Session
 from pickel.shared.model_config import ModelConfig
 
@@ -51,7 +51,7 @@ def test_model_context_builder_rediscovers_skills_when_skills_path_set():
         run = SimpleNamespace(agent=agent, tools=[], unit_window=5)
         session = Session.create(agent_id="Pickle")
 
-        builder = ModelContextBuilder()
+        builder = LegacyModelContextBuilder()
         first = asyncio.run(builder.build_model_context(run=run, session=session))
         assert "alpha: First skill." in first.system.as_text()
         assert "beta:" not in first.system.as_text()
@@ -85,7 +85,7 @@ def test_model_context_builder_uses_agent_skills_when_skills_path_is_none():
         session = Session.create(agent_id="Pickle")
 
         ctx = asyncio.run(
-            ModelContextBuilder().build_model_context(run=run, session=session)
+            LegacyModelContextBuilder().build_model_context(run=run, session=session)
         )
         assert "disk-only" not in ctx.system.as_text()
         assert ctx.system.as_text() == "You are Pickle."

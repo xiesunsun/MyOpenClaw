@@ -188,3 +188,46 @@ def test_prepare_no_tools_completes_model_step() -> None:
     assert state.current_step is not None
     assert state.current_step.phase == "completed"
     assert machine.decide_next_action(state).action == "finish_agent_run"
+
+
+def test_completed_tool_step_is_archived_before_next_model_step() -> None:
+    machine = OperationStateMachine()
+    completed_call = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="echo",
+        arguments={},
+        execution_state="completed",
+        result_message_node_id="result-node",
+        is_error=False,
+    )
+    state = _state(
+        revision=8,
+        step=_step("completed", tool_calls=(completed_call,)),
+    )
+
+    assert machine.decide_next_action(state).action == "archive_model_step"
+    archived = machine.archive_completed_model_step(state)
+
+    assert archived.current_step is None
+    assert archived.completed_step_ids == ("step-1",)
+    assert machine.decide_next_action(archived).action == "start_model_step"
+
+
+def test_unknown_tool_effect_can_transition_to_waiting() -> None:
+    machine = OperationStateMachine()
+    intent = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="external",
+        arguments={},
+        execution_state="intent_recorded",
+    )
+    state = _state(
+        revision=6,
+        step=_step("tool_calls_running", tool_calls=(intent,)),
+    )
+
+    waiting = machine.pause_for_unknown_tool_effect(state)
+
+    assert waiting.status == "waiting"
+    assert waiting.current_step == state.current_step
+    assert machine.decide_next_action(waiting).action == "pause"

@@ -14,7 +14,7 @@ from pickel.tools.base import (
 )
 from pickel.conversations.content_blocks import content_blocks_to_list
 from pickel.tools.services import ToolServices
-from pickel.tools.validation import validate_tool_result
+from pickel.tools.validation import validate_tool_arguments, validate_tool_result
 
 
 class ToolExecutionBoundaryError(RuntimeError):
@@ -47,6 +47,15 @@ class ToolCallExecutor:
             return self._failure(
                 f"工具不可用: {tool_call.tool_name}",
                 error_type="ToolNotAvailable",
+            )
+        invalid_arguments = validate_tool_arguments(
+            entry.tool,
+            tool_call.arguments,
+        )
+        if invalid_arguments is not None:
+            return self._failure(
+                f"工具参数不符合 schema：{invalid_arguments}",
+                error_type="ToolArgumentsInvalid",
             )
         context = ToolExecutionContext(
             agent_id=self._bindings.agent_id,

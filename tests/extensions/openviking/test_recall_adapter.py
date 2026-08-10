@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 
 from pickel.context.session_recall import SessionRecallResult, SessionRecallSnippet
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.session import Session
 from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
 
 
@@ -16,9 +14,14 @@ class _StubProvider:
         self.result = result
         self.calls: list[dict] = []
 
-    async def recall(self, *, session, current_user_text: str) -> SessionRecallResult:
+    async def recall(
+        self,
+        *,
+        session_id: str,
+        current_user_text: str,
+    ) -> SessionRecallResult:
         self.calls.append(
-            {"session_id": session.session_id, "current_user_text": current_user_text}
+            {"session_id": session_id, "current_user_text": current_user_text}
         )
         return self.result
 
@@ -29,11 +32,8 @@ class OpenVikingRecallAdapterTests(unittest.IsolatedAsyncioTestCase):
             SessionRecallResult(snippets=[SessionRecallSnippet(text="prior context")])
         )
         adapter = OpenVikingRecall(provider, max_chars=6000)
-        session = Session.create(agent_id="Pickle")
-
         messages = await adapter.provide(
-            run=SimpleNamespace(),
-            session=session,
+            session_id="session-1",
             current_user_text="hello",
         )
 
@@ -42,15 +42,14 @@ class OpenVikingRecallAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prior context", messages[0].content[0].text)
         self.assertIn("<Session_Retrieved_Context>", messages[0].content[0].text)
         self.assertEqual(
-            [{"session_id": session.session_id, "current_user_text": "hello"}],
+            [{"session_id": "session-1", "current_user_text": "hello"}],
             provider.calls,
         )
 
     async def test_provide_returns_empty_when_no_snippets(self) -> None:
         adapter = OpenVikingRecall(_StubProvider(SessionRecallResult()), max_chars=100)
         messages = await adapter.provide(
-            run=SimpleNamespace(),
-            session=Session.create(agent_id="Pickle"),
+            session_id="session-1",
             current_user_text="x",
         )
         self.assertEqual([], messages)

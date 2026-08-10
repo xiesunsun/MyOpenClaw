@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pickel.context.model_context_builder import build_tool_definitions
+from pickel.runs.legacy_model_context_builder import build_tool_definitions
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import builtin_tools, install_builtin_tools

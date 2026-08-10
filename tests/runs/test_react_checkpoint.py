@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pickel.agents.agent import Agent
-from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.conversations.session import Session
@@ -103,7 +103,7 @@ class ReactCheckpointTests(unittest.TestCase):
             provider=provider,  # type: ignore[arg-type]
             tool_bus=bus,
             activation=ToolActivation(allowed=frozenset(bus.list_names())),
-            model_context_builder=ModelContextBuilder(),
+            model_context_builder=LegacyModelContextBuilder(),
             lifecycle_hooks=NoopLifecycleHooks(),
             session_service=spy,  # type: ignore[arg-type]
             file_access_policy=None,

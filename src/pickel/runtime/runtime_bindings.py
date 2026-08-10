@@ -7,6 +7,7 @@ from numbers import Real
 from pathlib import Path
 
 from pickel.agents.agent_package import AgentPackageVersion
+from pickel.artifacts.artifact_service import ArtifactService
 from pickel.context.recall import Recall
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.providers.base import Provider
@@ -28,6 +29,7 @@ class RuntimeBindings:
     lifecycle_hooks: LifecycleHooks = field(default_factory=NoopLifecycleHooks)
     recall_sources: tuple[Recall, ...] = ()
     tool_services: ToolServices = field(default_factory=ToolServices)
+    artifact_service: ArtifactService | None = None
 
     DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
 
@@ -70,6 +72,15 @@ class RuntimeBindings:
         if actual_tools != expected_tools:
             raise RuntimeBindingError(
                 "ToolSnapshot 与 AgentPackageVersion.tools 不一致"
+            )
+        provider_artifact_service = getattr(
+            self.provider,
+            "artifact_service",
+            None,
+        )
+        if provider_artifact_service is not self.artifact_service:
+            raise RuntimeBindingError(
+                "Provider 与 RuntimeBindings 必须共享同一 ArtifactService"
             )
 
     @property

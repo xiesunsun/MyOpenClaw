@@ -80,7 +80,9 @@ class FailingOpenVikingClient:
 
 
 class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
-    def _store_with_remote(self, session_id: str, remote_session_id: str) -> InMemoryOpenVikingStateStore:
+    def _store_with_remote(
+        self, session_id: str, remote_session_id: str
+    ) -> InMemoryOpenVikingStateStore:
         store = InMemoryOpenVikingStateStore()
         store.put_state(
             session_id,
@@ -99,7 +101,7 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
         result = await provider.recall(
-            session=session,
+            session_id=session.session_id,
             current_user_text="之前说了什么",
         )
 
@@ -119,7 +121,10 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await provider.recall(session=session, current_user_text="hello")
+        result = await provider.recall(
+            session_id=session.session_id,
+            current_user_text="hello",
+        )
 
         self.assertTrue(result.is_empty)
         self.assertEqual([], client.search_calls)
@@ -133,7 +138,10 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         session = Session.create(agent_id="Pickle", session_id="session-1")
 
-        result = await provider.recall(session=session, current_user_text="hello")
+        result = await provider.recall(
+            session_id=session.session_id,
+            current_user_text="hello",
+        )
 
         self.assertTrue(result.is_empty)
 
