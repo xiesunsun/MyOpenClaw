@@ -18,6 +18,7 @@ from pickel.operations.agent_run_state import (
     AgentRunState,
     agent_run_state_from_content,
 )
+from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.operation_store import OperationStore
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.storage_transaction import StorageIntegrityError
@@ -39,6 +40,12 @@ class AcceptedAgentRun:
 
 
 @dataclass(frozen=True)
+class AcceptedDelegatedAgentRun:
+    accepted_run: AcceptedAgentRun
+    delegation: AgentDelegation
+
+
+@dataclass(frozen=True)
 class AgentRunProgressCommit:
     state: AgentRunState
     appended_message_entry: ConversationEntry | None
@@ -52,11 +59,15 @@ class OperationService:
         store: OperationStore,
         *,
         operation_id_factory: Callable[[], str] | None = None,
+        delegation_id_factory: Callable[[], str] | None = None,
+        session_id_factory: Callable[[], str] | None = None,
         node_id_factory: Callable[[], str] | None = None,
         state_machine: OperationStateMachine | None = None,
     ) -> None:
         self._store = store
         self._operation_id_factory = operation_id_factory or (lambda: str(uuid4()))
+        self._delegation_id_factory = delegation_id_factory or (lambda: str(uuid4()))
+        self._session_id_factory = session_id_factory or (lambda: str(uuid4()))
         self._node_id_factory = node_id_factory or (lambda: str(uuid4()))
         self._state_machine = state_machine or OperationStateMachine()
 
@@ -66,6 +77,103 @@ class OperationService:
         session_id: str,
         agent_package_version_id: str,
         user_message: UserMessage,
+    ) -> AcceptedAgentRun:
+        return self._accept_agent_run(
+            session_id=session_id,
+            agent_package_version_id=agent_package_version_id,
+            user_message=user_message,
+        )
+
+    def accept_delegated_agent_run(
+        self,
+        *,
+        session_id: str,
+        agent_package_version_id: str,
+        user_message: UserMessage,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str | None = None,
+    ) -> AcceptedDelegatedAgentRun:
+        parent_state = self.load_agent_run_state(parent_operation_id)
+        parent_step = parent_state.current_step
+        if parent_step is None or parent_step.step_id != parent_step_id:
+            raise StorageIntegrityError(
+                "AgentDelegation 必须关联父 Operation 的当前 ModelStep: "
+                f"{parent_step_id}"
+            )
+        if parent_tool_call_id is not None and not any(
+            tool_call.tool_call_id == parent_tool_call_id
+            for tool_call in parent_step.tool_calls
+        ):
+            raise StorageIntegrityError(
+                "AgentDelegation.parent_tool_call_id 不属于父 ModelStep: "
+                f"{parent_tool_call_id}"
+            )
+        delegation_id = self._delegation_id_factory()
+        accepted = self._accept_agent_run(
+            session_id=session_id,
+            agent_package_version_id=agent_package_version_id,
+            user_message=user_message,
+            delegation=(
+                delegation_id,
+                parent_operation_id,
+                parent_step_id,
+                parent_tool_call_id,
+            ),
+        )
+        delegation = self._store.load_agent_delegation(delegation_id)
+        if delegation is None:
+            raise StorageIntegrityError(
+                f"AgentDelegation 接受后不可见: {delegation_id}"
+            )
+        return AcceptedDelegatedAgentRun(
+            accepted_run=accepted,
+            delegation=delegation,
+        )
+
+    def start_delegated_run(
+        self,
+        *,
+        agent_package_version_id: str,
+        user_message: UserMessage,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str | None = None,
+        cwd: str | None = None,
+    ) -> AcceptedDelegatedAgentRun:
+        """创建隔离 child Session，并原子接受其 AgentRun 与父子关系。"""
+        package = self._store.load_agent_package_version(agent_package_version_id)
+        if package is None:
+            raise StorageIntegrityError(
+                f"AgentPackageVersion 不存在: {agent_package_version_id}"
+            )
+        child_session_id = self._session_id_factory()
+        self._store.create_conversation_session(
+            session_id=child_session_id,
+            agent_id=package.agent_id,
+            cwd=cwd or package.definition.workspace_path,
+        )
+        try:
+            return self.accept_delegated_agent_run(
+                session_id=child_session_id,
+                agent_package_version_id=agent_package_version_id,
+                user_message=user_message,
+                parent_operation_id=parent_operation_id,
+                parent_step_id=parent_step_id,
+                parent_tool_call_id=parent_tool_call_id,
+            )
+        except BaseException:
+            # 接受失败时 child Session 尚无提交，可直接清理孤儿封面。
+            self._store.delete_conversation_session(session_id=child_session_id)
+            raise
+
+    def _accept_agent_run(
+        self,
+        *,
+        session_id: str,
+        agent_package_version_id: str,
+        user_message: UserMessage,
+        delegation: tuple[str, str, str, str | None] | None = None,
     ) -> AcceptedAgentRun:
         session = self._store.load_conversation_session(session_id)
         if session is None:
@@ -96,6 +204,20 @@ class OperationService:
             operation_type="agent_run",
             agent_package_version_id=agent_package_version_id,
         )
+        if delegation is not None:
+            (
+                delegation_id,
+                parent_operation_id,
+                parent_step_id,
+                parent_tool_call_id,
+            ) = delegation
+            transaction.create_agent_delegation(
+                delegation_id=delegation_id,
+                parent_operation_id=parent_operation_id,
+                parent_step_id=parent_step_id,
+                parent_tool_call_id=parent_tool_call_id,
+                child_operation_id=operation_id,
+            )
         user_object_id = transaction.insert_immutable_object(
             object_type="agent_message",
             schema_version=3,
@@ -153,6 +275,22 @@ class OperationService:
                 f"SessionOperation 不存在: {operation_id}"
             )
         return operation
+
+    def load_agent_delegation(self, delegation_id: str) -> AgentDelegation:
+        delegation = self._store.load_agent_delegation(delegation_id)
+        if delegation is None:
+            raise LookupError(f"AgentDelegation 不存在: {delegation_id}")
+        return delegation
+
+    def list_agent_delegations(
+        self,
+        *,
+        parent_operation_id: str,
+    ) -> list[AgentDelegation]:
+        self.load_session_operation(parent_operation_id)
+        return self._store.list_agent_delegations(
+            parent_operation_id=parent_operation_id
+        )
 
     def load_agent_run_state(self, operation_id: str) -> AgentRunState:
         operation = self.load_session_operation(operation_id)

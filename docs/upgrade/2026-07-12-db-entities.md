@@ -140,6 +140,21 @@ Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_
 
 SQLite 只保存不可变元数据；实际字节由 `BlobStore` 保存。默认本地实现使用 `sha256/<前两位>/<剩余 digest>`，以后可以替换为对象存储而不改变 `ArtifactReference` 和消息 schema。消息 payload v3 使用 `ArtifactBlock(artifact=ArtifactReference)`，禁止直接持久化 base64、临时 URL 或 Provider 文件 ID。Blob 先写、元数据后写，失败可能留下可 GC 的孤立 Blob，但绝不能留下指向不存在 Blob 的已提交消息。
 
+### 3.9 `agent_delegations`
+
+| 列 | 类型 | 含义 |
+| --- | --- | --- |
+| `delegation_id` | TEXT PK | 委派关系稳定身份 |
+| `parent_operation_id` | TEXT FK | 发起委派的父 AgentRun |
+| `parent_step_id` | TEXT | 发起委派的父 ModelStep |
+| `parent_tool_call_id` | TEXT NULL | 若通过工具发起，记录父 ToolCall |
+| `child_operation_id` | TEXT UNIQUE FK | 被委派的 AgentRun |
+| `child_session_id` | TEXT | child 所属隔离 Session |
+| `created_commit_sequence` | INTEGER | child Operation 接受提交 |
+| `created_at` | TEXT | UTC ISO8601 |
+
+`AgentDelegation` 与 child `SessionOperation` 必须在 child Session 的同一 StorageTransaction 中创建。一个 child Operation 只能有一个父关系。Lane 只表示同一会话树上的独立活动位置，不表示 Agent；动态子 Agent 默认创建隔离 Session，避免多个执行者竞争同一 `conversation/active`。
+
 ## 4. StorageTransaction
 
 唯一写边界：

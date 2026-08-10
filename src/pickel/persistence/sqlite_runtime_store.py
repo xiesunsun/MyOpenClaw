@@ -17,6 +17,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.immutable_object import (
     ImmutableObject,
@@ -30,7 +31,7 @@ from pickel.persistence.storage_transaction import (
     StorageTransaction,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
@@ -226,6 +227,50 @@ class SQLiteRuntimeStore:
                 (session_id,),
             ).fetchall()
         return [self._operation_from_row(row) for row in rows]
+
+    def load_agent_delegation(
+        self,
+        delegation_id: str,
+    ) -> AgentDelegation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_delegations WHERE delegation_id = ?",
+                (delegation_id,),
+            ).fetchone()
+        return self._delegation_from_row(row) if row is not None else None
+
+    def find_delegation_by_child_operation(
+        self,
+        child_operation_id: str,
+    ) -> AgentDelegation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM agent_delegations
+                WHERE child_operation_id = ?
+                """,
+                (child_operation_id,),
+            ).fetchone()
+        return self._delegation_from_row(row) if row is not None else None
+
+    def list_agent_delegations(
+        self,
+        *,
+        parent_operation_id: str,
+    ) -> list[AgentDelegation]:
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_delegations
+                WHERE parent_operation_id = ?
+                ORDER BY created_at ASC, delegation_id ASC
+                """,
+                (parent_operation_id,),
+            ).fetchall()
+        return [self._delegation_from_row(row) for row in rows]
 
     def load_conversation_session(
         self,
@@ -459,6 +504,12 @@ class SQLiteRuntimeStore:
                 commit_sequence,
                 committed_at,
             )
+            self._insert_delegations(
+                connection,
+                transaction,
+                commit_sequence,
+                committed_at,
+            )
             self._insert_references(connection, transaction, commit_sequence)
             connection.execute(
                 """
@@ -489,6 +540,7 @@ class SQLiteRuntimeStore:
             or transaction.node_appends
             or transaction.reference_moves
             or transaction.operation_creates
+            or transaction.delegation_creates
         ):
             raise StorageIntegrityError("StorageTransaction 不能为空")
         staged_object_ids = [
@@ -504,6 +556,16 @@ class SQLiteRuntimeStore:
         ]
         if len(staged_operation_ids) != len(set(staged_operation_ids)):
             raise StorageIntegrityError("同一事务包含重复 operation_id")
+        delegation_ids = [
+            command.delegation_id for command in transaction.delegation_creates
+        ]
+        if len(delegation_ids) != len(set(delegation_ids)):
+            raise StorageIntegrityError("同一事务包含重复 delegation_id")
+        child_operation_ids = [
+            command.child_operation_id for command in transaction.delegation_creates
+        ]
+        if len(child_operation_ids) != len(set(child_operation_ids)):
+            raise StorageIntegrityError("同一事务不能多次委派同一个 child_operation_id")
         for command in transaction.operation_creates:
             existing = connection.execute(
                 "SELECT 1 FROM session_operations WHERE operation_id = ?",
@@ -523,6 +585,33 @@ class SQLiteRuntimeStore:
             if package is None:
                 raise StorageIntegrityError(
                     "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
+                )
+
+        for command in transaction.delegation_creates:
+            parent = connection.execute(
+                "SELECT 1 FROM session_operations WHERE operation_id = ?",
+                (command.parent_operation_id,),
+            ).fetchone()
+            if parent is None:
+                raise StorageIntegrityError(
+                    f"父 SessionOperation 不存在: {command.parent_operation_id}"
+                )
+            if command.child_operation_id not in staged_operation_ids:
+                raise StorageIntegrityError(
+                    "child SessionOperation 必须与 AgentDelegation 同事务创建: "
+                    f"{command.child_operation_id}"
+                )
+            existing = connection.execute(
+                """
+                SELECT 1 FROM agent_delegations
+                WHERE delegation_id = ? OR child_operation_id = ?
+                """,
+                (command.delegation_id, command.child_operation_id),
+            ).fetchone()
+            if existing is not None:
+                raise StorageIntegrityError(
+                    "AgentDelegation 或 child SessionOperation 已存在: "
+                    f"{command.delegation_id}"
                 )
 
         for command in transaction.node_appends:
@@ -729,6 +818,34 @@ class SQLiteRuntimeStore:
             )
 
     @staticmethod
+    def _insert_delegations(
+        connection: sqlite3.Connection,
+        transaction: StorageTransaction,
+        commit_sequence: int,
+        created_at: datetime,
+    ) -> None:
+        for command in transaction.delegation_creates:
+            connection.execute(
+                """
+                INSERT INTO agent_delegations (
+                    delegation_id, parent_operation_id, parent_step_id,
+                    parent_tool_call_id, child_operation_id, child_session_id,
+                    created_commit_sequence, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    command.delegation_id,
+                    command.parent_operation_id,
+                    command.parent_step_id,
+                    command.parent_tool_call_id,
+                    command.child_operation_id,
+                    transaction.session_id,
+                    commit_sequence,
+                    created_at.isoformat(),
+                ),
+            )
+
+    @staticmethod
     def _find_reference_row(
         connection: sqlite3.Connection,
         *,
@@ -793,7 +910,7 @@ class SQLiteRuntimeStore:
     @staticmethod
     def _schema_sql() -> str:
         return """
-            PRAGMA user_version = 8;
+            PRAGMA user_version = 9;
 
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
@@ -844,6 +961,28 @@ class SQLiteRuntimeStore:
 
             CREATE INDEX idx_session_operations_session_commit_sequence
             ON session_operations(session_id, accepted_commit_sequence);
+
+            CREATE TABLE agent_delegations (
+                delegation_id TEXT PRIMARY KEY,
+                parent_operation_id TEXT NOT NULL,
+                parent_step_id TEXT NOT NULL,
+                parent_tool_call_id TEXT,
+                child_operation_id TEXT NOT NULL UNIQUE,
+                child_session_id TEXT NOT NULL,
+                created_commit_sequence INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (parent_operation_id)
+                    REFERENCES session_operations(operation_id),
+                FOREIGN KEY (child_operation_id)
+                    REFERENCES session_operations(operation_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (child_session_id, created_commit_sequence)
+                    REFERENCES storage_commits(session_id, commit_sequence)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX idx_agent_delegations_parent
+            ON agent_delegations(parent_operation_id, created_at);
 
             CREATE TABLE storage_commits (
                 session_id TEXT NOT NULL,
@@ -987,6 +1126,23 @@ class SQLiteRuntimeStore:
             operation_type=str(row["operation_type"]),  # type: ignore[arg-type]
             agent_package_version_id=str(row["agent_package_version_id"]),
             accepted_commit_sequence=int(row["accepted_commit_sequence"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+        )
+
+    @staticmethod
+    def _delegation_from_row(row: sqlite3.Row) -> AgentDelegation:
+        return AgentDelegation(
+            delegation_id=str(row["delegation_id"]),
+            parent_operation_id=str(row["parent_operation_id"]),
+            parent_step_id=str(row["parent_step_id"]),
+            parent_tool_call_id=(
+                str(row["parent_tool_call_id"])
+                if row["parent_tool_call_id"] is not None
+                else None
+            ),
+            child_operation_id=str(row["child_operation_id"]),
+            child_session_id=str(row["child_session_id"]),
+            created_commit_sequence=int(row["created_commit_sequence"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
         )
 

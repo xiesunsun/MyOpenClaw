@@ -16,6 +16,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.immutable_object import (
     ImmutableObject,
@@ -38,6 +39,7 @@ class InMemoryRuntimeStore:
         self._agent_package_versions: dict[str, tuple[str, dict, datetime]] = {}
         self._artifacts: dict[str, Artifact] = {}
         self._operations: dict[str, SessionOperation] = {}
+        self._delegations: dict[str, AgentDelegation] = {}
         self._commits: dict[tuple[str, int], StorageCommit] = {}
         self._objects: dict[str, ImmutableObject] = {}
         self._nodes: dict[str, ConversationNode] = {}
@@ -241,6 +243,42 @@ class InMemoryRuntimeStore:
                 key=lambda item: (item.accepted_commit_sequence, item.operation_id),
             )
 
+    def load_agent_delegation(
+        self,
+        delegation_id: str,
+    ) -> AgentDelegation | None:
+        with self._lock:
+            return self._delegations.get(delegation_id)
+
+    def find_delegation_by_child_operation(
+        self,
+        child_operation_id: str,
+    ) -> AgentDelegation | None:
+        with self._lock:
+            return next(
+                (
+                    delegation
+                    for delegation in self._delegations.values()
+                    if delegation.child_operation_id == child_operation_id
+                ),
+                None,
+            )
+
+    def list_agent_delegations(
+        self,
+        *,
+        parent_operation_id: str,
+    ) -> list[AgentDelegation]:
+        with self._lock:
+            return sorted(
+                (
+                    delegation
+                    for delegation in self._delegations.values()
+                    if delegation.parent_operation_id == parent_operation_id
+                ),
+                key=lambda item: (item.created_at, item.delegation_id),
+            )
+
     def begin_storage_transaction(
         self,
         *,
@@ -391,11 +429,25 @@ class InMemoryRuntimeStore:
                 )
                 for command in transaction.operation_creates
             }
+            staged_delegations = {
+                command.delegation_id: AgentDelegation(
+                    delegation_id=command.delegation_id,
+                    parent_operation_id=command.parent_operation_id,
+                    parent_step_id=command.parent_step_id,
+                    parent_tool_call_id=command.parent_tool_call_id,
+                    child_operation_id=command.child_operation_id,
+                    child_session_id=transaction.session_id,
+                    created_commit_sequence=commit_sequence,
+                    created_at=committed_at,
+                )
+                for command in transaction.delegation_creates
+            }
 
             self._commits[(transaction.session_id, commit_sequence)] = commit
             self._objects.update(staged_objects)
             self._nodes.update(staged_nodes)
             self._operations.update(staged_operations)
+            self._delegations.update(staged_delegations)
             for reference in staged_references:
                 self._references.setdefault(
                     (reference.session_id, reference.reference_name), []
@@ -413,6 +465,7 @@ class InMemoryRuntimeStore:
             or transaction.node_appends
             or transaction.reference_moves
             or transaction.operation_creates
+            or transaction.delegation_creates
         ):
             raise StorageIntegrityError("StorageTransaction 不能为空")
 
@@ -427,6 +480,16 @@ class InMemoryRuntimeStore:
         ]
         if len(operation_ids) != len(set(operation_ids)):
             raise StorageIntegrityError("同一事务包含重复 operation_id")
+        delegation_ids = [
+            command.delegation_id for command in transaction.delegation_creates
+        ]
+        if len(delegation_ids) != len(set(delegation_ids)):
+            raise StorageIntegrityError("同一事务包含重复 delegation_id")
+        child_operation_ids = [
+            command.child_operation_id for command in transaction.delegation_creates
+        ]
+        if len(child_operation_ids) != len(set(child_operation_ids)):
+            raise StorageIntegrityError("同一事务不能多次委派同一个 child_operation_id")
         duplicate_object = next(
             (object_id for object_id in object_ids if object_id in self._objects),
             None,
@@ -447,6 +510,27 @@ class InMemoryRuntimeStore:
             if command.agent_package_version_id not in self._agent_package_versions:
                 raise StorageIntegrityError(
                     "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
+                )
+        for command in transaction.delegation_creates:
+            if command.delegation_id in self._delegations:
+                raise StorageIntegrityError(
+                    f"AgentDelegation 已存在: {command.delegation_id}"
+                )
+            if command.parent_operation_id not in self._operations:
+                raise StorageIntegrityError(
+                    f"父 SessionOperation 不存在: {command.parent_operation_id}"
+                )
+            if command.child_operation_id not in operation_ids:
+                raise StorageIntegrityError(
+                    "child SessionOperation 必须与 AgentDelegation 同事务创建: "
+                    f"{command.child_operation_id}"
+                )
+            if any(
+                delegation.child_operation_id == command.child_operation_id
+                for delegation in self._delegations.values()
+            ):
+                raise StorageIntegrityError(
+                    f"child SessionOperation 已被委派: {command.child_operation_id}"
                 )
 
         staged_object_ids = set(object_ids)

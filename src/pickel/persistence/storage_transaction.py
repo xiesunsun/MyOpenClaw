@@ -57,6 +57,15 @@ class _CreateSessionOperation:
     agent_package_version_id: str
 
 
+@dataclass(frozen=True)
+class _CreateAgentDelegation:
+    delegation_id: str
+    parent_operation_id: str
+    parent_step_id: str
+    parent_tool_call_id: str | None
+    child_operation_id: str
+
+
 class _StorageTransactionCommitter(Protocol):
     def _commit_storage_transaction(
         self,
@@ -83,6 +92,7 @@ class StorageTransaction:
         self.node_appends: list[_AppendNode] = []
         self.reference_moves: list[_MoveReference] = []
         self.operation_creates: list[_CreateSessionOperation] = []
+        self.delegation_creates: list[_CreateAgentDelegation] = []
         self._committed = False
 
     def insert_immutable_object(
@@ -175,6 +185,35 @@ class StorageTransaction:
                 operation_id=operation_id,
                 operation_type=operation_type,
                 agent_package_version_id=agent_package_version_id,
+            )
+        )
+
+    def create_agent_delegation(
+        self,
+        *,
+        delegation_id: str,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str | None,
+        child_operation_id: str,
+    ) -> None:
+        """把父子关系与 child SessionOperation 放入同一接受事务。"""
+        self._ensure_open()
+        if not delegation_id:
+            raise ValueError("delegation_id 不能为空")
+        if not parent_operation_id or not child_operation_id:
+            raise ValueError("父子 operation_id 不能为空")
+        if parent_operation_id == child_operation_id:
+            raise ValueError("AgentDelegation 不能指向自身")
+        if not parent_step_id:
+            raise ValueError("parent_step_id 不能为空")
+        self.delegation_creates.append(
+            _CreateAgentDelegation(
+                delegation_id=delegation_id,
+                parent_operation_id=parent_operation_id,
+                parent_step_id=parent_step_id,
+                parent_tool_call_id=parent_tool_call_id,
+                child_operation_id=child_operation_id,
             )
         )
 
