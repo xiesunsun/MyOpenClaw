@@ -71,7 +71,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | 列 | 类型 | 约束 | 含义 |
 | --- | --- | --- | --- |
 | `object_id` | TEXT | PK | UUID |
-| `object_type` | TEXT | NOT NULL | 如 `agent_message`、`compaction` |
+| `object_type` | TEXT | NOT NULL | 如 `agent_message`、`history_compaction` |
 | `schema_version` | INTEGER | NOT NULL | 对象自身 schema 版本 |
 | `digest` | TEXT | NOT NULL | 规范 JSON envelope 的 SHA-256 |
 | `content_json` | TEXT | NOT NULL | JSON object |
@@ -195,6 +195,8 @@ insert ImmutableObject
 `ConversationEntry` 只包含读取所需的 Node 与解析对象，不拥有独立 Repository，也不能写回数据库。
 
 Context、Session Preview 与 OpenViking 都消费同一个活动分支读取接口，禁止分别重建树遍历逻辑。
+
+`ConversationProjector.project_conversation_messages()` 是 Context 的唯一消息投影算法。压缩对象使用 `history_compaction`，并以 `first_kept_node_id` 引用当前分支上的 `ConversationNode`；不再创建指向旧 `SessionEntry` 的 `first_kept_entry_id`。
 
 ## 7. 并发与损坏数据
 

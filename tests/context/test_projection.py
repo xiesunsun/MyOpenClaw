@@ -1,148 +1,173 @@
-"""project_messages：message 投影与 compaction 规则。"""
+"""ConversationProjector：会话事实投影与压缩规则。"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from uuid import uuid4
+from pathlib import Path
 
-from pickel.context.projection import project_messages
-from pickel.conversations.agent_message import (
-    AssistantMessage,
-    UserMessage,
-)
+from pickel.context.projection import ConversationProjector
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextContent
-from pickel.conversations.session import Session
-from pickel.conversations.session_entry import SessionEntry
+from pickel.conversations.conversation_service import ConversationService
+from pickel.persistence.sqlite_conversation_store import SQLiteConversationStore
 
 
-def _append_unknown_entry(session: Session, *, entry_type: str, payload: dict) -> SessionEntry:
-    entry = SessionEntry(
-        entry_id=str(uuid4()),
-        session_id=session.session_id,
-        parent_id=session.leaf_id,
-        entry_type=entry_type,
-        payload=payload,
-        created_at=datetime.now(timezone.utc),
+def _conversation(tmp_path: Path) -> tuple[ConversationService, str]:
+    service = ConversationService(
+        SQLiteConversationStore(tmp_path / "conversations.db"),
+        session_id_factory=lambda: "session-1",
     )
-    session.entries.append(entry)
-    session.leaf_id = entry.entry_id
-    session.touch(at=entry.created_at)
-    return entry
+    session = service.create_conversation_session(agent_id="Pickle")
+    return service, session.session_id
 
 
-def test_project_messages_skips_unknown_entry_types():
-    session = Session.create(agent_id="Pickle")
-    session.append_user(UserMessage(content=[TextContent(text="hi")]))
-    _append_unknown_entry(
-        session,
-        entry_type="openviking",
-        payload={"kind": "binding", "remote_session_id": "r1"},
+def _project(service: ConversationService, session_id: str):
+    entries = service.list_active_branch_entries(session_id=session_id)
+    return ConversationProjector().project_conversation_messages(entries)
+
+
+def test_project_conversation_messages_skips_non_message_facts(tmp_path: Path):
+    service, session_id = _conversation(tmp_path)
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="hi")]),
     )
-    _append_unknown_entry(
-        session,
-        entry_type="model_change",
-        payload={"model": "claude-test"},
+    service.append_host_call_request(
+        session_id=session_id,
+        content={"call_id": "host-1"},
+    )
+    service.append_host_call_response(
+        session_id=session_id,
+        content={"call_id": "host-1", "status": "completed"},
     )
 
-    messages = project_messages(session.active_path())
+    messages = _project(service, session_id)
 
     assert len(messages) == 1
     assert isinstance(messages[0], UserMessage)
     assert messages[0].content[0].text == "hi"
 
 
-def test_compaction_keeps_from_first_kept_and_injects_summary():
-    session = Session.create(agent_id="Pickle")
-    session.append_user(UserMessage(content=[TextContent(text="u1")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a1")]))
-    u2 = session.append_user(UserMessage(content=[TextContent(text="u2")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a2")]))
-    session.append_compaction(
-        {
+def test_compaction_keeps_from_first_kept_node_and_injects_summary(
+    tmp_path: Path,
+):
+    service, session_id = _conversation(tmp_path)
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u1")]),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a1")]),
+    )
+    u2 = service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u2")]),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a2")]),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content={
             "summary": "earlier was about X",
-            "first_kept_entry_id": u2.entry_id,
-        }
+            "first_kept_node_id": u2.node.node_id,
+        },
     )
 
-    messages = project_messages(session.active_path())
+    messages = _project(service, session_id)
 
-    assert len(messages) == 3
-    assert isinstance(messages[0], UserMessage)
-    assert messages[0].content[0].text == "[compaction]\nearlier was about X"
-    assert isinstance(messages[1], UserMessage)
-    assert messages[1].content[0].text == "u2"
-    assert isinstance(messages[2], AssistantMessage)
-    assert messages[2].content[0].text == "a2"
+    assert [message.content[0].text for message in messages] == [
+        "[compaction]\nearlier was about X",
+        "u2",
+        "a2",
+    ]
 
 
-def test_invalid_first_kept_ignores_compaction():
-    session = Session.create(agent_id="Pickle")
-    session.append_user(UserMessage(content=[TextContent(text="u1")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a1")]))
-    session.append_compaction(
-        {
+def test_invalid_first_kept_node_ignores_compaction(tmp_path: Path):
+    service, session_id = _conversation(tmp_path)
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u1")]),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a1")]),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content={
             "summary": "bad compact",
-            "first_kept_entry_id": "does-not-exist",
-        }
+            "first_kept_node_id": "does-not-exist",
+        },
     )
 
-    messages = project_messages(session.active_path())
+    assert [message.content[0].text for message in _project(service, session_id)] == [
+        "u1",
+        "a1",
+    ]
 
-    assert len(messages) == 2
-    assert messages[0].content[0].text == "u1"
-    assert messages[1].content[0].text == "a1"
 
-
-def test_last_compaction_wins_when_multiple():
-    session = Session.create(agent_id="Pickle")
-    u1 = session.append_user(UserMessage(content=[TextContent(text="u1")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a1")]))
-    u2 = session.append_user(UserMessage(content=[TextContent(text="u2")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a2")]))
-    session.append_compaction(
-        {
-            "summary": "old summary",
-            "first_kept_entry_id": u1.entry_id,
-        }
+def test_last_valid_compaction_wins(tmp_path: Path):
+    service, session_id = _conversation(tmp_path)
+    u1 = service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u1")]),
     )
-    u3 = session.append_user(UserMessage(content=[TextContent(text="u3")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a3")]))
-    session.append_compaction(
-        {
-            "summary": "new summary",
-            "first_kept_entry_id": u3.entry_id,
-        }
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a1")]),
     )
-
-    messages = project_messages(session.active_path())
-
-    assert messages[0].content[0].text == "[compaction]\nnew summary"
-    assert [m.content[0].text for m in messages[1:]] == ["u3", "a3"]
-
-
-def test_later_invalid_compaction_falls_back_to_earlier_valid():
-    """路径尾部无效 compaction 不掩盖更早的有效 compaction。"""
-    session = Session.create(agent_id="Pickle")
-    session.append_user(UserMessage(content=[TextContent(text="u1")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a1")]))
-    u2 = session.append_user(UserMessage(content=[TextContent(text="u2")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a2")]))
-    session.append_compaction(
-        {
-            "summary": "valid earlier",
-            "first_kept_entry_id": u2.entry_id,
-        }
+    service.append_history_compaction(
+        session_id=session_id,
+        content={"summary": "old", "first_kept_node_id": u1.node.node_id},
     )
-    session.append_user(UserMessage(content=[TextContent(text="u3")]))
-    session.append_assistant(AssistantMessage(content=[TextContent(text="a3")]))
-    session.append_compaction(
-        {
-            "summary": "invalid later",
-            "first_kept_entry_id": "does-not-exist",
-        }
+    u2 = service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u2")]),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a2")]),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content={"summary": "new", "first_kept_node_id": u2.node.node_id},
     )
 
-    messages = project_messages(session.active_path())
+    assert [message.content[0].text for message in _project(service, session_id)] == [
+        "[compaction]\nnew",
+        "u2",
+        "a2",
+    ]
 
-    assert messages[0].content[0].text == "[compaction]\nvalid earlier"
-    assert [m.content[0].text for m in messages[1:]] == ["u2", "a2", "u3", "a3"]
+
+def test_later_invalid_compaction_falls_back_to_earlier_valid(tmp_path: Path):
+    service, session_id = _conversation(tmp_path)
+    u1 = service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u1")]),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage(content=[TextContent(text="a1")]),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content={"summary": "valid", "first_kept_node_id": u1.node.node_id},
+    )
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage(content=[TextContent(text="u2")]),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content={"summary": "invalid", "first_kept_node_id": "missing"},
+    )
+
+    assert [message.content[0].text for message in _project(service, session_id)] == [
+        "[compaction]\nvalid",
+        "u1",
+        "a1",
+        "u2",
+    ]
