@@ -73,6 +73,7 @@
 | Config、Settings、Agent 加载、目录与 Session 库位置 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 理解配置分层和路径合同；运行层名称以命名合同为准 |
 | RuntimeBus、HostCall、交互队列、Runtime 与 Host 边界 | [`Runtime I/O 总线与宿主调用设计`](docs/upgrade/2026-07-31-runtime-interaction-design.md) | 保护已实施的 I/O 边界，避免 Runtime 直接依赖 UI |
 | SQLite Session 表、字段和迁移 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 理解现有数据库实体；若目标实体已在命名合同中重命名，先按目标名设计迁移 |
+| Operation、AgentRunState、Tool 恢复 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | 约束 Operation 接受事务、状态引用、Package 绑定和未知副作用恢复语义 |
 | Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 保持 Provider Adapter 边界和 Anthropic 协议语义 |
 
 ### 使用要求
