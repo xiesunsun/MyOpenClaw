@@ -15,5 +15,5 @@ class SessionOperation:
     session_id: str
     operation_type: OperationType
     agent_package_version_id: str
-    accepted_sequence: int
+    accepted_commit_sequence: int
     created_at: datetime

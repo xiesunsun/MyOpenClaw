@@ -12,7 +12,7 @@
 ```text
 SessionOperation（不可变身份记录）
 ├── agent_package_version_id
-├── accepted_sequence
+├── accepted_commit_sequence
 └── operation/<operation_id>/state（NamedReference）
     └── ImmutableObject(session_operation_state)
         └── AgentRunState
@@ -34,7 +34,7 @@ SessionOperation（不可变身份记录）
 | `session_id` | TEXT | FK → sessions | 所属会话 |
 | `operation_type` | TEXT | `agent_run` 等 | 工作类型 |
 | `agent_package_version_id` | TEXT | FK → agent_package_versions，AgentRun 必填 | 接受时冻结的 Agent Package |
-| `accepted_sequence` | INTEGER | FK → storage_commits | 接受操作的原子提交 |
+| `accepted_commit_sequence` | INTEGER | FK → storage_commits | 接受操作的原子提交 |
 | `created_at` | TEXT | NOT NULL | UTC ISO8601 |
 
 第一版只接受 `agent_run`。后续 HistoryCompaction、HistoryNavigation 和 Delegation 复用同一 Operation 身份，不另建 Turn/Job/Task 表。
@@ -82,7 +82,7 @@ commit
 | `tool_calls` | 有序 ToolCallState 列表 |
 | `retry_count` | 已持久化的模型请求重试次数 |
 
-状态 Reference 使用 `operation/<operation_id>/state`。State 中的 `revision` 与 Reference 的 `sequence` 含义不同：revision 只排序该 Operation 的状态版本；Reference sequence 是 Session 的全局提交顺序。
+状态 Reference 使用 `operation/<operation_id>/state`。State 中的 `revision` 与 Reference 的 `commit_sequence` 含义不同：revision 只排序该 Operation 的状态版本；Reference `commit_sequence` 是 Session 的持久化提交顺序。
 
 ## 5. Tool 恢复语义
 
@@ -112,7 +112,7 @@ ToolCallReady
 ## 6. 状态转换约束
 
 - 新状态 `revision = current.revision + 1`。
-- 提交同时校验 Session `current_sequence` 与状态 Reference 当前 sequence。
+- 提交同时校验 Session `current_commit_sequence` 与状态 Reference 当前 `commit_sequence`。
 - 终态不能回到运行态。
 - `succeeded` 必须有 `final_assistant_node_id`。
 - `failed/cancelled` 不得留下可自动执行的 `ready` ToolCall。
@@ -123,7 +123,7 @@ ToolCallReady
 
 1. 接受 AgentRun 时 Operation、用户消息、初始 State 和两个 Reference 原子成功或全部回滚。
 2. Package Version 不存在时拒绝接受。
-3. State revision 与 Reference CAS 冲突可复现，失败不消耗 sequence。
+3. State revision 与 Reference CAS 冲突可复现，失败不消耗 `commit_sequence`。
 4. 进程重启后按 `operation/<id>/state` 一次读取恢复最新 AgentRunState。
 5. `intent_recorded` ToolCall 不被自动重放。
 6. 核心持久化身份不再新增 `turn_id`。

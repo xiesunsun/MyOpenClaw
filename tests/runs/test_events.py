@@ -580,7 +580,10 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         await run.turn(session=session, user_message=user_message("hello"), bus=bus)
 
         self.assertTrue(events)
-        self.assertEqual(list(range(len(events))), [e.envelope.seq for e in events])
+        self.assertEqual(
+            list(range(len(events))),
+            [e.envelope.event_sequence for e in events],
+        )
         self.assertTrue(all(e.envelope.session_id == "session-1" for e in events))
         turn_ids = {e.envelope.turn_id for e in events}
         self.assertEqual(1, len(turn_ids))

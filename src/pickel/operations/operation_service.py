@@ -89,7 +89,7 @@ class OperationService:
         )
         transaction = self._store.begin_storage_transaction(
             session_id=session_id,
-            expected_sequence=session.current_sequence,
+            expected_commit_sequence=session.current_commit_sequence,
         )
         transaction.create_session_operation(
             operation_id=operation_id,
@@ -112,8 +112,10 @@ class OperationService:
             reference_name=ACTIVE_CONVERSATION_REFERENCE,
             target_kind="node",
             target_id=user_message_node_id,
-            expected_current_sequence=(
-                active_reference.sequence if active_reference is not None else None
+            expected_current_commit_sequence=(
+                active_reference.commit_sequence
+                if active_reference is not None
+                else None
             ),
         )
         initial_state = self._state_machine.create_initial_agent_run_state(
@@ -129,7 +131,7 @@ class OperationService:
             reference_name=operation_state_reference_name(operation_id),
             target_kind="object",
             target_id=state_object_id,
-            expected_current_sequence=None,
+            expected_current_commit_sequence=None,
         )
         transaction.commit()
         operation = self.load_session_operation(operation_id)
@@ -234,7 +236,7 @@ class OperationService:
             )
         transaction = self._store.begin_storage_transaction(
             session_id=operation.session_id,
-            expected_sequence=session.current_sequence,
+            expected_commit_sequence=session.current_commit_sequence,
         )
 
         if appended_message is not None:
@@ -259,8 +261,10 @@ class OperationService:
                 reference_name=ACTIVE_CONVERSATION_REFERENCE,
                 target_kind="node",
                 target_id=appended_message_node_id,
-                expected_current_sequence=(
-                    active_reference.sequence if active_reference is not None else None
+                expected_current_commit_sequence=(
+                    active_reference.commit_sequence
+                    if active_reference is not None
+                    else None
                 ),
             )
 
@@ -273,7 +277,7 @@ class OperationService:
             reference_name=state_reference_name,
             target_kind="object",
             target_id=state_object_id,
-            expected_current_sequence=state_reference.sequence,
+            expected_current_commit_sequence=state_reference.commit_sequence,
         )
         transaction.commit()
 

@@ -58,7 +58,7 @@ def test_create_and_append_messages_through_single_transaction_path(
         assistant_entry.node.node_id,
         tool_entry.node.node_id,
     ]
-    assert [entry.node.sequence for entry in entries] == [1, 2, 3]
+    assert [entry.node.created_commit_sequence for entry in entries] == [1, 2, 3]
     assert all(entry.object.object_type == "agent_message" for entry in entries)
     assert entries[0].object.content["role"] == "user"
     assert entries[1].object.content["role"] == "assistant"
@@ -89,7 +89,7 @@ def test_move_active_branch_creates_reference_version_without_new_node(
     )
 
     entries = service.list_active_branch_entries(session_id=session.session_id)
-    assert moved.current_sequence == 3
+    assert moved.current_commit_sequence == 3
     assert moved.active_node_id == first.node.node_id
     assert replacement.node.parent_node_id == first.node.node_id
     assert [entry.object.content["content"][0]["text"] for entry in entries] == [

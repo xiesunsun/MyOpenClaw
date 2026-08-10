@@ -12,6 +12,6 @@ ReferenceTargetKind = Literal["node", "object"]
 class NamedReference:
     session_id: str
     reference_name: str
-    sequence: int
+    commit_sequence: int
     target_kind: ReferenceTargetKind
     target_id: str

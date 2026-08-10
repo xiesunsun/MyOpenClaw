@@ -38,5 +38,5 @@ class ImmutableObject:
     digest: str
     content: dict[str, Any]
     created_session_id: str
-    created_sequence: int
+    created_commit_sequence: int
     created_at: datetime

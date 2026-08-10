@@ -30,15 +30,15 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `ConversationEntry` | 不落库 | Node 与 Object 解析后的读取视图 |
 | `SessionOperation` | 否 | Session 接受的工作身份；状态内容见 Operation 恢复合同 |
 
-## 2. 共享 sequence
+## 2. 共享 commit_sequence
 
-`sequence` 是单个 Session 内的提交顺序，从 `1` 严格递增。
+`commit_sequence` 是单个 Session 内的持久化提交顺序，从 `1` 严格递增。
 
-- 一个 `StorageTransaction` 只分配一个 sequence。
-- 同一事务插入的 Object、Node 和 Reference 版本共享该 sequence。
-- 事务回滚不得消耗 sequence。
-- sequence 用于审计、增量 Watch 和并发检查，不用于扫描历史恢复当前状态。
-- 当前 Runtime EventBus 的进程内 `seq` 不是本字段；后续分别命名为 `event_sequence` 与 `commit_sequence`。
+- 一个 `StorageTransaction` 只分配一个 `commit_sequence`。
+- 同一事务插入的 Object、Node 和 Reference 版本共享该序号。
+- 事务回滚不得消耗 `commit_sequence`。
+- `commit_sequence` 用于审计、增量 Watch 和并发检查，不用于扫描历史恢复当前状态。
+- EventBus 另行分配进程内 `event_sequence`；二者不可比较，也不能互相充当 cursor。
 
 ## 3. 表结构
 
@@ -49,7 +49,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `session_id` | TEXT | PK | UUID |
 | `agent_id` | TEXT | NOT NULL | 创建时使用的 Agent Definition 标识 |
 | `cwd` | TEXT | NOT NULL | 规范化工作目录 |
-| `current_sequence` | INTEGER | NOT NULL, DEFAULT 0 | 最近成功提交序号 |
+| `current_commit_sequence` | INTEGER | NOT NULL, DEFAULT 0 | 最近成功提交序号 |
 | `created_at` | TEXT | NOT NULL | UTC ISO8601 |
 | `updated_at` | TEXT | NOT NULL | UTC ISO8601 |
 | `status` | TEXT | NOT NULL | `active` / `archived` |
@@ -62,11 +62,11 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
 | `session_id` | TEXT | FK → sessions |
-| `sequence` | INTEGER | Session 内递增 |
+| `commit_sequence` | INTEGER | Session 内递增 |
 | `commit_id` | TEXT | 全局唯一 UUID |
 | `committed_at` | TEXT | UTC ISO8601 |
 
-主键：`(session_id, sequence)`；`commit_id` 唯一。
+主键：`(session_id, commit_sequence)`；`commit_id` 唯一。
 
 ### 3.3 `immutable_objects`
 
@@ -78,7 +78,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `digest` | TEXT | NOT NULL | 规范 JSON envelope 的 SHA-256 |
 | `content_json` | TEXT | NOT NULL | JSON object |
 | `created_session_id` | TEXT | NOT NULL | 首次创建所在 Session |
-| `created_sequence` | INTEGER | NOT NULL | 首次创建所在提交 |
+| `created_commit_sequence` | INTEGER | NOT NULL | 首次创建所在提交 |
 | `created_at` | TEXT | NOT NULL | UTC ISO8601 |
 
 对象只能 INSERT，禁止 UPDATE。第一阶段不按 digest 自动合并对象；digest 用于校验和后续内容寻址。
@@ -91,7 +91,7 @@ ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落�
 | `session_id` | TEXT | FK → sessions | 所属会话 |
 | `parent_node_id` | TEXT | NULL | 同 Session 父节点；根节点为空 |
 | `object_id` | TEXT | FK → immutable_objects | 节点内容 |
-| `sequence` | INTEGER | NOT NULL | 创建节点的提交序号 |
+| `created_commit_sequence` | INTEGER | NOT NULL | 创建节点的提交序号 |
 | `created_at` | TEXT | NOT NULL | UTC ISO8601 |
 
 节点只能 INSERT。`parent_node_id` 必须为空或指向同 Session 已存在/同事务新建的节点。
@@ -104,11 +104,11 @@ NamedReference 的移动通过追加版本表达，不覆盖旧行。
 | --- | --- | --- |
 | `session_id` | TEXT | FK → sessions |
 | `reference_name` | TEXT | 如 `conversation/active` |
-| `sequence` | INTEGER | 本次移动所在提交 |
+| `commit_sequence` | INTEGER | 本次移动所在提交 |
 | `target_kind` | TEXT | `node` / `object` |
 | `target_id` | TEXT | 目标 ID |
 
-主键：`(session_id, reference_name, sequence)`。当前 Reference 是同名行中 sequence 最大的一条。
+主键：`(session_id, reference_name, commit_sequence)`。当前 Reference 是同名行中 `commit_sequence` 最大的一条。
 
 ### 3.6 `agent_package_versions`
 
@@ -124,7 +124,7 @@ Package Snapshot 直接从 Pickel 现有 `AppConfig / AgentConfig / ModelConfig 
 
 ### 3.7 `session_operations`
 
-Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_sequence)` 关联接受它的 `StorageCommit`，以 `agent_package_version_id` 关联冻结的 Package。状态不覆盖此行，而是通过 `operation/<operation_id>/state` NamedReference 指向不可变 State；完整字段和转换约束见 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。
+Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_commit_sequence)` 关联接受它的 `StorageCommit`，以 `agent_package_version_id` 关联冻结的 Package。状态不覆盖此行，而是通过 `operation/<operation_id>/state` NamedReference 指向不可变 State；完整字段和转换约束见 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。
 
 ## 4. StorageTransaction
 
@@ -133,7 +133,7 @@ Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_
 ```python
 transaction = store.begin_storage_transaction(
     session_id=session_id,
-    expected_sequence=current_sequence,
+    expected_commit_sequence=current_commit_sequence,
 )
 object_id = transaction.insert_immutable_object(...)
 node_id = transaction.append_conversation_node(
@@ -144,22 +144,22 @@ transaction.move_named_reference(
     reference_name="conversation/active",
     target_kind="node",
     target_id=node_id,
-    expected_current_sequence=active_reference_sequence,
+    expected_current_commit_sequence=active_reference_commit_sequence,
 )
 commit = transaction.commit()
 ```
 
 事务必须：
 
-1. 校验 Session 当前 sequence 与调用方预期一致；
+1. 校验 Session 当前 `commit_sequence` 与调用方预期一致；
 2. 校验 Object、Node 和 Reference 目标；
-3. 分配 `current_sequence + 1`；
+3. 分配 `current_commit_sequence + 1`；
 4. 写入全部不可变事实和 Reference 新版本；
 5. 插入 StorageCommit；
-6. 更新 Session `current_sequence/updated_at`；
-7. 任一步失败则全部回滚且不消耗 sequence。
+6. 更新 Session `current_commit_sequence/updated_at`；
+7. 任一步失败则全部回滚且不消耗 `commit_sequence`。
 
-Reference move 还需校验 `expected_current_sequence`：
+Reference move 还需校验 `expected_current_commit_sequence`：
 
 - `None` 表示调用方预期该 Reference 尚不存在；
 - 整数表示调用方最后读取的 Reference 版本；

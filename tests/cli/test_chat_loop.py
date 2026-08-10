@@ -780,9 +780,9 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
                 await loop.run()
 
             seqs = [
-                json.loads(line)["seq"]
+                json.loads(line)["event_sequence"]
                 for line in trace_file.read_text(encoding="utf-8").splitlines()
-                if "seq" in json.loads(line)
+                if "event_sequence" in json.loads(line)
             ]
 
         self.assertEqual([0, 1, 2], seqs)
@@ -918,7 +918,10 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
             ],
             [record["event_type"] for record in records],
         )
-        self.assertEqual(list(range(9)), [record["seq"] for record in records])
+        self.assertEqual(
+            list(range(9)),
+            [record["event_sequence"] for record in records],
+        )
         self.assertEqual({"session-1"}, {record["session_id"] for record in records})
         self.assertEqual(1, len({record["turn_id"] for record in records}))
         self.assertEqual({"text": "hi"}, records[3]["tool_call"]["arguments"])
@@ -1044,7 +1047,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         # 全事件 seq 连续（0..n-1）；seq 由 bus 按事件分配，
         # 连续即证明 trace 行数与事件数一致——没有事件被 sink 吞掉
         self.assertEqual(
-            list(range(len(records))), [record["seq"] for record in records]
+            list(range(len(records))),
+            [record["event_sequence"] for record in records],
         )
         spans = [
             json.loads(line)

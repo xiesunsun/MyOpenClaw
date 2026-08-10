@@ -113,7 +113,10 @@ def test_落盘的_seq_与_bus_分配一致(tmp_path: Path):
     asyncio.run(_emit(bus))
     sink.close()
 
-    seqs = [json.loads(line)["seq"] for line in path.read_text().strip().splitlines()]
+    seqs = [
+        json.loads(line)["event_sequence"]
+        for line in path.read_text().strip().splitlines()
+    ]
     assert seqs == [0, 1]
 
 

@@ -81,7 +81,7 @@ class RuntimeEventBase:
             "session_id": envelope.session_id,
             "turn_id": envelope.turn_id,
             "step_index": envelope.step_index,
-            "seq": envelope.seq,
+            "event_sequence": envelope.event_sequence,
             "occurred_at": envelope.occurred_at.isoformat(),
         }
         base.update(self._payload())

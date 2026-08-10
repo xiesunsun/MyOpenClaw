@@ -178,15 +178,17 @@ def test_accept_agent_run_is_one_atomic_commit(store: OperationStore) -> None:
     )
 
     assert session is not None
-    assert session.current_sequence == 1
-    assert accepted.operation.accepted_sequence == 1
+    assert session.current_commit_sequence == 1
+    assert accepted.operation.accepted_commit_sequence == 1
     assert accepted.operation.agent_package_version_id == package.package_version_id
     assert accepted.state.revision == 1
     assert accepted.state.status == "queued"
     assert accepted.user_message_entry.node.node_id == "user-node"
     assert conversation_reference is not None
     assert state_reference is not None
-    assert conversation_reference.sequence == state_reference.sequence == 1
+    assert (
+        conversation_reference.commit_sequence == state_reference.commit_sequence == 1
+    )
 
 
 def test_accept_agent_run_rejects_missing_package_without_consuming_sequence(
@@ -203,7 +205,7 @@ def test_accept_agent_run_rejects_missing_package_without_consuming_sequence(
 
     session = store.load_conversation_session("session-1")
     assert session is not None
-    assert session.current_sequence == 0
+    assert session.current_commit_sequence == 0
     assert store.list_session_operations(session_id="session-1") == []
 
 
@@ -232,7 +234,7 @@ def test_failed_second_accept_rolls_back_user_message_and_sequence(
     session = store.load_conversation_session("session-1")
     entries = store.list_active_branch_entries(session_id="session-1")
     assert session is not None
-    assert session.current_sequence == 1
+    assert session.current_commit_sequence == 1
     assert len(entries) == 1
     assert entries[0].object.content["content"][0]["text"] == "first"
 
@@ -260,7 +262,9 @@ def test_commit_message_and_state_share_commit_sequence(
     assert committed == next_state
     assert conversation_reference is not None
     assert state_reference is not None
-    assert conversation_reference.sequence == state_reference.sequence == 4
+    assert (
+        conversation_reference.commit_sequence == state_reference.commit_sequence == 4
+    )
 
 
 def test_recovery_preserves_unknown_tool_effect_without_replaying(
@@ -346,7 +350,7 @@ def test_state_reference_compare_and_swap_rejects_stale_version(
     )
     stale = store.begin_storage_transaction(
         session_id="session-1",
-        expected_sequence=2,
+        expected_commit_sequence=2,
     )
     object_id = stale.insert_immutable_object(
         object_type="session_operation_state",
@@ -356,15 +360,15 @@ def test_state_reference_compare_and_swap_rejects_stale_version(
         reference_name=operation_state_reference_name("operation-1"),
         target_kind="object",
         target_id=object_id,
-        expected_current_sequence=1,
+        expected_current_commit_sequence=1,
     )
 
-    with pytest.raises(StorageConflictError, match="NamedReference sequence 冲突"):
+    with pytest.raises(StorageConflictError, match="commit_sequence 冲突"):
         stale.commit()
 
     session = store.load_conversation_session("session-1")
     assert session is not None
-    assert session.current_sequence == 2
+    assert session.current_commit_sequence == 2
 
 
 def test_sqlite_store_recovers_latest_state_after_reopen(tmp_path: Path) -> None:

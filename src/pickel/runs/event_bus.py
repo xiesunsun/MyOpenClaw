@@ -1,7 +1,7 @@
 """EventBus：runtime 事件的多订阅广播。
 
 两条硬约束：
-1. seq 只在这里分配（红线 4）——它是全序的唯一来源
+1. event_sequence 只在这里分配——它是进程内观测事件全序的唯一来源
 2. 订阅者异常被吞掉（红线 2）——渲染器崩溃不得杀掉正在跑的 turn
 """
 
@@ -30,7 +30,7 @@ class EventBus:
         # 若按值匹配退订会删错槽位、打乱剩余订阅者的调用顺序。
         self._handlers: dict[int, RuntimeEventHandler] = {}
         self._next_handler_id = 0
-        self._next_seq = 0
+        self._next_event_sequence = 0
 
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
         """注册订阅者，返回退订函数。"""
@@ -44,9 +44,12 @@ class EventBus:
         return unsubscribe
 
     async def emit(self, event: RuntimeEventBase) -> RuntimeEventBase:
-        """分配 seq 后广播；返回带 seq 的事件。"""
-        stamped = replace(event, envelope=event.envelope.with_seq(self._next_seq))
-        self._next_seq += 1
+        """分配 event_sequence 后广播；返回带序号的事件。"""
+        stamped = replace(
+            event,
+            envelope=event.envelope.with_event_sequence(self._next_event_sequence),
+        )
+        self._next_event_sequence += 1
 
         for handler in list(self._handlers.values()):
             try:

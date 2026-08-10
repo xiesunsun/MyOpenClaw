@@ -31,11 +31,11 @@ class EventIdentity:
 class EventEnvelope(EventIdentity):
     """runtime 事件的信封：身份 + 全序序号。
 
-    seq 由 EventBus 统一分配（红线 4）；-1 表示尚未进入 bus。
+    event_sequence 由 EventBus 统一分配；-1 表示尚未进入 bus。
     hook 事件不经过 bus，故只用 EventIdentity，不背这个字段。
     """
 
-    seq: int = -1
+    event_sequence: int = -1
 
-    def with_seq(self, seq: int) -> "EventEnvelope":
-        return replace(self, seq=seq)
+    def with_event_sequence(self, event_sequence: int) -> "EventEnvelope":
+        return replace(self, event_sequence=event_sequence)

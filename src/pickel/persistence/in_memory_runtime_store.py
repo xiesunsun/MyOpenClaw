@@ -58,17 +58,17 @@ class InMemoryRuntimeStore:
                 session_id=session_id,
                 agent_id=agent_id,
                 cwd=cwd,
-                current_sequence=0,
+                current_commit_sequence=0,
                 active_node_id=None,
                 created_at=now,
                 updated_at=now,
             )
 
-    def load_current_sequence(self, session_id: str) -> int:
+    def load_current_commit_sequence(self, session_id: str) -> int:
         session = self.load_conversation_session(session_id)
         if session is None:
             raise LookupError(f"ConversationSession 不存在: {session_id}")
-        return session.current_sequence
+        return session.current_commit_sequence
 
     def load_conversation_session(
         self,
@@ -221,19 +221,19 @@ class InMemoryRuntimeStore:
                     for operation in self._operations.values()
                     if operation.session_id == session_id
                 ),
-                key=lambda item: (item.accepted_sequence, item.operation_id),
+                key=lambda item: (item.accepted_commit_sequence, item.operation_id),
             )
 
     def begin_storage_transaction(
         self,
         *,
         session_id: str,
-        expected_sequence: int,
+        expected_commit_sequence: int,
     ) -> StorageTransaction:
         return StorageTransaction(
             store=self,
             session_id=session_id,
-            expected_sequence=expected_sequence,
+            expected_commit_sequence=expected_commit_sequence,
         )
 
     def load_immutable_object(self, object_id: str) -> ImmutableObject | None:
@@ -310,17 +310,17 @@ class InMemoryRuntimeStore:
                 raise LookupError(
                     f"ConversationSession 不存在: {transaction.session_id}"
                 )
-            if session.current_sequence != transaction.expected_sequence:
+            if session.current_commit_sequence != transaction.expected_commit_sequence:
                 raise StorageConflictError(
-                    "ConversationSession sequence 冲突: "
-                    f"expected={transaction.expected_sequence}, "
-                    f"actual={session.current_sequence}"
+                    "ConversationSession commit_sequence 冲突: "
+                    f"expected={transaction.expected_commit_sequence}, "
+                    f"actual={session.current_commit_sequence}"
                 )
             self._validate_transaction(transaction)
-            sequence = session.current_sequence + 1
+            commit_sequence = session.current_commit_sequence + 1
             commit = StorageCommit(
                 session_id=transaction.session_id,
-                sequence=sequence,
+                commit_sequence=commit_sequence,
                 commit_id=str(uuid4()),
                 committed_at=committed_at,
             )
@@ -337,7 +337,7 @@ class InMemoryRuntimeStore:
                     ),
                     content=self._copy_content(command.content),
                     created_session_id=transaction.session_id,
-                    created_sequence=sequence,
+                    created_commit_sequence=commit_sequence,
                     created_at=committed_at,
                 )
                 for command in transaction.object_inserts
@@ -348,7 +348,7 @@ class InMemoryRuntimeStore:
                     session_id=transaction.session_id,
                     parent_node_id=command.parent_node_id,
                     object_id=command.object_id,
-                    sequence=sequence,
+                    created_commit_sequence=commit_sequence,
                     created_at=committed_at,
                 )
                 for command in transaction.node_appends
@@ -357,7 +357,7 @@ class InMemoryRuntimeStore:
                 NamedReference(
                     session_id=transaction.session_id,
                     reference_name=command.reference_name,
-                    sequence=sequence,
+                    commit_sequence=commit_sequence,
                     target_kind=command.target_kind,
                     target_id=command.target_id,
                 )
@@ -369,13 +369,13 @@ class InMemoryRuntimeStore:
                     session_id=transaction.session_id,
                     operation_type=command.operation_type,  # type: ignore[arg-type]
                     agent_package_version_id=command.agent_package_version_id,
-                    accepted_sequence=sequence,
+                    accepted_commit_sequence=commit_sequence,
                     created_at=committed_at,
                 )
                 for command in transaction.operation_creates
             }
 
-            self._commits[(transaction.session_id, sequence)] = commit
+            self._commits[(transaction.session_id, commit_sequence)] = commit
             self._objects.update(staged_objects)
             self._nodes.update(staged_nodes)
             self._operations.update(staged_operations)
@@ -385,7 +385,7 @@ class InMemoryRuntimeStore:
                 ).append(reference)
             self._sessions[transaction.session_id] = replace(
                 session,
-                current_sequence=sequence,
+                current_commit_sequence=commit_sequence,
                 updated_at=committed_at,
             )
             return commit
@@ -472,12 +472,14 @@ class InMemoryRuntimeStore:
                 session_id=transaction.session_id,
                 reference_name=command.reference_name,
             )
-            current_sequence = current.sequence if current is not None else None
-            if current_sequence != command.expected_current_sequence:
+            current_commit_sequence = (
+                current.commit_sequence if current is not None else None
+            )
+            if current_commit_sequence != command.expected_current_commit_sequence:
                 raise StorageConflictError(
-                    f"NamedReference sequence 冲突: {command.reference_name}; "
-                    f"expected={command.expected_current_sequence}, "
-                    f"actual={current_sequence}"
+                    f"NamedReference commit_sequence 冲突: {command.reference_name}; "
+                    f"expected={command.expected_current_commit_sequence}, "
+                    f"actual={current_commit_sequence}"
                 )
             if command.target_kind == "object":
                 exists = (

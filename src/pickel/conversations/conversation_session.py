@@ -11,7 +11,7 @@ class ConversationSession:
     session_id: str
     agent_id: str
     cwd: str
-    current_sequence: int
+    current_commit_sequence: int
     active_node_id: str | None
     created_at: datetime
     updated_at: datetime

@@ -126,7 +126,10 @@ class RuntimeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("completed", first.status)
         self.assertEqual("completed", second.status)
         self.assertEqual(["one", "two"], [item.text for item in events])
-        self.assertEqual([0, 1], [item.envelope.seq for item in events])
+        self.assertEqual(
+            [0, 1],
+            [item.envelope.event_sequence for item in events],
+        )
 
     async def test_publishes_outputs_to_surface_subscriber(self) -> None:
         agent = _agent()

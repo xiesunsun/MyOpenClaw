@@ -29,14 +29,14 @@ def store(request, tmp_path: Path) -> ConversationStore:
 def _append_message(
     store: ConversationStore,
     *,
-    expected_sequence: int,
+    expected_commit_sequence: int,
     expected_reference_sequence: int | None,
     parent_node_id: str | None,
     text: str,
 ) -> str:
     transaction = store.begin_storage_transaction(
         session_id="session-1",
-        expected_sequence=expected_sequence,
+        expected_commit_sequence=expected_commit_sequence,
     )
     object_id = transaction.insert_immutable_object(
         object_type="agent_message",
@@ -50,7 +50,7 @@ def _append_message(
         reference_name="conversation/active",
         target_kind="node",
         target_id=node_id,
-        expected_current_sequence=expected_reference_sequence,
+        expected_current_commit_sequence=expected_reference_sequence,
     )
     transaction.commit()
     return node_id
@@ -61,14 +61,14 @@ def test_store_contract_commits_and_reads_active_branch(
 ) -> None:
     first = _append_message(
         store,
-        expected_sequence=0,
+        expected_commit_sequence=0,
         expected_reference_sequence=None,
         parent_node_id=None,
         text="first",
     )
     _append_message(
         store,
-        expected_sequence=1,
+        expected_commit_sequence=1,
         expected_reference_sequence=1,
         parent_node_id=first,
         text="second",
@@ -78,7 +78,7 @@ def test_store_contract_commits_and_reads_active_branch(
     entries = store.list_active_branch_entries(session_id="session-1")
 
     assert session is not None
-    assert session.current_sequence == 2
+    assert session.current_commit_sequence == 2
     assert [entry.object.content["content"][0]["text"] for entry in entries] == [
         "first",
         "second",
@@ -90,7 +90,7 @@ def test_store_contract_rejects_stale_session_sequence(
 ) -> None:
     stale = store.begin_storage_transaction(
         session_id="session-1",
-        expected_sequence=0,
+        expected_commit_sequence=0,
     )
     stale.insert_immutable_object(
         object_type="agent_message",
@@ -98,7 +98,7 @@ def test_store_contract_rejects_stale_session_sequence(
     )
     _append_message(
         store,
-        expected_sequence=0,
+        expected_commit_sequence=0,
         expected_reference_sequence=None,
         parent_node_id=None,
         text="winner",
@@ -113,32 +113,32 @@ def test_store_contract_moves_reference_to_create_branch(
 ) -> None:
     first = _append_message(
         store,
-        expected_sequence=0,
+        expected_commit_sequence=0,
         expected_reference_sequence=None,
         parent_node_id=None,
         text="first",
     )
     _append_message(
         store,
-        expected_sequence=1,
+        expected_commit_sequence=1,
         expected_reference_sequence=1,
         parent_node_id=first,
         text="discarded",
     )
     transaction = store.begin_storage_transaction(
         session_id="session-1",
-        expected_sequence=2,
+        expected_commit_sequence=2,
     )
     transaction.move_named_reference(
         reference_name="conversation/active",
         target_kind="node",
         target_id=first,
-        expected_current_sequence=2,
+        expected_current_commit_sequence=2,
     )
     transaction.commit()
     _append_message(
         store,
-        expected_sequence=3,
+        expected_commit_sequence=3,
         expected_reference_sequence=3,
         parent_node_id=first,
         text="replacement",
@@ -154,7 +154,7 @@ def test_store_contract_moves_reference_to_create_branch(
 def test_store_contract_deletes_all_session_facts(store: ConversationStore) -> None:
     _append_message(
         store,
-        expected_sequence=0,
+        expected_commit_sequence=0,
         expected_reference_sequence=None,
         parent_node_id=None,
         text="delete me",

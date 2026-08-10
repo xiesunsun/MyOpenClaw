@@ -11,14 +11,14 @@ def _write_trace(path: Path) -> None:
     events = [
         {
             "event_type": "turn_started",
-            "seq": 0,
+            "event_sequence": 0,
             "occurred_at": "2026-07-26T00:00:00+00:00",
             "turn_id": "t1",
             "user_text": "SECRET",
         },
         {
             "event_type": "tool_call_started",
-            "seq": 1,
+            "event_sequence": 1,
             "occurred_at": "2026-07-26T00:00:01+00:00",
             "tool_call": {
                 "id": "c1",
@@ -28,7 +28,7 @@ def _write_trace(path: Path) -> None:
         },
         {
             "event_type": "tool_call_completed",
-            "seq": 2,
+            "event_sequence": 2,
             "occurred_at": "2026-07-26T00:00:02.500000+00:00",
             "tool_call": {
                 "id": "c1",
@@ -42,7 +42,7 @@ def _write_trace(path: Path) -> None:
         },
         {
             "event_type": "turn_failed",
-            "seq": 3,
+            "event_sequence": 3,
             "occurred_at": "2026-07-26T00:00:03+00:00",
             "error_type": "RuntimeError",
             "message": "boom",
@@ -91,12 +91,12 @@ def test_interrupted_marks_turn(tmp_path):
     events = [
         {
             "event_type": "turn_started",
-            "seq": 0,
+            "event_sequence": 0,
             "occurred_at": "2026-07-26T00:00:00+00:00",
         },
         {
             "event_type": "turn_interrupted",
-            "seq": 1,
+            "event_sequence": 1,
             "occurred_at": "2026-07-26T00:00:01+00:00",
             "at_step": 2,
         },
@@ -115,13 +115,13 @@ def test_request_digests_grouped_by_turn(tmp_path):
     events = [
         {
             "event_type": "turn_started",
-            "seq": 0,
+            "event_sequence": 0,
             "occurred_at": "2026-07-27T00:00:00+00:00",
             "user_text": "SECRET",
         },
         {
             "event_type": "request_digest",
-            "seq": 1,
+            "event_sequence": 1,
             "occurred_at": "2026-07-27T00:00:01+00:00",
             "system_sections": [{"name": "behavior", "chars": 120}],
             "tool_names": ["shell_exec"],
@@ -131,7 +131,7 @@ def test_request_digests_grouped_by_turn(tmp_path):
         },
         {
             "event_type": "request_digest",
-            "seq": 2,
+            "event_sequence": 2,
             "occurred_at": "2026-07-27T00:00:02+00:00",
             "system_sections": [{"name": "behavior", "chars": 120}],
             "tool_names": ["shell_exec"],
@@ -141,12 +141,12 @@ def test_request_digests_grouped_by_turn(tmp_path):
         },
         {
             "event_type": "turn_started",
-            "seq": 3,
+            "event_sequence": 3,
             "occurred_at": "2026-07-27T00:01:00+00:00",
         },
         {
             "event_type": "request_digest",
-            "seq": 4,
+            "event_sequence": 4,
             "occurred_at": "2026-07-27T00:01:01+00:00",
             "system_sections": [],
             "tool_names": [],
@@ -177,7 +177,7 @@ def test_request_digest_before_any_turn_is_dropped(tmp_path):
     events = [
         {
             "event_type": "request_digest",
-            "seq": 0,
+            "event_sequence": 0,
             "occurred_at": "2026-07-27T00:00:00+00:00",
             "system_sections": [],
             "tool_names": [],

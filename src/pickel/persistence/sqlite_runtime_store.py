@@ -1,4 +1,4 @@
-"""SQLite v4 会话存储：共享 sequence 与原子 StorageTransaction。"""
+"""SQLite Runtime 存储：共享 commit_sequence 与原子事务。"""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from pickel.persistence.storage_transaction import (
     StorageTransaction,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
@@ -61,23 +61,23 @@ class SQLiteRuntimeStore:
             connection.execute(
                 """
                 INSERT INTO sessions (
-                    session_id, agent_id, cwd, current_sequence,
+                    session_id, agent_id, cwd, current_commit_sequence,
                     created_at, updated_at, status, title
                 ) VALUES (?, ?, ?, 0, ?, ?, 'active', NULL)
                 """,
                 (session_id, agent_id, cwd, now.isoformat(), now.isoformat()),
             )
 
-    def load_current_sequence(self, session_id: str) -> int:
+    def load_current_commit_sequence(self, session_id: str) -> int:
         self._ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT current_sequence FROM sessions WHERE session_id = ?",
+                "SELECT current_commit_sequence FROM sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
             raise LookupError(f"ConversationSession 不存在: {session_id}")
-        return int(row["current_sequence"])
+        return int(row["current_commit_sequence"])
 
     def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
         self._ensure_schema()
@@ -181,7 +181,7 @@ class SQLiteRuntimeStore:
                 """
                 SELECT * FROM session_operations
                 WHERE session_id = ?
-                ORDER BY accepted_sequence ASC, operation_id ASC
+                ORDER BY accepted_commit_sequence ASC, operation_id ASC
                 """,
                 (session_id,),
             ).fetchall()
@@ -280,13 +280,13 @@ class SQLiteRuntimeStore:
         self,
         *,
         session_id: str,
-        expected_sequence: int,
+        expected_commit_sequence: int,
     ) -> StorageTransaction:
         self._ensure_schema()
         return StorageTransaction(
             store=self,
             session_id=session_id,
-            expected_sequence=expected_sequence,
+            expected_commit_sequence=expected_commit_sequence,
         )
 
     def load_immutable_object(self, object_id: str) -> ImmutableObject | None:
@@ -335,16 +335,17 @@ class SQLiteRuntimeStore:
                 """
                 WITH RECURSIVE active_branch(
                     node_id, session_id, parent_node_id, object_id,
-                    sequence, created_at, depth
+                    created_commit_sequence, created_at, depth
                 ) AS (
                     SELECT node_id, session_id, parent_node_id, object_id,
-                           sequence, created_at, 0
+                           created_commit_sequence, created_at, 0
                     FROM conversation_nodes
                     WHERE node_id = ? AND session_id = ?
                     UNION ALL
                     SELECT parent.node_id, parent.session_id,
                            parent.parent_node_id, parent.object_id,
-                           parent.sequence, parent.created_at, child.depth + 1
+                           parent.created_commit_sequence, parent.created_at,
+                           child.depth + 1
                     FROM conversation_nodes AS parent
                     JOIN active_branch AS child
                       ON parent.node_id = child.parent_node_id
@@ -352,10 +353,12 @@ class SQLiteRuntimeStore:
                 )
                 SELECT
                     branch.node_id, branch.session_id, branch.parent_node_id,
-                    branch.object_id, branch.sequence, branch.created_at,
+                    branch.object_id, branch.created_commit_sequence,
+                    branch.created_at,
                     object.object_type, object.schema_version, object.digest,
                     object.content_json, object.created_session_id,
-                    object.created_sequence, object.created_at AS object_created_at
+                    object.created_commit_sequence,
+                    object.created_at AS object_created_at
                 FROM active_branch AS branch
                 JOIN immutable_objects AS object
                   ON object.object_id = branch.object_id
@@ -379,55 +382,59 @@ class SQLiteRuntimeStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session_row = connection.execute(
-                "SELECT current_sequence FROM sessions WHERE session_id = ?",
+                "SELECT current_commit_sequence FROM sessions WHERE session_id = ?",
                 (transaction.session_id,),
             ).fetchone()
             if session_row is None:
                 raise LookupError(
                     f"ConversationSession 不存在: {transaction.session_id}"
                 )
-            current_sequence = int(session_row["current_sequence"])
-            if current_sequence != transaction.expected_sequence:
+            current_commit_sequence = int(session_row["current_commit_sequence"])
+            if current_commit_sequence != transaction.expected_commit_sequence:
                 raise StorageConflictError(
-                    "ConversationSession sequence 冲突: "
-                    f"expected={transaction.expected_sequence}, "
-                    f"actual={current_sequence}"
+                    "ConversationSession commit_sequence 冲突: "
+                    f"expected={transaction.expected_commit_sequence}, "
+                    f"actual={current_commit_sequence}"
                 )
-            sequence = current_sequence + 1
+            commit_sequence = current_commit_sequence + 1
             self._validate_transaction(connection, transaction)
             connection.execute(
                 """
                 INSERT INTO storage_commits (
-                    session_id, sequence, commit_id, committed_at
+                    session_id, commit_sequence, commit_id, committed_at
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (
                     transaction.session_id,
-                    sequence,
+                    commit_sequence,
                     commit_id,
                     committed_at.isoformat(),
                 ),
             )
-            self._insert_objects(connection, transaction, sequence, committed_at)
-            self._insert_nodes(connection, transaction, sequence, committed_at)
+            self._insert_objects(connection, transaction, commit_sequence, committed_at)
+            self._insert_nodes(connection, transaction, commit_sequence, committed_at)
             self._insert_operations(
                 connection,
                 transaction,
-                sequence,
+                commit_sequence,
                 committed_at,
             )
-            self._insert_references(connection, transaction, sequence)
+            self._insert_references(connection, transaction, commit_sequence)
             connection.execute(
                 """
                 UPDATE sessions
-                SET current_sequence = ?, updated_at = ?
+                SET current_commit_sequence = ?, updated_at = ?
                 WHERE session_id = ?
                 """,
-                (sequence, committed_at.isoformat(), transaction.session_id),
+                (
+                    commit_sequence,
+                    committed_at.isoformat(),
+                    transaction.session_id,
+                ),
             )
         return StorageCommit(
             session_id=transaction.session_id,
-            sequence=sequence,
+            commit_sequence=commit_sequence,
             commit_id=commit_id,
             committed_at=committed_at,
         )
@@ -517,12 +524,14 @@ class SQLiteRuntimeStore:
                 session_id=transaction.session_id,
                 reference_name=command.reference_name,
             )
-            current_sequence = int(current["sequence"]) if current is not None else None
-            if current_sequence != command.expected_current_sequence:
+            current_commit_sequence = (
+                int(current["commit_sequence"]) if current is not None else None
+            )
+            if current_commit_sequence != command.expected_current_commit_sequence:
                 raise StorageConflictError(
-                    f"NamedReference sequence 冲突: {command.reference_name}; "
-                    f"expected={command.expected_current_sequence}, "
-                    f"actual={current_sequence}"
+                    f"NamedReference commit_sequence 冲突: {command.reference_name}; "
+                    f"expected={command.expected_current_commit_sequence}, "
+                    f"actual={current_commit_sequence}"
                 )
             if command.target_kind == "object":
                 exists = command.target_id in staged_object_ids or self._object_exists(
@@ -548,7 +557,7 @@ class SQLiteRuntimeStore:
     def _insert_objects(
         connection: sqlite3.Connection,
         transaction: StorageTransaction,
-        sequence: int,
+        commit_sequence: int,
         created_at: datetime,
     ) -> None:
         for command in transaction.object_inserts:
@@ -562,7 +571,8 @@ class SQLiteRuntimeStore:
                     """
                     INSERT INTO immutable_objects (
                         object_id, object_type, schema_version, digest,
-                        content_json, created_session_id, created_sequence, created_at
+                        content_json, created_session_id,
+                        created_commit_sequence, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -572,7 +582,7 @@ class SQLiteRuntimeStore:
                         digest,
                         json.dumps(command.content, ensure_ascii=False),
                         transaction.session_id,
-                        sequence,
+                        commit_sequence,
                         created_at.isoformat(),
                     ),
                 )
@@ -585,7 +595,7 @@ class SQLiteRuntimeStore:
     def _insert_nodes(
         connection: sqlite3.Connection,
         transaction: StorageTransaction,
-        sequence: int,
+        commit_sequence: int,
         created_at: datetime,
     ) -> None:
         pending = list(transaction.node_appends)
@@ -605,7 +615,7 @@ class SQLiteRuntimeStore:
                         """
                         INSERT INTO conversation_nodes (
                             node_id, session_id, parent_node_id,
-                            object_id, sequence, created_at
+                            object_id, created_commit_sequence, created_at
                         ) VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
@@ -613,7 +623,7 @@ class SQLiteRuntimeStore:
                             transaction.session_id,
                             command.parent_node_id,
                             command.object_id,
-                            sequence,
+                            commit_sequence,
                             created_at.isoformat(),
                         ),
                     )
@@ -633,19 +643,20 @@ class SQLiteRuntimeStore:
     def _insert_references(
         connection: sqlite3.Connection,
         transaction: StorageTransaction,
-        sequence: int,
+        commit_sequence: int,
     ) -> None:
         for command in transaction.reference_moves:
             connection.execute(
                 """
                 INSERT INTO named_references (
-                    session_id, reference_name, sequence, target_kind, target_id
+                    session_id, reference_name, commit_sequence,
+                    target_kind, target_id
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     transaction.session_id,
                     command.reference_name,
-                    sequence,
+                    commit_sequence,
                     command.target_kind,
                     command.target_id,
                 ),
@@ -655,7 +666,7 @@ class SQLiteRuntimeStore:
     def _insert_operations(
         connection: sqlite3.Connection,
         transaction: StorageTransaction,
-        sequence: int,
+        commit_sequence: int,
         created_at: datetime,
     ) -> None:
         for command in transaction.operation_creates:
@@ -663,7 +674,8 @@ class SQLiteRuntimeStore:
                 """
                 INSERT INTO session_operations (
                     operation_id, session_id, operation_type,
-                    agent_package_version_id, accepted_sequence, created_at
+                    agent_package_version_id, accepted_commit_sequence,
+                    created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -671,7 +683,7 @@ class SQLiteRuntimeStore:
                     transaction.session_id,
                     command.operation_type,
                     command.agent_package_version_id,
-                    sequence,
+                    commit_sequence,
                     created_at.isoformat(),
                 ),
             )
@@ -685,10 +697,11 @@ class SQLiteRuntimeStore:
     ) -> sqlite3.Row | None:
         return connection.execute(
             """
-            SELECT session_id, reference_name, sequence, target_kind, target_id
+            SELECT session_id, reference_name, commit_sequence,
+                   target_kind, target_id
             FROM named_references
             WHERE session_id = ? AND reference_name = ?
-            ORDER BY sequence DESC
+            ORDER BY commit_sequence DESC
             LIMIT 1
             """,
             (session_id, reference_name),
@@ -740,13 +753,13 @@ class SQLiteRuntimeStore:
     @staticmethod
     def _schema_sql() -> str:
         return """
-            PRAGMA user_version = 6;
+            PRAGMA user_version = 7;
 
             CREATE TABLE sessions (
                 session_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 cwd TEXT NOT NULL,
-                current_sequence INTEGER NOT NULL DEFAULT 0,
+                current_commit_sequence INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -769,24 +782,24 @@ class SQLiteRuntimeStore:
                 session_id TEXT NOT NULL,
                 operation_type TEXT NOT NULL CHECK(operation_type IN ('agent_run')),
                 agent_package_version_id TEXT NOT NULL,
-                accepted_sequence INTEGER NOT NULL,
+                accepted_commit_sequence INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (session_id, accepted_sequence)
-                    REFERENCES storage_commits(session_id, sequence)
+                FOREIGN KEY (session_id, accepted_commit_sequence)
+                    REFERENCES storage_commits(session_id, commit_sequence)
                     ON DELETE CASCADE,
                 FOREIGN KEY (agent_package_version_id)
                     REFERENCES agent_package_versions(package_version_id)
             );
 
-            CREATE INDEX idx_session_operations_session_sequence
-            ON session_operations(session_id, accepted_sequence);
+            CREATE INDEX idx_session_operations_session_commit_sequence
+            ON session_operations(session_id, accepted_commit_sequence);
 
             CREATE TABLE storage_commits (
                 session_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
+                commit_sequence INTEGER NOT NULL,
                 commit_id TEXT NOT NULL UNIQUE,
                 committed_at TEXT NOT NULL,
-                PRIMARY KEY (session_id, sequence),
+                PRIMARY KEY (session_id, commit_sequence),
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                     ON DELETE CASCADE
             );
@@ -798,10 +811,10 @@ class SQLiteRuntimeStore:
                 digest TEXT NOT NULL,
                 content_json TEXT NOT NULL,
                 created_session_id TEXT NOT NULL,
-                created_sequence INTEGER NOT NULL,
+                created_commit_sequence INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (created_session_id, created_sequence)
-                    REFERENCES storage_commits(session_id, sequence)
+                FOREIGN KEY (created_session_id, created_commit_sequence)
+                    REFERENCES storage_commits(session_id, commit_sequence)
                     ON DELETE CASCADE
             );
 
@@ -813,10 +826,10 @@ class SQLiteRuntimeStore:
                 session_id TEXT NOT NULL,
                 parent_node_id TEXT,
                 object_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
+                created_commit_sequence INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (session_id, sequence)
-                    REFERENCES storage_commits(session_id, sequence)
+                FOREIGN KEY (session_id, created_commit_sequence)
+                    REFERENCES storage_commits(session_id, commit_sequence)
                     ON DELETE CASCADE,
                 FOREIGN KEY (parent_node_id) REFERENCES conversation_nodes(node_id),
                 FOREIGN KEY (object_id) REFERENCES immutable_objects(object_id)
@@ -828,17 +841,19 @@ class SQLiteRuntimeStore:
             CREATE TABLE named_references (
                 session_id TEXT NOT NULL,
                 reference_name TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
+                commit_sequence INTEGER NOT NULL,
                 target_kind TEXT NOT NULL CHECK(target_kind IN ('node', 'object')),
                 target_id TEXT NOT NULL,
-                PRIMARY KEY (session_id, reference_name, sequence),
-                FOREIGN KEY (session_id, sequence)
-                    REFERENCES storage_commits(session_id, sequence)
+                PRIMARY KEY (session_id, reference_name, commit_sequence),
+                FOREIGN KEY (session_id, commit_sequence)
+                    REFERENCES storage_commits(session_id, commit_sequence)
                     ON DELETE CASCADE
             );
 
             CREATE INDEX idx_named_references_current
-            ON named_references(session_id, reference_name, sequence DESC);
+            ON named_references(
+                session_id, reference_name, commit_sequence DESC
+            );
 
             CREATE INDEX idx_sessions_agent_updated
             ON sessions(agent_id, updated_at DESC);
@@ -869,7 +884,7 @@ class SQLiteRuntimeStore:
             session_id=str(row["session_id"]),
             agent_id=str(row["agent_id"]),
             cwd=str(row["cwd"]),
-            current_sequence=int(row["current_sequence"]),
+            current_commit_sequence=int(row["current_commit_sequence"]),
             active_node_id=active_node_id,
             created_at=datetime.fromisoformat(str(row["created_at"])),
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
@@ -898,7 +913,7 @@ class SQLiteRuntimeStore:
             digest=str(row["digest"]),
             content=content,
             created_session_id=str(row["created_session_id"]),
-            created_sequence=int(row["created_sequence"]),
+            created_commit_sequence=int(row["created_commit_sequence"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
         )
 
@@ -909,7 +924,7 @@ class SQLiteRuntimeStore:
             session_id=str(row["session_id"]),
             operation_type=str(row["operation_type"]),  # type: ignore[arg-type]
             agent_package_version_id=str(row["agent_package_version_id"]),
-            accepted_sequence=int(row["accepted_sequence"]),
+            accepted_commit_sequence=int(row["accepted_commit_sequence"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
         )
 
@@ -918,7 +933,7 @@ class SQLiteRuntimeStore:
         return NamedReference(
             session_id=str(row["session_id"]),
             reference_name=str(row["reference_name"]),
-            sequence=int(row["sequence"]),
+            commit_sequence=int(row["commit_sequence"]),
             target_kind=str(row["target_kind"]),  # type: ignore[arg-type]
             target_id=str(row["target_id"]),
         )
@@ -934,7 +949,7 @@ class SQLiteRuntimeStore:
                 else None
             ),
             object_id=str(row["object_id"]),
-            sequence=int(row["sequence"]),
+            created_commit_sequence=int(row["created_commit_sequence"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
         )
         object_row: dict[str, Any] = {
@@ -944,7 +959,7 @@ class SQLiteRuntimeStore:
             "digest": row["digest"],
             "content_json": row["content_json"],
             "created_session_id": row["created_session_id"],
-            "created_sequence": row["created_sequence"],
+            "created_commit_sequence": row["created_commit_sequence"],
             "created_at": row["object_created_at"],
         }
         immutable_object = cls._object_from_row(object_row)  # type: ignore[arg-type]

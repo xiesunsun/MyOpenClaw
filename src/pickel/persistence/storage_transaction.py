@@ -22,7 +22,7 @@ class StorageIntegrityError(RuntimeError):
 @dataclass(frozen=True)
 class StorageCommit:
     session_id: str
-    sequence: int
+    commit_sequence: int
     commit_id: str
     committed_at: datetime
 
@@ -47,7 +47,7 @@ class _MoveReference:
     reference_name: str
     target_kind: ReferenceTargetKind
     target_id: str
-    expected_current_sequence: int | None
+    expected_current_commit_sequence: int | None
 
 
 @dataclass(frozen=True)
@@ -72,13 +72,13 @@ class StorageTransaction:
         *,
         store: _StorageTransactionCommitter,
         session_id: str,
-        expected_sequence: int,
+        expected_commit_sequence: int,
     ) -> None:
-        if expected_sequence < 0:
-            raise ValueError("expected_sequence 不能小于 0")
+        if expected_commit_sequence < 0:
+            raise ValueError("expected_commit_sequence 不能小于 0")
         self.store = store
         self.session_id = session_id
-        self.expected_sequence = expected_sequence
+        self.expected_commit_sequence = expected_commit_sequence
         self.object_inserts: list[_InsertObject] = []
         self.node_appends: list[_AppendNode] = []
         self.reference_moves: list[_MoveReference] = []
@@ -139,7 +139,7 @@ class StorageTransaction:
         reference_name: str,
         target_kind: ReferenceTargetKind,
         target_id: str,
-        expected_current_sequence: int | None,
+        expected_current_commit_sequence: int | None,
     ) -> None:
         self._ensure_open()
         if not reference_name:
@@ -151,7 +151,7 @@ class StorageTransaction:
                 reference_name=reference_name,
                 target_kind=target_kind,
                 target_id=target_id,
-                expected_current_sequence=expected_current_sequence,
+                expected_current_commit_sequence=expected_current_commit_sequence,
             )
         )
 

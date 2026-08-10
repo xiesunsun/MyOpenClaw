@@ -23,7 +23,12 @@ from pickel.tools.base import ToolExecutionResult
 
 
 def _envelope() -> EventEnvelope:
-    return EventEnvelope(session_id="s1", turn_id="t1", step_index=1, seq=3)
+    return EventEnvelope(
+        session_id="s1",
+        turn_id="t1",
+        step_index=1,
+        event_sequence=3,
+    )
 
 
 def test_每个事件类型有唯一的_event_type():
@@ -47,7 +52,7 @@ def test_to_dict_含信封与_event_type():
     data = event.to_dict()
 
     assert data["event_type"] == "step_started"
-    assert data["seq"] == 3
+    assert data["event_sequence"] == 3
     assert data["session_id"] == "s1"
     assert data["turn_id"] == "t1"
     assert data["step_index"] == 1
@@ -213,7 +218,7 @@ def test_delta_事件可_json_序列化():
     for event in events:
         data = event.to_dict()
         json.dumps(data)
-        assert data["seq"] == 3
+        assert data["event_sequence"] == 3
 
 
 def test_text_delta_事件载荷():

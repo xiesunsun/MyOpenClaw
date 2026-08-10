@@ -101,7 +101,7 @@ NamedReference ──► ImmutableObject
                └► ConversationNode ──► ImmutableObject
 ```
 
-`sequence` 表示 Session 内的提交顺序。共享 sequence 用于事务排序、审计和 Watch cursor，不通过扫描历史恢复当前 Operation。
+`commit_sequence` 表示 Session 内的持久化提交顺序；`event_sequence` 表示 EventBus 内的观测事件顺序。二者作用域不同，不可比较。共享 `commit_sequence` 用于事务排序、审计和 Watch cursor，不通过扫描历史恢复当前 Operation。
 
 当前 Operation 的唯一恢复入口是：
 

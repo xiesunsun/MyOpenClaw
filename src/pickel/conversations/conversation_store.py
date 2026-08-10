@@ -47,7 +47,7 @@ class ConversationStore(Protocol):
         self,
         *,
         session_id: str,
-        expected_sequence: int,
+        expected_commit_sequence: int,
     ) -> StorageTransaction: ...
 
     def load_immutable_object(self, object_id: str) -> ImmutableObject | None: ...

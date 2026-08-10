@@ -12,7 +12,7 @@ from pickel.shared.event_envelope import EventEnvelope
 def test_seq_从_0_起严格递增():
     bus = EventBus()
     seen = []
-    bus.subscribe(lambda event: seen.append(event.envelope.seq))
+    bus.subscribe(lambda event: seen.append(event.envelope.event_sequence))
 
     asyncio.run(_emit_many(bus, 3))
 
@@ -30,8 +30,8 @@ def test_emit_返回带_seq_的事件且不改原件():
 
     emitted = asyncio.run(bus.emit(original))
 
-    assert emitted.envelope.seq == 0
-    assert original.envelope.seq == -1
+    assert emitted.envelope.event_sequence == 0
+    assert original.envelope.event_sequence == -1
 
 
 def test_多订阅者都收到同一事件():
@@ -43,7 +43,7 @@ def test_多订阅者都收到同一事件():
     asyncio.run(bus.emit(TurnStarted(user_text="hi")))
 
     assert len(a) == 1 and len(b) == 1
-    assert a[0].envelope.seq == b[0].envelope.seq
+    assert a[0].envelope.event_sequence == b[0].envelope.event_sequence
 
 
 def test_订阅者抛异常不影响其余订阅者():
@@ -72,7 +72,7 @@ def test_唯一订阅者抛异常时_emit_仍正常返回():
 
     emitted = asyncio.run(bus.emit(StepStarted()))
 
-    assert emitted.envelope.seq == 0
+    assert emitted.envelope.event_sequence == 0
 
 
 def test_异步订阅者被_await():
@@ -124,7 +124,10 @@ def test_无订阅者时_emit_仍分配_seq():
     first = asyncio.run(bus.emit(StepStarted()))
     second = asyncio.run(bus.emit(StepStarted()))
 
-    assert (first.envelope.seq, second.envelope.seq) == (0, 1)
+    assert (
+        first.envelope.event_sequence,
+        second.envelope.event_sequence,
+    ) == (0, 1)
 
 
 def test_退订同一绑定方法的其中一次订阅不影响顺序与另一次():

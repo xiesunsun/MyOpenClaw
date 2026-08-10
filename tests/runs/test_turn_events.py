@@ -89,7 +89,7 @@ class TurnEventTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(events[0], TurnStarted)
         self.assertEqual("hello", events[0].user_text)
-        self.assertEqual(0, events[0].envelope.seq)
+        self.assertEqual(0, events[0].envelope.event_sequence)
 
     async def test_turn_completed_是最后一个事件且带_usage(self) -> None:
         session = Session.create(agent_id="Pickle", session_id="s1")

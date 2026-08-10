@@ -14,7 +14,7 @@ class ConversationNode:
     session_id: str
     parent_node_id: str | None
     object_id: str
-    sequence: int
+    created_commit_sequence: int
     created_at: datetime
 
 

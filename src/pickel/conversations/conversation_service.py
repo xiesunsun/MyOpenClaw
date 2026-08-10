@@ -202,14 +202,16 @@ class ConversationService:
         )
         transaction = self._store.begin_storage_transaction(
             session_id=session_id,
-            expected_sequence=session.current_sequence,
+            expected_commit_sequence=session.current_commit_sequence,
         )
         transaction.move_named_reference(
             reference_name=ACTIVE_CONVERSATION_REFERENCE,
             target_kind="node",
             target_id=node_id,
-            expected_current_sequence=(
-                active_reference.sequence if active_reference is not None else None
+            expected_current_commit_sequence=(
+                active_reference.commit_sequence
+                if active_reference is not None
+                else None
             ),
         )
         transaction.commit()
@@ -232,7 +234,7 @@ class ConversationService:
             raise ValueError("conversation/active 必须指向 ConversationNode")
         transaction = self._store.begin_storage_transaction(
             session_id=session_id,
-            expected_sequence=session.current_sequence,
+            expected_commit_sequence=session.current_commit_sequence,
         )
         object_id = transaction.insert_immutable_object(
             object_type=object_type,
@@ -249,8 +251,10 @@ class ConversationService:
             reference_name=ACTIVE_CONVERSATION_REFERENCE,
             target_kind="node",
             target_id=node_id,
-            expected_current_sequence=(
-                active_reference.sequence if active_reference is not None else None
+            expected_current_commit_sequence=(
+                active_reference.commit_sequence
+                if active_reference is not None
+                else None
             ),
         )
         transaction.commit()

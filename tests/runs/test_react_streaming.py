@@ -136,7 +136,10 @@ class ReactStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_seq_在_delta_之间仍然连续(self) -> None:
         events = await self._collect(_StreamingProvider())
 
-        self.assertEqual(list(range(len(events))), [e.envelope.seq for e in events])
+        self.assertEqual(
+            list(range(len(events))),
+            [e.envelope.event_sequence for e in events],
+        )
 
     async def test_只调用一次_stream(self) -> None:
         provider = _StreamingProvider()
