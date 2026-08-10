@@ -199,7 +199,7 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 ```
 
 - `AgentDefinition` 保存现有设置解析后的来源和选择。
-- `AgentPackageVersion` 冻结 behavior、无密钥模型参数、Skill 全文和工具 schema；ID 为内容 digest。
+- `AgentPackageVersion` 冻结 behavior、无密钥模型参数、Skill 全文、工具 schema，以及现有 `react_max_steps` / `context_cli_turn_window` 解析出的 Runtime 设置；ID 为内容 digest。
 - `LoadedAgentPackage` 持有进程内 ToolSnapshot、SkillManifest 和现阶段运行对象，不能直接持久化。
 - `api_key`、token、password、authorization 等秘密不得进入 Snapshot；只记录所需秘密名称。
 - 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。

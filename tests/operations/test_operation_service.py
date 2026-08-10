@@ -10,6 +10,7 @@ from pickel.agents.agent_package import (
     AgentDefinition,
     AgentModelVersion,
     AgentPackageVersion,
+    AgentRuntimeSettings,
     agent_package_digest,
 )
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
@@ -61,6 +62,10 @@ def _package() -> AgentPackageVersion:
         definition=definition,
         behavior_instruction="Be helpful.",
         model=model,
+        runtime=AgentRuntimeSettings(
+            max_model_steps=8,
+            context_unit_window=5,
+        ),
         skills=(),
         tools=(),
         created_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
@@ -73,6 +78,7 @@ def _package() -> AgentPackageVersion:
         definition=definition,
         behavior_instruction=provisional.behavior_instruction,
         model=model,
+        runtime=provisional.runtime,
         skills=(),
         tools=(),
         created_at=provisional.created_at,

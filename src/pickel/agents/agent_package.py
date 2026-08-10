@@ -63,6 +63,18 @@ class AgentModelVersion:
 
 
 @dataclass(frozen=True)
+class AgentRuntimeSettings:
+    max_model_steps: int
+    context_unit_window: int
+
+    def __post_init__(self) -> None:
+        if self.max_model_steps < 1:
+            raise ValueError("max_model_steps 必须大于 0")
+        if self.context_unit_window < 1:
+            raise ValueError("context_unit_window 必须大于 0")
+
+
+@dataclass(frozen=True)
 class AgentPackageVersion:
     package_version_id: str
     digest: str
@@ -70,6 +82,7 @@ class AgentPackageVersion:
     definition: AgentDefinition
     behavior_instruction: str
     model: AgentModelVersion
+    runtime: AgentRuntimeSettings
     skills: tuple[AgentSkillVersion, ...]
     tools: tuple[AgentToolVersion, ...]
     created_at: datetime
@@ -77,11 +90,12 @@ class AgentPackageVersion:
     def content_dict(self) -> dict[str, Any]:
         """返回参与 digest 和持久化的稳定内容，不包含创建时间。"""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "agent_id": self.agent_id,
             "definition": asdict(self.definition),
             "behavior_instruction": self.behavior_instruction,
             "model": asdict(self.model),
+            "runtime": asdict(self.runtime),
             "skills": [asdict(skill) for skill in self.skills],
             "tools": [asdict(tool) for tool in self.tools],
         }
@@ -115,7 +129,7 @@ def agent_package_version_from_content(
     content: dict[str, Any],
     created_at: datetime,
 ) -> AgentPackageVersion:
-    if content.get("schema_version") != 1:
+    if content.get("schema_version") != 2:
         raise ValueError(
             f"不支持的 AgentPackageVersion schema: {content.get('schema_version')}"
         )
@@ -124,6 +138,7 @@ def agent_package_version_from_content(
     definition_data["extension_ids"] = tuple(definition_data.get("extension_ids") or ())
     model_data = dict(content["model"])
     model_data["required_secrets"] = tuple(model_data.get("required_secrets") or ())
+    runtime_data = dict(content["runtime"])
     skills = []
     for item in content.get("skills") or []:
         data = dict(item)
@@ -138,6 +153,7 @@ def agent_package_version_from_content(
         definition=AgentDefinition(**definition_data),
         behavior_instruction=str(content["behavior_instruction"]),
         model=AgentModelVersion(**model_data),
+        runtime=AgentRuntimeSettings(**runtime_data),
         skills=tuple(skills),
         tools=tools,
         created_at=created_at,

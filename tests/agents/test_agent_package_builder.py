@@ -140,6 +140,8 @@ def test_snapshot_excludes_provider_secrets(tmp_path: Path) -> None:
     assert "access_token" not in serialized
     assert package.version.model.required_secrets == ("api_key",)
     assert package.version.model.provider_options == {"thinking": "high"}
+    assert package.version.runtime.max_model_steps == 8
+    assert package.version.runtime.context_unit_window == 5
 
 
 def test_behavior_change_creates_new_package_version(tmp_path: Path) -> None:

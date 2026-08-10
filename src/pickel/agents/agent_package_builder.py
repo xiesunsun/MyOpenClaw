@@ -15,6 +15,7 @@ from pickel.agents.agent_package import (
     AgentDefinition,
     AgentModelVersion,
     AgentPackageVersion,
+    AgentRuntimeSettings,
     AgentSkillVersion,
     AgentToolVersion,
     LoadedAgentPackage,
@@ -37,6 +38,7 @@ class _AgentPackageDigestInput:
     definition: AgentDefinition
     behavior_instruction: str
     model: AgentModelVersion
+    runtime: AgentRuntimeSettings
     skills: tuple[AgentSkillVersion, ...]
     tools: tuple[AgentToolVersion, ...]
 
@@ -142,6 +144,10 @@ class AgentPackageBuilder:
             provider_options=self._remove_secrets(model_config.provider_options),
             required_secrets=("api_key",) if model_config.api_key else (),
         )
+        runtime = AgentRuntimeSettings(
+            max_model_steps=self._app_config.react_max_steps,
+            context_unit_window=self._app_config.context_cli_turn_window,
+        )
         skills = tuple(self._skill_version(manifest) for manifest in skill_manifests)
         tools = tuple(
             AgentToolVersion(
@@ -160,11 +166,12 @@ class AgentPackageBuilder:
             for entry in tool_snapshot.entries
         )
         draft = {
-            "schema_version": 1,
+            "schema_version": 2,
             "agent_id": definition.agent_id,
             "definition": definition,
             "behavior_instruction": behavior_instruction,
             "model": model,
+            "runtime": runtime,
             "skills": skills,
             "tools": tools,
         }
@@ -177,6 +184,7 @@ class AgentPackageBuilder:
             definition=definition,
             behavior_instruction=behavior_instruction,
             model=model,
+            runtime=runtime,
             skills=skills,
             tools=tools,
             created_at=self._now(),
