@@ -133,8 +133,9 @@ class McpServerRuntime:
             context = HostCallContext(
                 call_id=f"{call_context.call_id}:{key}",
                 session_id=call_context.session_id,
-                turn_id=call_context.turn_id,
-                step_index=call_context.step_index,
+                operation_id=call_context.operation_id,
+                step_id=call_context.step_id,
+                step_sequence=call_context.step_sequence,
                 tool_call_id=call_context.tool_call_id,
                 timeout_seconds=call_context.timeout_seconds,
             )

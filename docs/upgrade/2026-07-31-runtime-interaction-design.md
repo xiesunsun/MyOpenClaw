@@ -80,8 +80,9 @@ class HostCallSpec[RequestT, ResponseT]:
 class HostCallContext:
     call_id: str
     session_id: str
-    turn_id: str
-    step_index: int | None = None
+    operation_id: str
+    step_id: str | None = None
+    step_sequence: int | None = None
     tool_call_id: str | None = None
     timeout_seconds: float | None = None
 ```
@@ -171,7 +172,7 @@ RuntimeConversation.turn
   -> ToolServices.host_calls
 ```
 
-`ToolExecutionContext` 补齐 `turn_id`、`step_index`、`tool_call_id`。外部 extension 的旧构造方式通过默认值兼容；生产路径必须填写真实身份。
+`ToolExecutionContext` 与 `HostCallContext` 使用同一身份：`operation_id`、`step_id`、`step_sequence`、`tool_call_id`。其中 ID 用于关联，sequence 只用于展示排序；生产路径必须填写真实身份。
 
 ## 9. MCP MRTR
 

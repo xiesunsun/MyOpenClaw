@@ -422,8 +422,9 @@ class Run:
         self,
         session_id: str,
         *,
-        turn_id: str = "",
-        step_index: int | None = None,
+        operation_id: str = "",
+        step_id: str = "",
+        step_sequence: int | None = None,
         tool_call_id: str = "",
         host_calls: "HostCallClient | None" = None,
     ) -> ToolExecutionContext:
@@ -438,8 +439,9 @@ class Run:
                 skill_store=self.skill_store,
                 host_calls=host_calls,
             ),
-            turn_id=turn_id,
-            step_index=step_index,
+            operation_id=operation_id,
+            step_id=step_id,
+            step_sequence=step_sequence,
             tool_call_id=tool_call_id,
         )
 

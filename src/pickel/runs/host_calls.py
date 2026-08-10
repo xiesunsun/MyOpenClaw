@@ -36,8 +36,9 @@ class HostCallSpec(Generic[RequestT, ResponseT]):
 class HostCallContext:
     call_id: str = field(default_factory=lambda: str(uuid4()))
     session_id: str = ""
-    turn_id: str = ""
-    step_index: int | None = None
+    operation_id: str = ""
+    step_id: str = ""
+    step_sequence: int | None = None
     tool_call_id: str | None = None
     timeout_seconds: float | None = None
 

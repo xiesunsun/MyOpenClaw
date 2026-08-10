@@ -51,8 +51,9 @@ class McpProxyTool(BaseTool):
                     host_calls=host_calls,
                     call_context=HostCallContext(
                         session_id=context.session_id,
-                        turn_id=context.turn_id,
-                        step_index=context.step_index,
+                        operation_id=context.operation_id,
+                        step_id=context.step_id,
+                        step_sequence=context.step_sequence,
                         tool_call_id=context.tool_call_id,
                     ),
                 )

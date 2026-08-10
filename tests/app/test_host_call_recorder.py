@@ -46,7 +46,7 @@ class SessionHostCallRecorderTests(unittest.IsolatedAsyncioTestCase):
             HostCallContext(
                 call_id="call-1",
                 session_id=session.session_id,
-                turn_id="turn-1",
+                operation_id="operation-1",
                 tool_call_id="tool-1",
             ),
         )

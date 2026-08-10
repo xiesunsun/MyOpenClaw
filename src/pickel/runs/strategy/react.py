@@ -829,8 +829,9 @@ class ReActStrategy(ExecutionStrategy):
             )
         exec_context = run.get_tool_execution_context(
             session.session_id,
-            turn_id=turn_id,
-            step_index=step_index,
+            operation_id=turn_id,
+            step_id=f"{turn_id}:{step_index}",
+            step_sequence=step_index,
             tool_call_id=tool_call.id,
             host_calls=host_calls,
         )
@@ -907,8 +908,9 @@ class ReActStrategy(ExecutionStrategy):
             ),
             HostCallContext(
                 session_id=session_id,
-                turn_id=turn_id,
-                step_index=step_index,
+                operation_id=turn_id,
+                step_id=f"{turn_id}:{step_index}",
+                step_sequence=step_index,
                 tool_call_id=tool_call.id,
             ),
         )

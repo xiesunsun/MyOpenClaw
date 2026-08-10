@@ -27,9 +27,9 @@ class ToolExecutionContext:
     session_id: str
     workspace_path: Path
     services: ToolServices = field(default_factory=ToolServices)
-    # 末尾默认字段兼容外部 extension 的旧构造方式；生产执行路径填写真实身份。
-    turn_id: str = ""
-    step_index: int | None = None
+    operation_id: str = ""
+    step_id: str = ""
+    step_sequence: int | None = None
     tool_call_id: str = ""
 
 

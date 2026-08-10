@@ -38,8 +38,9 @@ def _context(*, host_calls=None) -> ToolExecutionContext:
         session_id="s",
         workspace_path=Path("/tmp"),
         services=ToolServices(host_calls=host_calls),
-        turn_id="turn-1",
-        step_index=1,
+        operation_id="operation-1",
+        step_id="step-1",
+        step_sequence=1,
         tool_call_id="tool-call-1",
     )
 
@@ -174,7 +175,7 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("elicited:Ada:2", result.content)
         self.assertEqual(1, len(seen))
         self.assertEqual("Provide user details", seen[0][0].message)
-        self.assertEqual("turn-1", seen[0][1].turn_id)
+        self.assertEqual("operation-1", seen[0][1].operation_id)
         self.assertEqual("tool-call-1", seen[0][1].tool_call_id)
 
     async def test_proxy_drives_multiple_mcp2_input_required_rounds(self) -> None:
@@ -244,7 +245,7 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             host_calls=host_calls.client,
             call_context=HostCallContext(
                 session_id="s",
-                turn_id="t",
+                operation_id="operation-1",
                 tool_call_id="tool-call",
             ),
             tool_name="tool",
