@@ -8,11 +8,8 @@ from pickel.extensions.openviking.commit_policy import ThresholdCommitPolicy
 from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.extensions.openviking.openviking_state import InMemoryOpenVikingStateStore
 from pickel.extensions.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
-from pickel.extensions.openviking.session_messages import (
-    agent_message_plain_text,
-    list_syncable_agent_messages,
-)
+from pickel.extensions.openviking.message_mapper import OpenVikingMessageMapper
+from pickel.extensions.openviking.sync_messages import list_syncable_agent_messages
 from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 
 
@@ -92,7 +89,7 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
             config=self._config(),
             remote_agent_id="remote-pickle",
             client=SyncHTTPOpenVikingSessionClient(self._config(), client=client),
-            message_mapper=SessionMessageMapper(),
+            message_mapper=OpenVikingMessageMapper(),
             commit_policy=ThresholdCommitPolicy(
                 commit_after=timedelta(minutes=30),
                 commit_after_turns=commit_after_turns,
@@ -138,8 +135,10 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
 
         state = self.state_store.get_or_create(session.session_id)
         self.assertIsNone(state.last_synced_message_index)
-        pending = list_syncable_agent_messages(session)[state.pending_sync_start_index() :]
-        self.assertEqual(["hello"], [agent_message_plain_text(m) for m in pending])
+        pending = list_syncable_agent_messages(session)[
+            state.pending_sync_start_index() :
+        ]
+        self.assertEqual(["hello"], [m.content[0].text for m in pending])
 
     def test_partial_sync_advances_watermark_for_successful_messages(self) -> None:
         client = FailingSecondAppendClient()
@@ -152,10 +151,12 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
         state = self.state_store.get_or_create(session.session_id)
         self.assertEqual(1, len(client.appended))
         self.assertEqual(0, state.last_synced_message_index)
-        pending = list_syncable_agent_messages(session)[state.pending_sync_start_index() :]
+        pending = list_syncable_agent_messages(session)[
+            state.pending_sync_start_index() :
+        ]
         self.assertEqual(
             ["hi"],
-            [agent_message_plain_text(m) for m in pending],
+            [m.content[0].text for m in pending],
         )
 
     def test_force_commit_advances_commit_watermark(self) -> None:
@@ -172,7 +173,9 @@ class OpenVikingSessionSyncTests(unittest.TestCase):
         state = sync.state_for(session)
         self.assertEqual(["session-1"], client.committed)
         self.assertEqual(0, state.last_committed_message_index)
-        self.assertEqual(datetime(2026, 4, 13, 2, tzinfo=timezone.utc), state.last_committed_at)
+        self.assertEqual(
+            datetime(2026, 4, 13, 2, tzinfo=timezone.utc), state.last_committed_at
+        )
 
     def test_policy_driven_commit_runs_after_sync(self) -> None:
         client = FakeSDKClient()

@@ -1,7 +1,7 @@
 """Session 列表封面与 last_message 展示规则。
 
 预览只消费 AgentMessage 形状的 payload dict（content blocks），
-不再识别 ToolCallBatch / SessionMessage。
+仅识别 AgentMessage 与 compaction 等持久化 payload。
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ from typing import Protocol
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.session import Session
 from pickel.extensions.openviking.openviking_state import OpenVikingSessionState
-from pickel.extensions.openviking.session_messages import list_syncable_agent_messages
+from pickel.extensions.openviking.sync_messages import list_syncable_agent_messages
 
 
 class CommitPolicy(Protocol):
@@ -39,7 +39,10 @@ class ThresholdCommitPolicy:
             and now - state.last_committed_at >= self.commit_after
         ):
             return True
-        return self._assistant_messages_since_commit(session, state) >= self.commit_after_turns
+        return (
+            self._assistant_messages_since_commit(session, state)
+            >= self.commit_after_turns
+        )
 
     def _assistant_messages_since_commit(
         self,

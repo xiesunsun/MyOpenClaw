@@ -13,7 +13,7 @@ from pickel.conversations.content_blocks import TextContent
 
 
 class OpenVikingRecall:
-    """包装 SessionRecallProvider，输出 UserMessage 供 prepare 注入。"""
+    """包装 SessionRecallProvider，输出 UserMessage 供上下文构建器注入。"""
 
     def __init__(
         self,

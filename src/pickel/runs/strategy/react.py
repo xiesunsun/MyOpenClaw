@@ -22,7 +22,6 @@ from pickel.conversations.content_blocks import (
     ToolCallContent,
     content_blocks_to_list,
 )
-from pickel.conversations.message import ToolCall
 from pickel.conversations.session import Session
 from pickel.hooks.events import (
     BeforeRequestEvent,
@@ -71,6 +70,7 @@ from pickel.runs.runtime_events import (
     TurnInterrupted,
 )
 from pickel.runs.strategy.base import ExecutionStrategy
+from pickel.runs.tool_call import ToolCall
 from pickel.runs.tool_result import build_tool_result_message
 from pickel.runs.turn_mailbox import TurnInputReader
 from pickel.runs.turn_state import TurnState

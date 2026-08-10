@@ -14,12 +14,8 @@ from pickel.extensions.openviking.openviking_state import (
     OpenVikingStateStore,
 )
 from pickel.extensions.openviking.session_client import OpenVikingSessionClient
-from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
-from pickel.extensions.openviking.session_messages import (
-    agent_message_to_session_message,
-    list_syncable_agent_messages,
-)
-
+from pickel.extensions.openviking.message_mapper import OpenVikingMessageMapper
+from pickel.extensions.openviking.sync_messages import list_syncable_agent_messages
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -34,7 +30,7 @@ class OpenVikingSessionSync:
         config: OpenVikingConfig,
         remote_agent_id: str,
         client: OpenVikingSessionClient,
-        message_mapper: SessionMessageMapper,
+        message_mapper: OpenVikingMessageMapper,
         commit_policy: CommitPolicy,
         state_store: OpenVikingStateStore | None = None,
         now: Callable[[], datetime] | None = None,
@@ -52,7 +48,9 @@ class OpenVikingSessionSync:
     def state_for(self, session: Session) -> OpenVikingSessionState:
         return self._state_store.get_or_create(session.session_id)
 
-    def save_state(self, session: Session, state: OpenVikingSessionState | None = None) -> None:
+    def save_state(
+        self, session: Session, state: OpenVikingSessionState | None = None
+    ) -> None:
         resolved = state if state is not None else self.state_for(session)
         self._state_store.put_state(session.session_id, resolved)
 
@@ -74,8 +72,7 @@ class OpenVikingSessionSync:
                     session_id=session.session_id
                 )
                 for offset, message in enumerate(pending_messages):
-                    legacy = agent_message_to_session_message(message)
-                    payload = self._message_mapper.to_openviking_message(legacy)
+                    payload = self._message_mapper.to_openviking_message(message)
                     self._client.append_message(
                         session_id=remote_session_id,
                         role=payload.role,

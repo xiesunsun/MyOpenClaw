@@ -18,7 +18,7 @@ from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.extensions.openviking.context_client import SyncHTTPOpenVikingContextClient
 from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
 from pickel.extensions.openviking.session_client import SyncHTTPOpenVikingSessionClient
-from pickel.extensions.openviking.session_message_mapper import SessionMessageMapper
+from pickel.extensions.openviking.message_mapper import OpenVikingMessageMapper
 from pickel.extensions.openviking.session_recall import OpenVikingSessionRecallProvider
 from pickel.extensions.openviking.session_sync import OpenVikingSessionSync
 
@@ -56,7 +56,7 @@ def _make_session_sync(config: OpenVikingConfig, scope) -> Any | None:
         config=config,
         remote_agent_id=remote_agent_id,
         client=SyncHTTPOpenVikingSessionClient(config, remote_agent_id=remote_agent_id),
-        message_mapper=SessionMessageMapper(
+        message_mapper=OpenVikingMessageMapper(
             tool_output_max_chars=config.tool_output_max_chars
         ),
         commit_policy=ThresholdCommitPolicy(

@@ -16,7 +16,6 @@ from pickel.conversations.content_blocks import TextContent, ToolCallContent
 from pickel.hooks.lifecycle import NoopLifecycleHooks
 from pickel.runs import ReActStrategy, Run
 from pickel.tools.shell import LocalBashOperations
-from pickel.conversations.metadata import MessageMetadata
 from pickel.conversations.session import Session
 from pickel.conversations.session_entry import SessionEntry
 from pickel.conversations.session_preview import SessionPreview
@@ -34,7 +33,7 @@ from pickel.runs.runtime_events import (
 )
 from pickel.runs.turn_usage import TurnUsage
 from pickel.shared.event_envelope import EventEnvelope
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.shared.model_config import ModelConfig
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.bus import ToolActivation, bus_with
@@ -78,22 +77,11 @@ def _model_metadata() -> ModelResponseMetadata:
 
 
 def _text_assistant(
-    text: str, *, metadata: MessageMetadata | None = None
+    text: str,
+    *,
+    metadata: ModelResponseMetadata | None = None,
 ) -> AssistantMessage:
-    model_meta = None
-    if metadata is not None:
-        from pickel.conversations.agent_message import ModelResponseMetadata
-
-        model_meta = ModelResponseMetadata(
-            provider=metadata.provider or "fake",
-            model=metadata.model or "fake",
-            elapsed_ms=metadata.elapsed_ms,
-            finish_reason=metadata.provider_finish_reason,
-            finish_message=metadata.provider_finish_message,
-            provider_response_id=metadata.provider_response_id,
-            provider_model_version=metadata.provider_model_version,
-        )
-    return AssistantMessage(content=[TextContent(text=text)], metadata=model_meta)
+    return AssistantMessage(content=[TextContent(text=text)], metadata=metadata)
 
 
 class StubRun:
@@ -267,7 +255,7 @@ class StubToolRun:
             )
         return _text_assistant(
             "final reply",
-            metadata=MessageMetadata(
+            metadata=ModelResponseMetadata(
                 provider="google/gemini",
                 model="gemini-3-flash-preview",
             ),

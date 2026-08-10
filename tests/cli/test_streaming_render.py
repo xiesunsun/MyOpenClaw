@@ -8,7 +8,7 @@ import pytest
 from rich.console import Console
 
 from pickel.cli.event_renderer import ChatEventRenderer
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     StepStarted,

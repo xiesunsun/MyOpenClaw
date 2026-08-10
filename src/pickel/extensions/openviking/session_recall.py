@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Any
 
-from pickel.context import SessionRecallResult, SessionRecallSnippet
+from pickel.context.session_recall import SessionRecallResult, SessionRecallSnippet
 from pickel.conversations.session import Session
 from pickel.extensions.openviking.config import OpenVikingConfig
 from pickel.extensions.openviking.context_client import OpenVikingContextClient
@@ -14,7 +14,6 @@ from pickel.extensions.openviking.openviking_state import (
     InMemoryOpenVikingStateStore,
     OpenVikingStateStore,
 )
-
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -75,7 +74,9 @@ class OpenVikingSessionRecallProvider:
             limit=recall_config.limit,
         )
         return SessionRecallResult(
-            snippets=self._extract_snippets(response=response, limit=recall_config.limit)
+            snippets=self._extract_snippets(
+                response=response, limit=recall_config.limit
+            )
         )
 
     def _extract_snippets(

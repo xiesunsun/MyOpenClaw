@@ -6,7 +6,7 @@ import json
 
 from pickel.conversations.agent_message import ToolResultMessage
 from pickel.conversations.content_blocks import TextContent
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.runs.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,

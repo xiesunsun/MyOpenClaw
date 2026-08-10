@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from pickel.context.models import SessionRecallResult, SessionRecallSnippet
+from pickel.context.session_recall import SessionRecallResult, SessionRecallSnippet
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.session import Session
 from pickel.extensions.openviking.recall_adapter import OpenVikingRecall
@@ -26,9 +26,7 @@ class _StubProvider:
 class OpenVikingRecallAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_provide_returns_user_message_from_snippets(self) -> None:
         provider = _StubProvider(
-            SessionRecallResult(
-                snippets=[SessionRecallSnippet(text="prior context")]
-            )
+            SessionRecallResult(snippets=[SessionRecallSnippet(text="prior context")])
         )
         adapter = OpenVikingRecall(provider, max_chars=6000)
         session = Session.create(agent_id="Pickle")

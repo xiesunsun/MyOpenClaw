@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from rich.console import Console
 
 from pickel.cli.render.tool import ToolRenderer
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.tools.base import ToolExecutionResult
 
 _T0 = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)

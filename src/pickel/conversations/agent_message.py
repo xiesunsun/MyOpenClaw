@@ -1,6 +1,6 @@
 """AgentMessage 联合类型与序列化合同。
 
-message entry 的 payload 即版本化 AgentMessage，不再依赖 SessionMessage 落盘。
+message entry 的 payload 即版本化 AgentMessage。
 """
 
 from __future__ import annotations

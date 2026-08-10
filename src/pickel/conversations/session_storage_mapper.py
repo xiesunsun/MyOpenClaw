@@ -1,6 +1,6 @@
 """Session / SessionEntry ↔ SQLite 行映射。
 
-payload_json 存 AgentMessage（或 compaction 等）dict；不再映射 ToolCallBatch / SessionMessage。
+payload_json 存 AgentMessage（或 compaction 等）dict。
 """
 
 from __future__ import annotations
@@ -76,7 +76,9 @@ def session_from_storage(
 
 def build_session_preview(*, session: Session) -> SessionPreview:
     path = session.active_path()
-    message_entries = [entry for entry in path if entry.entry_type == ENTRY_TYPE_MESSAGE]
+    message_entries = [
+        entry for entry in path if entry.entry_type == ENTRY_TYPE_MESSAGE
+    ]
     last_message = ""
     if message_entries:
         last_message = preview_text_from_message_payload(message_entries[-1].payload)

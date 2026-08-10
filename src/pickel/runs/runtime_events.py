@@ -21,7 +21,7 @@ from pickel.conversations.agent_message import (
     agent_message_to_dict,
 )
 from pickel.conversations.content_blocks import content_blocks_to_list
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.runs.turn_usage import TurnUsage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult

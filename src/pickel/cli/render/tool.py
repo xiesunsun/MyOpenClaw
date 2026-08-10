@@ -17,7 +17,7 @@ from datetime import datetime
 from rich.console import Console
 from rich.text import Text
 
-from pickel.conversations.message import ToolCall
+from pickel.runs.tool_call import ToolCall
 from pickel.tools.base import ToolExecutionResult
 
 _DURATION_MIN_SECONDS = 0.1

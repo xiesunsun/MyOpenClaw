@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Protocol
 
-from pickel.context.models import SessionRecallResult, SessionRecallSnippet
-from pickel.conversations.message import MessageRole, SessionMessage
 from pickel.conversations.session import Session
+
+
+@dataclass(frozen=True)
+class SessionRecallSnippet:
+    text: str
+    source_uri: str | None = None
+    score: float | None = None
+
+
+@dataclass(frozen=True)
+class SessionRecallResult:
+    snippets: list[SessionRecallSnippet] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.snippets
 
 
 class SessionRecallProvider(Protocol):
@@ -14,27 +29,6 @@ class SessionRecallProvider(Protocol):
         session: Session,
         current_user_text: str,
     ) -> SessionRecallResult: ...
-
-
-class NoopSessionRecallProvider:
-    async def recall(
-        self,
-        *,
-        session: Session,
-        current_user_text: str,
-    ) -> SessionRecallResult:
-        return SessionRecallResult()
-
-
-def build_session_recall_message(
-    result: SessionRecallResult | None,
-    *,
-    max_chars: int | None = None,
-) -> SessionMessage | None:
-    rendered = render_session_recall(result, max_chars=max_chars)
-    if rendered is None:
-        return None
-    return SessionMessage(role=MessageRole.USER, content=rendered)
 
 
 def render_session_recall(
