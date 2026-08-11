@@ -54,7 +54,7 @@ def _package() -> AgentPackageVersion:
         model=model,
         runtime=AgentRuntimeSettings(
             max_model_steps=8,
-            context_unit_window=5,
+            context_turn_window=5,
         ),
         skills=(),
         tools=(),

@@ -1,8 +1,8 @@
-"""apply_window：不可拆分单元与 tool 原子组。"""
+"""apply_window：完整用户轮次与 Tool Loop 不可拆分。"""
 
 from __future__ import annotations
 
-from pickel.context.window import apply_window, group_message_units
+from pickel.context.window import apply_window, group_conversation_turns
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
@@ -35,7 +35,7 @@ def _tool_result(call_id: str, text: str = "ok") -> ToolResultMessage:
     )
 
 
-def test_group_units_keeps_tool_call_with_results():
+def test_group_turn_keeps_user_tool_loop_and_final_response_together():
     messages = [
         _user("q"),
         _assistant_tools("c1", "c2"),
@@ -44,12 +44,9 @@ def test_group_units_keeps_tool_call_with_results():
         _assistant_text("done"),
     ]
 
-    units = group_message_units(messages)
+    turns = group_conversation_turns(messages)
 
-    assert len(units) == 3
-    assert units[0] == [messages[0]]
-    assert units[1] == [messages[1], messages[2], messages[3]]
-    assert units[2] == [messages[4]]
+    assert turns == [messages]
 
 
 def test_apply_window_never_splits_tool_call_from_results():
@@ -62,20 +59,20 @@ def test_apply_window_never_splits_tool_call_from_results():
         _assistant_text("final"),
     ]
 
-    # 6 messages → units: [u0], [a0], [u1], [assistant+tool], [final] = 5 units
-    # window=2 keeps last 2 units: tool group + final
-    windowed = apply_window(messages, unit_window=2)
+    windowed = apply_window(messages, turn_window=1)
 
-    assert len(windowed) == 3
-    assert isinstance(windowed[0], AssistantMessage)
-    assert any(isinstance(b, ToolCallBlock) for b in windowed[0].content)
-    assert isinstance(windowed[1], ToolResultMessage)
-    assert windowed[1].tool_call_id == "c1"
-    assert isinstance(windowed[2], AssistantMessage)
-    assert windowed[2].content[0].text == "final"
+    assert len(windowed) == 4
+    assert isinstance(windowed[0], UserMessage)
+    assert windowed[0].content[0].text == "u1"
+    assert isinstance(windowed[1], AssistantMessage)
+    assert any(isinstance(b, ToolCallBlock) for b in windowed[1].content)
+    assert isinstance(windowed[2], ToolResultMessage)
+    assert windowed[2].tool_call_id == "c1"
+    assert isinstance(windowed[3], AssistantMessage)
+    assert windowed[3].content[0].text == "final"
 
 
-def test_apply_window_keeps_recent_n_units():
+def test_apply_window_keeps_recent_n_turns():
     messages = [
         _user("u1"),
         _assistant_text("a1"),
@@ -85,11 +82,24 @@ def test_apply_window_keeps_recent_n_units():
         _assistant_text("a3"),
     ]
 
-    windowed = apply_window(messages, unit_window=3)
+    windowed = apply_window(messages, turn_window=2)
 
-    assert [m.content[0].text for m in windowed] == ["a2", "u3", "a3"]
+    assert [m.content[0].text for m in windowed] == ["u2", "a2", "u3", "a3"]
 
 
-def test_apply_window_minimum_one_unit():
+def test_apply_window_minimum_one_turn():
     messages = [_user("only")]
-    assert apply_window(messages, unit_window=0) == messages
+    assert apply_window(messages, turn_window=0) == messages
+
+
+def test_window_keeps_user_prompt_across_many_tool_steps():
+    messages = [_user("今天星期几了")]
+    for index in range(6):
+        call_id = f"call-{index}"
+        messages.extend([_assistant_tools(call_id), _tool_result(call_id)])
+    messages.append(_assistant_text("今天是星期二"))
+
+    windowed = apply_window(messages, turn_window=5)
+
+    assert windowed[0] == messages[0]
+    assert windowed == messages

@@ -62,6 +62,10 @@ class AgentPackageBuilder:
     ) -> LoadedAgentPackage:
         resolved_agent_id = agent_id or self._app_config.default_agent
         agent_config = self._app_config.get_agent_config(resolved_agent_id)
+        self._validate_workspace_path(
+            agent_id=resolved_agent_id,
+            workspace_path=agent_config.workspace_path,
+        )
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
         file_access_mode = self._app_config.resolve_file_access_mode(resolved_agent_id)
         skills_path = self.resolve_skills_path(resolved_agent_id)
@@ -132,7 +136,7 @@ class AgentPackageBuilder:
         )
         runtime = AgentRuntimeSettings(
             max_model_steps=self._app_config.react_max_steps,
-            context_unit_window=self._app_config.context_cli_turn_window,
+            context_turn_window=self._app_config.context_cli_turn_window,
         )
         skills = tuple(self._skill_version(manifest) for manifest in skill_manifests)
         tools = tuple(
@@ -152,7 +156,7 @@ class AgentPackageBuilder:
             for entry in tool_snapshot.entries
         )
         draft = {
-            "schema_version": 2,
+            "schema_version": 3,
             "agent_id": definition.agent_id,
             "definition": definition,
             "behavior_instruction": behavior_instruction,
@@ -175,6 +179,17 @@ class AgentPackageBuilder:
             tools=tools,
             created_at=self._now(),
         )
+
+    @staticmethod
+    def _validate_workspace_path(*, agent_id: str, workspace_path: Path) -> None:
+        if not workspace_path.exists():
+            raise ValueError(
+                f"Agent '{agent_id}' workspace_path 不存在: {workspace_path}"
+            )
+        if not workspace_path.is_dir():
+            raise ValueError(
+                f"Agent '{agent_id}' workspace_path 不是目录: {workspace_path}"
+            )
 
     @staticmethod
     def _skill_version(manifest: SkillManifest) -> AgentSkillVersion:

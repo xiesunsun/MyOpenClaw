@@ -127,7 +127,7 @@ def _bindings(
         provider_options={},
         required_secrets=("api_key",),
     )
-    runtime = AgentRuntimeSettings(max_model_steps=8, context_unit_window=5)
+    runtime = AgentRuntimeSettings(max_model_steps=8, context_turn_window=5)
     tool_version = AgentToolVersion(
         name="echo",
         source="builtin",

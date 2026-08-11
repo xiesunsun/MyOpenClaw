@@ -138,7 +138,7 @@ def _package() -> AgentPackageVersion:
         model=model,
         runtime=AgentRuntimeSettings(
             max_model_steps=4,
-            context_unit_window=10,
+            context_turn_window=10,
         ),
         skills=(),
         tools=(tool,),

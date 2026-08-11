@@ -3,6 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from pickel.agents.agent_package import (
+    agent_package_digest,
+    agent_package_version_from_content,
+)
 from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
@@ -128,6 +134,17 @@ def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) ->
     assert first.tool_snapshot.names == ("echo",)
 
 
+def test_rejects_missing_agent_workspace_before_runtime_starts(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].workspace_path = tmp_path / "missing-workspace"
+
+    with pytest.raises(ValueError, match="workspace_path 不存在"):
+        AgentPackageBuilder(
+            app_config=config,
+            tool_bus=_tool_bus(),
+        ).build_loaded_agent_package()
+
+
 def test_snapshot_excludes_provider_secrets(tmp_path: Path) -> None:
     package = AgentPackageBuilder(
         app_config=_config(tmp_path),
@@ -141,7 +158,7 @@ def test_snapshot_excludes_provider_secrets(tmp_path: Path) -> None:
     assert package.version.model.required_secrets == ("api_key",)
     assert package.version.model.provider_options == {"thinking": "high"}
     assert package.version.runtime.max_model_steps == 8
-    assert package.version.runtime.context_unit_window == 5
+    assert package.version.runtime.context_turn_window == 5
 
 
 def test_behavior_change_creates_new_package_version(tmp_path: Path) -> None:
@@ -175,6 +192,33 @@ def test_agent_package_version_round_trips_through_sqlite(tmp_path: Path) -> Non
     assert loaded is not None
     assert loaded == version
     assert loaded.content_dict() == version.content_dict()
+
+
+def test_loads_schema_v2_package_with_renamed_turn_window(tmp_path: Path) -> None:
+    current = (
+        AgentPackageBuilder(
+            app_config=_config(tmp_path),
+            tool_bus=_tool_bus(),
+        )
+        .build_loaded_agent_package()
+        .version
+    )
+    legacy_content = current.content_dict()
+    legacy_content["schema_version"] = 2
+    legacy_runtime = legacy_content["runtime"]
+    legacy_runtime["context_unit_window"] = legacy_runtime.pop("context_turn_window")
+    digest = agent_package_digest(legacy_content)
+
+    loaded = agent_package_version_from_content(
+        package_version_id=f"agentpkg_{digest}",
+        digest=digest,
+        content=legacy_content,
+        created_at=current.created_at,
+    )
+
+    assert loaded.schema_version == 2
+    assert loaded.runtime.context_turn_window == 5
+    assert loaded.content_dict() == legacy_content
 
 
 def test_boot_resolves_a_single_loaded_agent_package(

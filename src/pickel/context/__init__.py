@@ -13,7 +13,7 @@ from pickel.context.session_recall import (
     SessionRecallSnippet,
     render_session_recall,
 )
-from pickel.context.window import apply_window, group_message_units
+from pickel.context.window import apply_window, group_conversation_turns
 
 __all__ = [
     "HookFeedback",
@@ -28,6 +28,6 @@ __all__ = [
     "ToolDefinition",
     "append_hook_feedback",
     "apply_window",
-    "group_message_units",
+    "group_conversation_turns",
     "render_session_recall",
 ]

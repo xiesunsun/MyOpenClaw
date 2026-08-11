@@ -43,7 +43,7 @@ class ModelContextBuilder:
         messages = self._projector.project_conversation_messages(conversation_entries)
         messages = apply_window(
             messages,
-            unit_window=agent_package_version.runtime.context_unit_window,
+            turn_window=agent_package_version.runtime.context_turn_window,
         )
         messages.extend(recalled_messages)
         return ModelContext(

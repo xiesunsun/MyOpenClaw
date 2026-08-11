@@ -64,13 +64,13 @@ class AgentModelVersion:
 @dataclass(frozen=True)
 class AgentRuntimeSettings:
     max_model_steps: int
-    context_unit_window: int
+    context_turn_window: int
 
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
             raise ValueError("max_model_steps 必须大于 0")
-        if self.context_unit_window < 1:
-            raise ValueError("context_unit_window 必须大于 0")
+        if self.context_turn_window < 1:
+            raise ValueError("context_turn_window 必须大于 0")
 
 
 @dataclass(frozen=True)
@@ -85,16 +85,20 @@ class AgentPackageVersion:
     skills: tuple[AgentSkillVersion, ...]
     tools: tuple[AgentToolVersion, ...]
     created_at: datetime
+    schema_version: int = 3
 
     def content_dict(self) -> dict[str, Any]:
         """返回参与 digest 和持久化的稳定内容，不包含创建时间。"""
+        runtime = asdict(self.runtime)
+        if self.schema_version == 2:
+            runtime["context_unit_window"] = runtime.pop("context_turn_window")
         return {
-            "schema_version": 2,
+            "schema_version": self.schema_version,
             "agent_id": self.agent_id,
             "definition": asdict(self.definition),
             "behavior_instruction": self.behavior_instruction,
             "model": asdict(self.model),
-            "runtime": asdict(self.runtime),
+            "runtime": runtime,
             "skills": [asdict(skill) for skill in self.skills],
             "tools": [asdict(tool) for tool in self.tools],
         }
@@ -126,7 +130,8 @@ def agent_package_version_from_content(
     content: dict[str, Any],
     created_at: datetime,
 ) -> AgentPackageVersion:
-    if content.get("schema_version") != 2:
+    schema_version = content.get("schema_version")
+    if schema_version not in {2, 3}:
         raise ValueError(
             f"不支持的 AgentPackageVersion schema: {content.get('schema_version')}"
         )
@@ -136,6 +141,8 @@ def agent_package_version_from_content(
     model_data = dict(content["model"])
     model_data["required_secrets"] = tuple(model_data.get("required_secrets") or ())
     runtime_data = dict(content["runtime"])
+    if schema_version == 2:
+        runtime_data["context_turn_window"] = runtime_data.pop("context_unit_window")
     skills = []
     for item in content.get("skills") or []:
         data = dict(item)
@@ -154,6 +161,7 @@ def agent_package_version_from_content(
         skills=tuple(skills),
         tools=tools,
         created_at=created_at,
+        schema_version=int(schema_version),
     )
     if agent_package_digest(version.content_dict()) != digest:
         raise ValueError(f"AgentPackageVersion digest 校验失败: {package_version_id}")

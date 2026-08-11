@@ -39,7 +39,7 @@ def test_plan_and_commit_history_compaction_keeps_tail_units(tmp_path: Path):
     entries = service.list_active_branch_entries(session_id=session_id)
     plan = plan_history_compaction(
         entries,
-        keep_units=4,
+        keep_turns=2,
         summary="earlier dropped",
     )
     assert plan is not None
@@ -66,5 +66,5 @@ def test_plan_history_compaction_rejects_non_positive_window(tmp_path: Path):
     service, session_id = _conversation(tmp_path)
     entries = service.list_active_branch_entries(session_id=session_id)
 
-    with pytest.raises(ValueError, match="keep_units"):
-        plan_history_compaction(entries, keep_units=0, summary="invalid")
+    with pytest.raises(ValueError, match="keep_turns"):
+        plan_history_compaction(entries, keep_turns=0, summary="invalid")

@@ -75,7 +75,7 @@ def _version(*, provider: str = "anthropic") -> AgentPackageVersion:
     )
     runtime = AgentRuntimeSettings(
         max_model_steps=8,
-        context_unit_window=5,
+        context_turn_window=5,
     )
     tool = AgentToolVersion(
         name="echo",

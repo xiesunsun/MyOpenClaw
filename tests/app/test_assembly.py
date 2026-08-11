@@ -50,5 +50,5 @@ def test_build_agent_runtime_captures_current_pickel_settings() -> None:
         version = runtime.bindings.agent_package_version
         assert loaded.version == version
         assert version.runtime.max_model_steps == 12
-        assert version.runtime.context_unit_window == 6
+        assert version.runtime.context_turn_window == 6
         assert version.model.provider == "anthropic"
