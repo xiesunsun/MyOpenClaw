@@ -3,6 +3,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
@@ -13,12 +14,13 @@ _CONFIG_YAML = """
 default_agent: Pickle
 default_file_access_mode: full
 default_llm:
-  provider: google/gemini
-  model: gemini-3-flash-preview
+  provider: anthropic
+  model: claude-test
 providers:
-  google/gemini:
+  anthropic:
     models:
-      gemini-3-flash-preview:
+      claude-test:
+        api_key: test-key
         temperature: 1.0
         max_output_tokens: 1024
         provider_options: {}
@@ -65,21 +67,20 @@ class SandboxWiringTests(unittest.TestCase):
             self.assertTrue(policy.strict)
             self.assertEqual(root.resolve(), policy.project_root.resolve())
 
-    def test_build_run_passes_policy_to_local_bash(self) -> None:
-        # Run.open 会构造 provider（需要 key），只验证注入的本地后端带上了 policy
+    def test_build_agent_runtime_passes_policy_to_local_bash(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             boot = self._boot(root)
-            captured: dict[str, object] = {}
 
-            def _capture(**kwargs):
-                captured.update(kwargs)
-                raise RuntimeError("stop after capture")
+            def _provider(config, *, artifact_service):
+                return SimpleNamespace(artifact_service=artifact_service)
 
-            with unittest.mock.patch("pickel.app.boot.Run.open", side_effect=_capture):
-                with self.assertRaises(RuntimeError):
-                    boot.build_run()
+            with unittest.mock.patch(
+                "pickel.app.boot.AnthropicProvider.from_config",
+                side_effect=_provider,
+            ):
+                _, runtime = boot.build_agent_runtime()
 
-            bash = captured["bash_operations"]
+            bash = runtime.bindings.tool_services.bash
             self.assertIsNotNone(bash.sandbox)
             self.assertTrue(bash.sandbox.strict)

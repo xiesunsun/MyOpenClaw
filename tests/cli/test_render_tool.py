@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from rich.console import Console
 
 from pickel.cli.render.tool import ToolRenderer
-from pickel.runs.tool_call import ToolCall
+from pickel.runtime.runtime_events import ToolCallSnapshot
 from pickel.tools.base import ToolExecutionResult
 
 _T0 = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
@@ -18,10 +18,10 @@ def _console(**kwargs) -> Console:
     return Console(width=100, record=True, force_terminal=False, **kwargs)
 
 
-def _call(call_id: str = "c1", **kwargs) -> ToolCall:
-    name = kwargs.pop("name", "echo")
+def _call(call_id: str = "c1", **kwargs) -> ToolCallSnapshot:
+    name = kwargs.pop("tool_name", kwargs.pop("name", "echo"))
     arguments = kwargs.pop("arguments", {"text": "hi"})
-    return ToolCall(id=call_id, name=name, arguments=arguments)
+    return ToolCallSnapshot(tool_call_id=call_id, tool_name=name, arguments=arguments)
 
 
 def test_started_名与_args_同一行_running_用点对齐():
@@ -77,7 +77,7 @@ def test_failed_分支():
 def test_bash_展示退出码和shell状态():
     console = _console()
     renderer = ToolRenderer(console)
-    call = _call(name="bash", arguments={"command": "exit 7"})
+    call = _call(tool_name="bash", arguments={"command": "exit 7"})
 
     renderer.on_started(call, _T0)
     renderer.on_completed(
@@ -100,7 +100,7 @@ def test_bash_展示退出码和shell状态():
 def test_bash_超时与截断可见():
     console = _console()
     renderer = ToolRenderer(console)
-    call = _call(name="bash", arguments={"command": "sleep 30"})
+    call = _call(tool_name="bash", arguments={"command": "sleep 30"})
 
     renderer.on_started(call, _T0)
     renderer.on_completed(

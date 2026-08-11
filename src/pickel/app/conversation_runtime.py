@@ -8,7 +8,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
-from pickel.agents.agent_package import LoadedAgentPackage
+from pickel.agents.agent_package import AgentDefinition, LoadedAgentPackage
 from pickel.app.runtime_models import (
     ContextInspection,
     ConversationClosedError,
@@ -17,28 +17,47 @@ from pickel.app.runtime_models import (
     RuntimeSnapshot,
     SkillActionResult,
     ToolInfo,
-    TurnInProgressError,
-    TurnRequest,
-    TurnResult,
+    OperationInProgressError,
+    AgentRunRequest,
+    AgentRunResult,
 )
 from pickel.config.app_config import AppConfig
 from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.context.context_usage import estimate_context_usage
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.runs.conversation_output_bus import ConversationOutputBus
-from pickel.runs.event_bus import EventBus
-from pickel.runs.runtime_bus import RuntimeBus
-from pickel.runs.runtime_events import (
+from pickel.runtime.conversation_output_bus import ConversationOutputBus
+from pickel.runtime.event_bus import EventBus
+from pickel.runtime.runtime_bus import RuntimeBus
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventHandler,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
-    TurnCompleted,
-    TurnFailed,
-    TurnStarted,
+    AgentRunCompleted,
+    AgentRunFailed,
+    AgentRunInterrupted,
+    AgentRunStarted,
+    ModelStepStarted,
+    ToolCallCompleted,
+    ToolCallSnapshot,
+    ToolCallStarted,
+)
+from pickel.observe.jsonl_trace_sink import (
+    JsonlTraceSink,
+    TraceOptions,
+    trace_mode,
+    trace_path,
+)
+from pickel.observe.operation_report import export_operation_report
+from pickel.observe.records import (
+    ErrorInfo,
+    ObservationIdentity,
+    SpanTimer,
+    observation_scope,
 )
 from pickel.providers.stream import (
     TextDelta,
@@ -46,6 +65,11 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.runtime.agent_runtime import AgentRuntime
+from pickel.runtime.operation_driver import (
+    ModelStepStartedProgress,
+    ToolCallCompletedProgress,
+    ToolCallStartedProgress,
+)
 from pickel.persistence.runtime_store import RuntimeStore
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
@@ -89,10 +113,17 @@ class ConversationRuntime:
         self._control_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._event_processors: list[tuple[EventProcessor, Callable[[], None]]] = []
+        self._trace_sink: JsonlTraceSink | None = None
+        self._unsubscribe_trace: Callable[[], None] | None = None
+        self._open_trace()
 
     @property
-    def agent(self):
-        return self._loaded_agent_package.agent
+    def agent_definition(self) -> AgentDefinition:
+        return self._loaded_agent_package.version.definition
+
+    @property
+    def model_config(self):
+        return self._loaded_agent_package.model_config
 
     @property
     def session(self) -> ConversationSession:
@@ -131,15 +162,21 @@ class ConversationRuntime:
     def active_operation_id(self) -> str | None:
         return self._active_operation_id
 
-    async def turn(self, request: TurnRequest) -> TurnResult:
+    async def start_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
+        with observation_scope(self._trace_sink):
+            return await self._execute_agent_run(request)
+
+    async def _execute_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
         if self._closed:
             raise ConversationClosedError("Conversation 已关闭")
         task = asyncio.current_task()
         if task is None:
-            raise RuntimeError("turn 必须运行在 asyncio.Task 中")
+            raise RuntimeError("AgentRun 必须运行在 asyncio.Task 中")
         async with self._control_lock:
             if self._active_task is not None:
-                raise TurnInProgressError("当前 Conversation 已有 Operation 正在执行")
+                raise OperationInProgressError(
+                    "当前 Conversation 已有 Operation 正在执行"
+                )
             accepted = await self._agent_runtime.accept_agent_run(
                 session_id=self._session.session_id,
                 user_message=request.message,
@@ -150,10 +187,17 @@ class ConversationRuntime:
         started = time.perf_counter()
         envelope = EventEnvelope(
             session_id=self._session.session_id,
-            turn_id=operation_id,
+            operation_id=operation_id,
+        )
+        timer = SpanTimer(
+            "pickel.agent_run",
+            ObservationIdentity(
+                session_id=self._session.session_id,
+                operation_id=operation_id,
+            ),
         )
         await self._events.emit(
-            TurnStarted(envelope=envelope, user_text=self._user_text(request))
+            AgentRunStarted(envelope=envelope, user_text=self._user_text(request))
         )
 
         async def consume_delta(delta) -> None:
@@ -174,11 +218,55 @@ class ConversationRuntime:
                     )
                 )
 
+        async def consume_progress(progress) -> None:
+            progress_envelope = EventEnvelope(
+                session_id=self._session.session_id,
+                operation_id=progress.operation_id,
+                step_id=progress.step_id,
+                step_sequence=progress.step_sequence,
+            )
+            if isinstance(progress, ModelStepStartedProgress):
+                await self._events.emit(ModelStepStarted(envelope=progress_envelope))
+                return
+            tool_call = ToolCallSnapshot(
+                tool_call_id=progress.tool_call.tool_call_id,
+                tool_name=progress.tool_call.tool_name,
+                arguments=dict(progress.tool_call.arguments),
+            )
+            entry = self._agent_runtime.bindings.tool_snapshot.get(
+                progress.tool_call.tool_name
+            )
+            common = {
+                "envelope": progress_envelope,
+                "tool_call": tool_call,
+                "batch_id": progress.step_id,
+                "call_index": progress.call_index,
+                "total_calls": progress.total_calls,
+                "tool_source": entry.source.value if entry is not None else None,
+                "tool_origin": entry.origin if entry is not None else None,
+                "hook_action": progress.tool_call.execution_policy,
+                "confirmation": (
+                    "pending"
+                    if progress.tool_call.execution_policy == "confirm"
+                    else "not_requested"
+                ),
+            }
+            if isinstance(progress, ToolCallCompletedProgress):
+                await self._events.emit(
+                    ToolCallCompleted(
+                        **common,
+                        tool_result=progress.result,
+                    )
+                )
+            elif isinstance(progress, ToolCallStartedProgress):
+                await self._events.emit(ToolCallStarted(**common))
+
         try:
             result = await self._agent_runtime.drive_operation(
                 operation_id,
                 host_calls=self._runtime_bus.host_calls.client,
                 consume_delta=consume_delta,
+                consume_progress=consume_progress,
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             if result.assistant_message is not None:
@@ -189,36 +277,53 @@ class ConversationRuntime:
                     )
                 )
             await self._events.emit(
-                TurnCompleted(
+                AgentRunCompleted(
                     envelope=envelope,
                     elapsed_ms=elapsed_ms,
                     outcome=("blocked" if result.status == "waiting" else "completed"),
                 )
             )
+            timer.finish(attributes={"outcome": result.status})
             self._refresh_session()
-            return TurnResult(
+            return AgentRunResult(
                 status=("blocked" if result.status == "waiting" else "completed"),
                 session_id=self._session.session_id,
-                turn_id=operation_id,
+                operation_id=operation_id,
                 message=result.assistant_message,
                 usage=None,
                 elapsed_ms=elapsed_ms,
             )
         except asyncio.CancelledError:
+            cancel = getattr(self._agent_runtime, "cancel_operation", None)
+            if callable(cancel):
+                cancel(operation_id, reason="用户中断")
+            await self._events.emit(
+                AgentRunInterrupted(envelope=envelope, at_step=0, partial_text="")
+            )
+            timer.finish(
+                status="cancelled",
+                attributes={"outcome": "cancelled"},
+            )
+            self._refresh_session()
             raise
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             await self._events.emit(
-                TurnFailed(
+                AgentRunFailed(
                     envelope=envelope,
                     error_type=type(exc).__name__,
                     message=str(exc),
                 )
             )
-            return TurnResult(
+            timer.finish(
+                status="error",
+                attributes={"outcome": "failed"},
+                error=ErrorInfo.from_exception(exc, kind="agent_run"),
+            )
+            return AgentRunResult(
                 status="failed",
                 session_id=self._session.session_id,
-                turn_id=operation_id,
+                operation_id=operation_id,
                 message=None,
                 usage=None,
                 elapsed_ms=elapsed_ms,
@@ -286,11 +391,9 @@ class ConversationRuntime:
         entries = self._conversation_service.list_active_branch_entries(
             session_id=self._session.session_id
         )
-        context = await ModelContextBuilder().build_model_context(
+        context = ModelContextBuilder().build_model_context(
             agent_package_version=self._loaded_agent_package.version,
             conversation_entries=entries,
-            session_id=self._session.session_id,
-            recall_sources=(),
         )
         tool_calls = sum(
             1
@@ -298,11 +401,16 @@ class ConversationRuntime:
             for block in message.content
             if getattr(block, "type", None) == "tool_call"
         )
+        version = self._loaded_agent_package.version
         return ContextInspection(
-            usage=None,
+            usage=estimate_context_usage(
+                context,
+                model_label=f"{version.model.provider} / {version.model.model}",
+                max_input_tokens=version.model.max_input_tokens,
+            ),
             last_turn=None,
             session_total=None,
-            note="新 Runtime 尚未接入 token 计量投影",
+            note="本地字符估算；实际用量以 Provider 响应为准",
             turns=sum(1 for message in context.messages if message.role == "user"),
             tool_calls=tool_calls,
             compactions=sum(
@@ -366,6 +474,8 @@ class ConversationRuntime:
 
     def flush(self) -> None:
         """新 Runtime 每次转换都已原子提交，无待刷缓冲。"""
+        if self._trace_sink is not None:
+            self._trace_sink.flush()
 
     def archive(self) -> None:
         if self._closed:
@@ -379,6 +489,12 @@ class ConversationRuntime:
         if self._closed:
             return
         self._runtime_bus.close_now()
+        if self._unsubscribe_trace is not None:
+            self._unsubscribe_trace()
+            self._unsubscribe_trace = None
+        if self._trace_sink is not None:
+            self._trace_sink.close()
+            self._trace_sink = None
         for processor, unsubscribe in reversed(self._event_processors):
             unsubscribe()
             processor.close()
@@ -399,7 +515,37 @@ class ConversationRuntime:
         raise ValueError("thinking 切换需要创建新的 AgentPackageVersion 并重装 Runtime")
 
     def export_observation(self, out: Path | None = None) -> Path:
-        raise NotImplementedError("新 Runtime 的 Operation 观测导出将在事件迁移后提供")
+        self.flush()
+        return export_operation_report(
+            conversation_service=self._conversation_service,
+            sessions=(self._session,),
+            out=out,
+        )
+
+    def _open_trace(self) -> None:
+        observability = getattr(self._app_config, "observability", None)
+        configured = getattr(observability, "trace", None)
+        if configured is None:
+            return
+        mode = trace_mode(configured.mode)
+        if mode == "off":
+            return
+        try:
+            self._trace_sink = JsonlTraceSink(
+                trace_path(self._session.session_id),
+                TraceOptions(
+                    mode=mode,
+                    queue_capacity=configured.queue_capacity,
+                    batch_size=configured.batch_size,
+                    flush_interval_ms=configured.flush_interval_ms,
+                    max_file_size_mb=configured.max_file_size_mb,
+                    max_age_days=configured.max_age_days,
+                    max_total_size_mb=configured.max_total_size_mb,
+                ),
+            )
+        except OSError:
+            return
+        self._unsubscribe_trace = self.subscribe(self._trace_sink)
 
     def _refresh_session(self) -> None:
         self._session = self._conversation_service.load_conversation_session(
@@ -407,15 +553,15 @@ class ConversationRuntime:
         )
 
     @staticmethod
-    def _user_text(request: TurnRequest) -> str:
+    def _user_text(request: AgentRunRequest) -> str:
         return "\n".join(
             block.text
             for block in request.message.content
-            if isinstance(block, TextContent)
+            if isinstance(block, TextBlock)
         )
 
     @staticmethod
     def _assistant_text(message: AssistantMessage) -> str:
         return "\n".join(
-            block.text for block in message.content if isinstance(block, TextContent)
+            block.text for block in message.content if isinstance(block, TextBlock)
         )

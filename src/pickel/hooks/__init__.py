@@ -3,7 +3,7 @@ from pickel.hooks.decisions import (
     PostToolBatchDecision,
     PostToolUseDecision,
     PreToolUseDecision,
-    TurnEndDecision,
+    AgentRunEndDecision,
     UserPromptSubmitDecision,
 )
 from pickel.hooks.events import (
@@ -11,7 +11,7 @@ from pickel.hooks.events import (
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
-    TurnEndEvent,
+    AgentRunEndEvent,
     UserPromptSubmitEvent,
 )
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
@@ -23,12 +23,12 @@ __all__ = [
     "PreToolUseEvent",
     "PostToolUseEvent",
     "PostToolBatchEvent",
-    "TurnEndEvent",
+    "AgentRunEndEvent",
     "BeforeRequestEvent",
     "UserPromptSubmitDecision",
     "PreToolUseDecision",
     "PostToolUseDecision",
     "PostToolBatchDecision",
-    "TurnEndDecision",
+    "AgentRunEndDecision",
     "BeforeRequestDecision",
 ]

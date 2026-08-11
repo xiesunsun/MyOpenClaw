@@ -11,7 +11,7 @@ from pickel.hooks.decisions import (
     PostToolBatchDecision,
     PostToolUseDecision,
     PreToolUseDecision,
-    TurnEndDecision,
+    AgentRunEndDecision,
     UserPromptSubmitDecision,
     merge_before_request_decisions,
     merge_feedback_texts,
@@ -23,7 +23,7 @@ from pickel.hooks.events import (
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
-    TurnEndEvent,
+    AgentRunEndEvent,
     UserPromptSubmitEvent,
 )
 from pickel.observe.records import (
@@ -53,7 +53,9 @@ class HookHandler(Protocol):
     async def before_request(
         self, event: BeforeRequestEvent
     ) -> BeforeRequestDecision | None: ...
-    async def turn_end(self, event: TurnEndEvent) -> TurnEndDecision | None: ...
+    async def agent_run_end(
+        self, event: AgentRunEndEvent
+    ) -> AgentRunEndDecision | None: ...
 
 
 class _HookFailed:
@@ -69,8 +71,9 @@ async def _call(handler: Any, method: str, event: Any) -> Any:
         return None
     identity = ObservationIdentity(
         session_id=event.session_id,
-        turn_id=event.turn_id,
-        step_index=event.step_index,
+        operation_id=event.operation_id,
+        step_id=event.step_id,
+        step_sequence=event.step_sequence,
     )
     handler_name = f"{type(handler).__module__}.{type(handler).__qualname__}"
     timer = SpanTimer(
@@ -160,10 +163,10 @@ class LifecycleHooks:
                     effective_context = result.model_context
         return merge_before_request_decisions(decisions)
 
-    async def turn_end(self, event: TurnEndEvent) -> TurnEndDecision:
+    async def agent_run_end(self, event: AgentRunEndEvent) -> AgentRunEndDecision:
         for handler in self.handlers:
-            await _call(handler, "turn_end", event)
-        return TurnEndDecision()
+            await _call(handler, "agent_run_end", event)
+        return AgentRunEndDecision()
 
 
 class NoopLifecycleHooks(LifecycleHooks):

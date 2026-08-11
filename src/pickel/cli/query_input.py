@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 
 
 @dataclass(frozen=True)
@@ -20,16 +20,16 @@ class QueryInput:
                 raise ValueError("query 为 '-' 时必须通过 stdin 提供用户输入")
             if not self.stdin_text.strip():
                 raise ValueError("stdin 用户输入不能为空")
-            return UserMessage(content=[TextContent(text=self.stdin_text)])
+            return UserMessage(content=[TextBlock(text=self.stdin_text)])
 
         if not self.query.strip():
             raise ValueError("query 不能为空")
         if self.stdin_text is None or not self.stdin_text:
-            return UserMessage(content=[TextContent(text=self.query)])
+            return UserMessage(content=[TextBlock(text=self.query)])
         return UserMessage(
             content=[
-                TextContent(text=f"任务：\n{self.query}"),
-                TextContent(text=f"输入数据（stdin）：\n{self.stdin_text}"),
+                TextBlock(text=f"任务：\n{self.query}"),
+                TextBlock(text=f"输入数据（stdin）：\n{self.stdin_text}"),
             ]
         )
 

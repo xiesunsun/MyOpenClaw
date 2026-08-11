@@ -7,16 +7,16 @@ import asyncio
 from rich.console import Console
 
 from pickel.cli.event_renderer import ChatEventRenderer
-from pickel.runs.tool_call import ToolCall
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import ToolCallSnapshot
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    StepStarted,
+    ModelStepStarted,
     ToolCallCompleted,
     ToolCallStarted,
-    TurnCompleted,
-    TurnStarted,
+    AgentRunCompleted,
+    AgentRunStarted,
 )
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.tools.base import ToolExecutionResult
 
@@ -27,8 +27,8 @@ def _render(event) -> str:
     return console.export_text()
 
 
-def _cached_usage() -> TurnUsage:
-    return TurnUsage(
+def _cached_usage() -> AgentRunUsage:
+    return AgentRunUsage(
         steps=2,
         input_tokens=100,
         cache_read_tokens=8200,
@@ -38,9 +38,9 @@ def _cached_usage() -> TurnUsage:
     )
 
 
-def test_step_started_不再上屏():
-    """无边框排版下 `Step N` 行是噪音（E3 分派表：StepStarted 只收尾流式行）。"""
-    text = _render(StepStarted(envelope=EventEnvelope(step_index=2)))
+def test_model_step_started_不再上屏():
+    """无边框排版下 `Step N` 行是噪音（E3 分派表：ModelStepStarted 只收尾流式行）。"""
+    text = _render(ModelStepStarted(envelope=EventEnvelope(step_sequence=2)))
 
     assert text.strip() == ""
 
@@ -48,8 +48,12 @@ def test_step_started_不再上屏():
 def test_tool_call_started_显示_tool_行与_running():
     text = _render(
         ToolCallStarted(
-            tool_call=ToolCall(id="c1", name="echo", arguments={"text": "hi"}),
-            batch_id="b1", call_index=0, total_calls=1,
+            tool_call=ToolCallSnapshot(
+                tool_call_id="c1", tool_name="echo", arguments={"text": "hi"}
+            ),
+            batch_id="b1",
+            call_index=0,
+            total_calls=1,
         )
     )
 
@@ -62,7 +66,9 @@ def test_tool_call_started_显示_tool_行与_running():
 def test_tool_call_completed_成功显示_ok():
     text = _render(
         ToolCallCompleted(
-            tool_call=ToolCall(id="c1", name="echo", arguments={}),
+            tool_call=ToolCallSnapshot(
+                tool_call_id="c1", tool_name="echo", arguments={}
+            ),
             tool_result=ToolExecutionResult(content="done"),
         )
     )
@@ -74,7 +80,9 @@ def test_tool_call_completed_成功显示_ok():
 def test_tool_call_completed_失败显示_failed():
     text = _render(
         ToolCallCompleted(
-            tool_call=ToolCall(id="c1", name="missing", arguments={}),
+            tool_call=ToolCallSnapshot(
+                tool_call_id="c1", tool_name="missing", arguments={}
+            ),
             tool_result=ToolExecutionResult(content="not found", is_error=True),
         )
     )
@@ -86,9 +94,12 @@ def test_assistant_message_显示正文与用量_footer():
     text = _render(
         AssistantMessageEvent(
             text="hello world",
-            usage=TurnUsage(
-                steps=1, input_tokens=100, output_tokens=20,
-                elapsed_ms=1500, model_label="anthropic / claude-jupiter-v1-p",
+            usage=AgentRunUsage(
+                steps=1,
+                input_tokens=100,
+                output_tokens=20,
+                elapsed_ms=1500,
+                model_label="anthropic / claude-jupiter-v1-p",
             ),
         )
     )
@@ -117,8 +128,7 @@ def test_footer_格式逐字锁定():
 
     last_line = [line for line in text.splitlines() if line.strip()][-1]
     assert last_line.strip() == (
-        "anthropic / claude-jupiter-v1-p · 8.3k→20"
-        " · cache r8.2k/w0 · 1.5s"
+        "anthropic / claude-jupiter-v1-p · 8.3k→20" " · cache r8.2k/w0 · 1.5s"
     )
     assert last_line.startswith(" ")  # 右对齐
 
@@ -142,7 +152,7 @@ def test_assistant_message_无用量时_footer_退到_fallback_label():
     assert "google/gemini / gemini-3-flash-preview" in text
 
 
-def test_turn_级事件不产生输出():
-    """turn_started/completed 只进 trace，不上屏。"""
-    assert _render(TurnStarted(user_text="hi")).strip() == ""
-    assert _render(TurnCompleted(usage=TurnUsage(steps=1))).strip() == ""
+def test_agent_run_级事件不产生输出():
+    """AgentRun started/completed 只进 trace，不上屏。"""
+    assert _render(AgentRunStarted(user_text="hi")).strip() == ""
+    assert _render(AgentRunCompleted(usage=AgentRunUsage(steps=1))).strip() == ""

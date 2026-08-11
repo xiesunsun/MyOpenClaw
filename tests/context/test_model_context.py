@@ -5,14 +5,20 @@ from pickel.context.model_context import (
     ToolDefinition,
 )
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 
 
 def test_model_context_holds_system_messages_tools():
     ctx = ModelContext(
-        system=SystemContent(sections=[SystemSection(name="behavior", text="you are pickle")]),
-        messages=[UserMessage(content=[TextContent(text="hi")])],
-        tools=[ToolDefinition(name="read_file", description="read", input_schema={"type": "object"})],
+        system=SystemContent(
+            sections=[SystemSection(name="behavior", text="you are pickle")]
+        ),
+        messages=[UserMessage(content=[TextBlock(text="hi")])],
+        tools=[
+            ToolDefinition(
+                name="read_file", description="read", input_schema={"type": "object"}
+            )
+        ],
     )
     assert ctx.system.sections[0].name == "behavior"
     assert len(ctx.messages) == 1

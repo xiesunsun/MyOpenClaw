@@ -13,7 +13,7 @@ from pickel.extensions.mcp.connection import McpConnection, McpConnectionError
 from pickel.extensions.mcp.elicitation_mapper import resolve_elicitation
 from pickel.extensions.mcp.proxy import McpProxyTool
 from pickel.extensions_host.mcp_status import McpServerStatusSnapshot
-from pickel.runs.host_calls import HostCallClient, HostCallContext
+from pickel.runtime.host_calls import HostCallClient, HostCallContext
 
 logger = logging.getLogger(__name__)
 

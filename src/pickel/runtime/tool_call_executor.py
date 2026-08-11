@@ -6,8 +6,8 @@ import copy
 
 from pickel.observe.records import ErrorInfo
 from pickel.operations.agent_run_state import ToolCallState
-from pickel.runs.host_calls import HostCallClient, HostCallCompleted, HostCallContext
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_calls import HostCallClient, HostCallCompleted, HostCallContext
+from pickel.runtime.host_call_types import (
     CONFIRMATION_CALL,
     ConfirmationAnswer,
     ConfirmationRequest,
@@ -95,6 +95,7 @@ class ToolCallExecutor:
                 activation_control=(self._bindings.tool_services.activation_control),
                 skill_store=self._bindings.tool_services.skill_store,
                 host_calls=host_calls,
+                artifact_service=self._bindings.artifact_service,
             ),
             operation_id=operation_id,
             step_id=step_id,

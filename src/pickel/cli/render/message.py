@@ -9,7 +9,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.text import Text
 
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 
 
 def abbrev_tokens(n: int) -> str:
@@ -23,7 +23,7 @@ def abbrev_tokens(n: int) -> str:
 
 
 def format_footer(
-    usage: TurnUsage | None, fallback_model_label: str | None
+    usage: AgentRunUsage | None, fallback_model_label: str | None
 ) -> str | None:
     """footer 单行文本；两者皆空返回 None。
 
@@ -75,7 +75,7 @@ def render_assistant(
     console: Console,
     *,
     text: str,
-    usage: TurnUsage | None,
+    usage: AgentRunUsage | None,
     fallback_model_label: str | None,
 ) -> None:
     """非流式定稿：白字正文 + footer（不解析 Markdown，避免双份与终端 MD 上限问题）。"""

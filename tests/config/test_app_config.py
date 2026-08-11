@@ -13,9 +13,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -31,9 +29,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -43,9 +39,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -61,21 +55,19 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
             self.assertEqual(5, config.context_cli_turn_window)
 
-    def test_extensions_section_passes_through_raw_and_extension_parses_defaults(self) -> None:
+    def test_extensions_section_passes_through_raw_and_extension_parses_defaults(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -99,9 +91,7 @@ class AppConfigTests(unittest.TestCase):
                         account_id: account
                         user_id: user
                         user_key: secret
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -123,9 +113,7 @@ class AppConfigTests(unittest.TestCase):
             (root / "agents" / "Pickle" / "AGENT.md").write_text("You are Pickle.\n")
             (root / "workspace").mkdir()
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -143,9 +131,7 @@ class AppConfigTests(unittest.TestCase):
                         behavior_path: agents/Pickle
                         tools:
                           - echo
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
             agent_config = config.get_agent_config()
@@ -157,9 +143,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     react_max_steps: 16
                     default_llm:
@@ -176,9 +160,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -188,9 +170,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     context_cli_turn_window: 9
                     default_llm:
@@ -207,9 +187,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -219,9 +197,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -237,9 +213,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
@@ -252,9 +226,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -271,22 +243,20 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
 
             self.assertEqual(1048576, model_config.max_input_tokens)
 
-    def test_resolve_model_config_defaults_temperature_to_none_when_omitted(self) -> None:
+    def test_resolve_model_config_defaults_temperature_to_none_when_omitted(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: anthropic
@@ -301,9 +271,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
@@ -314,9 +282,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: anthropic
@@ -332,9 +298,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
             model_config = config.resolve_model_config()
@@ -345,9 +309,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -365,9 +327,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             with patch.dict(
                 "os.environ",
@@ -387,9 +347,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -406,9 +364,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             with patch.dict("os.environ", {}, clear=True):
                 with self.assertRaisesRegex(
@@ -420,9 +376,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_llm:
                       provider: google/gemini
@@ -438,9 +392,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -450,9 +402,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_file_access_mode: workspace
                     default_llm:
@@ -470,9 +420,7 @@ class AppConfigTests(unittest.TestCase):
                         workspace_path: workspace
                         behavior_path: agents/Pickle
                         file_access_mode: full
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -482,9 +430,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_skills_path: .agent/skills
                     default_llm:
@@ -501,9 +447,7 @@ class AppConfigTests(unittest.TestCase):
                       Pickle:
                         workspace_path: workspace
                         behavior_path: agents/Pickle
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 
@@ -513,9 +457,7 @@ class AppConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
+            config_path.write_text(textwrap.dedent("""
                     default_agent: Pickle
                     default_skills_path: .agent/skills
                     default_llm:
@@ -533,9 +475,7 @@ class AppConfigTests(unittest.TestCase):
                         workspace_path: workspace
                         behavior_path: agents/Pickle
                         skills_path: custom-skills
-                    """
-                ).strip()
-            )
+                    """).strip())
 
             config = app_config_from_yaml_file(config_path)
 

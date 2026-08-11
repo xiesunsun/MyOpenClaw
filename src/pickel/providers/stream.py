@@ -6,7 +6,7 @@ AssistantMessage。accumulate() 消费到它为止。
 
 这样 generate() 可以完全由 stream() 实现，而不必再写一份增量拼装。
 
-StreamDelta 是 union 别名而非基类（同 content_blocks.ContentBlock 的做法）：
+StreamDelta 是 union 别名而非基类（同 content_blocks.MessageBlock 的做法）：
 各 delta 扁平、字段全部必填，「StreamCompleted 必须携带消息」由构造期
 保证；下游 isinstance 分派也不必为一个可实例化的空基类兜底。
 """

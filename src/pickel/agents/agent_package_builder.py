@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pickel.agents.agent import Agent
 from pickel.agents.agent_package import (
     AgentDefinition,
     AgentModelVersion,
@@ -82,17 +81,6 @@ class AgentPackageBuilder:
             provider=model_config.provider,
             model=model_config.model,
         )
-        agent = Agent(
-            agent_id=resolved_agent_id,
-            workspace_path=agent_config.workspace_path,
-            behavior_path=agent_config.behavior_path,
-            behavior_instruction=behavior_instruction,
-            model_config=model_config,
-            tool_ids=list(agent_config.tools),
-            file_access_mode=file_access_mode.value,
-            skills=list(skill_manifests),
-            skills_path=skills_path,
-        )
         version = self._build_version(
             definition=definition,
             behavior_instruction=behavior_instruction,
@@ -101,11 +89,9 @@ class AgentPackageBuilder:
             model_config=model_config,
         )
         return LoadedAgentPackage(
-            definition=definition,
             version=version,
-            agent=agent,
+            model_config=model_config,
             tool_snapshot=tool_snapshot,
-            skill_manifests=skill_manifests,
         )
 
     def resolve_skills_path(self, agent_id: str) -> Path | None:

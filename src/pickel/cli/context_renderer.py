@@ -12,8 +12,8 @@ from rich.console import Group, RenderableType
 from rich.text import Text
 
 from pickel.cli.render.message import abbrev_tokens
-from pickel.runs.measure import ContextCategory, ContextUsage
-from pickel.runs.turn_usage import TurnUsage
+from pickel.context.context_usage import ContextCategory, ContextUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 
 # 主占用图：5×20 = 100 格
 _GRID_ROWS = 5
@@ -35,8 +35,8 @@ class ContextRenderer:
         self,
         usage: ContextUsage | None,
         *,
-        last_turn: TurnUsage | None = None,
-        session_total: TurnUsage | None = None,
+        last_turn: AgentRunUsage | None = None,
+        session_total: AgentRunUsage | None = None,
         note: str | None = None,
         source_line: str | None = None,
         turns: int = 0,
@@ -176,7 +176,7 @@ class ContextRenderer:
         line = f"{left}  {mid}  {pct}{extra}".rstrip()
         return Text(line, style=style) if style else Text(line)
 
-    def _render_turn(self, title: str, turn: TurnUsage) -> RenderableType:
+    def _render_turn(self, title: str, turn: AgentRunUsage) -> RenderableType:
         lines: list[RenderableType] = [Text(title, style="bold")]
         suffix = f"  steps={turn.steps}" if turn.steps else ""
         lines.append(

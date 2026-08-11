@@ -103,7 +103,3 @@ class ExtensionHost:
     def add_recall_source(self, factory: Factory) -> None:
         """注册召回源工厂：(AgentScope) -> Recall | None。"""
         self._registry.recall_factories.append(factory)
-
-    def add_session_sync(self, factory: Factory) -> None:
-        """注册会话同步工厂：(AgentScope) -> SessionSync | None。"""
-        self._registry.sync_factories.append(factory)

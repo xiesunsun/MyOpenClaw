@@ -319,6 +319,49 @@ class OperationStateMachine:
         )
         return self._validated(state, next_state)
 
+    def record_reconciled_tool_call(
+        self,
+        state: AgentRunState,
+        *,
+        tool_call_id: str,
+        result_message_node_id: str,
+        is_error: bool,
+    ) -> AgentRunState:
+        """由 Host 明确补交未知副作用结果，并恢复 AgentRun 推进资格。"""
+        if state.status != "waiting":
+            raise StorageIntegrityError("只有 waiting AgentRun 可以补交 ToolCall 结果")
+        step = self._require_step(state, phase="tool_calls_running")
+        tool_calls = self._replace_tool_call(
+            step,
+            tool_call_id=tool_call_id,
+            expected_execution_state="intent_recorded",
+            replacement=lambda call: replace(
+                call,
+                execution_state="completed",
+                result_message_node_id=result_message_node_id,
+                is_error=is_error,
+            ),
+        )
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="running",
+            current_step=replace(step, tool_calls=tool_calls),
+        )
+        return self._validated(state, next_state)
+
+    def cancel_agent_run(self, state: AgentRunState, *, reason: str) -> AgentRunState:
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            raise StorageIntegrityError(f"终态 AgentRun 不能取消: {state.status}")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="cancelled",
+            current_step=None,
+            error={"kind": "cancelled", "message": reason},
+        )
+        return self._validated(state, next_state)
+
     def finish_agent_run(
         self,
         state: AgentRunState,

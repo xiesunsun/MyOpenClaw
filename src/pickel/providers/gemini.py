@@ -20,10 +20,9 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolCallContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
 from pickel.providers.base import Provider
 from pickel.shared.model_config import ModelConfig
@@ -262,13 +261,13 @@ class GeminiProvider(Provider):
     def _assistant_parts(message: AssistantMessage) -> list[types.Part]:
         parts: list[types.Part] = []
         for block in message.content:
-            if isinstance(block, ThinkingContent):
+            if isinstance(block, ThinkingBlock):
                 if block.text:
                     parts.append(types.Part.from_text(text=block.text))
-            elif isinstance(block, TextContent):
+            elif isinstance(block, TextBlock):
                 if block.text:
                     parts.append(types.Part.from_text(text=block.text))
-            elif isinstance(block, ToolCallContent):
+            elif isinstance(block, ToolCallBlock):
                 thought_signature = None
                 if block.thought_signature:
                     try:
@@ -292,7 +291,7 @@ class GeminiProvider(Provider):
         parts = [
             block.text
             for block in blocks
-            if isinstance(block, TextContent) and block.text
+            if isinstance(block, TextBlock) and block.text
         ]
         return "\n".join(parts)
 
@@ -300,18 +299,8 @@ class GeminiProvider(Provider):
     def _function_response_payload(message: ToolResultMessage) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
         for block in message.content:
-            if isinstance(block, TextContent):
+            if isinstance(block, TextBlock):
                 content.append({"type": "text", "text": block.text})
-            elif isinstance(block, ImageContent):
-                image: dict[str, Any] = {
-                    "type": "image",
-                    "media_type": block.media_type,
-                }
-                if block.data_base64 is not None:
-                    image["data_base64"] = block.data_base64
-                if block.url is not None:
-                    image["url"] = block.url
-                content.append(image)
         return {
             "content": content,
             "structured_content": message.structured_content,
@@ -324,12 +313,12 @@ class GeminiProvider(Provider):
         content: list[Any] = []
         text = self._extract_text(response)
         if text:
-            content.append(TextContent(text=text))
+            content.append(TextBlock(text=text))
 
         for tool_call in self._extract_tool_call_contents(response):
             content.append(tool_call)
 
-        has_tool_calls = any(isinstance(block, ToolCallContent) for block in content)
+        has_tool_calls = any(isinstance(block, ToolCallBlock) for block in content)
         return AssistantMessage(
             content=content,
             metadata=ModelResponseMetadata(
@@ -361,9 +350,9 @@ class GeminiProvider(Provider):
     @staticmethod
     def _extract_tool_call_contents(
         response: types.GenerateContentResponse,
-    ) -> list[ToolCallContent]:
+    ) -> list[ToolCallBlock]:
         candidates = getattr(response, "candidates", None) or []
-        tool_calls: list[ToolCallContent] = []
+        tool_calls: list[ToolCallBlock] = []
         if candidates and candidates[0].content:
             for part in candidates[0].content.parts:
                 function_call = getattr(part, "function_call", None)
@@ -379,7 +368,7 @@ class GeminiProvider(Provider):
                     else:
                         thought_signature_str = str(thought_sig)
                 tool_calls.append(
-                    ToolCallContent(
+                    ToolCallBlock(
                         id=function_call.id or function_call.name,
                         name=function_call.name,
                         arguments=dict(function_call.args or {}),
@@ -392,7 +381,7 @@ class GeminiProvider(Provider):
         function_calls = getattr(response, "function_calls", None)
         if function_calls:
             return [
-                ToolCallContent(
+                ToolCallBlock(
                     id=function_call.id or function_call.name,
                     name=function_call.name,
                     arguments=dict(function_call.args or {}),

@@ -2,7 +2,6 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pickel.runs.legacy_model_context_builder import build_tool_definitions
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import builtin_tools, install_builtin_tools
@@ -17,10 +16,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         bus = ToolBus()
         install_builtin_tools(bus)
         snapshot = bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
-        definitions = {
-            definition.name: definition
-            for definition in build_tool_definitions(tool_snapshot=snapshot)
-        }
+        definitions = {entry.name: entry.tool.spec for entry in snapshot.entries}
 
         self.assertEqual(
             {"ls", "glob", "grep", "read", "edit", "write", "bash"},

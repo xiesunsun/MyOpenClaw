@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.text import Text
 
 from pickel.cli.render.message import format_footer, render_assistant
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 
 _IDLE = "idle"
 _THINKING = "thinking"
@@ -62,7 +62,7 @@ class StreamRenderer:
     def settle(
         self,
         text: str,
-        usage: TurnUsage | None,
+        usage: AgentRunUsage | None,
         fallback_model_label: str | None,
     ) -> None:
         """流式收尾。

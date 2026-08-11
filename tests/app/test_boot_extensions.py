@@ -37,13 +37,6 @@ class BootExtensionWiringTests(unittest.TestCase):
 
         self.assertEqual(["handler-a"], boot.resolve_hook_handlers("Pickle"))
 
-    def test_session_syncs_come_from_registry(self) -> None:
-        registry = ExtensionRegistry()
-        registry.sync_factories.append(lambda scope: "sync-a")
-        boot = Boot.from_config(SimpleNamespace(extensions={}), extensions=registry)
-
-        self.assertEqual(["sync-a"], boot.resolve_session_syncs("Pickle"))
-
 
 if __name__ == "__main__":
     unittest.main()

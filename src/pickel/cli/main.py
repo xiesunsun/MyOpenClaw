@@ -14,7 +14,7 @@ from pickel.cli.query_input import read_query_input
 from pickel.app.runtime_models import (
     ConversationRequest,
     RuntimeLaunchRequest,
-    TurnRequest,
+    AgentRunRequest,
 )
 from pickel.config.loader import Config
 from pickel.conversations.conversation_service import ConversationNotFoundError
@@ -146,7 +146,7 @@ def _run_query(
                 output_format=output_format,  # type: ignore[arg-type]
             ).run(
                 conversation=conversation,
-                request=TurnRequest(message=user_message),
+                request=AgentRunRequest(message=user_message),
             )
 
     try:
@@ -221,23 +221,38 @@ def observe(
     ),
 ) -> None:
     """导出会话执行轨迹为自包含 HTML 观测平台。"""
-    from pickel.config.paths import sessions_db_path
-    from pickel.observe.collector import collect_previews
-    from pickel.observe.exporter import export_html
-    from pickel.persistence.sqlite_session_repository import (
-        SQLiteSessionRepository,
-    )
+    from pickel.observe.operation_report import export_operation_report
 
-    repository = SQLiteSessionRepository(sessions_db_path())
+    service = _boot().build_conversation_service()
     if session:
-        sessions = [loaded for sid in session if (loaded := repository.load(sid))]
+        loaded_sessions = []
+        for session_id in session:
+            try:
+                loaded_sessions.append(service.load_conversation_session(session_id))
+            except ConversationNotFoundError:
+                continue
     else:
-        sessions = collect_previews(repository, limit=limit)
-    if not sessions:
+        loaded_sessions = [
+            service.load_conversation_session(preview.session_id)
+            for preview in service.list_conversation_previews(
+                limit=limit,
+                all_sessions=True,
+            )
+            if preview.message_count > 0
+        ]
+    if not loaded_sessions:
         typer.echo("没有可导出的会话", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(str(export_html(sessions, out=out)))
+    typer.echo(
+        str(
+            export_operation_report(
+                conversation_service=service,
+                sessions=tuple(loaded_sessions),
+                out=out,
+            )
+        )
+    )
 
 
 @sessions_app.callback()

@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from pickel.agents.agent import Agent
 from pickel.agents.agent_package import LoadedAgentPackage
 from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.config.app_config import AppConfig
@@ -11,21 +10,14 @@ from pickel.config.paths import (
     artifact_blobs_path,
     home_dir,
     runtime_db_path,
-    sessions_db_path,
 )
 from pickel.conversations.conversation_service import ConversationService
-from pickel.runs.legacy_model_context_builder import LegacyModelContextBuilder
-from pickel.conversations.service import SessionService
-from pickel.conversations.session_sync import CompositeSessionSync
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.hooks.lifecycle import LifecycleHooks
-from pickel.persistence.sqlite_session_repository import SQLiteSessionRepository
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.persistence.runtime_store import RuntimeStore
 from pickel.operations.operation_service import OperationService
 from pickel.providers.anthropic import AnthropicProvider
-from pickel.runs import ReActStrategy
-from pickel.runs.run import Run
 from pickel.runtime.agent_runtime import AgentRuntime
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_bindings import RuntimeBindings
@@ -44,7 +36,7 @@ from pickel.tools.services import ToolServices
 
 
 class Boot:
-    """Composition root：读配置，解析 Agent，构造 Run / SessionService。"""
+    """Composition Root：从 Pickel 设置装配 Agent Runtime。"""
 
     def __init__(
         self,
@@ -100,12 +92,6 @@ class Boot:
     def resolve_hook_handlers(self, agent_id: str | None = None) -> list:
         return self.extensions.hook_handlers(self._scope(agent_id))
 
-    def resolve_session_syncs(self, agent_id: str | None = None) -> list:
-        return self.extensions.session_syncs(self._scope(agent_id))
-
-    def resolve_agent(self, agent_id: str | None = None) -> Agent:
-        return self.resolve_loaded_agent_package(agent_id).agent
-
     def resolve_loaded_agent_package(
         self,
         agent_id: str | None = None,
@@ -115,28 +101,6 @@ class Boot:
     def _resolve_agent_skills_path(self, agent_id: str) -> Path | None:
         """复用 AgentPackageBuilder 的 Pickel 设置路径解析。"""
         return self._agent_package_builder.resolve_skills_path(agent_id)
-
-    def build_run(
-        self,
-        agent_id: str | None = None,
-        session_service: SessionService | None = None,
-    ) -> tuple[Agent, Run]:
-        agent = self.resolve_agent(agent_id=agent_id)
-        run = Run.open(
-            skill_store=self._build_skill_store(agent.agent_id),
-            agent=agent,
-            tool_bus=self.tool_bus,
-            strategy=ReActStrategy(max_steps=self.app_config.react_max_steps),
-            session_service=session_service,
-            model_context_builder=LegacyModelContextBuilder(),
-            unit_window=self.app_config.context_cli_turn_window,
-            recall_sources=self.resolve_recall_sources(agent.agent_id),
-            lifecycle_hooks=LifecycleHooks(
-                handlers=self.resolve_hook_handlers(agent.agent_id)
-            ),
-            bash_operations=LocalBashOperations(sandbox=self.sandbox_policy),
-        )
-        return agent, run
 
     def build_agent_runtime(
         self,
@@ -162,14 +126,14 @@ class Boot:
             ),
         )
         provider = AnthropicProvider.from_config(
-            loaded.agent.model_config,
+            loaded.model_config,
             artifact_service=artifact_service,
         )
         workspace_files = WorkspaceFileService(
-            workspace_root=loaded.agent.workspace,
+            workspace_root=Path(loaded.version.definition.workspace_path),
             access_policy=(
                 FullAccessPathPolicy()
-                if loaded.definition.file_access_mode == "full"
+                if loaded.version.definition.file_access_mode == "full"
                 else WorkspacePathAccessPolicy()
             ),
         )
@@ -186,6 +150,7 @@ class Boot:
                 workspace_files=workspace_files,
                 bash=bash,
                 skill_store=self._build_skill_store(loaded.version.agent_id),
+                artifact_service=artifact_service,
             ),
             artifact_service=artifact_service,
         )
@@ -237,14 +202,4 @@ class Boot:
             write_approval=self.app_config.skills.write_approval,
             guard=self.app_config.skills.guard,
             agent_id=agent_id,
-        )
-
-    def build_session_service(self, agent_id: str | None = None) -> SessionService:
-        # 全局会话库：~/.pickel/sessions.db（或 PICKEL_HOME）
-        db_path = sessions_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        repository = SQLiteSessionRepository(db_path)
-        return SessionService(
-            repository,
-            CompositeSessionSync(self.resolve_session_syncs(agent_id)),
         )

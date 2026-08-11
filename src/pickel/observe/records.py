@@ -48,8 +48,9 @@ class ErrorInfo:
 @dataclass(frozen=True)
 class ObservationIdentity:
     session_id: str = ""
-    turn_id: str = ""
-    step_index: int | None = None
+    operation_id: str = ""
+    step_id: str | None = None
+    step_sequence: int | None = None
 
 
 @dataclass(frozen=True)

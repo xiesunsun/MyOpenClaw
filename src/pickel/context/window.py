@@ -17,7 +17,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import ToolCallContent
+from pickel.conversations.content_blocks import ToolCallBlock
 
 
 def apply_window(
@@ -53,7 +53,7 @@ def group_message_units(messages: list[AgentMessage]) -> list[list[AgentMessage]
             tool_call_ids = {
                 block.id
                 for block in message.content
-                if isinstance(block, ToolCallContent)
+                if isinstance(block, ToolCallBlock)
             }
             if not tool_call_ids:
                 units.append([message])

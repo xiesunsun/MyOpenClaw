@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from pickel.config.paths import home_dir, sessions_db_path
+from pickel.config.paths import home_dir
 
 # openviking：策略进 settings 的 extensions.openviking，密钥进 auth 的 extensions.openviking
 _OPENVIKING_SECRET_KEYS = frozenset({"base_url", "account_id", "user_id", "user_key"})
@@ -305,8 +305,6 @@ def _migrate_sessions(
     """项目旁 .pickel/sessions.db → 全局 home/sessions.db。"""
     legacy = project_root / _LEGACY_SESSIONS_DIR / _SESSIONS_DB
     global_db = Path(home) / _SESSIONS_DB
-    # 与 paths.sessions_db_path 一致（home 可能是测试注入）
-    _ = sessions_db_path  # 保留引用；实际用传入 home
 
     info: dict[str, Any] = {
         "legacy": str(legacy) if legacy.is_file() else None,

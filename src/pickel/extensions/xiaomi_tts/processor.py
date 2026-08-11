@@ -17,12 +17,12 @@ from pickel.extensions.xiaomi_tts.synthesizer import (
 )
 from pickel.extensions.xiaomi_tts.config import XiaomiTtsConfig
 from pickel.extensions_host.event_processor import ConversationExtensionContext
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
-    TurnCompleted,
-    TurnFailed,
-    TurnInterrupted,
+    AgentRunCompleted,
+    AgentRunFailed,
+    AgentRunInterrupted,
 )
 
 _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
@@ -59,22 +59,22 @@ class XiaomiTtsProcessor:
         self._closed = False
 
     async def handle_event(self, event: RuntimeEventBase) -> None:
-        turn_id = event.envelope.turn_id
+        operation_id = event.envelope.operation_id
         if isinstance(event, AssistantMessageEvent):
-            self._pending_text[turn_id] = event.text
+            self._pending_text[operation_id] = event.text
             return
-        if isinstance(event, TurnCompleted):
-            self._handle_turn_completed(event)
+        if isinstance(event, AgentRunCompleted):
+            self._handle_agent_run_completed(event)
             return
-        if isinstance(event, (TurnFailed, TurnInterrupted)):
-            self._pending_text.pop(turn_id, None)
+        if isinstance(event, (AgentRunFailed, AgentRunInterrupted)):
+            self._pending_text.pop(operation_id, None)
 
     def close(self) -> None:
         self._closed = True
         self._pending_text.clear()
 
-    def _handle_turn_completed(self, event: TurnCompleted) -> None:
-        text = self._pending_text.pop(event.envelope.turn_id, "")
+    def _handle_agent_run_completed(self, event: AgentRunCompleted) -> None:
+        text = self._pending_text.pop(event.envelope.operation_id, "")
         if self._closed or event.outcome != "completed":
             return
         text = prepare_speech_text(text, max_chars=self._config.max_text_chars)
@@ -88,7 +88,7 @@ class XiaomiTtsProcessor:
                 pass
         self._jobs.put_nowait(
             (
-                event.envelope.turn_id,
+                event.envelope.operation_id,
                 SpeechSynthesisRequest(
                     text=text,
                     style=self._config.style,
@@ -106,13 +106,13 @@ class XiaomiTtsProcessor:
     async def _run(self) -> None:
         try:
             while not self._closed:
-                turn_id, request = await self._jobs.get()
+                operation_id, request = await self._jobs.get()
                 try:
                     audio = await self._synthesizer.synthesize(request)
                     await self._context.publish_output(
                         AudioOutputReady(
                             session_id=self._context.session_id,
-                            turn_id=turn_id,
+                            operation_id=operation_id,
                             source="xiaomi_tts",
                             audio=AudioContent(
                                 data=audio.data,
@@ -124,11 +124,11 @@ class XiaomiTtsProcessor:
                     )
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # noqa: BLE001 — TTS 不影响正文 turn
+                except Exception as exc:  # noqa: BLE001 — TTS 不影响正文 AgentRun
                     await self._context.publish_output(
                         AudioOutputFailed(
                             session_id=self._context.session_id,
-                            turn_id=turn_id,
+                            operation_id=operation_id,
                             source="xiaomi_tts",
                             message=str(exc),
                             retryable=(

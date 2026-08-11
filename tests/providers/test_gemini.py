@@ -14,7 +14,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.providers.gemini import GeminiProvider
 from pickel.shared.model_config import ModelConfig
 
@@ -52,11 +52,11 @@ class GeminiProviderTests(unittest.TestCase):
     def test_build_contents_maps_tool_calls_and_results(self) -> None:
         contents = GeminiProvider._build_contents(
             [
-                UserMessage(content=[TextContent(text="hello")]),
+                UserMessage(content=[TextBlock(text="hello")]),
                 AssistantMessage(
                     content=[
-                        TextContent(text="checking"),
-                        ToolCallContent(
+                        TextBlock(text="checking"),
+                        ToolCallBlock(
                             id="call-1",
                             name="echo",
                             arguments={"text": "ping"},
@@ -67,7 +67,7 @@ class GeminiProviderTests(unittest.TestCase):
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="echo",
-                    content=[TextContent(text="pong")],
+                    content=[TextBlock(text="pong")],
                 ),
             ]
         )
@@ -91,12 +91,12 @@ class GeminiProviderTests(unittest.TestCase):
         contents = GeminiProvider._build_contents(
             [
                 AssistantMessage(
-                    content=[ToolCallContent(id="call-1", name="echo", arguments={})]
+                    content=[ToolCallBlock(id="call-1", name="echo", arguments={})]
                 ),
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="echo",
-                    content=[TextContent(text="failed")],
+                    content=[TextBlock(text="failed")],
                     is_error=True,
                 ),
             ]
@@ -116,7 +116,7 @@ class GeminiProviderTests(unittest.TestCase):
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="lookup",
-                    content=[TextContent(text="found")],
+                    content=[TextBlock(text="found")],
                     structured_content={"id": 7},
                 )
             ]
@@ -128,22 +128,22 @@ class GeminiProviderTests(unittest.TestCase):
     def test_build_contents_aggregates_multiple_tool_results(self) -> None:
         contents = GeminiProvider._build_contents(
             [
-                UserMessage(content=[TextContent(text="hi")]),
+                UserMessage(content=[TextBlock(text="hi")]),
                 AssistantMessage(
                     content=[
-                        ToolCallContent(id="c1", name="a", arguments={}),
-                        ToolCallContent(id="c2", name="b", arguments={}),
+                        ToolCallBlock(id="c1", name="a", arguments={}),
+                        ToolCallBlock(id="c2", name="b", arguments={}),
                     ]
                 ),
                 ToolResultMessage(
                     tool_call_id="c1",
                     tool_name="a",
-                    content=[TextContent(text="r1")],
+                    content=[TextBlock(text="r1")],
                 ),
                 ToolResultMessage(
                     tool_call_id="c2",
                     tool_name="b",
-                    content=[TextContent(text="r2")],
+                    content=[TextBlock(text="r2")],
                 ),
             ]
         )
@@ -241,7 +241,7 @@ class GeminiProviderTests(unittest.TestCase):
             provider.count_context_tokens(
                 ModelContext(
                     system=SystemContent.from_text("sys"),
-                    messages=[UserMessage(content=[TextContent(text="hello")])],
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                 )
             )
         )
@@ -268,7 +268,7 @@ class GeminiProviderTests(unittest.TestCase):
                     messages=[
                         AssistantMessage(
                             content=[
-                                ToolCallContent(
+                                ToolCallBlock(
                                     id="c1",
                                     name="echo",
                                     arguments={"text": "x"},
@@ -281,7 +281,7 @@ class GeminiProviderTests(unittest.TestCase):
                         ToolResultMessage(
                             tool_call_id="c1",
                             tool_name="echo",
-                            content=[TextContent(text="ok")],
+                            content=[TextBlock(text="ok")],
                         ),
                     ],
                     tools=[
@@ -334,7 +334,7 @@ class GeminiProviderTests(unittest.TestCase):
                 provider.count_context_tokens(
                     ModelContext(
                         system=SystemContent.from_text(""),
-                        messages=[UserMessage(content=[TextContent(text="hello")])],
+                        messages=[UserMessage(content=[TextBlock(text="hello")])],
                     )
                 )
             )
@@ -352,7 +352,7 @@ class GeminiProviderTests(unittest.TestCase):
         config = provider._build_generate_config(
             ModelContext(
                 system=SystemContent.from_text("sys"),
-                messages=[UserMessage(content=[TextContent(text="hello")])],
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
             )
         )
         self.assertIsNotNone(config.thinking_config)
@@ -397,7 +397,7 @@ class GeminiProviderTests(unittest.TestCase):
             provider.generate(
                 ModelContext(
                     system=SystemContent.from_text("sys"),
-                    messages=[UserMessage(content=[TextContent(text="hi")])],
+                    messages=[UserMessage(content=[TextBlock(text="hi")])],
                 )
             )
         )

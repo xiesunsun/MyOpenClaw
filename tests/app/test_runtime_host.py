@@ -54,7 +54,7 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
             resumed = host.open_conversation(ConversationRequest(session_id=session_id))
 
         assert resumed.session.session_id == session_id
-        assert resumed.agent.agent_id == "Pickle"
+        assert resumed.agent_definition.agent_id == "Pickle"
         assert (root / "home" / "runtime.db").exists()
 
 

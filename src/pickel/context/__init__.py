@@ -5,7 +5,7 @@ from pickel.context.model_context import (
     SystemSection,
     ToolDefinition,
 )
-from pickel.context.projection import project_messages
+from pickel.context.projection import ConversationProjector
 from pickel.context.recall import Recall
 from pickel.context.session_recall import (
     SessionRecallProvider,
@@ -17,6 +17,7 @@ from pickel.context.window import apply_window, group_message_units
 
 __all__ = [
     "HookFeedback",
+    "ConversationProjector",
     "ModelContext",
     "Recall",
     "SessionRecallProvider",
@@ -28,6 +29,5 @@ __all__ = [
     "append_hook_feedback",
     "apply_window",
     "group_message_units",
-    "project_messages",
     "render_session_recall",
 ]

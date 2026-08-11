@@ -15,7 +15,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     agent_message_from_dict,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.agent_run_state import AgentRunState, ToolCallState
 from pickel.operations.operation_service import OperationService
@@ -24,17 +24,48 @@ from pickel.hooks.events import (
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
-    TurnEndEvent,
+    AgentRunEndEvent,
 )
 from pickel.providers.stream import StreamDelta
 from pickel.runtime.operation_state_machine import OperationStateMachine
 from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.runtime_effects import RuntimeEffects
-from pickel.runs.host_calls import HostCallClient
+from pickel.runtime.host_calls import HostCallClient
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.validation import validate_tool_arguments
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class ModelStepStartedProgress:
+    operation_id: str
+    step_id: str
+    step_sequence: int
+
+
+@dataclass(frozen=True)
+class ToolCallStartedProgress:
+    operation_id: str
+    step_id: str
+    step_sequence: int
+    tool_call: ToolCallState
+    call_index: int
+    total_calls: int
+
+
+@dataclass(frozen=True)
+class ToolCallCompletedProgress(ToolCallStartedProgress):
+    result: ToolExecutionResult
+
+
+OperationProgress = (
+    ModelStepStartedProgress | ToolCallStartedProgress | ToolCallCompletedProgress
+)
+OperationProgressConsumer = Callable[
+    [OperationProgress],
+    None | Awaitable[None],
+]
 
 
 @dataclass(frozen=True)
@@ -74,6 +105,7 @@ class OperationDriver:
         operation_id: str,
         *,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_progress: OperationProgressConsumer | None = None,
         host_calls: HostCallClient | None = None,
     ) -> OperationDriveResult:
         """推进直到成功、终态或需要人工恢复的暂停点。"""
@@ -108,6 +140,15 @@ class OperationDriver:
                         step_id=self._step_id_factory(),
                     )
                 )
+                assert state.current_step is not None
+                await self._notify_progress(
+                    consume_progress,
+                    ModelStepStartedProgress(
+                        operation_id=state.operation_id,
+                        step_id=state.current_step.step_id,
+                        step_sequence=state.current_step.step_sequence,
+                    ),
+                )
                 continue
             if decision.action == "record_model_request_intent":
                 state = self._commit(
@@ -127,22 +168,35 @@ class OperationDriver:
                 entries = self._conversation_service.list_active_branch_entries(
                     session_id=operation.session_id
                 )
-                context = await self._context_builder.build_model_context(
+                context = self._context_builder.build_model_context(
                     agent_package_version=self._bindings.agent_package_version,
                     conversation_entries=entries,
+                )
+                recalled_messages = await self._effects.retrieve_recall_messages(
                     session_id=operation.session_id,
-                    recall_sources=self._bindings.recall_sources,
-                    hook_feedback=tuple(
-                        HookFeedback(source_event="PersistedHookFeedback", text=text)
-                        for text in state.model_context_feedback
+                    visible_messages=context.messages,
+                )
+                context = ModelContext(
+                    system=context.system,
+                    messages=append_hook_feedback(
+                        [*context.messages, *recalled_messages],
+                        [
+                            HookFeedback(
+                                source_event="PersistedHookFeedback",
+                                text=text,
+                            )
+                            for text in state.model_context_feedback
+                        ],
                     ),
+                    tools=context.tools,
                 )
                 before = await self._effects.invoke_hook(
                     "before_request",
                     BeforeRequestEvent(
                         session_id=operation.session_id,
-                        turn_id=operation.operation_id,
-                        step_index=step.step_sequence,
+                        operation_id=operation.operation_id,
+                        step_id=step.step_id,
+                        step_sequence=step.step_sequence,
                         model_context=context,
                     ),
                 )
@@ -186,7 +240,7 @@ class OperationDriver:
                 )
                 tool_calls = []
                 for block in assistant.content:
-                    if not isinstance(block, ToolCallContent):
+                    if not isinstance(block, ToolCallBlock):
                         continue
                     entry = self._bindings.tool_snapshot.get(block.name)
                     arguments = dict(block.arguments)
@@ -197,8 +251,9 @@ class OperationDriver:
                             "pre_tool_use",
                             PreToolUseEvent(
                                 session_id=operation.session_id,
-                                turn_id=operation.operation_id,
-                                step_index=state.current_step.step_sequence,
+                                operation_id=operation.operation_id,
+                                step_id=state.current_step.step_id,
+                                step_sequence=state.current_step.step_sequence,
                                 tool_name=block.name,
                                 tool_call_id=block.id,
                                 arguments=arguments,
@@ -252,6 +307,27 @@ class OperationDriver:
                         self._state_machine.pause_for_unknown_tool_effect(state)
                     )
                     return OperationDriveResult(operation_id, "waiting", state)
+                progress_tool_call = self._find_tool_call(
+                    state,
+                    decision.tool_call_id,
+                )
+                assert state.current_step is not None
+                call_index = next(
+                    index
+                    for index, call in enumerate(state.current_step.tool_calls)
+                    if call.tool_call_id == decision.tool_call_id
+                )
+                await self._notify_progress(
+                    consume_progress,
+                    ToolCallStartedProgress(
+                        operation_id=state.operation_id,
+                        step_id=state.current_step.step_id,
+                        step_sequence=state.current_step.step_sequence,
+                        tool_call=progress_tool_call,
+                        call_index=call_index,
+                        total_calls=len(state.current_step.tool_calls),
+                    ),
+                )
                 result = await self._effects.execute_tool_call(
                     state=state,
                     tool_call_id=decision.tool_call_id,
@@ -263,8 +339,9 @@ class OperationDriver:
                     "post_tool_use",
                     PostToolUseEvent(
                         session_id=operation.session_id,
-                        turn_id=operation.operation_id,
-                        step_index=state.current_step.step_sequence,
+                        operation_id=operation.operation_id,
+                        step_id=state.current_step.step_id,
+                        step_sequence=state.current_step.step_sequence,
                         tool_name=tool_call.tool_name,
                         tool_call_id=tool_call.tool_call_id,
                         arguments=dict(tool_call.arguments),
@@ -290,6 +367,18 @@ class OperationDriver:
                     ),
                     appended_message_node_id=result_node_id,
                 ).state
+                await self._notify_progress(
+                    consume_progress,
+                    ToolCallCompletedProgress(
+                        operation_id=state.operation_id,
+                        step_id=next_state.current_step.step_id,
+                        step_sequence=next_state.current_step.step_sequence,
+                        tool_call=tool_call,
+                        call_index=call_index,
+                        total_calls=len(next_state.current_step.tool_calls),
+                        result=copy.deepcopy(result),
+                    ),
+                )
                 owned_tool_intents.remove(decision.tool_call_id)
                 continue
             if decision.action == "invoke_post_tool_batch_hook":
@@ -307,8 +396,9 @@ class OperationDriver:
                     "post_tool_batch",
                     PostToolBatchEvent(
                         session_id=operation.session_id,
-                        turn_id=operation.operation_id,
-                        step_index=step.step_sequence,
+                        operation_id=operation.operation_id,
+                        step_id=step.step_id,
+                        step_sequence=step.step_sequence,
                         outcomes=outcomes,
                     ),
                 )
@@ -331,7 +421,7 @@ class OperationDriver:
                 ):
                     message = AssistantMessage(
                         content=[
-                            TextContent(
+                            TextBlock(
                                 text=("Reached the maximum number of reasoning steps.")
                             )
                         ]
@@ -346,7 +436,7 @@ class OperationDriver:
                         appended_message=message,
                         appended_message_node_id=node_id,
                     ).state
-                    await self._invoke_turn_end(operation.session_id, state)
+                    await self._invoke_agent_run_end(operation.session_id, state)
                     return OperationDriveResult(
                         operation_id,
                         "succeeded",
@@ -371,7 +461,7 @@ class OperationDriver:
                         final_assistant_node_id=step.assistant_message_node_id,
                     )
                 )
-                await self._invoke_turn_end(operation.session_id, state)
+                await self._invoke_agent_run_end(operation.session_id, state)
                 return OperationDriveResult(
                     operation_id,
                     "succeeded",
@@ -383,19 +473,40 @@ class OperationDriver:
     def _commit(self, state: AgentRunState) -> AgentRunState:
         return self._effects.commit_operation_state(state=state).state
 
-    async def _invoke_turn_end(
+    async def _invoke_agent_run_end(
         self,
         session_id: str,
         state: AgentRunState,
     ) -> None:
         await self._effects.invoke_hook(
-            "turn_end",
-            TurnEndEvent(
+            "agent_run_end",
+            AgentRunEndEvent(
                 session_id=session_id,
-                turn_id=state.operation_id,
+                operation_id=state.operation_id,
+                step_id=(
+                    state.current_step.step_id
+                    if state.current_step is not None
+                    else None
+                ),
+                step_sequence=(
+                    state.current_step.step_sequence
+                    if state.current_step is not None
+                    else None
+                ),
                 reason=state.status,
             ),
         )
+
+    @staticmethod
+    async def _notify_progress(
+        consumer: OperationProgressConsumer | None,
+        progress: OperationProgress,
+    ) -> None:
+        if consumer is None:
+            return
+        result = consumer(progress)
+        if hasattr(result, "__await__"):
+            await result
 
     @staticmethod
     def _has_unknown_tool_effect(state: AgentRunState) -> bool:
@@ -449,7 +560,7 @@ class OperationDriver:
         content = (
             copy.deepcopy(result.content_blocks)
             if result.content_blocks
-            else [TextContent(text=result.content)]
+            else [TextBlock(text=result.content)]
         )
         return ToolResultMessage(
             tool_call_id=tool_call.tool_call_id,

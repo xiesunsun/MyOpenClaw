@@ -24,13 +24,23 @@ class LoadMcpServersTests(unittest.TestCase):
             home, proj = Path(tmp) / "home", Path(tmp) / "proj"
             home.mkdir()
             proj.mkdir()
-            _write(home / ".mcp.json", {"mcpServers": {
-                "github": {"command": "global-cmd"},
-                "jira": {"command": "jira-cmd", "args": ["--x"]},
-            }})
-            _write(proj / ".mcp.json", {"mcpServers": {
-                "github": {"command": "project-cmd"},
-            }})
+            _write(
+                home / ".mcp.json",
+                {
+                    "mcpServers": {
+                        "github": {"command": "global-cmd"},
+                        "jira": {"command": "jira-cmd", "args": ["--x"]},
+                    }
+                },
+            )
+            _write(
+                proj / ".mcp.json",
+                {
+                    "mcpServers": {
+                        "github": {"command": "project-cmd"},
+                    }
+                },
+            )
 
             servers = load_mcp_servers(home=home, project_root=proj)
 
@@ -54,9 +64,15 @@ class LoadMcpServersTests(unittest.TestCase):
     def test_server_name_with_dunder_is_skipped(self) -> None:
         with TemporaryDirectory() as tmp:
             proj = Path(tmp)
-            _write(proj / ".mcp.json", {"mcpServers": {
-                "bad__name": {"command": "c"}, "good": {"command": "c"},
-            }})
+            _write(
+                proj / ".mcp.json",
+                {
+                    "mcpServers": {
+                        "bad__name": {"command": "c"},
+                        "good": {"command": "c"},
+                    }
+                },
+            )
 
             servers = load_mcp_servers(home=proj / "nohome", project_root=proj)
 
@@ -65,12 +81,20 @@ class LoadMcpServersTests(unittest.TestCase):
     def test_env_expands_vars_and_keeps_missing_literal(self) -> None:
         with TemporaryDirectory() as tmp:
             proj = Path(tmp)
-            _write(proj / ".mcp.json", {"mcpServers": {
-                "s": {"command": "c", "env": {
-                    "TOKEN": "${PICKEL_TEST_TOKEN}",
-                    "MISSING": "${PICKEL_TEST_NO_SUCH_VAR}",
-                }},
-            }})
+            _write(
+                proj / ".mcp.json",
+                {
+                    "mcpServers": {
+                        "s": {
+                            "command": "c",
+                            "env": {
+                                "TOKEN": "${PICKEL_TEST_TOKEN}",
+                                "MISSING": "${PICKEL_TEST_NO_SUCH_VAR}",
+                            },
+                        },
+                    }
+                },
+            )
 
             with mock.patch.dict("os.environ", {"PICKEL_TEST_TOKEN": "sekrit"}):
                 servers = load_mcp_servers(home=proj / "nohome", project_root=proj)

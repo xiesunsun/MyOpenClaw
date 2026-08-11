@@ -5,26 +5,26 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from pickel.app.runtime_models import TurnResult
+from pickel.app.runtime_models import AgentRunResult
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent, content_blocks_to_list
-from pickel.runs.runtime_events import RuntimeEventBase, TurnFailed
+from pickel.conversations.content_blocks import TextBlock, content_blocks_to_list
+from pickel.runtime.runtime_events import RuntimeEventBase, AgentRunFailed
 
 SCHEMA_VERSION = 1
 
 _PUBLIC_EVENT_TYPES = {
-    "turn_started": "turn.started",
-    "step_started": "step.started",
+    "agent_run_started": "agent_run.started",
+    "model_step_started": "model_step.started",
     "tool_call_started": "tool.started",
     "tool_call_completed": "tool.completed",
     "assistant_message": "message.completed",
-    "turn_completed": "turn.completed",
-    "turn_failed": "turn.failed",
+    "agent_run_completed": "agent_run.completed",
+    "agent_run_failed": "agent_run.failed",
     "thinking_delta": "thinking.delta",
     "text_delta": "message.delta",
     "tool_call_args_delta": "tool.arguments.delta",
     "request_digest": "request.prepared",
-    "turn_interrupted": "turn.interrupted",
+    "agent_run_interrupted": "agent_run.interrupted",
 }
 
 
@@ -34,20 +34,20 @@ def assistant_text(message: AssistantMessage | None) -> str:
     return "\n".join(
         block.text
         for block in message.content
-        if isinstance(block, TextContent) and block.text
+        if isinstance(block, TextBlock) and block.text
     )
 
 
-def encode_result_text(result: TurnResult) -> str:
+def encode_result_text(result: AgentRunResult) -> str:
     return assistant_text(result.message)
 
 
-def result_to_dict(result: TurnResult) -> dict:
+def result_to_dict(result: AgentRunResult) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "status": result.status,
         "session_id": result.session_id,
-        "turn_id": result.turn_id,
+        "operation_id": result.operation_id,
         "message": (
             {
                 "role": result.message.role,
@@ -69,14 +69,14 @@ def result_to_dict(result: TurnResult) -> dict:
     }
 
 
-def encode_result_json(result: TurnResult) -> str:
+def encode_result_json(result: AgentRunResult) -> str:
     return json.dumps(result_to_dict(result), ensure_ascii=False, separators=(",", ":"))
 
 
 def event_to_dict(event: RuntimeEventBase) -> dict:
     payload = event.to_dict()
     internal_type = payload.pop("event_type")
-    if isinstance(event, TurnFailed):
+    if isinstance(event, AgentRunFailed):
         payload.pop("traceback", None)
     public_type = _PUBLIC_EVENT_TYPES.get(internal_type)
     if public_type is None:

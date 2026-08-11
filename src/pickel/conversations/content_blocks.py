@@ -1,7 +1,4 @@
-"""AgentMessage 的版本化内容块持久合同。
-
-ArtifactBlock 是目标态多模态合同；ImageContent 仅供旧 Runtime 切换期间读取。
-"""
+"""AgentMessage 的版本化多模态 Block 持久化合同。"""
 
 from __future__ import annotations
 
@@ -15,17 +12,9 @@ from pickel.artifacts.artifact import (
 
 
 @dataclass(frozen=True)
-class TextContent:
+class TextBlock:
     text: str
     type: Literal["text"] = "text"
-
-
-@dataclass(frozen=True)
-class ImageContent:
-    media_type: str
-    data_base64: str | None = None
-    url: str | None = None
-    type: Literal["image"] = "image"
 
 
 @dataclass(frozen=True)
@@ -38,14 +27,14 @@ class ArtifactBlock:
 
 
 @dataclass(frozen=True)
-class ThinkingContent:
+class ThinkingBlock:
     text: str
     signature: str | None = None
     type: Literal["thinking"] = "thinking"
 
 
 @dataclass(frozen=True)
-class ToolCallContent:
+class ToolCallBlock:
     id: str
     name: str
     arguments: dict[str, Any]
@@ -53,15 +42,13 @@ class ToolCallContent:
     type: Literal["tool_call"] = "tool_call"
 
 
-ContentBlock = (
-    TextContent | ImageContent | ArtifactBlock | ThinkingContent | ToolCallContent
-)
-UserContent = TextContent | ImageContent | ArtifactBlock
-AssistantContent = TextContent | ThinkingContent | ToolCallContent
-ToolResultContent = TextContent | ImageContent | ArtifactBlock
+MessageBlock = TextBlock | ArtifactBlock | ThinkingBlock | ToolCallBlock
+UserContent = TextBlock | ArtifactBlock
+AssistantContent = TextBlock | ThinkingBlock | ToolCallBlock
+ToolResultContent = TextBlock | ArtifactBlock
 
 
-def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
+def content_block_to_dict(block: MessageBlock) -> dict[str, Any]:
     """将 content block 序列化为可 JSON 落盘的 dict。"""
     if isinstance(block, ArtifactBlock):
         return {
@@ -72,19 +59,13 @@ def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
     return asdict(block)
 
 
-def content_block_from_dict(data: dict[str, Any]) -> ContentBlock:
+def content_block_from_dict(data: dict[str, Any]) -> MessageBlock:
     """从 dict 还原 content block。"""
     if not isinstance(data, dict):
         raise TypeError("content block 必须是 dict")
     block_type = data.get("type")
     if block_type == "text":
-        return TextContent(text=data["text"])
-    if block_type == "image":
-        return ImageContent(
-            media_type=data["media_type"],
-            data_base64=data.get("data_base64"),
-            url=data.get("url"),
-        )
+        return TextBlock(text=data["text"])
     if block_type == "artifact":
         return ArtifactBlock(
             artifact=artifact_reference_from_dict(data["artifact"]),
@@ -93,15 +74,15 @@ def content_block_from_dict(data: dict[str, Any]) -> ContentBlock:
             ),
         )
     if block_type == "thinking":
-        return ThinkingContent(
+        return ThinkingBlock(
             text=data["text"],
             signature=data.get("signature"),
         )
     if block_type == "tool_call":
         arguments = data.get("arguments")
         if not isinstance(arguments, dict):
-            raise TypeError("ToolCallContent.arguments 必须是 dict")
-        return ToolCallContent(
+            raise TypeError("ToolCallBlock.arguments 必须是 dict")
+        return ToolCallBlock(
             id=data["id"],
             name=data["name"],
             arguments=dict(arguments),
@@ -110,11 +91,11 @@ def content_block_from_dict(data: dict[str, Any]) -> ContentBlock:
     raise ValueError(f"未知 content block type: {block_type!r}")
 
 
-def content_blocks_to_list(blocks: list[ContentBlock]) -> list[dict[str, Any]]:
+def content_blocks_to_list(blocks: list[MessageBlock]) -> list[dict[str, Any]]:
     return [content_block_to_dict(block) for block in blocks]
 
 
-def content_blocks_from_list(items: list[dict[str, Any]]) -> list[ContentBlock]:
+def content_blocks_from_list(items: list[dict[str, Any]]) -> list[MessageBlock]:
     if not isinstance(items, list):
         raise TypeError("content 必须是 list")
     return [content_block_from_dict(item) for item in items]

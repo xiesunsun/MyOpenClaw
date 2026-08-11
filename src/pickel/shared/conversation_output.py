@@ -12,7 +12,7 @@ from uuid import uuid4
 class ConversationOutputBase:
     output_id: str = field(default_factory=lambda: str(uuid4()))
     session_id: str = ""
-    turn_id: str = ""
+    operation_id: str = ""
     source: str = ""
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

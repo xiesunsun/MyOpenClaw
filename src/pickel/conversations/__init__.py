@@ -8,22 +8,18 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import (
     ArtifactBlock,
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolCallContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
-from pickel.conversations.session import Session
 
 __all__ = [
     "ArtifactBlock",
     "AgentMessage",
     "AssistantMessage",
-    "ImageContent",
-    "Session",
-    "TextContent",
-    "ThinkingContent",
-    "ToolCallContent",
+    "TextBlock",
+    "ThinkingBlock",
+    "ToolCallBlock",
     "ToolResultMessage",
     "UserMessage",
 ]

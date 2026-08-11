@@ -13,7 +13,7 @@ from pickel.cli.render.message import (
     render_interrupted,
     render_system,
 )
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 
 
 def _console() -> Console:
@@ -41,7 +41,7 @@ def test_footer_输入规模必须是_5_1_口径():
 
     退回裸 input_tokens 的变异会显示 100，本测试必须杀死它。
     """
-    usage = TurnUsage(
+    usage = AgentRunUsage(
         steps=1,
         input_tokens=100,
         cache_read_tokens=8000,
@@ -54,22 +54,24 @@ def test_footer_输入规模必须是_5_1_口径():
     footer = format_footer(usage, None)
 
     assert footer == (
-        "anthropic / claude-jupiter-v1-p · 8.3k→20"
-        " · cache r8k/w200 · 1.5s"
+        "anthropic / claude-jupiter-v1-p · 8.3k→20" " · cache r8k/w200 · 1.5s"
     )
 
 
 def test_footer_elapsed_为零省略时间段():
-    usage = TurnUsage(
-        steps=1, input_tokens=100, output_tokens=20,
-        elapsed_ms=0, model_label="anthropic / m",
+    usage = AgentRunUsage(
+        steps=1,
+        input_tokens=100,
+        output_tokens=20,
+        elapsed_ms=0,
+        model_label="anthropic / m",
     )
 
     assert format_footer(usage, None) == "anthropic / m · 100→20 · cache r0/w0"
 
 
 def test_footer_model_label_为空退_fallback():
-    usage = TurnUsage(steps=1, input_tokens=100, output_tokens=20, elapsed_ms=1000)
+    usage = AgentRunUsage(steps=1, input_tokens=100, output_tokens=20, elapsed_ms=1000)
 
     footer = format_footer(usage, "gemini / flash")
 
@@ -135,12 +137,17 @@ def test_render_header_三行无框():
 
 def test_render_assistant_白字加_footer_无框_不解析_md():
     console = _console()
-    usage = TurnUsage(
-        steps=1, input_tokens=100, output_tokens=20,
-        elapsed_ms=1500, model_label="anthropic / m",
+    usage = AgentRunUsage(
+        steps=1,
+        input_tokens=100,
+        output_tokens=20,
+        elapsed_ms=1500,
+        model_label="anthropic / m",
     )
 
-    render_assistant(console, text="# 标题\n\n正文", usage=usage, fallback_model_label=None)
+    render_assistant(
+        console, text="# 标题\n\n正文", usage=usage, fallback_model_label=None
+    )
 
     text = console.export_text()
     assert "# 标题" in text  # 不解析 Markdown，字面输出

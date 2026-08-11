@@ -10,10 +10,10 @@ from pickel.observe.trace_reader import read_trace
 def _write_trace(path: Path) -> None:
     events = [
         {
-            "event_type": "turn_started",
+            "event_type": "agent_run_started",
             "event_sequence": 0,
             "occurred_at": "2026-07-26T00:00:00+00:00",
-            "turn_id": "t1",
+            "operation_id": "t1",
             "user_text": "SECRET",
         },
         {
@@ -41,7 +41,7 @@ def _write_trace(path: Path) -> None:
             },
         },
         {
-            "event_type": "turn_failed",
+            "event_type": "agent_run_failed",
             "event_sequence": 3,
             "occurred_at": "2026-07-26T00:00:03+00:00",
             "error_type": "RuntimeError",
@@ -65,8 +65,8 @@ def test_read_trace_timings_and_markers(tmp_path):
     assert timing.started_at == "2026-07-26T00:00:01+00:00"
     assert timing.completed_at == "2026-07-26T00:00:02.500000+00:00"
     assert timing.duration_ms == 1500
-    assert len(enhancement.turn_markers) == 1
-    marker = enhancement.turn_markers[0]
+    assert len(enhancement.agent_run_markers) == 1
+    marker = enhancement.agent_run_markers[0]
     assert marker.started_at == "2026-07-26T00:00:00+00:00"
     assert marker.failed == {"error_type": "RuntimeError", "message": "boom"}
     assert marker.interrupted is False
@@ -86,16 +86,16 @@ def test_missing_file_returns_none(tmp_path):
     assert read_trace(tmp_path / "absent.jsonl") is None
 
 
-def test_interrupted_marks_turn(tmp_path):
+def test_interrupted_marks_agent_run(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
         {
-            "event_type": "turn_started",
+            "event_type": "agent_run_started",
             "event_sequence": 0,
             "occurred_at": "2026-07-26T00:00:00+00:00",
         },
         {
-            "event_type": "turn_interrupted",
+            "event_type": "agent_run_interrupted",
             "event_sequence": 1,
             "occurred_at": "2026-07-26T00:00:01+00:00",
             "at_step": 2,
@@ -107,14 +107,14 @@ def test_interrupted_marks_turn(tmp_path):
 
     enhancement = read_trace(trace_file)
 
-    assert enhancement.turn_markers[0].interrupted is True
+    assert enhancement.agent_run_markers[0].interrupted is True
 
 
-def test_request_digests_grouped_by_turn(tmp_path):
+def test_request_digests_grouped_by_agent_run(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
         {
-            "event_type": "turn_started",
+            "event_type": "agent_run_started",
             "event_sequence": 0,
             "occurred_at": "2026-07-27T00:00:00+00:00",
             "user_text": "SECRET",
@@ -140,7 +140,7 @@ def test_request_digests_grouped_by_turn(tmp_path):
             "hook_injected_chars": 40,
         },
         {
-            "event_type": "turn_started",
+            "event_type": "agent_run_started",
             "event_sequence": 3,
             "occurred_at": "2026-07-27T00:01:00+00:00",
         },
@@ -172,7 +172,7 @@ def test_request_digests_grouped_by_turn(tmp_path):
     assert len(second) == 1
 
 
-def test_request_digest_before_any_turn_is_dropped(tmp_path):
+def test_request_digest_before_any_agent_run_is_dropped(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
         {
@@ -193,19 +193,19 @@ def test_request_digest_before_any_turn_is_dropped(tmp_path):
     assert enhancement.request_digests == []
 
 
-def test_full_request_snapshots_grouped_by_turn(tmp_path):
+def test_full_request_snapshots_grouped_by_agent_run(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     events = [
         {
             "record_type": "runtime_event",
-            "event_type": "turn_started",
-            "turn_id": "t1",
+            "event_type": "agent_run_started",
+            "operation_id": "t1",
             "occurred_at": "2026-07-31T00:00:00+00:00",
         },
         {
             "record_type": "request_snapshot",
-            "turn_id": "t1",
-            "step_index": 1,
+            "operation_id": "t1",
+            "step_sequence": 1,
             "payload": {
                 "provider": "anthropic",
                 "model": "claude-test",
@@ -272,7 +272,7 @@ def test_rotated_segments_are_read_before_active_file(tmp_path):
     rotated.write_text(
         json.dumps(
             {
-                "event_type": "turn_started",
+                "event_type": "agent_run_started",
                 "occurred_at": "2026-07-31T00:00:00+00:00",
             }
         )
@@ -282,7 +282,7 @@ def test_rotated_segments_are_read_before_active_file(tmp_path):
     active.write_text(
         json.dumps(
             {
-                "event_type": "turn_failed",
+                "event_type": "agent_run_failed",
                 "occurred_at": "2026-07-31T00:00:01+00:00",
                 "error_type": "RuntimeError",
                 "message": "boom",
@@ -294,4 +294,4 @@ def test_rotated_segments_are_read_before_active_file(tmp_path):
 
     enhancement = read_trace(active)
 
-    assert enhancement.turn_markers[0].failed["error_type"] == "RuntimeError"
+    assert enhancement.agent_run_markers[0].failed["error_type"] == "RuntimeError"

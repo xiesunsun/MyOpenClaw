@@ -1,6 +1,5 @@
 import unittest
 
-from pickel.conversations.session import Session
 from pickel.extensions.openviking.config import (
     OpenVikingConfig,
     OpenVikingSessionRecallConfig,
@@ -98,10 +97,8 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
             client=client,
             state_store=store,
         )
-        session = Session.create(agent_id="Pickle", session_id="session-1")
-
         result = await provider.recall(
-            session_id=session.session_id,
+            session_id="session-1",
             current_user_text="之前说了什么",
         )
 
@@ -119,10 +116,8 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
             client=client,
             state_store=InMemoryOpenVikingStateStore(),
         )
-        session = Session.create(agent_id="Pickle", session_id="session-1")
-
         result = await provider.recall(
-            session_id=session.session_id,
+            session_id="session-1",
             current_user_text="hello",
         )
 
@@ -136,10 +131,8 @@ class OpenVikingSessionRecallProviderTests(unittest.IsolatedAsyncioTestCase):
             client=FailingOpenVikingClient(),
             state_store=store,
         )
-        session = Session.create(agent_id="Pickle", session_id="session-1")
-
         result = await provider.recall(
-            session_id=session.session_id,
+            session_id="session-1",
             current_user_text="hello",
         )
 

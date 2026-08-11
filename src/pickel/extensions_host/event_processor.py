@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from pickel.shared.conversation_output import ConversationOutputBase
-from pickel.runs.runtime_events import RuntimeEventBase
+from pickel.runtime.runtime_events import RuntimeEventBase
 from pickel.shared.conversation_mode import ConversationMode
 
 OutputPublisher = Callable[[ConversationOutputBase], Coroutine[Any, Any, None]]

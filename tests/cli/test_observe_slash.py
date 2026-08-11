@@ -24,6 +24,4 @@ def test_observe_slash_delegates_to_runtime(tmp_path: Path) -> None:
 
     assert result is True
     loop._conversation.export_observation.assert_called_once_with(out)
-    loop._render_system_message.assert_called_once_with(
-        f"Observation report: {out}"
-    )
+    loop._render_system_message.assert_called_once_with(f"Observation report: {out}")

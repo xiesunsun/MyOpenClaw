@@ -13,8 +13,12 @@ from pickel.agents.agent_package import (
     AgentRuntimeSettings,
     agent_package_digest,
 )
-from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
+from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
     ModelStepState,
@@ -153,7 +157,7 @@ def _commit_model_response(
     )
     service.commit_agent_run_state(
         state=completed,
-        appended_message=AssistantMessage(content=[TextContent(text="working")]),
+        appended_message=AssistantMessage(content=[TextBlock(text="working")]),
         appended_message_node_id=assistant_node_id,
     )
     return completed
@@ -164,7 +168,7 @@ def test_accept_agent_run_is_one_atomic_commit(store: OperationStore) -> None:
     accepted = _service(store).accept_agent_run(
         session_id="session-1",
         agent_package_version_id=package.package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
 
     session = store.load_conversation_session("session-1")
@@ -200,7 +204,7 @@ def test_accept_agent_run_rejects_missing_package_without_consuming_sequence(
         service.accept_agent_run(
             session_id="session-1",
             agent_package_version_id="missing",
-            user_message=UserMessage(content=[TextContent(text="hello")]),
+            user_message=UserMessage(content=[TextBlock(text="hello")]),
         )
 
     session = store.load_conversation_session("session-1")
@@ -221,14 +225,14 @@ def test_failed_second_accept_rolls_back_user_message_and_sequence(
     service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="first")]),
+        user_message=UserMessage(content=[TextBlock(text="first")]),
     )
 
     with pytest.raises(StorageIntegrityError, match="SessionOperation 已存在"):
         service.accept_agent_run(
             session_id="session-1",
             agent_package_version_id=_package().package_version_id,
-            user_message=UserMessage(content=[TextContent(text="must rollback")]),
+            user_message=UserMessage(content=[TextBlock(text="must rollback")]),
         )
 
     session = store.load_conversation_session("session-1")
@@ -246,7 +250,7 @@ def test_commit_message_and_state_share_commit_sequence(
     accepted = service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     next_state = _commit_model_response(service, accepted=accepted)
     committed = service.load_agent_run_state(accepted.operation.operation_id)
@@ -274,7 +278,7 @@ def test_recovery_preserves_unknown_tool_effect_without_replaying(
     accepted = service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     _commit_model_response(service, accepted=accepted)
     tools_ready = AgentRunState(
@@ -320,15 +324,28 @@ def test_recovery_preserves_unknown_tool_effect_without_replaying(
     )
     service.commit_agent_run_state(state=waiting)
 
-    recovered = OperationService(store).list_unfinished_agent_runs(
-        session_id="session-1"
-    )
+    recovered_service = OperationService(store)
+    recovered = recovered_service.list_unfinished_agent_runs(session_id="session-1")
 
     assert len(recovered) == 1
     assert recovered[0][1] == waiting
     assert (
         recovered[0][1].current_step.tool_calls[0].execution_state == "intent_recorded"
     )
+
+    reconciled = recovered_service.record_reconciled_tool_result(
+        operation_id="operation-1",
+        result_message=ToolResultMessage(
+            tool_call_id="tool-1",
+            tool_name="external_action",
+            content=[TextBlock(text="已由 Host 核实完成")],
+        ),
+    )
+
+    assert reconciled.state.status == "running"
+    assert reconciled.state.current_step is not None
+    assert reconciled.state.current_step.tool_calls[0].execution_state == "completed"
+    assert reconciled.appended_message_entry is not None
 
 
 def test_state_reference_compare_and_swap_rejects_stale_version(
@@ -338,7 +355,7 @@ def test_state_reference_compare_and_swap_rejects_stale_version(
     accepted = service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     service.commit_agent_run_state(
         state=AgentRunState(
@@ -384,7 +401,7 @@ def test_sqlite_store_recovers_latest_state_after_reopen(tmp_path: Path) -> None
     accepted = service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     service.commit_agent_run_state(
         state=AgentRunState(

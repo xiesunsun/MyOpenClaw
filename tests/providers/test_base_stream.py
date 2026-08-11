@@ -8,7 +8,7 @@ import pytest
 
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted, accumulate
 from pickel.shared.model_config import ModelConfig
@@ -26,7 +26,7 @@ class _OnlyGenerateProvider(Provider):
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
         self.calls += 1
-        return AssistantMessage(content=[TextContent(text="done")])
+        return AssistantMessage(content=[TextBlock(text="done")])
 
 
 def _context() -> ModelContext:

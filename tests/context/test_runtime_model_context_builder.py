@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -16,7 +15,7 @@ from pickel.agents.agent_package import (
 from pickel.context.hook_feedback import HookFeedback
 from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 
@@ -96,23 +95,20 @@ def _entries():
     service.create_conversation_session(agent_id="Pickle", cwd="/project")
     service.append_user_message(
         session_id="session-1",
-        message=UserMessage(content=[TextContent(text="old")]),
+        message=UserMessage(content=[TextBlock(text="old")]),
     )
     service.append_user_message(
         session_id="session-1",
-        message=UserMessage(content=[TextContent(text="latest")]),
+        message=UserMessage(content=[TextBlock(text="latest")]),
     )
     return service.list_active_branch_entries(session_id="session-1")
 
 
 def test_builder_consumes_frozen_package_and_conversation_entries() -> None:
-    context = asyncio.run(
-        ModelContextBuilder().build_model_context(
-            agent_package_version=_package(),
-            conversation_entries=_entries(),
-            session_id="session-1",
-            hook_feedback=(HookFeedback(source_event="test", text="feedback"),),
-        )
+    context = ModelContextBuilder().build_model_context(
+        agent_package_version=_package(),
+        conversation_entries=_entries(),
+        hook_feedback=(HookFeedback(source_event="test", text="feedback"),),
     )
 
     assert context.system.sections[0].text == "Frozen behavior."
@@ -125,22 +121,11 @@ def test_builder_consumes_frozen_package_and_conversation_entries() -> None:
     ]
 
 
-def test_builder_passes_stable_session_identity_to_recall() -> None:
-    seen = []
-
-    class _Recall:
-        async def provide(self, *, session_id: str, current_user_text: str = ""):
-            seen.append((session_id, current_user_text))
-            return [UserMessage(content=[TextContent(text="recalled")])]
-
-    context = asyncio.run(
-        ModelContextBuilder().build_model_context(
-            agent_package_version=_package(),
-            conversation_entries=_entries(),
-            session_id="session-1",
-            recall_sources=(_Recall(),),
-        )
+def test_builder_appends_already_retrieved_messages() -> None:
+    context = ModelContextBuilder().build_model_context(
+        agent_package_version=_package(),
+        conversation_entries=_entries(),
+        recalled_messages=(UserMessage(content=[TextBlock(text="recalled")]),),
     )
 
-    assert seen == [("session-1", "latest")]
     assert context.messages[-1].content[0].text == "recalled"

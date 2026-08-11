@@ -4,11 +4,11 @@ import unittest
 import mcp.types
 
 from pickel.extensions.mcp.elicitation_mapper import resolve_elicitation
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_call_types import (
     STRUCTURED_INPUT_CALL,
     StructuredInputAnswer,
 )
-from pickel.runs.host_calls import HostCallContext, HostCallRouter
+from pickel.runtime.host_calls import HostCallContext, HostCallRouter
 
 
 def _params() -> mcp.types.ElicitRequestFormParams:

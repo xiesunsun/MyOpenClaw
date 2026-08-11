@@ -14,10 +14,10 @@ from pickel.extensions.xiaomi_tts.synthesizer import (
     SpeechSynthesisError,
     SynthesizedAudio,
 )
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    TurnCompleted,
-    TurnInterrupted,
+    AgentRunCompleted,
+    AgentRunInterrupted,
 )
 from pickel.shared.event_envelope import EventEnvelope
 
@@ -34,8 +34,8 @@ class _Synthesizer:
         return SynthesizedAudio(data=b"wav", media_type="audio/wav")
 
 
-def _envelope(turn_id: str = "turn-1") -> EventEnvelope:
-    return EventEnvelope(session_id="session-1", turn_id=turn_id)
+def _envelope(operation_id: str = "turn-1") -> EventEnvelope:
+    return EventEnvelope(session_id="session-1", operation_id=operation_id)
 
 
 class PrepareSpeechTextTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class XiaomiTtsProcessorTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
-    async def test_publishes_latest_assistant_message_after_turn_completed(
+    async def test_publishes_latest_assistant_message_after_agent_run_completed(
         self,
     ) -> None:
         await self.processor.handle_event(
@@ -89,7 +89,7 @@ class XiaomiTtsProcessorTests(unittest.IsolatedAsyncioTestCase):
         await self.processor.handle_event(
             AssistantMessageEvent(envelope=_envelope(), text="最终回答")
         )
-        await self.processor.handle_event(TurnCompleted(envelope=_envelope()))
+        await self.processor.handle_event(AgentRunCompleted(envelope=_envelope()))
 
         await asyncio.wait_for(self.output_ready.wait(), timeout=1)
 
@@ -102,8 +102,8 @@ class XiaomiTtsProcessorTests(unittest.IsolatedAsyncioTestCase):
         await self.processor.handle_event(
             AssistantMessageEvent(envelope=_envelope(), text="未完成")
         )
-        await self.processor.handle_event(TurnInterrupted(envelope=_envelope()))
-        await self.processor.handle_event(TurnCompleted(envelope=_envelope()))
+        await self.processor.handle_event(AgentRunInterrupted(envelope=_envelope()))
+        await self.processor.handle_event(AgentRunCompleted(envelope=_envelope()))
         await asyncio.sleep(0)
 
         self.assertEqual([], self.synthesizer.requests)
@@ -116,7 +116,7 @@ class XiaomiTtsProcessorTests(unittest.IsolatedAsyncioTestCase):
         await self.processor.handle_event(
             AssistantMessageEvent(envelope=_envelope(), text="最终回答")
         )
-        await self.processor.handle_event(TurnCompleted(envelope=_envelope()))
+        await self.processor.handle_event(AgentRunCompleted(envelope=_envelope()))
 
         await asyncio.wait_for(self.output_ready.wait(), timeout=1)
 

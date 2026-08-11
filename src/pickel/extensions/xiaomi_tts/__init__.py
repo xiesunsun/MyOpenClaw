@@ -7,11 +7,11 @@ import os
 from pickel.extensions.xiaomi_tts.config import XiaomiTtsConfig
 from pickel.extensions.xiaomi_tts.processor import XiaomiTtsProcessor
 from pickel.extensions.xiaomi_tts.synthesizer import XiaomiSpeechSynthesizer
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    TurnCompleted,
-    TurnFailed,
-    TurnInterrupted,
+    AgentRunCompleted,
+    AgentRunFailed,
+    AgentRunInterrupted,
 )
 
 
@@ -42,9 +42,9 @@ def setup(host) -> None:
     host.add_event_processor(
         event_types=(
             AssistantMessageEvent,
-            TurnCompleted,
-            TurnFailed,
-            TurnInterrupted,
+            AgentRunCompleted,
+            AgentRunFailed,
+            AgentRunInterrupted,
         ),
         factory=create_processor,
     )

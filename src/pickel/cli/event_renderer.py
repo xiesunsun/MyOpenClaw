@@ -9,16 +9,16 @@ from rich.console import Console
 from pickel.cli.render.message import render_interrupted
 from pickel.cli.render.stream import StreamRenderer
 from pickel.cli.render.tool import ToolRenderer
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
-    StepStarted,
+    ModelStepStarted,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
     ToolCallCompleted,
     ToolCallStarted,
-    TurnInterrupted,
+    AgentRunInterrupted,
 )
 from pickel.tools.base import ToolExecutionResult
 
@@ -47,7 +47,7 @@ class ChatEventRenderer:
             # partial_json 拼完前不是合法 JSON，展示半截只会制造噪音
             return
 
-        if isinstance(event, StepStarted):
+        if isinstance(event, ModelStepStarted):
             # 无边框：Step 行不上屏；预览提交为历史
             self._stream.end()
             return
@@ -64,7 +64,7 @@ class ChatEventRenderer:
             )
             return
 
-        if isinstance(event, TurnInterrupted):
+        if isinstance(event, AgentRunInterrupted):
             self._stream.end()
             render_interrupted(self.console)
             return

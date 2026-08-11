@@ -7,7 +7,7 @@ from pickel.context.session_recall import (
     render_session_recall,
 )
 from pickel.conversations.agent_message import AgentMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 
 
 class OpenVikingRecall:
@@ -35,4 +35,4 @@ class OpenVikingRecall:
         rendered = render_session_recall(result, max_chars=self._max_chars)
         if rendered is None:
             return []
-        return [UserMessage(content=[TextContent(text=rendered)])]
+        return [UserMessage(content=[TextBlock(text=rendered)])]

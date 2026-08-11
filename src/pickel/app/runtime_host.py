@@ -124,7 +124,7 @@ class RuntimeHost:
     def new_session(self, conversation: ConversationRuntime) -> ConversationRuntime:
         next_conversation = self.open_conversation(
             ConversationRequest(
-                agent_id=conversation.agent.agent_id,
+                agent_id=conversation.agent_definition.agent_id,
                 persistence=conversation.persistence,
                 cwd=Path.cwd(),
                 mode=conversation.mode,
@@ -183,7 +183,7 @@ class RuntimeHost:
             store=store,
             service=next_boot.build_conversation_service(store=store),
             session=conversation.session,
-            agent_id=conversation.agent.agent_id,
+            agent_id=conversation.agent_definition.agent_id,
             persistence=conversation.persistence,
             mode=conversation.mode,
         )
@@ -230,7 +230,7 @@ class RuntimeHost:
         registry: Any,
     ) -> None:
         context = ConversationExtensionContext(
-            agent_id=conversation.agent.agent_id,
+            agent_id=conversation.agent_definition.agent_id,
             session_id=conversation.session.session_id,
             mode=conversation.mode,
             publish_output=conversation.publish_output,

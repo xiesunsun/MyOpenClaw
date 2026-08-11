@@ -17,10 +17,9 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import (
     ArtifactBlock,
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolCallContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
 from pickel.providers.anthropic import AnthropicProvider
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
@@ -106,12 +105,12 @@ class AnthropicProviderTests(unittest.TestCase):
     def test_build_messages_thinking_tool_use_and_results(self) -> None:
         messages = AnthropicProvider._build_messages(
             [
-                UserMessage(content=[TextContent(text="hello")]),
+                UserMessage(content=[TextBlock(text="hello")]),
                 AssistantMessage(
                     content=[
-                        ThinkingContent(text="internal", signature="sig-1"),
-                        TextContent(text="Let me check."),
-                        ToolCallContent(
+                        ThinkingBlock(text="internal", signature="sig-1"),
+                        TextBlock(text="Let me check."),
+                        ToolCallBlock(
                             id="call-1",
                             name="echo",
                             arguments={"text": "ping"},
@@ -121,12 +120,12 @@ class AnthropicProviderTests(unittest.TestCase):
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="echo",
-                    content=[TextContent(text="pong")],
+                    content=[TextBlock(text="pong")],
                 ),
                 AssistantMessage(
                     content=[
-                        ThinkingContent(text="final", signature="sig-2"),
-                        TextContent(text="Done."),
+                        ThinkingBlock(text="final", signature="sig-2"),
+                        TextBlock(text="Done."),
                     ]
                 ),
             ]
@@ -159,7 +158,7 @@ class AnthropicProviderTests(unittest.TestCase):
             ToolResultMessage(
                 tool_call_id="call-1",
                 tool_name="lookup",
-                content=[TextContent(text="found")],
+                content=[TextBlock(text="found")],
                 structured_content={"id": 7},
             )
         )
@@ -171,7 +170,7 @@ class AnthropicProviderTests(unittest.TestCase):
             [
                 AssistantMessage(
                     content=[
-                        ToolCallContent(
+                        ToolCallBlock(
                             id="call-1", name="echo", arguments={"text": "ping"}
                         )
                     ]
@@ -179,7 +178,7 @@ class AnthropicProviderTests(unittest.TestCase):
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="echo",
-                    content=[TextContent(text="failed")],
+                    content=[TextBlock(text="failed")],
                     is_error=True,
                 ),
             ]
@@ -187,20 +186,26 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertTrue(messages[1]["content"][0]["is_error"])
 
     def test_build_messages_maps_image_tool_result(self) -> None:
+        service = ArtifactService(
+            artifact_store=InMemoryRuntimeStore(),
+            blob_store=InMemoryBlobStore(),
+        )
+        reference = service.create_artifact(data=b"hi", media_type="image/png")
         messages = AnthropicProvider._build_messages(
             [
                 AssistantMessage(
-                    content=[ToolCallContent(id="call-1", name="look", arguments={})]
+                    content=[ToolCallBlock(id="call-1", name="look", arguments={})]
                 ),
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="look",
                     content=[
-                        TextContent(text="截图"),
-                        ImageContent(media_type="image/png", data_base64="aGk="),
+                        TextBlock(text="截图"),
+                        ArtifactBlock(artifact=reference),
                     ],
                 ),
-            ]
+            ],
+            artifact_service=service,
         )
 
         content = messages[1]["content"][0]["content"]
@@ -235,22 +240,22 @@ class AnthropicProviderTests(unittest.TestCase):
     def test_build_messages_aggregates_consecutive_tool_results(self) -> None:
         messages = AnthropicProvider._build_messages(
             [
-                UserMessage(content=[TextContent(text="hi")]),
+                UserMessage(content=[TextBlock(text="hi")]),
                 AssistantMessage(
                     content=[
-                        ToolCallContent(id="c1", name="a", arguments={}),
-                        ToolCallContent(id="c2", name="b", arguments={}),
+                        ToolCallBlock(id="c1", name="a", arguments={}),
+                        ToolCallBlock(id="c2", name="b", arguments={}),
                     ]
                 ),
                 ToolResultMessage(
                     tool_call_id="c1",
                     tool_name="a",
-                    content=[TextContent(text="r1")],
+                    content=[TextBlock(text="r1")],
                 ),
                 ToolResultMessage(
                     tool_call_id="c2",
                     tool_name="b",
-                    content=[TextContent(text="r2")],
+                    content=[TextBlock(text="r2")],
                 ),
             ]
         )
@@ -306,7 +311,7 @@ class AnthropicProviderTests(unittest.TestCase):
             provider.generate(
                 ModelContext(
                     system=SystemContent.from_text("You are Pickle."),
-                    messages=[UserMessage(content=[TextContent(text="hello")])],
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                     tools=[
                         ToolDefinition(
                             name="echo",
@@ -365,7 +370,7 @@ class AnthropicProviderTests(unittest.TestCase):
             provider.generate(
                 ModelContext(
                     system=SystemContent.from_text(""),
-                    messages=[UserMessage(content=[TextContent(text="hello")])],
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                 )
             )
         )
@@ -381,7 +386,7 @@ class AnthropicProviderTests(unittest.TestCase):
             provider.count_context_tokens(
                 ModelContext(
                     system=SystemContent.from_text("sys"),
-                    messages=[UserMessage(content=[TextContent(text="hello")])],
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                     tools=[
                         ToolDefinition(
                             name="echo",
@@ -409,7 +414,7 @@ class AnthropicProviderTests(unittest.TestCase):
             provider.count_context_tokens(
                 ModelContext(
                     system=SystemContent.from_text(""),
-                    messages=[UserMessage(content=[TextContent(text="hello")])],
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                 )
             )
         )
@@ -429,7 +434,7 @@ class AnthropicProviderTests(unittest.TestCase):
         params = provider._build_request_params(
             ModelContext(
                 system=SystemContent.from_text("stable system"),
-                messages=[UserMessage(content=[TextContent(text="hello")])],
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
                 tools=[
                     ToolDefinition(
                         name="echo",
@@ -462,7 +467,7 @@ class AnthropicProviderTests(unittest.TestCase):
         )
         context = ModelContext(
             system=SystemContent.from_text("stable system"),
-            messages=[UserMessage(content=[TextContent(text="full user message")])],
+            messages=[UserMessage(content=[TextBlock(text="full user message")])],
             tools=[
                 ToolDefinition(
                     name="echo",
@@ -489,7 +494,7 @@ class AnthropicProviderTests(unittest.TestCase):
         params = provider._build_request_params(
             ModelContext(
                 system=SystemContent.from_text("system"),
-                messages=[UserMessage(content=[TextContent(text="hello")])],
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
             )
         )
 

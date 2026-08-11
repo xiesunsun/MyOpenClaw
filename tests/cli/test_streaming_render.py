@@ -8,17 +8,17 @@ import pytest
 from rich.console import Console
 
 from pickel.cli.event_renderer import ChatEventRenderer
-from pickel.runs.tool_call import ToolCall
-from pickel.runs.runtime_events import (
+from pickel.runtime.runtime_events import ToolCallSnapshot
+from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    StepStarted,
+    ModelStepStarted,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
     ToolCallStarted,
-    TurnInterrupted,
+    AgentRunInterrupted,
 )
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
 
 
@@ -32,7 +32,11 @@ def _render(events) -> str:
 
 def test_文本增量按顺序出现():
     text = _render(
-        [TextDeltaEvent(text="你"), TextDeltaEvent(text="好"), TextDeltaEvent(text="呀")]
+        [
+            TextDeltaEvent(text="你"),
+            TextDeltaEvent(text="好"),
+            TextDeltaEvent(text="呀"),
+        ]
     )
 
     assert "你好呀" in text
@@ -45,19 +49,19 @@ def test_settle_后正文一份且有_footer():
             TextDeltaEvent(text="你好"),
             AssistantMessageEvent(
                 text="你好",
-                usage=TurnUsage(
-                    steps=1, input_tokens=100, output_tokens=20,
-                    elapsed_ms=1500, model_label="anthropic / claude-jupiter-v1-p",
+                usage=AgentRunUsage(
+                    steps=1,
+                    input_tokens=100,
+                    output_tokens=20,
+                    elapsed_ms=1500,
+                    model_label="anthropic / claude-jupiter-v1-p",
                 ),
             ),
         ]
     )
 
     assert text.count("你好") == 1
-    assert (
-        "anthropic / claude-jupiter-v1-p · 100→20"
-        " · cache r0/w0 · 1.5s"
-    ) in text
+    assert ("anthropic / claude-jupiter-v1-p · 100→20" " · cache r0/w0 · 1.5s") in text
     assert "╭" not in text
 
 
@@ -71,9 +75,7 @@ def test_思考增量与正文增量都出现():
 
 def test_工具参数增量不上屏():
     """partial_json 拼完前不是合法 JSON，展示半截参数只会制造噪音。"""
-    text = _render(
-        [ToolCallArgsDeltaEvent(tool_call_id="c1", partial_json='{"text"')]
-    )
+    text = _render([ToolCallArgsDeltaEvent(tool_call_id="c1", partial_json='{"text"')])
 
     assert '{"text"' not in text
 
@@ -83,14 +85,16 @@ def test_工具参数增量不上屏():
     [
         # 有流式预览时 settle 只补 footer，不再重打正文
         (AssistantMessageEvent(text="最终回复"), None),
-        (StepStarted(envelope=EventEnvelope(step_index=1)), None),
+        (ModelStepStarted(envelope=EventEnvelope(step_sequence=1)), None),
         (
             ToolCallStarted(
-                envelope=EventEnvelope(step_index=1),
+                envelope=EventEnvelope(step_sequence=1),
                 batch_id="batch-1",
                 call_index=0,
                 total_calls=1,
-                tool_call=ToolCall(id="c1", name="echo", arguments={"text": "hi"}),
+                tool_call=ToolCallSnapshot(
+                    tool_call_id="c1", tool_name="echo", arguments={"text": "hi"}
+                ),
             ),
             "⏺ echo",
         ),
@@ -106,7 +110,7 @@ def test_渲染事件前流式输出必须收尾换行(event, next_line_marker):
     assert lines[idx].strip() == "流式预览"
     assert "⏺" not in lines[idx]
     if next_line_marker is None:
-        assert "最终回复" not in text or isinstance(event, StepStarted)
+        assert "最终回复" not in text or isinstance(event, ModelStepStarted)
         # 流式正文只一份
         assert text.count("流式预览") == 1
     else:
@@ -114,7 +118,7 @@ def test_渲染事件前流式输出必须收尾换行(event, next_line_marker):
 
 
 def test_中断显示提示():
-    text = _render([TurnInterrupted(at_step=2, partial_text="写到一半")])
+    text = _render([AgentRunInterrupted(at_step=2, partial_text="写到一半")])
 
     assert "已中断本轮" in text
 
@@ -125,17 +129,17 @@ def test_无_delta_时渲染正文与_footer():
         [
             AssistantMessageEvent(
                 text="完整回复",
-                usage=TurnUsage(
-                    steps=1, input_tokens=100, output_tokens=20,
-                    elapsed_ms=1500, model_label="anthropic / claude-jupiter-v1-p",
+                usage=AgentRunUsage(
+                    steps=1,
+                    input_tokens=100,
+                    output_tokens=20,
+                    elapsed_ms=1500,
+                    model_label="anthropic / claude-jupiter-v1-p",
                 ),
             )
         ]
     )
 
     assert "完整回复" in text
-    assert (
-        "anthropic / claude-jupiter-v1-p · 100→20"
-        " · cache r0/w0 · 1.5s"
-    ) in text
+    assert ("anthropic / claude-jupiter-v1-p · 100→20" " · cache r0/w0 · 1.5s") in text
     assert "╭" not in text

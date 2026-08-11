@@ -17,7 +17,7 @@ from datetime import datetime
 from rich.console import Console
 from rich.text import Text
 
-from pickel.runs.tool_call import ToolCall
+from pickel.runtime.runtime_events import ToolCallSnapshot
 from pickel.tools.base import ToolExecutionResult
 
 _DURATION_MIN_SECONDS = 0.1
@@ -33,17 +33,17 @@ class ToolRenderer:
         self.console = console
         self._started_at: dict[str, datetime] = {}
 
-    def on_started(self, tool_call: ToolCall, occurred_at: datetime) -> None:
-        self._started_at[tool_call.id] = occurred_at
+    def on_started(self, tool_call: ToolCallSnapshot, occurred_at: datetime) -> None:
+        self._started_at[tool_call.tool_call_id] = occurred_at
         self._print_plain(self._format_started_block(tool_call))
 
     def on_completed(
         self,
-        tool_call: ToolCall,
+        tool_call: ToolCallSnapshot,
         tool_result: ToolExecutionResult,
         occurred_at: datetime,
     ) -> None:
-        started_at = self._started_at.pop(tool_call.id, None)
+        started_at = self._started_at.pop(tool_call.tool_call_id, None)
         elapsed: float | None = None
         if started_at is not None:
             elapsed = (occurred_at - started_at).total_seconds()
@@ -52,7 +52,7 @@ class ToolRenderer:
 
         if started_at is None:
             self._print_plain(self._format_started_block(tool_call, running=False))
-        self._print_status_and_out(tool_call.name, tool_result, elapsed)
+        self._print_status_and_out(tool_call.tool_name, tool_result, elapsed)
 
     def _print_plain(self, body: str) -> None:
         self.console.print(body, highlight=False, markup=False, end="")
@@ -75,13 +75,13 @@ class ToolRenderer:
         self._print_plain(out_body)
 
     def _format_started_block(
-        self, tool_call: ToolCall, *, running: bool = True
+        self, tool_call: ToolCallSnapshot, *, running: bool = True
     ) -> str:
         args = _format_args_inline(tool_call.arguments)
         if args:
-            head = f"⏺ {tool_call.name}  {args}"
+            head = f"⏺ {tool_call.tool_name}  {args}"
         else:
-            head = f"⏺ {tool_call.name}"
+            head = f"⏺ {tool_call.tool_name}"
         # 超宽时截断到 console 宽，保证单行
         width = max(20, self.console.width)
         if len(head) > width:

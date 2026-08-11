@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pickel.context.projection import ConversationProjector
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 
@@ -29,7 +29,7 @@ def test_project_conversation_messages_skips_non_message_facts(tmp_path: Path):
     service, session_id = _conversation(tmp_path)
     service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="hi")]),
+        message=UserMessage(content=[TextBlock(text="hi")]),
     )
     service.append_host_call_request(
         session_id=session_id,
@@ -53,19 +53,19 @@ def test_compaction_keeps_from_first_kept_node_and_injects_summary(
     service, session_id = _conversation(tmp_path)
     service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u1")]),
+        message=UserMessage(content=[TextBlock(text="u1")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a1")]),
+        message=AssistantMessage(content=[TextBlock(text="a1")]),
     )
     u2 = service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u2")]),
+        message=UserMessage(content=[TextBlock(text="u2")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a2")]),
+        message=AssistantMessage(content=[TextBlock(text="a2")]),
     )
     service.append_history_compaction(
         session_id=session_id,
@@ -88,11 +88,11 @@ def test_invalid_first_kept_node_ignores_compaction(tmp_path: Path):
     service, session_id = _conversation(tmp_path)
     service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u1")]),
+        message=UserMessage(content=[TextBlock(text="u1")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a1")]),
+        message=AssistantMessage(content=[TextBlock(text="a1")]),
     )
     service.append_history_compaction(
         session_id=session_id,
@@ -112,11 +112,11 @@ def test_last_valid_compaction_wins(tmp_path: Path):
     service, session_id = _conversation(tmp_path)
     u1 = service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u1")]),
+        message=UserMessage(content=[TextBlock(text="u1")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a1")]),
+        message=AssistantMessage(content=[TextBlock(text="a1")]),
     )
     service.append_history_compaction(
         session_id=session_id,
@@ -124,11 +124,11 @@ def test_last_valid_compaction_wins(tmp_path: Path):
     )
     u2 = service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u2")]),
+        message=UserMessage(content=[TextBlock(text="u2")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a2")]),
+        message=AssistantMessage(content=[TextBlock(text="a2")]),
     )
     service.append_history_compaction(
         session_id=session_id,
@@ -146,11 +146,11 @@ def test_later_invalid_compaction_falls_back_to_earlier_valid(tmp_path: Path):
     service, session_id = _conversation(tmp_path)
     u1 = service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u1")]),
+        message=UserMessage(content=[TextBlock(text="u1")]),
     )
     service.append_assistant_message(
         session_id=session_id,
-        message=AssistantMessage(content=[TextContent(text="a1")]),
+        message=AssistantMessage(content=[TextBlock(text="a1")]),
     )
     service.append_history_compaction(
         session_id=session_id,
@@ -158,7 +158,7 @@ def test_later_invalid_compaction_falls_back_to_earlier_valid(tmp_path: Path):
     )
     service.append_user_message(
         session_id=session_id,
-        message=UserMessage(content=[TextContent(text="u2")]),
+        message=UserMessage(content=[TextBlock(text="u2")]),
     )
     service.append_history_compaction(
         session_id=session_id,

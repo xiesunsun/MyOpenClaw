@@ -16,8 +16,8 @@ from pickel.agents.agent_package import (
     agent_package_digest,
 )
 from pickel.context.model_context import ModelContext, SystemContent
-from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
     ModelStepState,
@@ -59,7 +59,7 @@ class _StreamingProvider(Provider):
         self.requests += 1
         yield TextDelta(text="hello")
         yield StreamCompleted(
-            message=AssistantMessage(content=[TextContent(text="hello")])
+            message=AssistantMessage(content=[TextBlock(text="hello")])
         )
 
 
@@ -197,6 +197,34 @@ def test_model_effect_rejects_request_before_intent_is_recorded() -> None:
         )
 
     assert provider.requests == 0
+
+
+def test_recall_sources_cross_runtime_effect_boundary() -> None:
+    seen = []
+
+    class _Recall:
+        async def provide(self, *, session_id: str, current_user_text: str = ""):
+            seen.append((session_id, current_user_text))
+            return [UserMessage(content=[TextBlock(text="recalled")])]
+
+    bindings = replace(
+        _bindings(provider=_StreamingProvider(), tool=_CapturingTool()),
+        recall_sources=(_Recall(),),
+    )
+    effects = RuntimeEffects(
+        bindings=bindings,
+        operation_service=_OperationServiceStub(_state("model_request_ready")),  # type: ignore[arg-type]
+    )
+
+    messages = asyncio.run(
+        effects.retrieve_recall_messages(
+            session_id="session-1",
+            visible_messages=[UserMessage(content=[TextBlock(text="latest")])],
+        )
+    )
+
+    assert seen == [("session-1", "latest")]
+    assert messages[0].content[0].text == "recalled"
 
 
 def test_model_effect_streams_after_intent_and_adds_metadata() -> None:

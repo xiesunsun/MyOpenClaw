@@ -10,34 +10,15 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import (
     ArtifactBlock,
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolCallContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
 
 
 def test_user_message_round_trip():
-    msg = UserMessage(content=[TextContent(text="hello")])
+    msg = UserMessage(content=[TextBlock(text="hello")])
     restored = agent_message_from_dict(agent_message_to_dict(msg))
-    assert restored == msg
-
-
-def test_user_message_with_image_round_trip():
-    msg = UserMessage(
-        content=[
-            TextContent(text="see image"),
-            ImageContent(
-                media_type="image/png",
-                data_base64="aGVsbG8=",
-                url=None,
-            ),
-        ]
-    )
-    payload = agent_message_to_dict(msg)
-    assert payload["payload_version"] == 3
-    assert payload["content"][1]["type"] == "image"
-    restored = agent_message_from_dict(payload)
     assert restored == msg
 
 
@@ -61,9 +42,9 @@ def test_user_message_with_artifact_reference_round_trip():
 def test_assistant_with_thinking_and_tool_calls_round_trip():
     msg = AssistantMessage(
         content=[
-            ThinkingContent(text="plan", signature="sig"),
-            TextContent(text="calling tools"),
-            ToolCallContent(id="c1", name="read_file", arguments={"path": "a.py"}),
+            ThinkingBlock(text="plan", signature="sig"),
+            TextBlock(text="calling tools"),
+            ToolCallBlock(id="c1", name="read_file", arguments={"path": "a.py"}),
         ],
         metadata=ModelResponseMetadata(
             provider="anthropic",
@@ -84,7 +65,7 @@ def test_tool_result_message_round_trip():
     msg = ToolResultMessage(
         tool_call_id="c1",
         tool_name="read_file",
-        content=[TextContent(text="ok")],
+        content=[TextBlock(text="ok")],
         is_error=False,
         structured_content={"count": 1},
     )

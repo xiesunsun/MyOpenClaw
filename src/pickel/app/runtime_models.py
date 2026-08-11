@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.runs.turn_usage import TurnUsage
+from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.conversation_mode import ConversationMode
 
 
@@ -110,8 +110,8 @@ class ConversationRequest:
 
 
 @dataclass(frozen=True)
-class TurnRequest:
-    """一次用户 turn；所有 Surface 都提交同一份消息合同。"""
+class AgentRunRequest:
+    """一次 AgentRun 请求；所有 Surface 都提交同一份消息合同。"""
 
     message: UserMessage
 
@@ -123,14 +123,14 @@ class RuntimeErrorInfo:
 
 
 @dataclass(frozen=True)
-class TurnResult:
-    """Runtime Application 的稳定 turn 结果。"""
+class AgentRunResult:
+    """Runtime Application 的稳定 AgentRun 结果。"""
 
     status: Literal["completed", "blocked", "failed"]
     session_id: str
-    turn_id: str
+    operation_id: str
     message: AssistantMessage | None
-    usage: TurnUsage | None
+    usage: AgentRunUsage | None
     elapsed_ms: int
     error: RuntimeErrorInfo | None = None
 
@@ -171,23 +171,7 @@ class ConversationClosedError(RuntimeApplicationError):
     pass
 
 
-class TurnInProgressError(RuntimeApplicationError):
-    pass
-
-
-class NoActiveTurnError(RuntimeApplicationError):
-    pass
-
-
-class TurnMismatchError(RuntimeApplicationError):
-    pass
-
-
-class PendingInputNotFoundError(RuntimeApplicationError):
-    pass
-
-
-class PendingInputConflictError(RuntimeApplicationError):
+class OperationInProgressError(RuntimeApplicationError):
     pass
 
 

@@ -63,7 +63,7 @@ def setup(host):
 
 _ASYNC_EXT = """
 async def setup(host):
-    host.add_session_sync(lambda scope: f"sync-from-{host.name}")
+    host.add_recall_source(lambda scope: f"recall-from-{host.name}")
 """
 
 
@@ -149,7 +149,7 @@ class LoaderDiscoveryTests(unittest.TestCase):
             self.assertEqual([], result.errors)
             scope = SimpleNamespace(agent_id="Pickle", app_config=None)
             self.assertEqual(
-                ["sync-from-async_ext"], result.registry.session_syncs(scope)
+                ["recall-from-async_ext"], result.registry.recall_sources(scope)
             )
 
     def test_skips_underscore_and_dot_prefixed_entries(self) -> None:

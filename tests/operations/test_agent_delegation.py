@@ -14,7 +14,7 @@ from pickel.agents.agent_package import (
     agent_package_digest,
 )
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.agent_run_state import AgentRunState, ModelStepState
 from pickel.operations.operation_service import OperationService
 from pickel.operations.operation_store import OperationStore
@@ -111,7 +111,7 @@ def _start_parent_step(service: OperationService) -> None:
     accepted = service.accept_agent_run(
         session_id="parent-session",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="parent")]),
+        user_message=UserMessage(content=[TextBlock(text="parent")]),
     )
     service.commit_agent_run_state(
         state=AgentRunState(
@@ -137,7 +137,7 @@ def test_delegation_is_atomic_with_child_operation_acceptance(
     result = service.accept_delegated_agent_run(
         session_id="child-session",
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="delegated work")]),
+        user_message=UserMessage(content=[TextBlock(text="delegated work")]),
         parent_operation_id="parent-operation",
         parent_step_id="parent-step",
     )
@@ -169,7 +169,7 @@ def test_invalid_parent_step_does_not_accept_child_operation(
         service.accept_delegated_agent_run(
             session_id="child-session",
             agent_package_version_id=_package().package_version_id,
-            user_message=UserMessage(content=[TextContent(text="must rollback")]),
+            user_message=UserMessage(content=[TextBlock(text="must rollback")]),
             parent_operation_id="parent-operation",
             parent_step_id="stale-step",
         )
@@ -196,7 +196,7 @@ def test_start_delegated_run_creates_isolated_child_session(
 
     result = service.start_delegated_run(
         agent_package_version_id=_package().package_version_id,
-        user_message=UserMessage(content=[TextContent(text="isolated work")]),
+        user_message=UserMessage(content=[TextBlock(text="isolated work")]),
         parent_operation_id="parent-operation",
         parent_step_id="parent-step",
     )

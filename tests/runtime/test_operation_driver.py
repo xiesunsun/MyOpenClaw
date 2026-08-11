@@ -13,7 +13,7 @@ from pickel.agents.agent_package import (
     agent_package_digest,
 )
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.hooks.decisions import (
     PostToolBatchDecision,
@@ -94,7 +94,7 @@ class _Hooks:
     async def post_tool_batch(self, _event):
         return PostToolBatchDecision(feedback_text="batch feedback")
 
-    async def turn_end(self, _event):
+    async def agent_run_end(self, _event):
         self.completed = True
 
 
@@ -169,20 +169,20 @@ def test_driver_runs_default_tool_loop_through_persisted_effects() -> None:
     accepted = operation_service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=package.package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     provider = _Provider(
         [
             AssistantMessage(
                 content=[
-                    ToolCallContent(
+                    ToolCallBlock(
                         id="tool-1",
                         name="echo",
                         arguments={"text": "hello"},
                     )
                 ]
             ),
-            AssistantMessage(content=[TextContent(text="done")]),
+            AssistantMessage(content=[TextBlock(text="done")]),
         ]
     )
     tool = _EchoTool()
@@ -238,20 +238,20 @@ def test_driver_persists_hook_decisions_and_routes_hooks_through_effects() -> No
     accepted = operation_service.accept_agent_run(
         session_id="session-1",
         agent_package_version_id=package.package_version_id,
-        user_message=UserMessage(content=[TextContent(text="hello")]),
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
     )
     provider = _Provider(
         [
             AssistantMessage(
                 content=[
-                    ToolCallContent(
+                    ToolCallBlock(
                         id="tool-1",
                         name="echo",
                         arguments={"text": "original"},
                     )
                 ]
             ),
-            AssistantMessage(content=[TextContent(text="done")]),
+            AssistantMessage(content=[TextBlock(text="done")]),
         ]
     )
     tool = _EchoTool()

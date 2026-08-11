@@ -56,10 +56,13 @@ class McpSetupTests(unittest.IsolatedAsyncioTestCase):
         bus = ToolBus()
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _mcp_json(root, {
-                "broken": {"command": "/no/such/command-xyz"},
-                "fixture": _fixture_entry(),
-            })
+            _mcp_json(
+                root,
+                {
+                    "broken": {"command": "/no/such/command-xyz"},
+                    "fixture": _fixture_entry(),
+                },
+            )
             host = _host(bus, root)
             with mock.patch.object(
                 mcp_extension, "home_dir", return_value=root / "nohome"

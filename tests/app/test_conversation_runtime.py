@@ -4,12 +4,16 @@ import asyncio
 from types import SimpleNamespace
 
 from pickel.app.conversation_runtime import ConversationRuntime
-from pickel.app.runtime_models import TurnRequest
+from pickel.app.runtime_models import AgentRunRequest
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
-from pickel.runs.runtime_events import AssistantMessageEvent, TurnCompleted, TurnStarted
+from pickel.runtime.runtime_events import (
+    AssistantMessageEvent,
+    AgentRunCompleted,
+    AgentRunStarted,
+)
 
 
 class _AgentRuntime:
@@ -28,7 +32,7 @@ class _AgentRuntime:
         return SimpleNamespace(operation=SimpleNamespace(operation_id="operation-1"))
 
     async def drive_operation(self, operation_id, **_kwargs):
-        message = AssistantMessage(content=[TextContent(text="done")])
+        message = AssistantMessage(content=[TextBlock(text="done")])
         self._conversation_service.append_assistant_message(
             session_id="session-1",
             message=message,
@@ -70,19 +74,19 @@ def test_conversation_runtime_drives_operation_and_projects_events() -> None:
     runtime.subscribe(events.append)
 
     result = asyncio.run(
-        runtime.turn(
-            TurnRequest(message=UserMessage(content=[TextContent(text="hello")]))
+        runtime.start_agent_run(
+            AgentRunRequest(message=UserMessage(content=[TextBlock(text="hello")]))
         )
     )
 
     assert result.status == "completed"
-    assert result.turn_id == "operation-1"
+    assert result.operation_id == "operation-1"
     assert result.message is not None
     assert result.message.content[0].text == "done"
     assert [type(event) for event in events] == [
-        TurnStarted,
+        AgentRunStarted,
         AssistantMessageEvent,
-        TurnCompleted,
+        AgentRunCompleted,
     ]
-    assert all(event.envelope.turn_id == "operation-1" for event in events)
+    assert all(event.envelope.operation_id == "operation-1" for event in events)
     assert runtime.snapshot().message_count == 2

@@ -119,8 +119,8 @@ def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) ->
     assert first.version.package_version_id == second.version.package_version_id
     assert first.version.digest == second.version.digest
     assert first.version.behavior_instruction == "You are Pickle."
-    assert first.definition.tool_ids == ("echo",)
-    assert first.definition.extension_ids == ("openviking",)
+    assert first.version.definition.tool_ids == ("echo",)
+    assert first.version.definition.extension_ids == ("openviking",)
     assert [tool.name for tool in first.version.tools] == ["echo"]
     assert first.version.tools[0].input_schema["properties"]["text"]["type"] == "string"
     assert first.version.skills[0].name == "research"
@@ -177,14 +177,13 @@ def test_agent_package_version_round_trips_through_sqlite(tmp_path: Path) -> Non
     assert loaded.content_dict() == version.content_dict()
 
 
-def test_boot_reuses_agent_package_builder_for_existing_resolve_agent(
+def test_boot_resolves_a_single_loaded_agent_package(
     tmp_path: Path,
 ) -> None:
     boot = Boot(_config(tmp_path), tool_bus=_tool_bus())
 
     loaded = boot.resolve_loaded_agent_package()
-    agent = boot.resolve_agent()
 
-    assert agent.agent_id == loaded.definition.agent_id
-    assert agent.behavior_instruction == loaded.version.behavior_instruction
-    assert agent.tool_ids == list(loaded.definition.tool_ids)
+    assert loaded.version.definition.agent_id == "Pickle"
+    assert loaded.version.behavior_instruction == "You are Pickle."
+    assert loaded.version.definition.tool_ids == ("echo",)

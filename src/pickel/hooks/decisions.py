@@ -35,7 +35,7 @@ class PostToolBatchDecision:
 
 
 @dataclass
-class TurnEndDecision:
+class AgentRunEndDecision:
     """观察者；无控制动作。"""
 
     pass

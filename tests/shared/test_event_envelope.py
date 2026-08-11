@@ -15,8 +15,8 @@ def test_identity_字段齐全且有默认值():
 
     assert identity.event_id
     assert identity.session_id == ""
-    assert identity.turn_id == ""
-    assert identity.step_index is None
+    assert identity.operation_id == ""
+    assert identity.step_sequence is None
     assert identity.occurred_at.tzinfo is timezone.utc
 
 
@@ -49,7 +49,7 @@ def test_envelope_是_frozen():
 
 def test_hook_事件继承_identity():
     """hook 事件复用同一组身份字段，但不带 event_sequence。"""
-    event = PreToolUseEvent(session_id="s1", turn_id="t1", tool_name="echo")
+    event = PreToolUseEvent(session_id="s1", operation_id="t1", tool_name="echo")
 
     assert isinstance(event, EventIdentity)
     assert event.session_id == "s1"
@@ -60,14 +60,14 @@ def test_hook_事件仍可正常构造与_replace():
     """确认改基类没破坏既有 hook 用法。"""
     event = PreToolUseEvent(
         session_id="s1",
-        turn_id="t1",
-        step_index=2,
+        operation_id="t1",
+        step_sequence=2,
         tool_name="echo",
         tool_call_id="c1",
         arguments={"text": "x"},
     )
-    updated = replace(event, step_index=3)
+    updated = replace(event, step_sequence=3)
 
-    assert updated.step_index == 3
+    assert updated.step_sequence == 3
     assert updated.tool_name == "echo"
     assert isinstance(updated.occurred_at, datetime)

@@ -151,7 +151,7 @@ def test_最后一个_delta_是_completed_且携带完整消息():
     assert isinstance(deltas[-1], StreamCompleted)
     message = deltas[-1].message
     kinds = [type(block).__name__ for block in message.content]
-    assert kinds == ["ThinkingContent", "TextContent", "ToolCallContent"]
+    assert kinds == ["ThinkingBlock", "TextBlock", "ToolCallBlock"]
 
 
 def test_thinking_的_signature_来自_sdk_累积而非自行拼装():

@@ -21,10 +21,9 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import (
     ArtifactBlock,
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolCallContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
 from pickel.providers.base import Provider
 from pickel.providers.stream import (
@@ -271,10 +270,8 @@ class AnthropicProvider(Provider):
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for block in message.content:
-            if isinstance(block, TextContent):
+            if isinstance(block, TextBlock):
                 blocks.append({"type": "text", "text": block.text})
-            elif isinstance(block, ImageContent):
-                blocks.append(AnthropicProvider._image_content_block(block))
             elif isinstance(block, ArtifactBlock):
                 blocks.append(
                     AnthropicProvider._artifact_content_block(
@@ -290,7 +287,7 @@ class AnthropicProvider(Provider):
     def _assistant_content_blocks(message: AssistantMessage) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for block in message.content:
-            if isinstance(block, ThinkingContent):
+            if isinstance(block, ThinkingBlock):
                 thinking_block: dict[str, Any] = {
                     "type": "thinking",
                     "thinking": block.text,
@@ -298,10 +295,10 @@ class AnthropicProvider(Provider):
                 if block.signature is not None:
                     thinking_block["signature"] = block.signature
                 blocks.append(thinking_block)
-            elif isinstance(block, TextContent):
+            elif isinstance(block, TextBlock):
                 if block.text:
                     blocks.append({"type": "text", "text": block.text})
-            elif isinstance(block, ToolCallContent):
+            elif isinstance(block, ToolCallBlock):
                 blocks.append(
                     {
                         "type": "tool_use",
@@ -320,10 +317,8 @@ class AnthropicProvider(Provider):
     ) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
         for item in message.content:
-            if isinstance(item, TextContent):
+            if isinstance(item, TextBlock):
                 content.append({"type": "text", "text": item.text})
-            elif isinstance(item, ImageContent):
-                content.append(AnthropicProvider._image_content_block(item))
             elif isinstance(item, ArtifactBlock):
                 content.append(
                     AnthropicProvider._artifact_content_block(
@@ -356,25 +351,6 @@ class AnthropicProvider(Provider):
         if message.is_error:
             block["is_error"] = True
         return block
-
-    @staticmethod
-    def _image_content_block(image: ImageContent) -> dict[str, Any]:
-        if image.media_type not in AnthropicProvider._IMAGE_MEDIA_TYPES:
-            return {
-                "type": "text",
-                "text": f"[Anthropic 不支持的图片类型: {image.media_type}]",
-            }
-        if image.data_base64 is not None:
-            source = {
-                "type": "base64",
-                "media_type": image.media_type,
-                "data": image.data_base64,
-            }
-        elif image.url is not None:
-            source = {"type": "url", "url": image.url}
-        else:
-            raise ValueError("ImageContent 必须包含 data_base64 或 url")
-        return {"type": "image", "source": source}
 
     @staticmethod
     def _artifact_content_block(
@@ -478,7 +454,7 @@ class AnthropicProvider(Provider):
             if block_type == "thinking":
                 thinking_text = self._block_field(block, "thinking")
                 content.append(
-                    ThinkingContent(
+                    ThinkingBlock(
                         text=str(thinking_text or ""),
                         signature=(
                             str(self._block_field(block, "signature"))
@@ -490,10 +466,10 @@ class AnthropicProvider(Provider):
             elif block_type == "text":
                 text = self._block_field(block, "text")
                 if text:
-                    content.append(TextContent(text=str(text)))
+                    content.append(TextBlock(text=str(text)))
             elif block_type == "tool_use":
                 content.append(
-                    ToolCallContent(
+                    ToolCallBlock(
                         id=str(
                             self._block_field(block, "id")
                             or self._block_field(block, "name")
@@ -503,7 +479,7 @@ class AnthropicProvider(Provider):
                     )
                 )
 
-        has_tool_calls = any(isinstance(block, ToolCallContent) for block in content)
+        has_tool_calls = any(isinstance(block, ToolCallBlock) for block in content)
         finish_reason = "tool_calls" if has_tool_calls else "stop"
         return AssistantMessage(
             content=content,

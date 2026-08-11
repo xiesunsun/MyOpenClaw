@@ -7,7 +7,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
     agent_message_to_dict,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.session_preview import (
     SessionPreview,
     preview_text_from_message_payload,
@@ -58,8 +58,8 @@ class SessionPreviewTests(unittest.TestCase):
         payload = agent_message_to_dict(
             AssistantMessage(
                 content=[
-                    ToolCallContent(id="c1", name="read_file", arguments={}),
-                    ToolCallContent(id="c2", name="grep_search", arguments={}),
+                    ToolCallBlock(id="c1", name="read_file", arguments={}),
+                    ToolCallBlock(id="c2", name="grep_search", arguments={}),
                 ]
             )
         )
@@ -73,7 +73,7 @@ class SessionPreviewTests(unittest.TestCase):
             ToolResultMessage(
                 tool_call_id="c1",
                 tool_name="read_file",
-                content=[TextContent(text="  file body\nline2  ")],
+                content=[TextBlock(text="  file body\nline2  ")],
             )
         )
         self.assertEqual("file body line2", preview_text_from_message_payload(payload))
@@ -82,17 +82,15 @@ class SessionPreviewTests(unittest.TestCase):
         payload = agent_message_to_dict(
             AssistantMessage(
                 content=[
-                    TextContent(text="working"),
-                    ToolCallContent(id="c1", name="read_file", arguments={}),
+                    TextBlock(text="working"),
+                    ToolCallBlock(id="c1", name="read_file", arguments={}),
                 ]
             )
         )
         self.assertEqual("working", preview_text_from_message_payload(payload))
 
     def test_preview_from_user_text(self) -> None:
-        payload = agent_message_to_dict(
-            UserMessage(content=[TextContent(text="hello")])
-        )
+        payload = agent_message_to_dict(UserMessage(content=[TextBlock(text="hello")]))
         self.assertEqual("hello", preview_text_from_message_payload(payload))
 
 

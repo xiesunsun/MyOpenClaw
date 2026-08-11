@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 import pytest
 
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.providers.stream import (
     StreamCompleted,
     StreamDelta,
@@ -21,7 +21,7 @@ from pickel.providers.stream import (
 
 
 def _message(text: str = "done") -> AssistantMessage:
-    return AssistantMessage(content=[TextContent(text=text)])
+    return AssistantMessage(content=[TextBlock(text=text)])
 
 
 async def _gen(deltas: list[StreamDelta]) -> AsyncGenerator[StreamDelta, None]:
@@ -47,13 +47,19 @@ class _PlainIterator:
 def test_四种_delta_都是_StreamDelta():
     assert isinstance(TextDelta(text="a"), StreamDelta)
     assert isinstance(ThinkingDelta(text="a"), StreamDelta)
-    assert isinstance(ToolCallArgsDelta(tool_call_id="c1", partial_json="{"), StreamDelta)
+    assert isinstance(
+        ToolCallArgsDelta(tool_call_id="c1", partial_json="{"), StreamDelta
+    )
     assert isinstance(StreamCompleted(message=_message()), StreamDelta)
 
 
 def test_accumulate_返回_completed_携带的消息():
     message = _message("hello")
-    deltas = [TextDelta(text="hel"), TextDelta(text="lo"), StreamCompleted(message=message)]
+    deltas = [
+        TextDelta(text="hel"),
+        TextDelta(text="lo"),
+        StreamCompleted(message=message),
+    ]
 
     assert asyncio.run(accumulate(_gen(deltas))) is message
 

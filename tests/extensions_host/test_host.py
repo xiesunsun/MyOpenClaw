@@ -28,7 +28,9 @@ def _stub_tool(name: str) -> BaseTool:
     return _Stub()
 
 
-def _host(*, name: str = "demo", section: dict | None = None) -> tuple[ExtensionHost, ToolBus, ExtensionRegistry]:
+def _host(
+    *, name: str = "demo", section: dict | None = None
+) -> tuple[ExtensionHost, ToolBus, ExtensionRegistry]:
     bus = ToolBus()
     registry = ExtensionRegistry()
     host = ExtensionHost(
@@ -98,13 +100,6 @@ class ExtensionRegistryTests(unittest.TestCase):
         handlers = registry.hook_handlers(_scope())
 
         self.assertEqual(["healthy-handler"], handlers)
-
-    def test_session_syncs_preserve_registration_order(self) -> None:
-        host, _, registry = _host()
-        host.add_session_sync(lambda scope: "first")
-        host.add_session_sync(lambda scope: "second")
-
-        self.assertEqual(["first", "second"], registry.session_syncs(_scope()))
 
     def test_registry_records_extension_names(self) -> None:
         bus = ToolBus()

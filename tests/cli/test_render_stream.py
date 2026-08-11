@@ -106,13 +106,13 @@ def test_end_后再来增量重新开一段():
 
 
 def test_settle_同文预览只补_footer():
-    from pickel.runs.turn_usage import TurnUsage
+    from pickel.runtime.agent_run_usage import AgentRunUsage
 
     console, renderer = _make()
     renderer.on_text("你好")
     renderer.settle(
         "你好",
-        TurnUsage(
+        AgentRunUsage(
             steps=1,
             input_tokens=10,
             output_tokens=2,
@@ -128,13 +128,13 @@ def test_settle_同文预览只补_footer():
 
 def test_settle_仅_thinking_仍打印最终正文():
     """thinking 不算正文预览；定稿 text 必须上屏。"""
-    from pickel.runs.turn_usage import TurnUsage
+    from pickel.runtime.agent_run_usage import AgentRunUsage
 
     console, renderer = _make()
     renderer.on_thinking("内部推理")
     renderer.settle(
         "给用户的回复",
-        TurnUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
+        AgentRunUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
         None,
     )
     text = console.export_text()
@@ -145,14 +145,14 @@ def test_settle_仅_thinking_仍打印最终正文():
 
 def test_end_后预览不参与_settle_需重打正文():
     """中间 step 已 end：settle 视为无当前预览，白字打定稿 + footer。"""
-    from pickel.runs.turn_usage import TurnUsage
+    from pickel.runtime.agent_run_usage import AgentRunUsage
 
     console, renderer = _make()
     renderer.on_text("中间话")
     renderer.end()
     renderer.settle(
         "最终回复",
-        TurnUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
+        AgentRunUsage(steps=1, input_tokens=1, output_tokens=1, model_label="m"),
         None,
     )
     text = console.export_text()

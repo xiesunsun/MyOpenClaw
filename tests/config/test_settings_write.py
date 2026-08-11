@@ -108,7 +108,9 @@ class SettingsWriteTests(unittest.TestCase):
             )
 
             written = set_default_llm(
-                ModelSelection(provider="google/gemini", model="gemini-3-flash-preview"),
+                ModelSelection(
+                    provider="google/gemini", model="gemini-3-flash-preview"
+                ),
                 scope="global",
                 home=home,
             )
@@ -146,7 +148,9 @@ class SettingsWriteTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             cwd = Path(tmpdir) / "empty"
             cwd.mkdir()
-            with patch("pickel.config.settings.discover_project_root", return_value=None):
+            with patch(
+                "pickel.config.settings.discover_project_root", return_value=None
+            ):
                 with self.assertRaises(ValueError):
                     set_default_llm(
                         ModelSelection(provider="anthropic", model="x"),

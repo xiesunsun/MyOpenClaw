@@ -5,7 +5,7 @@ import unittest
 from pickel.extensions_host.event_processor import ConversationExtensionContext
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
-from pickel.runs.runtime_events import AssistantMessageEvent
+from pickel.runtime.runtime_events import AssistantMessageEvent
 from pickel.tools.bus import ToolBus
 
 

@@ -29,16 +29,14 @@ class SkillRegistryTests(unittest.TestCase):
             skill_dir = root / "pdf-processing"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: pdf-processing
                     description: Extract text and tables from PDF files.
                     ---
 
                     # PDF Processing
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
 
@@ -57,15 +55,13 @@ class SkillRegistryTests(unittest.TestCase):
             skill_dir = root / "broken"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: broken
                     ---
 
                     # Broken
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
 
@@ -80,14 +76,12 @@ class SkillRegistryTests(unittest.TestCase):
             skill_dir.mkdir(parents=True)
             skill_file = skill_dir / "SKILL.md"
             skill_file.write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: excel
                     description: Analyze spreadsheets.
                     ---
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
 
@@ -105,20 +99,20 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertIn("excel: Analyze spreadsheets.", instruction)
         self.assertIn(skill_file.as_posix(), instruction)
 
-    def test_compose_system_instruction_parts_separates_behavior_and_skills(self) -> None:
+    def test_compose_system_instruction_parts_separates_behavior_and_skills(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             skill_dir = root / "excel"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: excel
                     description: Analyze spreadsheets.
                     ---
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
 
@@ -141,14 +135,12 @@ class SkillRegistryTests(unittest.TestCase):
             skill_dir = root / "excel"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: excel
                     description: Analyze spreadsheets.
                     ---
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
             manifests = SkillRegistry.discover(root)
@@ -170,14 +162,12 @@ class SkillRegistryTests(unittest.TestCase):
             skill_dir = root / "excel"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                textwrap.dedent(
-                    """\
+                textwrap.dedent("""\
                     ---
                     name: excel
                     description: Analyze spreadsheets.
                     ---
-                    """
-                ),
+                    """),
                 encoding="utf-8",
             )
             manifests = SkillRegistry.discover(root)
@@ -190,7 +180,9 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual("custom guidance text", parts.skills_guidance)
         self.assertIn("custom guidance text", parts.full_instruction)
 
-    def test_repo_local_skills_use_uppercase_entrypoints_and_trigger_descriptions(self) -> None:
+    def test_repo_local_skills_use_uppercase_entrypoints_and_trigger_descriptions(
+        self,
+    ) -> None:
         root = Path(__file__).resolve().parents[2] / ".agent" / "skills"
 
         for skill_dir in sorted(path for path in root.iterdir() if path.is_dir()):

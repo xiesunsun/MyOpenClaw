@@ -42,7 +42,6 @@ class ExtensionRegistry:
 
     hook_factories: list[Factory] = field(default_factory=list)
     recall_factories: list[Factory] = field(default_factory=list)
-    sync_factories: list[Factory] = field(default_factory=list)
     event_processors: list[EventProcessorRegistration] = field(default_factory=list)
     extension_names: list[str] = field(default_factory=list)
     mcp_status_source: McpStatusSource | None = None
@@ -56,9 +55,6 @@ class ExtensionRegistry:
 
     def recall_sources(self, scope: AgentScope) -> list[Any]:
         return self._evaluate(self.recall_factories, scope, "recall source")
-
-    def session_syncs(self, scope: AgentScope) -> list[Any]:
-        return self._evaluate(self.sync_factories, scope, "session sync")
 
     def add_event_processor(
         self,

@@ -1,9 +1,5 @@
 # src/pickel/shared/event_envelope.py
-"""事件信封：hook 与 runtime 事件共用的身份字段。
-
-放在 shared/ 而非 runs/：runs 依赖 hooks（react 调 lifecycle_hooks），
-hooks 若反向依赖 runs 会形成循环。
-"""
+"""Hook 与 Runtime Event 共用的 Operation 身份字段。"""
 
 from __future__ import annotations
 
@@ -18,12 +14,13 @@ def _now() -> datetime:
 
 @dataclass(frozen=True)
 class EventIdentity:
-    """一个事件是谁、属于哪个 turn、发生在何时。"""
+    """一个事件属于哪个 Operation/ModelStep、发生在何时。"""
 
     event_id: str = field(default_factory=lambda: str(uuid4()))
     session_id: str = ""
-    turn_id: str = ""
-    step_index: int | None = None
+    operation_id: str = ""
+    step_id: str | None = None
+    step_sequence: int | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

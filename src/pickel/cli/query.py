@@ -6,13 +6,13 @@ from collections.abc import Callable
 from typing import Literal, TextIO
 
 from pickel.app.conversation_runtime import ConversationRuntime
-from pickel.app.runtime_models import TurnRequest, TurnResult
+from pickel.app.runtime_models import AgentRunRequest, AgentRunResult
 from pickel.cli.query_output import (
     encode_event_jsonl,
     encode_result_json,
     encode_result_text,
 )
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_call_types import (
     CONFIRMATION_CALL,
     EXTERNAL_ACTION_CALL,
     STRUCTURED_INPUT_CALL,
@@ -20,7 +20,7 @@ from pickel.runs.host_call_types import (
     ExternalActionAnswer,
     StructuredInputAnswer,
 )
-from pickel.runs.host_calls import HostCallHandlerLease
+from pickel.runtime.host_calls import HostCallHandlerLease
 
 OutputFormat = Literal["text", "json", "jsonl"]
 
@@ -56,14 +56,14 @@ class QuerySurface:
         self,
         *,
         conversation: ConversationRuntime,
-        request: TurnRequest,
-    ) -> TurnResult:
+        request: AgentRunRequest,
+    ) -> AgentRunResult:
         leases = NonInteractiveHostCalls.attach(conversation)
         unsubscribe: Callable[[], None] | None = None
         if self.output_format == "jsonl":
             unsubscribe = conversation.subscribe(self._write_event)
         try:
-            result = await conversation.turn(request)
+            result = await conversation.start_agent_run(request)
             conversation.flush()
             if self.output_format == "text":
                 text = encode_result_text(result)

@@ -49,7 +49,7 @@ class PostToolBatchEvent(HookEventBase):
 
 
 @dataclass(frozen=True)
-class TurnEndEvent(HookEventBase):
+class AgentRunEndEvent(HookEventBase):
     reason: str = "completed"
 
 

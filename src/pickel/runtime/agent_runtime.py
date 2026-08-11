@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.agent_message import ToolResultMessage, UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.operation_service import AcceptedAgentRun, OperationService
 from pickel.hooks.events import UserPromptSubmitEvent
 from pickel.runtime.operation_driver import (
     OperationDriveResult,
     OperationDriver,
+    OperationProgressConsumer,
     StreamDeltaConsumer,
 )
 from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.runtime_effects import RuntimeEffects
-from pickel.runs.host_calls import HostCallClient
+from pickel.runtime.host_calls import HostCallClient
+from pickel.tools.base import ToolExecutionResult
 
 
 class AgentRunBlockedError(RuntimeError):
@@ -46,6 +49,7 @@ class AgentRuntime:
         user_message: UserMessage,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_progress: OperationProgressConsumer | None = None,
     ) -> OperationDriveResult:
         accepted = await self.accept_agent_run(
             session_id=session_id,
@@ -55,6 +59,7 @@ class AgentRuntime:
             accepted.operation.operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,
+            consume_progress=consume_progress,
         )
 
     async def accept_agent_run(
@@ -96,11 +101,13 @@ class AgentRuntime:
         *,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_progress: OperationProgressConsumer | None = None,
     ) -> OperationDriveResult:
         return await self._operation_driver.drive_operation(
             operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,
+            consume_progress=consume_progress,
         )
 
     async def resume_operation(
@@ -109,6 +116,7 @@ class AgentRuntime:
         *,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_progress: OperationProgressConsumer | None = None,
     ) -> OperationDriveResult:
         operation = self._operation_service.load_session_operation(operation_id)
         if (
@@ -120,6 +128,36 @@ class AgentRuntime:
             operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,
+            consume_progress=consume_progress,
+        )
+
+    def record_reconciled_tool_result(
+        self,
+        *,
+        operation_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        result: ToolExecutionResult,
+    ) -> None:
+        """由 Host 显式提交已核实结果；Runtime 不会猜测或重放未知工具。"""
+        content = list(result.content_blocks)
+        if not content:
+            content.append(TextBlock(text=result.content))
+        self._operation_service.record_reconciled_tool_result(
+            operation_id=operation_id,
+            result_message=ToolResultMessage(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                content=content,
+                is_error=result.is_error,
+                structured_content=result.structured_content,
+            ),
+        )
+
+    def cancel_operation(self, operation_id: str, *, reason: str) -> None:
+        self._operation_service.cancel_agent_run(
+            operation_id=operation_id,
+            reason=reason,
         )
 
     async def start_delegated_run(
@@ -131,6 +169,7 @@ class AgentRuntime:
         parent_tool_call_id: str | None = None,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_progress: OperationProgressConsumer | None = None,
     ) -> OperationDriveResult:
         accepted = self._operation_service.start_delegated_run(
             agent_package_version_id=(
@@ -145,4 +184,5 @@ class AgentRuntime:
             accepted.accepted_run.operation.operation_id,
             host_calls=host_calls,
             consume_delta=consume_delta,
+            consume_progress=consume_progress,
         )

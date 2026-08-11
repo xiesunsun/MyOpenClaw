@@ -17,7 +17,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.providers.anthropic import AnthropicProvider
 from pickel.providers.gemini import GeminiProvider
 
@@ -26,14 +26,14 @@ def _sample_tool_history_context() -> ModelContext:
     return ModelContext(
         system=SystemContent.from_text("you are pickle"),
         messages=[
-            UserMessage(content=[TextContent(text="list files")]),
+            UserMessage(content=[TextBlock(text="list files")]),
             AssistantMessage(
                 content=[
-                    TextContent(text="I'll list."),
-                    ToolCallContent(
+                    TextBlock(text="I'll list."),
+                    ToolCallBlock(
                         id="c1", name="list_directory", arguments={"path": "."}
                     ),
-                    ToolCallContent(
+                    ToolCallBlock(
                         id="c2", name="read_file", arguments={"path": "a.py"}
                     ),
                 ]
@@ -41,14 +41,14 @@ def _sample_tool_history_context() -> ModelContext:
             ToolResultMessage(
                 tool_call_id="c1",
                 tool_name="list_directory",
-                content=[TextContent(text="a.py\nb.py")],
+                content=[TextBlock(text="a.py\nb.py")],
             ),
             ToolResultMessage(
                 tool_call_id="c2",
                 tool_name="read_file",
-                content=[TextContent(text="print(1)")],
+                content=[TextBlock(text="print(1)")],
             ),
-            AssistantMessage(content=[TextContent(text="done")]),
+            AssistantMessage(content=[TextBlock(text="done")]),
         ],
         tools=[
             ToolDefinition(
@@ -69,7 +69,7 @@ class ModelContextGenerateTests(unittest.TestCase):
     def test_both_providers_accept_same_model_context_structure(self) -> None:
         context = ModelContext(
             system=SystemContent.from_text("sys"),
-            messages=[UserMessage(content=[TextContent(text="hi")])],
+            messages=[UserMessage(content=[TextBlock(text="hi")])],
             tools=[
                 ToolDefinition(
                     name="echo",

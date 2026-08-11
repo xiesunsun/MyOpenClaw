@@ -10,7 +10,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import (
     ConversationNotFoundError,
     ConversationService,
@@ -37,18 +37,18 @@ def test_create_and_append_messages_through_single_transaction_path(
 
     user_entry = service.append_user_message(
         session_id=session.session_id,
-        message=UserMessage(content=[TextContent(text="hello")]),
+        message=UserMessage(content=[TextBlock(text="hello")]),
     )
     assistant_entry = service.append_assistant_message(
         session_id=session.session_id,
-        message=AssistantMessage(content=[TextContent(text="hi")]),
+        message=AssistantMessage(content=[TextBlock(text="hi")]),
     )
     tool_entry = service.append_tool_result_message(
         session_id=session.session_id,
         message=ToolResultMessage(
             tool_call_id="call-1",
             tool_name="echo",
-            content=[TextContent(text="done")],
+            content=[TextBlock(text="done")],
         ),
     )
 
@@ -72,11 +72,11 @@ def test_move_active_branch_creates_reference_version_without_new_node(
     session = service.create_conversation_session(agent_id="Pickle")
     first = service.append_user_message(
         session_id=session.session_id,
-        message=UserMessage(content=[TextContent(text="first")]),
+        message=UserMessage(content=[TextBlock(text="first")]),
     )
     service.append_assistant_message(
         session_id=session.session_id,
-        message=AssistantMessage(content=[TextContent(text="discarded branch")]),
+        message=AssistantMessage(content=[TextBlock(text="discarded branch")]),
     )
 
     moved = service.move_active_branch_to(
@@ -85,7 +85,7 @@ def test_move_active_branch_creates_reference_version_without_new_node(
     )
     replacement = service.append_assistant_message(
         session_id=session.session_id,
-        message=AssistantMessage(content=[TextContent(text="replacement")]),
+        message=AssistantMessage(content=[TextBlock(text="replacement")]),
     )
 
     entries = service.list_active_branch_entries(session_id=session.session_id)
@@ -140,7 +140,7 @@ def test_preview_archive_and_delete_use_conversation_facts(tmp_path: Path) -> No
     )
     service.append_user_message(
         session_id=session.session_id,
-        message=UserMessage(content=[TextContent(text="hello")]),
+        message=UserMessage(content=[TextBlock(text="hello")]),
     )
     service.append_host_call_request(
         session_id=session.session_id,
@@ -148,7 +148,7 @@ def test_preview_archive_and_delete_use_conversation_facts(tmp_path: Path) -> No
     )
     service.append_assistant_message(
         session_id=session.session_id,
-        message=AssistantMessage(content=[TextContent(text="final answer")]),
+        message=AssistantMessage(content=[TextBlock(text="final answer")]),
     )
 
     previews = service.list_conversation_previews(cwd=str(tmp_path))

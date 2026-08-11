@@ -223,9 +223,7 @@ class MigrateFromYamlTests(unittest.TestCase):
             config_path = project / "config.yaml"
             self._write_yaml(config_path, self._minimal_yaml())
 
-            summary = migrate_from_yaml(
-                config_path, home=home, project_root=project
-            )
+            summary = migrate_from_yaml(config_path, home=home, project_root=project)
 
             auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
             self.assertEqual("keep-me", auth["providers"]["anthropic"]["api_key"])
@@ -233,9 +231,7 @@ class MigrateFromYamlTests(unittest.TestCase):
                 "https://keep.example",
                 auth["providers"]["anthropic"]["api_base"],
             )
-            self.assertEqual(
-                "keep-ov", auth["extensions"]["openviking"]["user_key"]
-            )
+            self.assertEqual("keep-ov", auth["extensions"]["openviking"]["user_key"])
             # 未冲突的 openviking 键可补入
             self.assertEqual(
                 "${OPENVIKING_BASE_URL}",
@@ -272,8 +268,7 @@ class MigrateFromYamlTests(unittest.TestCase):
             legacy_dir.mkdir(parents=True)
             legacy_db = legacy_dir / "sessions.db"
             with sqlite3.connect(legacy_db) as conn:
-                conn.executescript(
-                    """
+                conn.executescript("""
                     PRAGMA user_version = 3;
                     CREATE TABLE sessions (
                         session_id TEXT PRIMARY KEY,
@@ -291,14 +286,11 @@ class MigrateFromYamlTests(unittest.TestCase):
                         '2026-01-01T00:00:00+00:00',
                         'active', NULL
                     );
-                    """
-                )
+                    """)
             config_path = project / "config.yaml"
             self._write_yaml(config_path, self._minimal_yaml())
 
-            summary = migrate_from_yaml(
-                config_path, home=home, project_root=project
-            )
+            summary = migrate_from_yaml(config_path, home=home, project_root=project)
 
             global_db = home / "sessions.db"
             self.assertTrue(global_db.is_file())

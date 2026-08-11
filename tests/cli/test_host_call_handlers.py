@@ -1,15 +1,15 @@
 import unittest
 
 from pickel.cli.host_call_handlers import CliHostCallHandlers
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_call_types import (
     CONFIRMATION_CALL,
     STRUCTURED_INPUT_CALL,
     ConfirmationRequest,
     HostCallSource,
     StructuredInputRequest,
 )
-from pickel.runs.host_calls import HostCallCompleted, HostCallContext
-from pickel.runs.runtime_bus import RuntimeBus
+from pickel.runtime.host_calls import HostCallCompleted, HostCallContext
+from pickel.runtime.runtime_bus import RuntimeBus
 
 
 class CliHostCallHandlersTests(unittest.IsolatedAsyncioTestCase):

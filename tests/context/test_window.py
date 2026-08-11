@@ -8,21 +8,21 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextContent, ToolCallContent
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 
 
 def _user(text: str) -> UserMessage:
-    return UserMessage(content=[TextContent(text=text)])
+    return UserMessage(content=[TextBlock(text=text)])
 
 
 def _assistant_text(text: str) -> AssistantMessage:
-    return AssistantMessage(content=[TextContent(text=text)])
+    return AssistantMessage(content=[TextBlock(text=text)])
 
 
 def _assistant_tools(*call_ids: str) -> AssistantMessage:
     return AssistantMessage(
         content=[
-            ToolCallContent(id=call_id, name="tool", arguments={}) for call_id in call_ids
+            ToolCallBlock(id=call_id, name="tool", arguments={}) for call_id in call_ids
         ]
     )
 
@@ -31,7 +31,7 @@ def _tool_result(call_id: str, text: str = "ok") -> ToolResultMessage:
     return ToolResultMessage(
         tool_call_id=call_id,
         tool_name="tool",
-        content=[TextContent(text=text)],
+        content=[TextBlock(text=text)],
     )
 
 
@@ -68,7 +68,7 @@ def test_apply_window_never_splits_tool_call_from_results():
 
     assert len(windowed) == 3
     assert isinstance(windowed[0], AssistantMessage)
-    assert any(isinstance(b, ToolCallContent) for b in windowed[0].content)
+    assert any(isinstance(b, ToolCallBlock) for b in windowed[0].content)
     assert isinstance(windowed[1], ToolResultMessage)
     assert windowed[1].tool_call_id == "c1"
     assert isinstance(windowed[2], AssistantMessage)

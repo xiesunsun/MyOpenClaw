@@ -35,7 +35,6 @@ class OpenVikingSetupTests(unittest.TestCase):
         setup(host)
 
         self.assertEqual([], registry.recall_factories)
-        self.assertEqual([], registry.sync_factories)
 
     def test_registers_nothing_when_disabled(self) -> None:
         host, registry = _host({**_MINIMAL, "enabled": False})
@@ -43,14 +42,6 @@ class OpenVikingSetupTests(unittest.TestCase):
         setup(host)
 
         self.assertEqual([], registry.recall_factories)
-        self.assertEqual([], registry.sync_factories)
-
-    def test_registers_sync_when_enabled(self) -> None:
-        host, registry = _host({**_MINIMAL, "enabled": True})
-
-        setup(host)
-
-        self.assertEqual(1, len(registry.sync_factories))
 
     def test_recall_factory_registered_only_when_session_recall_enabled(self) -> None:
         host_off, registry_off = _host(
@@ -67,7 +58,9 @@ class OpenVikingSetupTests(unittest.TestCase):
         self.assertEqual(1, len(registry_on.recall_factories))
 
     def test_factory_returns_none_for_agent_without_remote_id(self) -> None:
-        host, registry = _host({**_MINIMAL, "enabled": True})
+        host, registry = _host(
+            {**_MINIMAL, "enabled": True, "session_recall": {"enabled": True}}
+        )
         setup(host)
 
         app_config = SimpleNamespace(
@@ -78,7 +71,7 @@ class OpenVikingSetupTests(unittest.TestCase):
         )
         scope = SimpleNamespace(agent_id="Pickle", app_config=app_config)
 
-        self.assertIsNone(registry.sync_factories[0](scope))
+        self.assertIsNone(registry.recall_factories[0](scope))
 
 
 if __name__ == "__main__":

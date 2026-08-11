@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pickel.conversations.content_blocks import (
     AssistantContent,
-    ContentBlock,
+    MessageBlock,
     ToolResultContent,
     UserContent,
     content_blocks_from_list,
@@ -209,7 +209,7 @@ def agent_message_from_dict(data: dict[str, Any]) -> AgentMessage:
     raise ValueError(f"未知 AgentMessage role: {role!r}")
 
 
-def _as_user_content(blocks: list[ContentBlock]) -> list[UserContent]:
+def _as_user_content(blocks: list[MessageBlock]) -> list[UserContent]:
     result: list[UserContent] = []
     for block in blocks:
         if not isinstance(block, UserContent):
@@ -218,7 +218,7 @@ def _as_user_content(blocks: list[ContentBlock]) -> list[UserContent]:
     return result
 
 
-def _as_assistant_content(blocks: list[ContentBlock]) -> list[AssistantContent]:
+def _as_assistant_content(blocks: list[MessageBlock]) -> list[AssistantContent]:
     result: list[AssistantContent] = []
     for block in blocks:
         if not isinstance(block, AssistantContent):
@@ -229,7 +229,7 @@ def _as_assistant_content(blocks: list[ContentBlock]) -> list[AssistantContent]:
     return result
 
 
-def _as_tool_result_content(blocks: list[ContentBlock]) -> list[ToolResultContent]:
+def _as_tool_result_content(blocks: list[MessageBlock]) -> list[ToolResultContent]:
     result: list[ToolResultContent] = []
     for block in blocks:
         if not isinstance(block, ToolResultContent):

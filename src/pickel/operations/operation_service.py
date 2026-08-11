@@ -339,6 +339,32 @@ class OperationService:
                 result.append((operation, state))
         return result
 
+    def record_reconciled_tool_result(
+        self,
+        *,
+        operation_id: str,
+        result_message: ToolResultMessage,
+    ) -> AgentRunProgressCommit:
+        """原子记录 Host 已核实的未知 ToolCall 结果，并解除 waiting。"""
+        state = self.load_agent_run_state(operation_id)
+        result_node_id = self._node_id_factory()
+        next_state = self._state_machine.record_reconciled_tool_call(
+            state,
+            tool_call_id=result_message.tool_call_id,
+            result_message_node_id=result_node_id,
+            is_error=result_message.is_error,
+        )
+        return self.commit_agent_run_state(
+            state=next_state,
+            appended_message=result_message,
+            appended_message_node_id=result_node_id,
+        )
+
+    def cancel_agent_run(self, *, operation_id: str, reason: str) -> AgentRunState:
+        state = self.load_agent_run_state(operation_id)
+        next_state = self._state_machine.cancel_agent_run(state, reason=reason)
+        return self.commit_agent_run_state(state=next_state).state
+
     def commit_agent_run_state(
         self,
         *,

@@ -21,7 +21,7 @@ class ToolTiming:
 
 
 @dataclass(frozen=True)
-class TurnMarker:
+class AgentRunMarker:
     started_at: str | None
     failed: dict[str, str] | None
     interrupted: bool
@@ -32,8 +32,8 @@ class TurnMarker:
 @dataclass(frozen=True)
 class TraceEnhancement:
     tool_timings: dict[str, ToolTiming] = field(default_factory=dict)
-    turn_markers: list[TurnMarker] = field(default_factory=list)
-    # 按 turn_started 分组的 request_digest 序列;digest 本身即摘要
+    agent_run_markers: list[AgentRunMarker] = field(default_factory=list)
+    # 按 agent_run_started 分组；digest 本身即摘要
     # (长度/名称/条数),发射端(RequestDigestEvent)保证无正文。
     request_digests: list[list[dict]] = field(default_factory=list)
     request_snapshots: list[list[dict]] = field(default_factory=list)
@@ -65,27 +65,31 @@ def read_trace(path: Path) -> TraceEnhancement | None:
             event.get("payload"), dict
         ):
             span = dict(event["payload"])
-            span["_turn_id"] = event.get("turn_id")
+            span["_operation_id"] = event.get("operation_id")
             spans.append(span)
             continue
 
         if event.get("record_type") == "request_snapshot" and isinstance(
             event.get("payload"), dict
         ):
-            turn_id = str(event.get("turn_id") or "")
+            operation_id = str(event.get("operation_id") or "")
             marker = next(
-                (item for item in reversed(markers) if item.turn_id == turn_id),
+                (
+                    item
+                    for item in reversed(markers)
+                    if item.operation_id == operation_id
+                ),
                 None,
             )
             if marker is not None:
                 marker.snapshots.append(dict(event["payload"]))
             continue
 
-        if event_type == "turn_started":
+        if event_type == "agent_run_started":
             markers.append(
                 _MarkerBuilder(
                     started_at=occurred_at,
-                    turn_id=str(event.get("turn_id") or ""),
+                    operation_id=str(event.get("operation_id") or ""),
                 )
             )
         elif event_type == "tool_call_started":
@@ -101,23 +105,23 @@ def read_trace(path: Path) -> TraceEnhancement | None:
                     completed_at=occurred_at,
                     duration_ms=_duration_ms(begin, occurred_at),
                 )
-        elif event_type == "turn_failed" and markers:
+        elif event_type == "agent_run_failed" and markers:
             markers[-1].failed = {
                 "error_type": str(event.get("error_type") or ""),
                 "message": str(event.get("message") or ""),
             }
-        elif event_type == "turn_interrupted" and markers:
+        elif event_type == "agent_run_interrupted" and markers:
             markers[-1].interrupted = True
         elif event_type == "request_digest" and markers:
             markers[-1].digests.append(_digest_fields(event))
 
-    turn_spans = {
-        str(span.get("_turn_id") or ""): span
+    agent_run_spans = {
+        str(span.get("_operation_id") or ""): span
         for span in spans
-        if span.get("name") == "pickel.turn"
+        if span.get("name") == "pickel.agent_run"
     }
     for marker in markers:
-        span = turn_spans.get(marker.turn_id)
+        span = agent_run_spans.get(marker.operation_id)
         if span is not None:
             duration = span.get("duration_ms")
             marker.duration_ms = (
@@ -145,7 +149,7 @@ def read_trace(path: Path) -> TraceEnhancement | None:
 
     return TraceEnhancement(
         tool_timings=timings,
-        turn_markers=[builder.freeze() for builder in markers],
+        agent_run_markers=[builder.freeze() for builder in markers],
         request_digests=[builder.digests for builder in markers],
         request_snapshots=[builder.snapshots for builder in markers],
         metrics=_build_metrics(spans),
@@ -172,12 +176,12 @@ def _trace_lines(files: list[Path]):
 
 def _build_metrics(spans: list[dict]) -> dict:
     groups = {
-        "turn": "pickel.turn",
+        "agent_run": "pickel.agent_run",
         "provider": "pickel.provider.request",
         "tool": "pickel.tool.execute",
         "hook": "pickel.hook.",
         "context": "pickel.model_context.build",
-        "storage": "pickel.session.append",
+        "storage": "pickel.storage.commit",
     }
     result: dict[str, dict] = {}
     for label, name in groups.items():
@@ -241,9 +245,9 @@ def _percentiles(values: list[float]) -> dict[str, float | None]:
 
 
 class _MarkerBuilder:
-    def __init__(self, *, started_at: str | None, turn_id: str = "") -> None:
+    def __init__(self, *, started_at: str | None, operation_id: str = "") -> None:
         self.started_at = started_at
-        self.turn_id = turn_id
+        self.operation_id = operation_id
         self.failed: dict[str, str] | None = None
         self.interrupted = False
         self.digests: list[dict] = []
@@ -251,8 +255,8 @@ class _MarkerBuilder:
         self.duration_ms: int | None = None
         self.outcome: str | None = None
 
-    def freeze(self) -> TurnMarker:
-        return TurnMarker(
+    def freeze(self) -> AgentRunMarker:
+        return AgentRunMarker(
             started_at=self.started_at,
             failed=self.failed,
             interrupted=self.interrupted,

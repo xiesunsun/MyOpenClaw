@@ -8,8 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
-from pickel.agents.agent import Agent
-from pickel.agents.skills import SkillManifest
+from pickel.shared.model_config import ModelConfig
 from pickel.tools.bus import ToolSnapshot
 
 
@@ -105,11 +104,9 @@ class AgentPackageVersion:
 class LoadedAgentPackage:
     """不可持久化的运行期加载结果。"""
 
-    definition: AgentDefinition
     version: AgentPackageVersion
-    agent: Agent
+    model_config: ModelConfig
     tool_snapshot: ToolSnapshot
-    skill_manifests: tuple[SkillManifest, ...]
 
 
 def agent_package_digest(content: dict[str, Any]) -> str:

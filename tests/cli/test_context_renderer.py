@@ -5,7 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 
 from pickel.cli.context_renderer import ContextRenderer
-from pickel.runs.measure import ContextCategory, ContextDetail, ContextUsage
+from pickel.context.context_usage import ContextCategory, ContextUsage
 
 
 def _usage(
@@ -21,20 +21,16 @@ def _usage(
         total_source=source,  # type: ignore[arg-type]
         max_input_tokens=max_input,
         categories=[
-            ContextCategory(key="behavior", label="System prompt", tokens=100),
-            ContextCategory(key="skills_guidance", label="Skills guidance", tokens=50),
+            ContextCategory(key="behavior", tokens=100),
+            ContextCategory(key="skills_guidance", tokens=50),
             ContextCategory(
                 key="skills_catalog",
-                label="Skills catalog",
                 tokens=200,
-                details=[
-                    ContextDetail(label="- skill-a", tokens=100),
-                    ContextDetail(label="- skill-b", tokens=100),
-                ],
+                details=("- skill-a", "- skill-b"),
             ),
-            ContextCategory(key="messages", label="Messages", tokens=1000),
-            ContextCategory(key="tools", label="Tools", tokens=1000),
-            ContextCategory(key="other", label="Other", tokens=140),
+            ContextCategory(key="messages", tokens=1000),
+            ContextCategory(key="tools", tokens=1000),
+            ContextCategory(key="other", tokens=140),
         ],
         free_tokens=free,
     )

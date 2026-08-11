@@ -27,9 +27,7 @@ def write_layered_home(
     import json
 
     home.mkdir(parents=True, exist_ok=True)
-    (home / "settings.json").write_text(
-        json.dumps(settings), encoding="utf-8"
-    )
+    (home / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
     if models is not None:
         (home / "models.json").write_text(json.dumps(models), encoding="utf-8")
     if auth is not None:

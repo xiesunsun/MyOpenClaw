@@ -62,7 +62,9 @@ class ToolBusRegistrationTests(unittest.TestCase):
     def test_same_origin_across_mcp_and_extension_does_not_collide(self) -> None:
         bus = ToolBus()
 
-        mcp_name = bus.register(_stub_tool("run"), source=ToolSource.MCP, origin="shared")
+        mcp_name = bus.register(
+            _stub_tool("run"), source=ToolSource.MCP, origin="shared"
+        )
         ext_name = bus.register(
             _stub_tool("run"), source=ToolSource.EXTENSION, origin="shared"
         )
@@ -79,7 +81,9 @@ class ToolBusRegistrationTests(unittest.TestCase):
 
     def test_same_source_and_origin_overwrites_and_keeps_enabled_flag(self) -> None:
         bus = ToolBus()
-        name = bus.register(_stub_tool("create_issue"), source=ToolSource.MCP, origin="github")
+        name = bus.register(
+            _stub_tool("create_issue"), source=ToolSource.MCP, origin="github"
+        )
         bus.set_enabled(name, False)
 
         replacement = _stub_tool("create_issue")

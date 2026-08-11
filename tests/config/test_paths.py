@@ -7,7 +7,7 @@ from unittest.mock import patch
 from pickel.config.paths import (
     discover_project_root,
     home_dir,
-    sessions_db_path,
+    runtime_db_path,
 )
 
 
@@ -24,11 +24,11 @@ class PathsTests(unittest.TestCase):
             with patch.dict(os.environ, {"PICKEL_HOME": str(override)}):
                 self.assertEqual(override, home_dir())
 
-    def test_sessions_db_path_is_under_home_dir(self) -> None:
+    def test_runtime_db_path_is_under_home_dir(self) -> None:
         with TemporaryDirectory() as tmpdir:
             override = Path(tmpdir) / "pickel-home"
             with patch.dict(os.environ, {"PICKEL_HOME": str(override)}):
-                self.assertEqual(override / "sessions.db", sessions_db_path())
+                self.assertEqual(override / "runtime.db", runtime_db_path())
 
     def test_discover_project_root_finds_dot_pickel(self) -> None:
         with TemporaryDirectory() as tmpdir:

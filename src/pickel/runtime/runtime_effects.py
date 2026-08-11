@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing, nullcontext
@@ -12,22 +13,35 @@ from typing import Any
 
 from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
+    AgentMessage,
     AssistantMessage,
     ModelResponseMetadata,
     ToolResultMessage,
 )
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.operation_service import (
     AgentRunProgressCommit,
     OperationService,
 )
+from pickel.observe.records import (
+    ErrorInfo,
+    ObservationIdentity,
+    RequestSnapshotRecord,
+    SpanTimer,
+    observation_requested,
+    record_request_snapshot,
+)
 from pickel.providers.stream import StreamCompleted, StreamDelta
-from pickel.runs.host_calls import HostCallClient
+from pickel.runtime.host_calls import HostCallClient
 from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.tool_call_executor import ToolCallExecutor
 from pickel.tools.base import ToolExecutionResult
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 
 class ModelExecutionBoundaryError(RuntimeError):
@@ -66,11 +80,21 @@ class RuntimeEffects:
         appended_message: AssistantMessage | ToolResultMessage | None = None,
         appended_message_node_id: str | None = None,
     ) -> AgentRunProgressCommit:
-        return self._operation_service.commit_agent_run_state(
-            state=state,
-            appended_message=appended_message,
-            appended_message_node_id=appended_message_node_id,
-        )
+        timer = SpanTimer("pickel.storage.commit", self._identity(state))
+        try:
+            committed = self._operation_service.commit_agent_run_state(
+                state=state,
+                appended_message=appended_message,
+                appended_message_node_id=appended_message_node_id,
+            )
+        except Exception as exc:
+            timer.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="storage"),
+            )
+            raise
+        timer.finish(attributes={"revision": state.revision})
+        return committed
 
     async def invoke_hook(self, hook_name: str, event: Any) -> Any:
         """Lifecycle Hook 的唯一执行边界。"""
@@ -81,6 +105,36 @@ class RuntimeEffects:
         if inspect.isawaitable(result):
             return await result
         return result
+
+    async def retrieve_recall_messages(
+        self,
+        *,
+        session_id: str,
+        visible_messages: list[AgentMessage],
+    ) -> list[AgentMessage]:
+        """在统一执行边界调用可选外部召回源；单源失败不阻断 AgentRun。"""
+        current_user_text = self._latest_user_text(visible_messages)
+        recalled: list[AgentMessage] = []
+        for source in self._bindings.recall_sources:
+            timer = SpanTimer(
+                "pickel.recall.retrieve",
+                ObservationIdentity(session_id=session_id),
+                attributes={"source": type(source).__name__},
+            )
+            try:
+                messages = await source.provide(
+                    session_id=session_id,
+                    current_user_text=current_user_text,
+                )
+                recalled.extend(messages)
+                timer.finish(attributes={"message_count": len(messages)})
+            except Exception as exc:
+                timer.finish(
+                    status="error",
+                    error=ErrorInfo.from_exception(exc, kind="recall"),
+                )
+                logger.exception("Recall source %s failed", type(source).__name__)
+        return recalled
 
     async def execute_model_request(
         self,
@@ -98,6 +152,26 @@ class RuntimeEffects:
             raise ModelExecutionBoundaryError(
                 "Provider 请求必须先持久化 model_request_intent_recorded: " f"{phase}"
             )
+        identity = self._identity(state)
+        timer = SpanTimer(
+            "pickel.provider.request",
+            identity,
+            attributes={
+                "provider": self._bindings.agent_package_version.model.provider,
+                "model": self._bindings.agent_package_version.model.model,
+            },
+        )
+        if observation_requested("request_snapshot"):
+            snapshot = self._bindings.provider.request_snapshot(model_context)
+            if snapshot is not None:
+                record_request_snapshot(
+                    RequestSnapshotRecord(
+                        provider=self._bindings.agent_package_version.model.provider,
+                        model=self._bindings.agent_package_version.model.model,
+                        request=snapshot,
+                        identity=identity,
+                    )
+                )
         started = time.perf_counter()
         first_delta_ms: list[float | None] = [None]
         coroutine = self._consume_provider_stream(
@@ -106,10 +180,19 @@ class RuntimeEffects:
             started=started,
             first_delta_ms=first_delta_ms,
         )
-        assistant = await asyncio.wait_for(
-            coroutine,
-            timeout=self._bindings.provider_timeout_seconds,
-        )
+        try:
+            assistant = await asyncio.wait_for(
+                coroutine,
+                timeout=self._bindings.provider_timeout_seconds,
+            )
+        except BaseException as exc:
+            timer.finish(
+                status=(
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                ),
+                error=ErrorInfo.from_exception(exc, kind="provider"),
+            )
+            raise
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         metadata = assistant.metadata or ModelResponseMetadata(
             provider=self._bindings.agent_package_version.model.provider,
@@ -127,6 +210,20 @@ class RuntimeEffects:
                 context_fingerprint=context_fingerprint,
                 hook_injected_chars=max(0, hook_injected_chars),
             ),
+        )
+        usage = assistant.metadata.usage if assistant.metadata is not None else None
+        timer.finish(
+            attributes={
+                "ttft_ms": first_delta_ms[0],
+                "input_tokens": usage.input_tokens if usage is not None else None,
+                "output_tokens": usage.output_tokens if usage is not None else None,
+                "cache_read_tokens": (
+                    usage.cache_read_tokens if usage is not None else None
+                ),
+                "cache_write_tokens": (
+                    usage.cache_write_tokens if usage is not None else None
+                ),
+            }
         )
         return ModelRequestResult(
             assistant_message=assistant,
@@ -160,14 +257,37 @@ class RuntimeEffects:
                 f"AgentRunState 不包含 ToolCall: {tool_call_id}"
             )
         operation = self._operation_service.load_session_operation(state.operation_id)
-        return await self._tool_call_executor.execute_tool_call(
-            tool_call=tool_call,
-            session_id=operation.session_id,
-            operation_id=operation.operation_id,
-            step_id=step.step_id,
-            step_sequence=step.step_sequence,
-            host_calls=host_calls,
+        timer = SpanTimer(
+            "pickel.tool.execute",
+            self._identity(state),
+            attributes={
+                "tool_call_id": tool_call.tool_call_id,
+                "tool_name": tool_call.tool_name,
+            },
         )
+        try:
+            result = await self._tool_call_executor.execute_tool_call(
+                tool_call=tool_call,
+                session_id=operation.session_id,
+                operation_id=operation.operation_id,
+                step_id=step.step_id,
+                step_sequence=step.step_sequence,
+                host_calls=host_calls,
+            )
+        except BaseException as exc:
+            timer.finish(
+                status=(
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                ),
+                error=ErrorInfo.from_exception(exc, kind="tool"),
+            )
+            raise
+        timer.finish(
+            status=("error" if result.is_error else "ok"),
+            attributes={"is_error": result.is_error},
+            error=result.error,
+        )
+        return result
 
     def _require_persisted_state(self, state: AgentRunState) -> None:
         persisted = self._operation_service.load_agent_run_state(state.operation_id)
@@ -176,6 +296,16 @@ class RuntimeEffects:
                 "真实副作用只能从当前已持久化 AgentRunState 执行: "
                 f"operation={state.operation_id}, revision={state.revision}"
             )
+
+    def _identity(self, state: AgentRunState) -> ObservationIdentity:
+        step = state.current_step
+        operation = self._operation_service.load_session_operation(state.operation_id)
+        return ObservationIdentity(
+            session_id=operation.session_id,
+            operation_id=state.operation_id,
+            step_id=step.step_id if step is not None else None,
+            step_sequence=step.step_sequence if step is not None else None,
+        )
 
     async def _consume_provider_stream(
         self,
@@ -201,3 +331,17 @@ class RuntimeEffects:
                 if isinstance(delta, StreamCompleted):
                     return delta.message
         raise ValueError("Provider stream 未以 StreamCompleted 收尾")
+
+    @staticmethod
+    def _latest_user_text(messages: list[AgentMessage]) -> str:
+        for message in reversed(messages):
+            if not isinstance(message, UserMessage):
+                continue
+            parts = [
+                block.text
+                for block in message.content
+                if isinstance(block, TextBlock) and block.text
+            ]
+            if parts:
+                return "\n".join(parts)
+        return ""

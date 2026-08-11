@@ -7,7 +7,7 @@ from dataclasses import replace
 import jsonschema
 import mcp.types
 
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_call_types import (
     EXTERNAL_ACTION_CALL,
     STRUCTURED_INPUT_CALL,
     ExternalActionAnswer,
@@ -16,7 +16,7 @@ from pickel.runs.host_call_types import (
     StructuredInputAnswer,
     StructuredInputRequest,
 )
-from pickel.runs.host_calls import (
+from pickel.runtime.host_calls import (
     HostCallClient,
     HostCallCompleted,
     HostCallContext,

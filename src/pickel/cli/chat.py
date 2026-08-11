@@ -12,8 +12,8 @@ from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import (
     ConversationRequest,
     McpServerInfo,
-    TurnRequest,
-    TurnResult,
+    AgentRunRequest,
+    AgentRunResult,
 )
 from pickel.cli.context_renderer import ContextRenderer
 from pickel.cli.audio_output_handler import CliAudioOutputHandler
@@ -27,13 +27,13 @@ from pickel.cli.slash import (
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.skills.store import SkillStoreError
 from pickel.cli.event_renderer import ChatEventRenderer
 from pickel.cli.prompt_input import PromptToolkitInputReader
 from pickel.cli.render.message import render_error, render_header, render_system
-from pickel.runs.event_bus import EventBus
+from pickel.runtime.event_bus import EventBus
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -87,12 +87,12 @@ class ChatLoop:
 
     # Surface 只读取 Conversation 状态，不持有第二份副本。
     @property
-    def agent(self):
-        return self._conversation.agent
+    def agent_definition(self):
+        return self._conversation.agent_definition
 
     @property
     def agent_id(self) -> str:
-        return self.agent.agent_id
+        return self.agent_definition.agent_id
 
     @property
     def session(self) -> ConversationSession:
@@ -119,10 +119,10 @@ class ChatLoop:
     async def handle_user_input(
         self,
         text: str,
-    ) -> TurnResult:
-        return await self._conversation.turn(
-            TurnRequest(
-                message=UserMessage(content=[TextContent(text=text)]),
+    ) -> AgentRunResult:
+        return await self._conversation.start_agent_run(
+            AgentRunRequest(
+                message=UserMessage(content=[TextBlock(text=text)]),
             )
         )
 
@@ -140,7 +140,8 @@ class ChatLoop:
             # usage=None 时 footer 退到这个 label；agent.model_config 在
             # /model 切换时被 run 原地更新（run.py），每轮取即最新
             fallback_model_label=(
-                f"{self.agent.model_config.provider} / {self.agent.model_config.model}"
+                f"{self._conversation.model_config.provider} / "
+                f"{self._conversation.model_config.model}"
             ),
         )
         unsubscribe = self._conversation.subscribe(renderer.handle_event)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.hooks.decisions import UserPromptSubmitDecision
 from pickel.runtime.agent_runtime import AgentRunBlockedError, AgentRuntime
 
@@ -49,7 +49,7 @@ def test_agent_runtime_persists_input_hook_feedback_with_acceptance() -> None:
     accepted = asyncio.run(
         runtime.accept_agent_run(
             session_id="session-1",
-            user_message=UserMessage(content=[TextContent(text="hello")]),
+            user_message=UserMessage(content=[TextBlock(text="hello")]),
         )
     )
 
@@ -66,7 +66,7 @@ def test_agent_runtime_does_not_accept_input_blocked_by_hook() -> None:
         asyncio.run(
             runtime.accept_agent_run(
                 session_id="session-1",
-                user_message=UserMessage(content=[TextContent(text="hello")]),
+                user_message=UserMessage(content=[TextBlock(text="hello")]),
             )
         )
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping, Sequence
 
@@ -15,14 +14,10 @@ from pickel.context.model_context import (
     ToolDefinition,
 )
 from pickel.context.projection import ConversationProjector
-from pickel.context.recall import Recall
 from pickel.context.templates_loader import load_templates
 from pickel.context.window import apply_window
-from pickel.conversations.agent_message import AgentMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.agent_message import AgentMessage
 from pickel.conversations.conversation_node import ConversationEntry
-
-logger = logging.getLogger(__name__)
 
 
 class ModelContextBuilder:
@@ -37,27 +32,20 @@ class ModelContextBuilder:
         self._projector = projector or ConversationProjector()
         self._environ = os.environ if environ is None else environ
 
-    async def build_model_context(
+    def build_model_context(
         self,
         *,
         agent_package_version: AgentPackageVersion,
         conversation_entries: Sequence[ConversationEntry],
-        session_id: str,
-        recall_sources: Sequence[Recall] = (),
+        recalled_messages: Sequence[AgentMessage] = (),
         hook_feedback: Sequence[HookFeedback] = (),
-        current_user_text: str = "",
     ) -> ModelContext:
         messages = self._projector.project_conversation_messages(conversation_entries)
         messages = apply_window(
             messages,
             unit_window=agent_package_version.runtime.context_unit_window,
         )
-        messages = await self._append_recalls(
-            messages=messages,
-            session_id=session_id,
-            recall_sources=recall_sources,
-            current_user_text=current_user_text,
-        )
+        messages.extend(recalled_messages)
         return ModelContext(
             system=self._build_system(agent_package_version),
             messages=append_hook_feedback(messages, list(hook_feedback)),
@@ -116,41 +104,3 @@ class ModelContextBuilder:
                 f"(read {skill.source_path}){suffix}"
             )
         return "\n".join(lines)
-
-    async def _append_recalls(
-        self,
-        *,
-        messages: list[AgentMessage],
-        session_id: str,
-        recall_sources: Sequence[Recall],
-        current_user_text: str,
-    ) -> list[AgentMessage]:
-        if not recall_sources:
-            return messages
-        user_text = current_user_text or self._current_user_text(messages)
-        result = list(messages)
-        for source in recall_sources:
-            try:
-                result.extend(
-                    await source.provide(
-                        session_id=session_id,
-                        current_user_text=user_text,
-                    )
-                )
-            except Exception:
-                logger.exception("Recall source %s failed", type(source).__name__)
-        return result
-
-    @staticmethod
-    def _current_user_text(messages: Sequence[AgentMessage]) -> str:
-        for message in reversed(messages):
-            if not isinstance(message, UserMessage):
-                continue
-            text = [
-                block.text
-                for block in message.content
-                if isinstance(block, TextContent) and block.text
-            ]
-            if text:
-                return "\n".join(text)
-        return ""

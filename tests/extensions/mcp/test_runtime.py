@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import mcp.types
 
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.extensions.mcp.proxy import McpProxyTool
 from pickel.extensions.mcp.runtime import McpServerRuntime
 from pickel.extensions.mcp.connection import McpConnectionError
@@ -13,11 +15,12 @@ from pickel.extensions_host.registry import ExtensionRegistry
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.bus import ToolBus, ToolSource
 from pickel.tools.services import ToolServices
-from pickel.runs.host_call_types import (
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.runtime.host_call_types import (
     STRUCTURED_INPUT_CALL,
     StructuredInputAnswer,
 )
-from pickel.runs.host_calls import HostCallContext, HostCallRouter
+from pickel.runtime.host_calls import HostCallContext, HostCallRouter
 
 from tests.extensions.mcp.test_connection import fixture_spec
 
@@ -32,12 +35,15 @@ def _host(bus: ToolBus) -> ExtensionHost:
     )
 
 
-def _context(*, host_calls=None) -> ToolExecutionContext:
+def _context(*, host_calls=None, artifact_service=None) -> ToolExecutionContext:
     return ToolExecutionContext(
         agent_id="Pickle",
         session_id="s",
         workspace_path=Path("/tmp"),
-        services=ToolServices(host_calls=host_calls),
+        services=ToolServices(
+            host_calls=host_calls,
+            artifact_service=artifact_service,
+        ),
         operation_id="operation-1",
         step_id="step-1",
         step_sequence=1,
@@ -123,14 +129,22 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         proxy = McpProxyTool(runtime, tool)
-        result = await proxy.execute({}, _context())
+        result = await proxy.execute(
+            {},
+            _context(
+                artifact_service=ArtifactService(
+                    artifact_store=InMemoryRuntimeStore(),
+                    blob_store=InMemoryBlobStore(),
+                )
+            ),
+        )
 
         self.assertEqual("hello", result.content)
         self.assertEqual({"answer": 42}, result.structured_content)
         self.assertEqual({"type": "object"}, proxy.spec.output_schema)
         self.assertEqual(2, len(result.content_blocks))
-        self.assertEqual("image", result.content_blocks[1].type)
-        self.assertEqual("image/png", result.content_blocks[1].media_type)
+        self.assertEqual("artifact", result.content_blocks[1].type)
+        self.assertEqual("image/png", result.content_blocks[1].artifact.media_type)
         self.assertEqual(["audio"], result.metadata["unsupported_content"])
         self.assertEqual("audio", result.metadata["unsupported_mcp_content"][0]["type"])
 

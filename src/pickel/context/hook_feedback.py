@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pickel.conversations.agent_message import AgentMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 
 
 @dataclass(frozen=True)
@@ -30,5 +30,5 @@ def append_hook_feedback(
         return list(messages)
     return [
         *messages,
-        UserMessage(content=[TextContent(text="\n\n".join(texts))]),
+        UserMessage(content=[TextBlock(text="\n\n".join(texts))]),
     ]

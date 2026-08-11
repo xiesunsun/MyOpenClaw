@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -14,8 +15,8 @@ from pickel.tools.base import (
     ToolExecutionResult,
     ToolSpec,
 )
-from pickel.conversations.content_blocks import ImageContent, TextContent
-from pickel.runs.host_calls import HostCallContext
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
+from pickel.runtime.host_calls import HostCallContext
 
 if TYPE_CHECKING:
     from pickel.extensions.mcp.runtime import McpServerRuntime
@@ -70,19 +71,22 @@ class McpProxyTool(BaseTool):
                 metadata=metadata,
             )
         text_parts: list[str] = []
-        content_blocks: list[TextContent | ImageContent] = []
+        content_blocks: list[TextBlock | ArtifactBlock] = []
         unsupported: list[str] = []
         for block in result.content:
             if isinstance(block, mcp.types.TextContent):
                 text_parts.append(block.text)
-                content_blocks.append(TextContent(text=block.text))
+                content_blocks.append(TextBlock(text=block.text))
             elif isinstance(block, mcp.types.ImageContent):
-                content_blocks.append(
-                    ImageContent(
-                        media_type=block.mime_type,
-                        data_base64=block.data,
-                    )
+                artifact_service = context.services.artifact_service
+                if artifact_service is None:
+                    unsupported.append(block.type)
+                    continue
+                reference = artifact_service.create_artifact(
+                    data=base64.b64decode(block.data, validate=True),
+                    media_type=block.mime_type,
                 )
+                content_blocks.append(ArtifactBlock(artifact=reference))
             else:
                 unsupported.append(block.type)
         structured_content = result.structured_content

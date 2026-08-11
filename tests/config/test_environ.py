@@ -6,21 +6,15 @@ import textwrap
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock, patch
-
-from pickel.agents.agent import Agent
-from pickel.config.app_config import AppConfig
 from pickel.config.environ import Environ
-from pickel.runs.run import Run
-from pickel.shared.model_config import ModelConfig, ModelSelection
+from pickel.shared.model_config import ModelSelection
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
 def _write_multi_model_config(root: Path) -> Path:
     config_path = root / "config.yaml"
     config_path.write_text(
-        textwrap.dedent(
-            """
+        textwrap.dedent("""
             default_agent: Pickle
             default_llm:
               provider: anthropic
@@ -49,8 +43,7 @@ def _write_multi_model_config(root: Path) -> Path:
               Pickle:
                 workspace_path: workspace
                 behavior_path: agents/Pickle
-            """
-        ).strip(),
+            """).strip(),
         encoding="utf-8",
     )
     return config_path
@@ -124,59 +117,6 @@ class EnvironTests(unittest.TestCase):
             self.assertEqual("anthropic", model.provider)
             self.assertEqual("claude-opus-4-7", model.model)
             self.assertEqual("xhigh", model.provider_options["thinking"])
-
-    def test_run_open_creates_empty_environ(self) -> None:
-        agent = Agent(
-            agent_id="Pickle",
-            workspace_path=Path("/tmp/pickle"),
-            behavior_path=Path("/tmp/pickle/AGENT.md"),
-            behavior_instruction="You are Pickle.",
-            model_config=ModelConfig(
-                provider="google/gemini",
-                model="gemini-3-flash-preview",
-                api_key="k",
-            ),
-            tool_ids=[],
-        )
-        provider = MagicMock()
-
-        run = Run.open(agent=agent, provider=provider, tools=[])
-
-        self.assertIsInstance(run.environ, Environ)
-        self.assertIsNone(run.environ.llm)
-        self.assertEqual({}, run.environ.provider_options)
-
-    def test_apply_environ_model_updates_agent_and_provider(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config = app_config_from_yaml_file(_write_multi_model_config(root))
-            agent = Agent(
-                agent_id="Pickle",
-                workspace_path=root / "workspace",
-                behavior_path=root / "agents" / "Pickle",
-                behavior_instruction="You are Pickle.",
-                model_config=config.resolve_model_config(),
-                tool_ids=[],
-            )
-            stub_provider = MagicMock(name="stub-provider")
-            new_provider = MagicMock(name="new-provider")
-
-            with patch(
-                "pickel.runs.run.create_llm_provider",
-                return_value=new_provider,
-            ) as create_provider:
-                run = Run.open(agent=agent, provider=stub_provider, tools=[])
-                run.environ.llm = ModelSelection(
-                    provider="anthropic", model="claude-sonnet-4-6"
-                )
-                run.environ.provider_options = {"thinking": "xhigh"}
-
-                run.apply_environ_model(config)
-
-            self.assertEqual("claude-sonnet-4-6", run.agent.model_config.model)
-            self.assertEqual("xhigh", run.agent.model_config.provider_options["thinking"])
-            self.assertIs(new_provider, run.provider)
-            create_provider.assert_called_once_with(run.agent.model_config)
 
 
 if __name__ == "__main__":

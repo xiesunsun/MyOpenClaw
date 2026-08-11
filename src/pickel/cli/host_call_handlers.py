@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pickel.runs.host_call_types import (
+from pickel.runtime.host_call_types import (
     CONFIRMATION_CALL,
     EXTERNAL_ACTION_CALL,
     STRUCTURED_INPUT_CALL,
@@ -19,8 +19,8 @@ from pickel.runs.host_call_types import (
     StructuredInputAnswer,
     StructuredInputRequest,
 )
-from pickel.runs.host_calls import HostCallContext, HostCallHandlerLease
-from pickel.runs.runtime_bus import RuntimeBus
+from pickel.runtime.host_calls import HostCallContext, HostCallHandlerLease
+from pickel.runtime.runtime_bus import RuntimeBus
 
 InputReader = Callable[[str], str | Awaitable[str]]
 MessageRenderer = Callable[[str], None]

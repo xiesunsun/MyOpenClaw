@@ -10,7 +10,7 @@ from pickel.context.history_compaction import (
 )
 from pickel.context.projection import ConversationProjector
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 
@@ -29,11 +29,11 @@ def test_plan_and_commit_history_compaction_keeps_tail_units(tmp_path: Path):
     for index in range(4):
         service.append_user_message(
             session_id=session_id,
-            message=UserMessage(content=[TextContent(text=f"u{index}")]),
+            message=UserMessage(content=[TextBlock(text=f"u{index}")]),
         )
         service.append_assistant_message(
             session_id=session_id,
-            message=AssistantMessage(content=[TextContent(text=f"a{index}")]),
+            message=AssistantMessage(content=[TextBlock(text=f"a{index}")]),
         )
 
     entries = service.list_active_branch_entries(session_id=session_id)
