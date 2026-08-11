@@ -64,7 +64,9 @@ class OperationStateMachine:
         "completed": set(),
     }
     _ALLOWED_TOOL_CALL_TRANSITIONS = {
-        "ready": {"intent_recorded"},
+        # 一个 ModelStep 可以包含多个 ToolCall。推进其中一个调用时，其余兄弟
+        # 调用保持原状态，因此所有执行状态都必须允许幂等自转换。
+        "ready": {"ready", "intent_recorded"},
         "intent_recorded": {"intent_recorded", "completed"},
         "completed": {"completed"},
     }
@@ -252,6 +254,51 @@ class OperationStateMachine:
         )
         return self._validated(state, next_state)
 
+    def record_tool_call_aborted(
+        self,
+        state: AgentRunState,
+        *,
+        tool_call_id: str,
+        result_message_node_id: str,
+    ) -> AgentRunState:
+        """不执行工具，显式写入错误结果以闭合 Provider 消息协议。"""
+        step = self._require_step(
+            state,
+            phase=("tool_calls_ready", "tool_calls_running"),
+        )
+        found = False
+        tool_calls = []
+        for call in step.tool_calls:
+            if call.tool_call_id != tool_call_id:
+                tool_calls.append(call)
+                continue
+            found = True
+            if call.execution_state == "completed":
+                raise StorageIntegrityError(
+                    f"ToolCallState 已完成，不能终止: {tool_call_id}"
+                )
+            tool_calls.append(
+                replace(
+                    call,
+                    execution_state="completed",
+                    result_message_node_id=result_message_node_id,
+                    is_error=True,
+                )
+            )
+        if not found:
+            raise StorageIntegrityError(f"ToolCallState 不存在: {tool_call_id}")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="running" if state.status == "waiting" else state.status,
+            current_step=replace(
+                step,
+                phase="tool_calls_running",
+                tool_calls=tuple(tool_calls),
+            ),
+        )
+        return self._validated(state, next_state)
+
     def record_post_tool_batch_hook_completed(
         self,
         state: AgentRunState,
@@ -357,8 +404,28 @@ class OperationStateMachine:
             state,
             revision=state.revision + 1,
             status="cancelled",
-            current_step=None,
             error={"kind": "cancelled", "message": reason},
+        )
+        return self._validated(state, next_state)
+
+    def fail_agent_run(
+        self,
+        state: AgentRunState,
+        *,
+        error_type: str,
+        message: str,
+    ) -> AgentRunState:
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            raise StorageIntegrityError(f"终态 AgentRun 不能标记失败: {state.status}")
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            status="failed",
+            error={
+                "kind": "runtime_error",
+                "error_type": error_type,
+                "message": message,
+            },
         )
         return self._validated(state, next_state)
 
@@ -498,6 +565,12 @@ class OperationStateMachine:
     ) -> None:
         current_step = current.current_step
         next_step = next_state.current_step
+        if next_state.status in {"failed", "cancelled"}:
+            if next_step != current_step:
+                raise StorageIntegrityError(
+                    "结束 AgentRun 时必须保留最后一次 ModelStep 诊断状态"
+                )
+            return
         if current_step is None:
             if next_step is None:
                 return
@@ -573,6 +646,14 @@ class OperationStateMachine:
             next_state.execution_state
             not in self._ALLOWED_TOOL_CALL_TRANSITIONS[current.execution_state]
         ):
+            if (
+                current.execution_state == "ready"
+                and next_state.execution_state == "completed"
+                and next_state.is_error is True
+            ):
+                # Runtime 终止时允许 ready 调用直接闭合为错误结果；它没有跨越
+                # 执行边界，因此不能伪造 intent_recorded。
+                return
             raise StorageIntegrityError(
                 "非法 ToolCallState.execution_state 转换: "
                 f"{current.execution_state} -> {next_state.execution_state}"

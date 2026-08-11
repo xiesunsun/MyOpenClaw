@@ -10,12 +10,15 @@ from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
+    agent_message_from_dict,
     agent_message_to_dict,
 )
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_node import ConversationEntry
 from pickel.conversations.conversation_service import ConversationNotFoundError
 from pickel.operations.agent_run_state import (
     AgentRunState,
+    ToolCallState,
     agent_run_state_from_content,
 )
 from pickel.operations.agent_delegation import AgentDelegation
@@ -30,6 +33,19 @@ OPERATION_STATE_OBJECT_TYPE = "session_operation_state"
 
 class SessionOperationNotFoundError(LookupError):
     pass
+
+
+class UnfinishedAgentRunError(RuntimeError):
+    """同一 ConversationSession 已有尚未结束的 AgentRun。"""
+
+    def __init__(self, *, operation_id: str, status: str) -> None:
+        self.operation_id = operation_id
+        self.status = status
+        super().__init__(
+            "ConversationSession 已有未完成的 AgentRun: "
+            f"{operation_id} ({status})；请先恢复或取消该 Operation，"
+            "也可以创建新 Session"
+        )
 
 
 @dataclass(frozen=True)
@@ -190,6 +206,13 @@ class OperationService:
             raise StorageIntegrityError(
                 "AgentPackageVersion 与 ConversationSession.agent_id 不匹配: "
                 f"{package.agent_id} != {session.agent_id}"
+            )
+        unfinished = self.list_unfinished_agent_runs(session_id=session_id)
+        if unfinished:
+            operation, state = unfinished[0]
+            raise UnfinishedAgentRunError(
+                operation_id=operation.operation_id,
+                status=state.status,
             )
 
         operation_id = self._operation_id_factory()
@@ -361,9 +384,96 @@ class OperationService:
         )
 
     def cancel_agent_run(self, *, operation_id: str, reason: str) -> AgentRunState:
-        state = self.load_agent_run_state(operation_id)
+        state = self._close_pending_tool_calls(
+            operation_id=operation_id,
+            result_text=f"工具执行被终止：{reason}",
+        )
         next_state = self._state_machine.cancel_agent_run(state, reason=reason)
         return self.commit_agent_run_state(state=next_state).state
+
+    def fail_agent_run(
+        self,
+        *,
+        operation_id: str,
+        error_type: str,
+        message: str,
+    ) -> AgentRunState:
+        state = self._close_pending_tool_calls(
+            operation_id=operation_id,
+            result_text=f"工具执行因 AgentRun 异常而终止：{error_type}: {message}",
+        )
+        next_state = self._state_machine.fail_agent_run(
+            state,
+            error_type=error_type,
+            message=message,
+        )
+        return self.commit_agent_run_state(state=next_state).state
+
+    def _close_pending_tool_calls(
+        self,
+        *,
+        operation_id: str,
+        result_text: str,
+    ) -> AgentRunState:
+        """为所有悬空 ToolCall 写入错误结果，不执行或重放真实工具。"""
+        state = self.load_agent_run_state(operation_id)
+        step = state.current_step
+        if step is None:
+            return state
+        if step.phase == "model_request_completed" and not step.tool_calls:
+            if step.assistant_message_node_id is None:
+                raise StorageIntegrityError(
+                    "model_request_completed 缺少 AssistantMessage 节点"
+                )
+            operation = self.load_session_operation(operation_id)
+            assistant_entry = self._find_active_entry(
+                session_id=operation.session_id,
+                node_id=step.assistant_message_node_id,
+            )
+            assistant_message = agent_message_from_dict(assistant_entry.object.content)
+            if not isinstance(assistant_message, AssistantMessage):
+                raise StorageIntegrityError(
+                    "ModelStep.assistant_message_node_id 未引用 AssistantMessage"
+                )
+            persisted_tool_calls = tuple(
+                ToolCallState(
+                    tool_call_id=block.id,
+                    tool_name=block.name,
+                    arguments=dict(block.arguments),
+                    execution_state="ready",
+                )
+                for block in assistant_message.content
+                if isinstance(block, ToolCallBlock)
+            )
+            if persisted_tool_calls:
+                state = self.commit_agent_run_state(
+                    state=self._state_machine.prepare_tool_calls(
+                        state,
+                        tool_calls=persisted_tool_calls,
+                    )
+                ).state
+                step = state.current_step
+                assert step is not None
+        for pending_call in tuple(step.tool_calls):
+            if pending_call.execution_state == "completed":
+                continue
+            result_node_id = self._node_id_factory()
+            next_state = self._state_machine.record_tool_call_aborted(
+                state,
+                tool_call_id=pending_call.tool_call_id,
+                result_message_node_id=result_node_id,
+            )
+            state = self.commit_agent_run_state(
+                state=next_state,
+                appended_message=ToolResultMessage(
+                    tool_call_id=pending_call.tool_call_id,
+                    tool_name=pending_call.tool_name,
+                    content=[TextBlock(text=result_text)],
+                    is_error=True,
+                ),
+                appended_message_node_id=result_node_id,
+            ).state
+        return state
 
     def commit_agent_run_state(
         self,

@@ -160,6 +160,19 @@ class AgentRuntime:
             reason=reason,
         )
 
+    def fail_operation(
+        self,
+        operation_id: str,
+        *,
+        error_type: str,
+        message: str,
+    ) -> None:
+        self._operation_service.fail_agent_run(
+            operation_id=operation_id,
+            error_type=error_type,
+            message=message,
+        )
+
     async def start_delegated_run(
         self,
         *,

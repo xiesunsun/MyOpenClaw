@@ -18,7 +18,7 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
     ModelStepState,
@@ -26,6 +26,7 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.operation_service import (
     OperationService,
+    UnfinishedAgentRunError,
     operation_state_reference_name,
 )
 from pickel.operations.operation_store import OperationStore
@@ -118,6 +119,7 @@ def _commit_model_response(
     *,
     accepted,
     assistant_node_id: str = "assistant-node",
+    assistant_message: AssistantMessage | None = None,
 ) -> AgentRunState:
     ready = AgentRunState(
         operation_id=accepted.operation.operation_id,
@@ -157,7 +159,8 @@ def _commit_model_response(
     )
     service.commit_agent_run_state(
         state=completed,
-        appended_message=AssistantMessage(content=[TextBlock(text="working")]),
+        appended_message=assistant_message
+        or AssistantMessage(content=[TextBlock(text="working")]),
         appended_message_node_id=assistant_node_id,
     )
     return completed
@@ -213,13 +216,14 @@ def test_accept_agent_run_rejects_missing_package_without_consuming_sequence(
     assert store.list_session_operations(session_id="session-1") == []
 
 
-def test_failed_second_accept_rolls_back_user_message_and_sequence(
+def test_second_accept_rejects_unfinished_run_without_appending_user_message(
     store: OperationStore,
 ) -> None:
+    operation_ids = iter(("operation-1", "operation-2"))
     node_ids = iter(("user-node-1", "user-node-2"))
     service = OperationService(
         store,
-        operation_id_factory=lambda: "operation-1",
+        operation_id_factory=lambda: next(operation_ids),
         node_id_factory=lambda: next(node_ids),
     )
     service.accept_agent_run(
@@ -228,7 +232,10 @@ def test_failed_second_accept_rolls_back_user_message_and_sequence(
         user_message=UserMessage(content=[TextBlock(text="first")]),
     )
 
-    with pytest.raises(StorageIntegrityError, match="SessionOperation 已存在"):
+    with pytest.raises(
+        UnfinishedAgentRunError,
+        match=r"operation-1 \(queued\)",
+    ):
         service.accept_agent_run(
             session_id="session-1",
             agent_package_version_id=_package().package_version_id,
@@ -241,6 +248,136 @@ def test_failed_second_accept_rolls_back_user_message_and_sequence(
     assert session.current_commit_sequence == 1
     assert len(entries) == 1
     assert entries[0].object.content["content"][0]["text"] == "first"
+
+
+def test_cancel_closes_all_pending_tool_calls_and_allows_next_run(
+    store: OperationStore,
+) -> None:
+    operation_ids = iter(("operation-1", "operation-2"))
+    node_ids = iter(("user-node-1", "result-node-1", "result-node-2", "user-node-2"))
+    service = OperationService(
+        store,
+        operation_id_factory=lambda: next(operation_ids),
+        node_id_factory=lambda: next(node_ids),
+    )
+    accepted = service.accept_agent_run(
+        session_id="session-1",
+        agent_package_version_id=_package().package_version_id,
+        user_message=UserMessage(content=[TextBlock(text="first")]),
+    )
+    model_completed = _commit_model_response(service, accepted=accepted)
+    assert model_completed.current_step is not None
+    tools_ready = AgentRunState(
+        operation_id=model_completed.operation_id,
+        revision=model_completed.revision + 1,
+        status="running",
+        user_message_node_id=model_completed.user_message_node_id,
+        current_step=ModelStepState(
+            step_id=model_completed.current_step.step_id,
+            step_sequence=model_completed.current_step.step_sequence,
+            phase="tool_calls_ready",
+            assistant_message_node_id=(
+                model_completed.current_step.assistant_message_node_id
+            ),
+            tool_calls=(
+                ToolCallState(
+                    tool_call_id="tool-1",
+                    tool_name="echo",
+                    arguments={"text": "first"},
+                    execution_state="ready",
+                ),
+                ToolCallState(
+                    tool_call_id="tool-2",
+                    tool_name="echo",
+                    arguments={"text": "second"},
+                    execution_state="ready",
+                ),
+            ),
+        ),
+    )
+    service.commit_agent_run_state(state=tools_ready)
+
+    cancelled = service.cancel_agent_run(
+        operation_id=accepted.operation.operation_id,
+        reason="用户中断",
+    )
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.current_step is not None
+    assert [call.execution_state for call in cancelled.current_step.tool_calls] == [
+        "completed",
+        "completed",
+    ]
+    entries = store.list_active_branch_entries(session_id="session-1")
+    assert [entry.object.content["role"] for entry in entries] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+    ]
+    assert all(entry.object.content["is_error"] for entry in entries[2:])
+
+    next_run = service.accept_agent_run(
+        session_id="session-1",
+        agent_package_version_id=_package().package_version_id,
+        user_message=UserMessage(content=[TextBlock(text="continue")]),
+    )
+    assert next_run.operation.operation_id == "operation-2"
+
+
+def test_failure_closes_tool_calls_even_before_prepare_phase_is_committed(
+    store: OperationStore,
+) -> None:
+    node_ids = iter(("user-node", "result-node-1", "result-node-2"))
+    service = OperationService(
+        store,
+        operation_id_factory=lambda: "operation-1",
+        node_id_factory=lambda: next(node_ids),
+    )
+    accepted = service.accept_agent_run(
+        session_id="session-1",
+        agent_package_version_id=_package().package_version_id,
+        user_message=UserMessage(content=[TextBlock(text="first")]),
+    )
+    _commit_model_response(
+        service,
+        accepted=accepted,
+        assistant_message=AssistantMessage(
+            content=[
+                ToolCallBlock(
+                    id="tool-1",
+                    name="echo",
+                    arguments={"text": "first"},
+                ),
+                ToolCallBlock(
+                    id="tool-2",
+                    name="echo",
+                    arguments={"text": "second"},
+                ),
+            ]
+        ),
+    )
+
+    failed = service.fail_agent_run(
+        operation_id=accepted.operation.operation_id,
+        error_type="RuntimeError",
+        message="hook failed",
+    )
+
+    assert failed.status == "failed"
+    assert failed.current_step is not None
+    assert [call.execution_state for call in failed.current_step.tool_calls] == [
+        "completed",
+        "completed",
+    ]
+    entries = store.list_active_branch_entries(session_id="session-1")
+    assert [entry.object.content["role"] for entry in entries] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+    ]
+    assert all(entry.object.content["is_error"] for entry in entries[2:])
 
 
 def test_commit_message_and_state_share_commit_sequence(

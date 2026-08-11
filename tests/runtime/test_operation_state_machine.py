@@ -115,6 +115,106 @@ def test_tool_call_ready_to_intent_recorded_is_valid() -> None:
     machine.validate_agent_run_transition(current=current, next_state=next_state)
 
 
+def test_unchanged_ready_sibling_is_valid_when_another_tool_records_intent() -> None:
+    machine = OperationStateMachine()
+    first_ready = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="echo",
+        arguments={"text": "first"},
+        execution_state="ready",
+    )
+    second_ready = ToolCallState(
+        tool_call_id="tool-2",
+        tool_name="echo",
+        arguments={"text": "second"},
+        execution_state="ready",
+    )
+    current = _state(
+        revision=5,
+        step=_step("tool_calls_ready", tool_calls=(first_ready, second_ready)),
+    )
+
+    next_state = machine.record_tool_call_intent(current, tool_call_id="tool-1")
+
+    assert next_state.current_step is not None
+    assert [
+        tool_call.execution_state for tool_call in next_state.current_step.tool_calls
+    ] == ["intent_recorded", "ready"]
+
+
+def test_aborted_ready_tool_call_closes_with_error_without_recording_intent() -> None:
+    machine = OperationStateMachine()
+    current = _state(
+        revision=5,
+        step=_step(
+            "tool_calls_ready",
+            tool_calls=(
+                ToolCallState(
+                    tool_call_id="tool-1",
+                    tool_name="echo",
+                    arguments={"text": "hello"},
+                    execution_state="ready",
+                ),
+            ),
+        ),
+    )
+
+    next_state = machine.record_tool_call_aborted(
+        current,
+        tool_call_id="tool-1",
+        result_message_node_id="result-node",
+    )
+
+    assert next_state.current_step is not None
+    tool_call = next_state.current_step.tool_calls[0]
+    assert tool_call.execution_state == "completed"
+    assert tool_call.is_error is True
+    assert tool_call.result_message_node_id == "result-node"
+
+
+def test_aborted_unknown_tool_effect_leaves_waiting_before_terminal_transition() -> None:
+    machine = OperationStateMachine()
+    current = _state(
+        revision=6,
+        status="waiting",
+        step=_step(
+            "tool_calls_running",
+            tool_calls=(
+                ToolCallState(
+                    tool_call_id="tool-1",
+                    tool_name="external_action",
+                    arguments={"target": "outside"},
+                    execution_state="intent_recorded",
+                ),
+            ),
+        ),
+    )
+
+    closed = machine.record_tool_call_aborted(
+        current,
+        tool_call_id="tool-1",
+        result_message_node_id="result-node",
+    )
+
+    assert closed.status == "running"
+    assert closed.current_step is not None
+    assert closed.current_step.tool_calls[0].execution_state == "completed"
+
+
+def test_cancelled_agent_run_keeps_last_step_for_diagnostics() -> None:
+    machine = OperationStateMachine()
+    current = _state(
+        revision=3,
+        step=_step("model_request_intent_recorded"),
+    )
+
+    cancelled = machine.cancel_agent_run(current, reason="用户中断")
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.current_step == current.current_step
+    assert cancelled.error == {"kind": "cancelled", "message": "用户中断"}
+
+
 def test_terminal_agent_run_cannot_restart() -> None:
     machine = OperationStateMachine()
     current = _state(revision=2, status="failed")

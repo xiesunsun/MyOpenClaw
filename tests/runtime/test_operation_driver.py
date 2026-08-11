@@ -225,6 +225,84 @@ def test_driver_runs_default_tool_loop_through_persisted_effects() -> None:
     ]
 
 
+def test_driver_runs_multiple_tool_calls_from_one_model_step() -> None:
+    store = InMemoryRuntimeStore()
+    store.create_conversation_session(
+        session_id="session-1",
+        agent_id="Pickle",
+        cwd="/project",
+    )
+    package = _package()
+    store.insert_agent_package_version(package)
+    operation_service = OperationService(
+        store,
+        operation_id_factory=lambda: "operation-1",
+        node_id_factory=lambda: "user-node",
+    )
+    accepted = operation_service.accept_agent_run(
+        session_id="session-1",
+        agent_package_version_id=package.package_version_id,
+        user_message=UserMessage(content=[TextBlock(text="hello")]),
+    )
+    provider = _Provider(
+        [
+            AssistantMessage(
+                content=[
+                    ToolCallBlock(
+                        id="tool-1",
+                        name="echo",
+                        arguments={"text": "first"},
+                    ),
+                    ToolCallBlock(
+                        id="tool-2",
+                        name="echo",
+                        arguments={"text": "second"},
+                    ),
+                ]
+            ),
+            AssistantMessage(content=[TextBlock(text="done")]),
+        ]
+    )
+    tool = _EchoTool()
+    bus = ToolBus()
+    bus.register(tool, source=ToolSource.BUILTIN)
+    bindings = RuntimeBindings(
+        agent_package_version=package,
+        provider=provider,
+        tool_snapshot=bus.snapshot(ToolActivation(allowed=frozenset({"echo"}))),
+    )
+    driver = OperationDriver(
+        bindings=bindings,
+        operation_service=operation_service,
+        conversation_service=ConversationService(store),
+        runtime_effects=RuntimeEffects(
+            bindings=bindings,
+            operation_service=operation_service,
+        ),
+        step_id_factory=iter(("step-1", "step-2")).__next__,
+        node_id_factory=iter(
+            ("assistant-1", "result-1", "result-2", "assistant-2")
+        ).__next__,
+    )
+
+    result = asyncio.run(driver.drive_operation(accepted.operation.operation_id))
+
+    assert result.status == "succeeded"
+    assert tool.arguments == [{"text": "first"}, {"text": "second"}]
+    entries = store.list_active_branch_entries(session_id="session-1")
+    assert [entry.object.content["role"] for entry in entries] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "assistant",
+    ]
+    assert [entry.object.content.get("tool_call_id") for entry in entries[2:4]] == [
+        "tool-1",
+        "tool-2",
+    ]
+
+
 def test_driver_persists_hook_decisions_and_routes_hooks_through_effects() -> None:
     store = InMemoryRuntimeStore()
     store.create_conversation_session(

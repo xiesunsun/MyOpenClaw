@@ -308,6 +308,13 @@ class ConversationRuntime:
             raise
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
+            fail = getattr(self._agent_runtime, "fail_operation", None)
+            if callable(fail):
+                fail(
+                    operation_id,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
             await self._events.emit(
                 AgentRunFailed(
                     envelope=envelope,
