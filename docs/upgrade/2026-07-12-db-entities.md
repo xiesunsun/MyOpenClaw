@@ -2,9 +2,9 @@
 
 **初稿日期**：2026-07-12
 **更新日期**：2026-08-11
-**状态**：目标合同（阶段 1 实施中）
-**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Agent Package Version、Operation 身份和原子提交
-**不在范围**：Operation 状态内容、Artifact 字节存储、多 Agent 调度
+**状态**：已实施（SQLite schema v9）
+**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Package、Operation、Artifact 元数据、Agent Delegation 和原子提交
+**不在范围**：Artifact Blob 实现细节、Operation 状态字段和多 Agent 调度策略
 
 本文定义持久化事实和事务边界。实体名称遵循 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md)；旧 `SessionEntry`、`leaf_id` 和 `session_entries` 合同已被本文替代。
 
@@ -245,19 +245,19 @@ Context、Session Preview 与 OpenViking 都消费同一个活动分支读取接
 
 - 归档只改变 Session status，不删除事实。
 - 删除 Session 在一个事务中级联删除 Commit、Node 和 Reference。
-- ImmutableObject 第一阶段随创建 Session 删除；引入跨 Session Artifact/Package 引用前再调整生命周期。
+- ImmutableObject 随创建 Session 删除；全局 Artifact 元数据、Blob 与 AgentPackageVersion 不随单个 Session 级联删除，后续由引用扫描 GC。
 - 禁止删除单个 Node、Object、Commit 或 Reference 历史版本。
 
 ## 9. Schema 策略
 
-阶段 1 基础 schema 为 v4；加入 `agent_package_versions` 后为 v5；加入 `session_operations` 后当前 schema 使用 `PRAGMA user_version = 6`。
+当前 Runtime 使用 `PRAGMA user_version = 9`，包含 `agent_package_versions`、`session_operations`、`artifacts` 与 `agent_delegations`。运行时只接受空库或 v9，不在请求路径中逐版补表。
 
 - Runtime 不提供 v3/v4 双读或双写。
 - 当前预发布阶段默认使用新库。
 - 若需要保留 v3 数据，只提供一次性、事务化离线迁移；迁移完成后删除旧表，不在 Runtime 中保留兼容分支。
 - schema 版本不支持时必须明确报错，不能在旧表上静默补列。
 
-## 10. 阶段 1 验收
+## 10. 验收
 
 1. Object、Node、Reference 和 Commit 原子成功或全部回滚。
 2. 失败事务不消耗 sequence。

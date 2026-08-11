@@ -48,7 +48,7 @@
 4. 命中的领域设计文档；
 5. 历史实现计划和旧代码。
 
-历史文档可以解释现状和演进原因，但其中的旧实体名、旧方法名和旧职责边界不能覆盖最新命名约束。
+2026-08-10 之前的 Runtime、Session、Context、Observability 实现稿均视为历史资料；其中的 `Run`、Strategy、`SessionService`、`ContextAssembler` 和旧表结构不得作为当前实现依据。
 
 ### 第一层：何时读取命名合同
 
@@ -68,13 +68,11 @@
 
 | 任务范围 | 必读文档 | 用途 |
 | --- | --- | --- |
-| Session 树、消息持久化、Context 投影、Tool Loop 数据流 | [`Query → Context → Chat Completion 升级设计`](docs/upgrade/2026-07-12-query-context-harness.md) | 理解当前数据流、消息合同和历史边界；名称以命名合同为准 |
-| `prepare`、ModelContext、System Prompt、Skill/Recall 热加载 | [`模型请求组装升级设计`](docs/upgrade/2026-07-25-request-prepare-design.md) | 理解当前请求组装阶段；目标入口和组件名称以命名合同为准 |
-| Config、Settings、Agent 加载、目录与 Session 库位置 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 理解配置分层和路径合同；运行层名称以命名合同为准 |
-| RuntimeBus、HostCall、交互队列、Runtime 与 Host 边界 | [`Runtime I/O 总线与宿主调用设计`](docs/upgrade/2026-07-31-runtime-interaction-design.md) | 保护已实施的 I/O 边界，避免 Runtime 直接依赖 UI |
-| SQLite Session 表、字段和迁移 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 理解现有数据库实体；若目标实体已在命名合同中重命名，先按目标名设计迁移 |
+| Session 树、消息持久化、Context 投影、Artifact、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 Runtime v9 的持久化事实、引用和原子提交 |
+| Tool Loop、Runtime/Host 边界、实体与方法命名 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 约束当前组件职责与唯一术语 |
+| Config、Settings、Agent Package Snapshot | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 只参考 Pickel 设置来源；Runtime 实体与数据库名称以三份当前合同为准 |
 | Operation、AgentRunState、Tool 恢复 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | 约束 Operation 接受事务、状态引用、Package 绑定和未知副作用恢复语义 |
-| Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 保持 Provider Adapter 边界和 Anthropic 协议语义 |
+| Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 只参考 Anthropic 协议语义；其中旧 Strategy/Run 描述已失效 |
 
 ### 使用要求
 

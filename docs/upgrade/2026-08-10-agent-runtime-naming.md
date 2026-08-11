@@ -1,9 +1,9 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**状态**：已对齐，作为后续重构的命名合同
+**状态**：已实施，作为 Runtime 演进的命名合同
 **范围**：Agent Runtime、持久化实体、执行状态、多模态与多 Agent 的代码命名
-**不在范围**：数据库表结构定稿、状态机全部迁移、兼容方案和实施排期
+**不在范围**：具体 Provider 协议、数据库列级说明和产品排期
 
 本文只定义“一个概念叫什么、负责什么”。后续设计和实现出现同义名称时，以本文为准；历史设计稿仍可说明当时的实现，但不再决定目标态命名。
 
@@ -298,3 +298,5 @@ cancel_delegated_run()
 5. `RuntimeEffects` 之外的 Operation 过程代码不直接执行 Provider、工具或 Hook。
 6. `AgentPackageVersion` 和 `ArtifactReference` 都可脱离进程内对象稳定恢复。
 7. 删除完成迁移的旧名和兼容别名，测试、事件和文档同步采用新名称。
+
+当前实现已经完成上述目标态切换：应用入口为 `RuntimeHost → ConversationRuntime → AgentRuntime`，默认 Tool Loop 由 `OperationDriver` 与 `OperationStateMachine` 推进；旧 `Agent`、`Run`、Strategy、`ContextAssembler`、Session Repository 及 `pickel.runs` 包已删除。外部 Recall、Provider、Tool、Hook 和持久化提交统一跨越 `RuntimeEffects`。

@@ -1,7 +1,7 @@
 # Operation 持久化与恢复模型
 
 **日期**：2026-08-11  
-**状态**：目标合同（阶段 3）  
+**状态**：已实施（阶段 3）
 **范围**：SessionOperation、AgentRunState、ModelStepState、ToolCallState、Agent Package 绑定与恢复语义  
 **不在范围**：Runtime 组件拆分、观测事件、多模态 Artifact、多 Agent 调度
 
@@ -70,6 +70,7 @@ commit
 | `completed_step_ids` | string[] | 已完成步骤的稳定身份 |
 | `final_assistant_node_id` | string/null | 成功终态的回答节点 |
 | `error` | object/null | 可恢复的失败摘要，不保存 Python exception |
+| `model_context_feedback` | string[] | 已持久化、待注入后续 ModelContext 的 Hook 反馈 |
 
 `ModelStepState`：
 
@@ -81,6 +82,9 @@ commit
 | `assistant_message_node_id` | 已落盘的模型输出节点，可空 |
 | `tool_calls` | 有序 ToolCallState 列表 |
 | `retry_count` | 已持久化的模型请求重试次数 |
+| `post_tool_batch_hook_completed` | PostToolBatch Hook 是否已经跨越执行边界 |
+
+`ToolCallState` 还持久化 `execution_policy`、`decision_reason`、结果节点与错误标记。Hook 对参数和执行策略的决定因此不是进程内临时状态，恢复后不会重新询问模型来猜测。
 
 状态 Reference 使用 `operation/<operation_id>/state`。State 中的 `revision` 与 Reference 的 `commit_sequence` 含义不同：revision 只排序该 Operation 的状态版本；Reference `commit_sequence` 是 Session 的持久化提交顺序。
 
@@ -107,6 +111,8 @@ ToolCallReady
 2. 否则暂停等待 Host 决策，或写入明确的中断 ToolResult；
 3. 禁止 Runtime 猜测“应该没执行”并静默重放。
 
+Host 核实外部结果后调用 `record_reconciled_tool_result()`，结果消息与 `waiting → running` 状态转换在同一提交中完成；随后 `resume_operation()` 从已完成 ToolCall 继续。Host 也可以通过 `cancel_operation()` 明确结束 Operation。
+
 这就是 Operation Record 支持续执行的边界：它能确定从哪个状态继续，也能确定哪些动作不能安全自动继续；它不承诺恢复已经丢失的 Python 协程。
 
 ## 6. 状态转换约束
@@ -127,3 +133,4 @@ ToolCallReady
 4. 进程重启后按 `operation/<id>/state` 一次读取恢复最新 AgentRunState。
 5. `intent_recorded` ToolCall 不被自动重放。
 6. 核心持久化身份不再新增 `turn_id`。
+7. Host 可原子补交未知 ToolCall 结果并继续，或显式取消 Operation。
