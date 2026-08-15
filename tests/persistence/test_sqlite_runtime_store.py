@@ -22,6 +22,7 @@ def _store(tmp_path: Path) -> SQLiteRuntimeStore:
         session_id="session-1",
         agent_id="Pickle",
         cwd="/tmp/project",
+        created_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
     )
     return store
 
