@@ -6,10 +6,10 @@ from pickel.conversations.agent_message import ToolResultMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.operation_service import AcceptedAgentRun, OperationService
 from pickel.hooks.events import UserPromptSubmitEvent
+from pickel.runtime.agent_run_progress import AgentRunProgressConsumer
 from pickel.runtime.operation_driver import (
     OperationDriveResult,
     OperationDriver,
-    OperationProgressConsumer,
     StreamDeltaConsumer,
 )
 from pickel.runtime.runtime_bindings import RuntimeBindings
@@ -49,7 +49,7 @@ class AgentRuntime:
         user_message: UserMessage,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: OperationProgressConsumer | None = None,
+        consume_progress: AgentRunProgressConsumer | None = None,
     ) -> OperationDriveResult:
         accepted = await self.accept_agent_run(
             session_id=session_id,
@@ -101,7 +101,7 @@ class AgentRuntime:
         *,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: OperationProgressConsumer | None = None,
+        consume_progress: AgentRunProgressConsumer | None = None,
     ) -> OperationDriveResult:
         return await self._operation_driver.drive_operation(
             operation_id,
@@ -116,7 +116,7 @@ class AgentRuntime:
         *,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: OperationProgressConsumer | None = None,
+        consume_progress: AgentRunProgressConsumer | None = None,
     ) -> OperationDriveResult:
         operation = self._operation_service.load_session_operation(operation_id)
         if (
@@ -182,7 +182,7 @@ class AgentRuntime:
         parent_tool_call_id: str | None = None,
         host_calls: HostCallClient | None = None,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: OperationProgressConsumer | None = None,
+        consume_progress: AgentRunProgressConsumer | None = None,
     ) -> OperationDriveResult:
         accepted = self._operation_service.start_delegated_run(
             agent_package_version_id=(

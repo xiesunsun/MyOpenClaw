@@ -27,6 +27,13 @@ from pickel.hooks.events import (
     AgentRunEndEvent,
 )
 from pickel.providers.stream import StreamDelta
+from pickel.runtime.agent_run_progress import (
+    AgentRunProgress,
+    AgentRunProgressConsumer,
+    ModelStepStartedProgress,
+    ToolCallCompletedProgress,
+    ToolCallStartedProgress,
+)
 from pickel.runtime.operation_state_machine import OperationStateMachine
 from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -35,37 +42,6 @@ from pickel.tools.base import ToolExecutionResult
 from pickel.tools.validation import validate_tool_arguments
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
-
-
-@dataclass(frozen=True)
-class ModelStepStartedProgress:
-    operation_id: str
-    step_id: str
-    step_sequence: int
-
-
-@dataclass(frozen=True)
-class ToolCallStartedProgress:
-    operation_id: str
-    step_id: str
-    step_sequence: int
-    tool_call: ToolCallState
-    call_index: int
-    total_calls: int
-
-
-@dataclass(frozen=True)
-class ToolCallCompletedProgress(ToolCallStartedProgress):
-    result: ToolExecutionResult
-
-
-OperationProgress = (
-    ModelStepStartedProgress | ToolCallStartedProgress | ToolCallCompletedProgress
-)
-OperationProgressConsumer = Callable[
-    [OperationProgress],
-    None | Awaitable[None],
-]
 
 
 @dataclass(frozen=True)
@@ -105,7 +81,7 @@ class OperationDriver:
         operation_id: str,
         *,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: OperationProgressConsumer | None = None,
+        consume_progress: AgentRunProgressConsumer | None = None,
         host_calls: HostCallClient | None = None,
     ) -> OperationDriveResult:
         """推进直到成功、终态或需要人工恢复的暂停点。"""
@@ -499,8 +475,8 @@ class OperationDriver:
 
     @staticmethod
     async def _notify_progress(
-        consumer: OperationProgressConsumer | None,
-        progress: OperationProgress,
+        consumer: AgentRunProgressConsumer | None,
+        progress: AgentRunProgress,
     ) -> None:
         if consumer is None:
             return
