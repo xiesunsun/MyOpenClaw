@@ -1,7 +1,7 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：实施中；v10 Persistence、Runtime 执行核心、Context 唯一管道与统一执行身份已闭合
+**状态**：实施中；v10 Persistence、Runtime 执行核心、Context 唯一管道、统一执行身份与 AgentRegistry 已闭合
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -107,8 +107,9 @@ OperationDriver
 | 4.6a Streaming 执行身份 | 完成 | Provider-neutral `StreamDelta` 保持无 Runtime 身份；RuntimeEffects 在已校验 Operation/Step 边界为每个 Delta 附加 `ExecutionIdentity`；ConversationRuntime 不再猜测身份；ToolCall Args Event 的重复 `tool_call_id` payload 已删除 | 4.6b Full Trace 丢帧 Diagnostic 验收 |
 | 4.6b Full Trace 丢帧 Diagnostic | 完成 | Full Trace 使用有界队列异步写入；每次连续 Delta 拥塞只在队列外报告首个 `trace_delta_dropped` Diagnostic，保留真实执行身份；慢回调不阻塞 Provider，flush/close 会排空单槽 pending diagnostic，且不参与恢复或可靠审计 | — |
 | 5.0 Persistence 收敛 | 完成 | SQLite/InMemory 统一为 v10 窄领域合同；Operation/State 只能通过原子 `accept_operation` 创建，`commit_run_transition` 是唯一 State CAS 提交入口；旧通用生产路径已删除；递归 CTE 沿 `parent_node_id → node_id` 主键回溯，1,000/10,000 Node 与 EXPLAIN 查询计划通过 | — |
+| 6.1 AgentRegistry | 完成 | `session_id → live Agent` 唯一映射；同 Session 普通 reopen 复用同一 Host/UI Adapter；幂等 wake 不丢运行期追加唤醒；Agent 锁串行前台与后台 drive；detach 按 expected Agent 注销；reload 仅在新代 attach 成功后替换 Agent，失败保留旧代 | active Operation 的 steer/inject 原子 claim 属于 6.2 |
 
-第十六轮验收基线：`782 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第十七轮验收基线：`788 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 已接通 AgentRegistry。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

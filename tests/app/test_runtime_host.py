@@ -59,9 +59,14 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
             )
             session_id = first.session.session_id
             resumed = host.open_conversation(ConversationRequest(session_id=session_id))
+            live_agent = host.agent_registry.get(session_id)
 
         assert resumed.session.session_id == session_id
+        assert resumed is first
         assert resumed.agent_definition.agent_id == "Pickle"
+        assert live_agent is not None
+        assert host.agent_registry.get(session_id) is live_agent
+        assert live_agent._driver._wake_callback == host.agent_registry.wake
         assert (root / "home" / "runtime.db").exists()
 
 
@@ -79,6 +84,28 @@ def test_runtime_host_keeps_ephemeral_conversation_off_disk() -> None:
 
         assert conversation.persistence == "ephemeral"
         assert not (root / "home" / "runtime.db").exists()
+
+
+def test_direct_conversation_detach_unregisters_agent_before_reopen() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            session_id = conversation.session.session_id
+            old_agent = host.agent_registry.get(session_id)
+            assert old_agent is not None
+
+            conversation.detach()
+
+            assert host.agent_registry.get(session_id) is None
+            reopened = host.open_conversation(
+                ConversationRequest(session_id=session_id)
+            )
+            assert host.agent_registry.get(session_id) is not old_agent
+            assert reopened is not conversation
 
 
 def test_runtime_host_keeps_recovery_path_open_when_exact_package_cannot_load() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from pickel.conversations.agent_message import UserMessage
 from pickel.runtime.agent_driver import AgentDriveResult, AgentDriver
 from pickel.runtime.operation_driver import OperationDriveResult
@@ -27,6 +29,7 @@ class Agent:
         self._session_id = session_id
         self._inbox = inbox
         self._driver = driver
+        self._drive_lock = asyncio.Lock()
 
     @property
     def session_id(self) -> str:
@@ -51,19 +54,21 @@ class Agent:
     async def when_idle(
         self, *, consume_delta=None, host_calls=None
     ) -> AgentDriveResult:
-        return await self._driver.when_idle(
-            session_id=self._session_id,
-            consume_delta=consume_delta,
-            host_calls=host_calls,
-        )
+        async with self._drive_lock:
+            return await self._driver.when_idle(
+                session_id=self._session_id,
+                consume_delta=consume_delta,
+                host_calls=host_calls,
+            )
 
     async def resume_operation(
         self, operation_id: str, *, consume_delta=None, host_calls=None
     ) -> OperationDriveResult:
         """恢复当前 Session 的指定 Operation；不绕过 AgentDriver 校验。"""
-        return await self._driver.resume_operation(
-            session_id=self._session_id,
-            operation_id=operation_id,
-            consume_delta=consume_delta,
-            host_calls=host_calls,
-        )
+        async with self._drive_lock:
+            return await self._driver.resume_operation(
+                session_id=self._session_id,
+                operation_id=operation_id,
+                consume_delta=consume_delta,
+                host_calls=host_calls,
+            )

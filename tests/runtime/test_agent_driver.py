@@ -35,6 +35,29 @@ class _Inbox:
     session_id = "session-1"
 
 
+class _SerializedOperationDriver:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.calls = 0
+
+    async def drive_operation(self, _operation_id, *, consume_delta, host_calls):
+        del consume_delta, host_calls
+        self.calls += 1
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.calls == 1:
+            self.started.set()
+            await self.release.wait()
+        else:
+            self.second_started.set()
+        self.active -= 1
+        return SimpleNamespace(status="waiting")
+
+
 def _session(*, active_operation_id="operation-1", archived_at=None):
     return SimpleNamespace(
         active_operation_id=active_operation_id,
@@ -127,3 +150,22 @@ def test_agent_resume_operation_is_a_thin_proxy():
     assert operation_driver.calls == [
         ("operation-1", consume_delta, host_calls),
     ]
+
+
+def test_agent_serializes_foreground_and_wake_drive_entries():
+    async def scenario() -> None:
+        operation_driver = _SerializedOperationDriver()
+        agent = Agent(
+            session_id="session-1",
+            inbox=_Inbox(),
+            driver=_driver(_session(), operation_driver),
+        )
+        foreground = asyncio.create_task(agent.when_idle())
+        await operation_driver.started.wait()
+        background = asyncio.create_task(agent.when_idle())
+        operation_driver.release.set()
+        await operation_driver.second_started.wait()
+        await asyncio.gather(foreground, background)
+        assert operation_driver.max_active == 1
+
+    asyncio.run(scenario())

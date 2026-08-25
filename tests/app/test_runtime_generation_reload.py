@@ -92,6 +92,7 @@ def test_reload_build_failure_keeps_old_generation_serving() -> None:
             conversation = host.open_conversation(
                 ConversationRequest(agent_id="Pickle", cwd=root)
             )
+            old_agent = host.agent_registry.get(conversation.session.session_id)
             old_generation = host.active_generation
 
             def fail_boot(*_args, **_kwargs):
@@ -109,6 +110,32 @@ def test_reload_build_failure_keeps_old_generation_serving() -> None:
         assert host.active_generation is old_generation
         assert old_generation.state is RuntimeGenerationState.ACTIVE
         assert not conversation.closed
+        assert old_agent is not None
+        assert host.agent_registry.get(conversation.session.session_id) is old_agent
+
+
+def test_reload_replaces_agent_only_after_new_generation_attach_succeeds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            session_id = conversation.session.session_id
+            old_agent = host.agent_registry.get(session_id)
+            assert old_agent is not None
+
+            result = asyncio.run(host.reload(conversation, app_config=host.app_config))
+
+            new_agent = host.agent_registry.get(session_id)
+            assert new_agent is not None
+            assert new_agent is not old_agent
+            assert result.conversation is not conversation
+            assert host.agent_registry.get(session_id) is new_agent
+            assert not host.agent_registry.unregister(session_id, old_agent)
+
+        assert conversation.closed
 
 
 def test_reload_does_not_wait_for_other_old_generation_conversations() -> None:

@@ -96,6 +96,7 @@ class ConversationRuntime:
         mode: ConversationMode = "batch",
         loaded_package_handle: LoadedPackageHandle | None = None,
         skill_store: Any | None = None,
+        on_detach: Callable[[], None] | None = None,
     ) -> None:
         self._loaded_agent_package = loaded_agent_package
         self._agent = agent
@@ -104,6 +105,7 @@ class ConversationRuntime:
         self._operation_service = operation_service
         self._persistence_store = persistence_store
         self._skill_store = skill_store
+        self._on_detach = on_detach
         self._persistence = persistence
         self._app_config = app_config
         self._mode = mode
@@ -532,6 +534,10 @@ class ConversationRuntime:
             # finally 中释放精确 Package Handle。
             self._release_package_after_task = True
         self._closed = True
+        on_detach = self._on_detach
+        self._on_detach = None
+        if on_detach is not None:
+            on_detach()
 
     async def close(self) -> None:
         self.detach()

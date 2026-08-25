@@ -34,6 +34,7 @@ from pickel.app.runtime_generation import (
 )
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.operations.operation_service import OperationService
+from pickel.runtime.agent_registry import AgentRegistry
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -54,6 +55,11 @@ class RuntimeHost:
         self._active_generation = self._build_generation(boot, self._extension_result)
         self._conversations: set[ConversationRuntime] = set()
         self._retired_generations: set[RuntimeGeneration] = set()
+        self._agent_registry = AgentRegistry()
+
+    @property
+    def agent_registry(self) -> AgentRegistry:
+        return self._agent_registry
 
     @classmethod
     async def create(
@@ -150,6 +156,10 @@ class RuntimeHost:
         )
 
     def open_conversation(self, request: ConversationRequest) -> ConversationRuntime:
+        if request.session_id is not None:
+            existing = self._find_open_conversation(request.session_id)
+            if existing is not None:
+                return existing
         generation = self._active_generation
         boot = self._active_generation_boot()
         if request.persistence == "ephemeral":
@@ -176,6 +186,17 @@ class RuntimeHost:
             agent_id=agent_id,
             persistence=request.persistence,
             mode=request.mode,
+        )
+
+    def _find_open_conversation(self, session_id: str) -> ConversationRuntime | None:
+        return next(
+            (
+                conversation
+                for conversation in self._conversations
+                if conversation.session.session_id == session_id
+                and not conversation.closed
+            ),
+            None,
         )
 
     def new_session(self, conversation: ConversationRuntime) -> ConversationRuntime:
@@ -246,6 +267,7 @@ class RuntimeHost:
                 agent_id=conversation.agent_definition.agent_id,
                 persistence=conversation.persistence,
                 mode=conversation.mode,
+                replace_agent=True,
             )
         except BaseException:
             # 新代尚未发布，任何构建/attach 失败都只回滚新资源。
@@ -287,6 +309,7 @@ class RuntimeHost:
         agent_id: str,
         persistence: str,
         mode: ConversationMode,
+        replace_agent: bool = False,
     ) -> ConversationRuntime:
         # 同一个 OperationService 同时服务 AgentDriver 与 UI Adapter，避免
         # ConversationRuntime 绕过窄服务直接读取 Operation 状态。
@@ -323,15 +346,20 @@ class RuntimeHost:
         package_handle = generation.acquire_loaded_package(
             loaded.version.package_version_id
         )
+        previous_agent = self._agent_registry.get(session.session_id)
         try:
             store.insert_agent_package_version(loaded.version)
-            agent = boot.build_agent(
-                store=store,
-                session_id=session.session_id,
-                loaded_agent_package=loaded,
-                session_cwd=session.cwd,
-                operation_service=operation_service,
-            )
+            if previous_agent is not None and not replace_agent:
+                agent = previous_agent
+            else:
+                agent = boot.build_agent(
+                    store=store,
+                    session_id=session.session_id,
+                    loaded_agent_package=loaded,
+                    session_cwd=session.cwd,
+                    operation_service=operation_service,
+                    wake_callback=self._agent_registry.wake,
+                )
             conversation = ConversationRuntime(
                 loaded_agent_package=loaded,
                 loaded_package_handle=package_handle,
@@ -343,6 +371,10 @@ class RuntimeHost:
                 persistence=persistence,
                 app_config=boot.app_config,
                 mode=mode,
+                on_detach=lambda: self._agent_registry.unregister(
+                    session.session_id,
+                    agent,
+                ),
             )
         except BaseException:
             package_handle.close_sync()
@@ -352,6 +384,20 @@ class RuntimeHost:
         except BaseException:
             conversation.detach()
             raise
+        if previous_agent is None:
+            try:
+                self._agent_registry.register(agent)
+            except BaseException:
+                conversation.detach()
+                raise
+        elif replace_agent:
+            self._agent_registry.unregister(session.session_id, previous_agent)
+            try:
+                self._agent_registry.register(agent)
+            except BaseException:
+                self._agent_registry.register(previous_agent)
+                conversation.detach()
+                raise
         self._conversations.add(conversation)
         return conversation
 

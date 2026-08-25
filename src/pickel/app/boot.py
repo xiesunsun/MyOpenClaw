@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from pickel.agents.agent_package import (
@@ -255,6 +256,7 @@ class Boot:
         loaded_agent_package: LoadedAgentPackage,
         session_cwd: Path,
         operation_service: OperationService | None = None,
+        wake_callback: Callable[[str], None] | None = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
@@ -308,6 +310,7 @@ class Boot:
                 ),
             ),
             cancel_operation=operation_service.request_cancellation,
+            wake_callback=wake_callback,
         )
         return Agent(
             session_id=session_id,
