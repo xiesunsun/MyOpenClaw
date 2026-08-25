@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Generic, Protocol, TypeAlias, TypeVar
 from uuid import uuid4
 
+from pickel.shared.execution_identity import ExecutionIdentity
+
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
@@ -35,11 +37,7 @@ class HostCallSpec(Generic[RequestT, ResponseT]):
 @dataclass(frozen=True)
 class HostCallContext:
     call_id: str = field(default_factory=lambda: str(uuid4()))
-    session_id: str = ""
-    operation_id: str = ""
-    step_id: str = ""
-    step_sequence: int | None = None
-    tool_call_id: str | None = None
+    identity: ExecutionIdentity = field(default_factory=ExecutionIdentity)
     timeout_seconds: float | None = None
 
 

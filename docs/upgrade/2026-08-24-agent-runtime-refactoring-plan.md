@@ -103,8 +103,9 @@ OperationDriver
 | 4.2 Tool execution 执行身份 | 完成 | `ToolExecutionContext` 只组合 `ExecutionIdentity`，删除五个重复执行字段；Boot 在工具执行边界一次性组装完整身份，Shell 与 MCP Proxy 调用方已迁移；`tool_call_id` 继续作为默认幂等身份 | Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.3 Hook 执行身份 | 完成 | Hook 控制事件只组合 `ExecutionIdentity`；Pre/Post Tool Hook 的 `tool_call_id` 收敛到统一身份；Lifecycle 与 OperationDriver 调用方已迁移；仅为旧 Hook 身份存在的 `EventIdentity` 已删除 | Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.4 Observation 执行身份 | 完成 | Span、Diagnostic 与 Request Snapshot 直接组合 `ExecutionIdentity`，Hook/Event/Model Request 调用方不再转换身份；旧 `ObservationIdentity` 已删除；观测时间字段与既有 Trace JSON schema 保持不变 | HostCall 与 Streaming 边界按后续小批次迁移 |
+| 4.5 HostCall 执行身份 | 完成 | `HostCallContext` 只保留独立 `call_id`、统一 `ExecutionIdentity` 与 timeout；MCP Proxy 和嵌套 elicitation 直接复用 ToolCall 身份；Router 的 pending/cancel/dedup 仍以每次 Host 请求的 `call_id` 为权威 | Streaming 边界按后续小批次迁移 |
 
-第十二轮验收基线：`769 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第十三轮验收基线：`770 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

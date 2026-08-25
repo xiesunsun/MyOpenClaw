@@ -13,6 +13,7 @@ from pickel.runtime.host_calls import (
     HostCallSpec,
     HostCallUnavailable,
 )
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,35 @@ class _Recorder:
 
 
 class HostCallRouterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_distinct_host_calls_share_tool_identity_but_have_unique_call_ids(
+        self,
+    ) -> None:
+        router = HostCallRouter()
+        seen = []
+        identity = ExecutionIdentity(
+            session_id="session-1",
+            operation_id="operation-1",
+            step_id="step-1",
+            tool_call_id="tool-call-1",
+        )
+
+        async def handler(_request, context):
+            seen.append(context)
+            return _Response("ok")
+
+        router.register(SPEC, handler)
+        await router.client.call(
+            SPEC, _Request("first"), HostCallContext(identity=identity)
+        )
+        await router.client.call(
+            SPEC, _Request("second"), HostCallContext(identity=identity)
+        )
+
+        self.assertEqual(2, len(seen))
+        self.assertNotEqual(seen[0].call_id, seen[1].call_id)
+        self.assertIs(seen[0].identity, identity)
+        self.assertIs(seen[1].identity, identity)
+
     async def test_routes_one_handler_and_records_before_return(self) -> None:
         recorder = _Recorder()
         router = HostCallRouter(recorder)

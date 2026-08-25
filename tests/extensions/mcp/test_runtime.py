@@ -192,8 +192,8 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("elicited:Ada:2", result.content)
         self.assertEqual(1, len(seen))
         self.assertEqual("Provide user details", seen[0][0].message)
-        self.assertEqual("operation-1", seen[0][1].operation_id)
-        self.assertEqual("tool-call-1", seen[0][1].tool_call_id)
+        self.assertEqual("operation-1", seen[0][1].identity.operation_id)
+        self.assertEqual("tool-call-1", seen[0][1].identity.tool_call_id)
 
     async def test_proxy_drives_multiple_mcp2_input_required_rounds(self) -> None:
         bus = ToolBus()
@@ -261,9 +261,11 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             input_requests=requests,
             host_calls=host_calls.client,
             call_context=HostCallContext(
-                session_id="s",
-                operation_id="operation-1",
-                tool_call_id="tool-call",
+                identity=ExecutionIdentity(
+                    session_id="s",
+                    operation_id="operation-1",
+                    tool_call_id="tool-call",
+                ),
             ),
             tool_name="tool",
         )
