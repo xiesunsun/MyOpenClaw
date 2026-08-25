@@ -46,6 +46,15 @@ class _HiddenTool(_EchoTool):
     )
 
 
+class _SafeTool(_EchoTool):
+    spec = ToolSpec(
+        name="safe",
+        description="Safe replay tool",
+        input_schema={"type": "object"},
+        replay_policy="safe",
+    )
+
+
 def _config(tmp_path: Path) -> AppConfig:
     agent_dir = tmp_path / "agents" / "Pickle"
     skill_dir = agent_dir / "skills" / "research"
@@ -103,6 +112,23 @@ def _tool_bus() -> ToolBus:
     bus.register(_EchoTool(), source=ToolSource.BUILTIN, version="1")
     bus.register(_HiddenTool(), source=ToolSource.BUILTIN, version="1")
     return bus
+
+
+def test_builder_preserves_tool_replay_policy(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].tools = ["echo", "safe"]
+    bus = _tool_bus()
+    bus.register(_SafeTool(), source=ToolSource.BUILTIN, version="1")
+
+    package = AgentPackageBuilder(
+        app_config=config,
+        tool_bus=bus,
+    ).build_agent_package_version()
+
+    assert [(tool.name, tool.replay_policy) for tool in package.tools] == [
+        ("echo", "never"),
+        ("safe", "safe"),
+    ]
 
 
 def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) -> None:

@@ -20,7 +20,16 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         definitions = {entry.name: entry.tool.spec for entry in snapshot.entries}
 
         self.assertEqual(
-            {"ls", "glob", "grep", "read", "edit", "write", "bash"},
+            {
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
+                "bash",
+                "delegate_agent",
+            },
             set(definitions),
         )
         self.assertIn("does not recurse", definitions["ls"].description)

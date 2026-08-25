@@ -12,6 +12,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+if TYPE_CHECKING:
+    from pickel.conversations.agent_message import UserMessage
+    from pickel.operations.agent_delegation import AgentDelegation
+
 if TYPE_CHECKING:  # 运行期不导入，避免 base ↔ shell / file_service 循环
     from pickel.artifacts.artifact_service import ArtifactService
     from pickel.runtime.host_calls import HostCallClient
@@ -33,6 +37,19 @@ class ActivationControl(Protocol):
     def enable_tools(self, names: Iterable[str]) -> None: ...
 
 
+class DelegationControl(Protocol):
+    """工具使用的 durable delegation 窄接口。"""
+
+    async def start_delegation(
+        self,
+        *,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str,
+        message: UserMessage,
+    ) -> "AgentDelegation": ...
+
+
 @dataclass(frozen=True)
 class ToolServices:
     workspace_files: "WorkspaceFileService | None" = None
@@ -41,3 +58,4 @@ class ToolServices:
     skill_store: "SkillStore | None" = None
     host_calls: "HostCallClient | None" = None
     artifact_service: "ArtifactService | None" = None
+    delegation: DelegationControl | None = None

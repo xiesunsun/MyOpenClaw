@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Literal, Optional, Union
 
 from pickel.observe.records import ErrorInfo
 from pickel.conversations.content_blocks import ToolResultContent
@@ -20,6 +20,11 @@ class ToolSpec:
     description: str
     input_schema: dict[str, Any]
     output_schema: Optional[dict[str, Any]] = None
+    replay_policy: Literal["safe", "never"] = "never"
+
+    def __post_init__(self) -> None:
+        if self.replay_policy not in {"safe", "never"}:
+            raise ValueError("ToolSpec.replay_policy 必须是 safe 或 never")
 
 
 @dataclass(frozen=True)
@@ -70,11 +75,13 @@ class FunctionTool(BaseTool):
         description: str,
         input_schema: dict[str, Any],
         func: ToolFunction,
+        replay_policy: Literal["safe", "never"] = "never",
     ) -> None:
         self.spec = ToolSpec(
             name=name,
             description=description,
             input_schema=input_schema,
+            replay_policy=replay_policy,
         )
         self._func = func
         self._signature = inspect.signature(func)
@@ -115,6 +122,7 @@ def tool(
     description: str,
     input_schema: Optional[dict[str, Any]] = None,
     parameters: Optional[dict[str, Any]] = None,
+    replay_policy: Literal["safe", "never"] = "never",
 ) -> Callable[[ToolFunction], FunctionTool]:
     schema = input_schema or parameters
     if schema is None:
@@ -126,6 +134,7 @@ def tool(
             description=description,
             input_schema=schema,
             func=func,
+            replay_policy=replay_policy,
         )
 
     return decorator

@@ -18,6 +18,7 @@ from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
+    DelegateAgentIntent,
     ModelStepState,
     ToolApproval,
     ToolApprovalDecision,
@@ -138,7 +139,7 @@ def _queued_state() -> AgentRunState:
     )
 
 
-def _loaded_package(*, replay_policy="safe", input_schema=None):
+def _loaded_package(*, replay_policy="safe", input_schema=None, tool_name="run"):
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
         behavior_instruction="behavior",
@@ -146,11 +147,11 @@ def _loaded_package(*, replay_policy="safe", input_schema=None):
         runtime_policy=SimpleNamespace(max_model_steps=8, context_turn_window=8),
         tools=(
             SimpleNamespace(
-                name="run",
-                description="run tool",
+                name=tool_name,
+                description=tool_name,
                 replay_policy=replay_policy,
                 source=SimpleNamespace(value="builtin"),
-                implementation_ref=SimpleNamespace(name="run"),
+                implementation_ref=SimpleNamespace(name=tool_name),
                 input_schema=input_schema or {"type": "object"},
             ),
         ),
@@ -164,6 +165,7 @@ def _driver(
     *,
     tool=None,
     replay_policy="safe",
+    tool_name="run",
     invoke_hook=None,
     input_schema=None,
     recall_sources=(),
@@ -181,6 +183,7 @@ def _driver(
         package_loader=lambda package_version_id: _loaded_package(
             replay_policy=replay_policy,
             input_schema=input_schema,
+            tool_name=tool_name,
         ).version,
         effects_resolver=lambda package_version_id: effects,
         model_context_builder=model_context_builder or _ContextBuilder(),
@@ -344,6 +347,101 @@ async def test_tool_replay_policy_and_intent_before_effect():
 
     assert result.status == "succeeded"
     assert seen == [("intent_recorded", "never")]
+
+
+@_run_async
+async def test_delegate_agent_freezes_parent_package_before_effect():
+    tool_message = AssistantMessage(
+        content=(
+            ToolCallBlock(
+                id="tool-1",
+                name="delegate_agent",
+                arguments={"description": "child", "prompt": "work"},
+            ),
+        )
+    )
+    seen = []
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        call = next(
+            call
+            for call in state.current_step.tool_calls
+            if call.tool_call_id == tool_call_id
+        )
+        seen.append((call.status, call.execution_intent))
+        return SimpleNamespace(
+            content="accepted", content_blocks=[], is_error=False, structured_content={}
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+        tool_name="delegate_agent",
+        replay_policy="safe",
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert seen == [
+        (
+            "intent_recorded",
+            DelegateAgentIntent(_operation().agent_package_version_id),
+        )
+    ]
+
+
+@_run_async
+async def test_delegate_agent_safe_replay_uses_persisted_intent():
+    call = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="delegate_agent",
+        arguments={"description": "child", "prompt": "work"},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=DelegateAgentIntent(_operation().agent_package_version_id),
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    state = replace(
+        _queued_state(),
+        status="running",
+        current_step=ModelStepState(
+            step_id="step-1",
+            step_sequence=1,
+            phase="awaiting_tools",
+            request_attempt=1,
+            request_intent=None,
+            assistant_message_node_id="assistant-1",
+            tool_calls=(call,),
+        ),
+    )
+    seen = []
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        persisted = next(
+            item
+            for item in state.current_step.tool_calls
+            if item.tool_call_id == tool_call_id
+        )
+        seen.append(persisted.execution_intent)
+        return SimpleNamespace(
+            content="accepted", content_blocks=[], is_error=False, structured_content={}
+        )
+
+    operations = _Operations(state)
+    result = await _driver(
+        operations,
+        _Provider([AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+        tool_name="delegate_agent",
+        replay_policy="safe",
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert seen == [DelegateAgentIntent(_operation().agent_package_version_id)]
 
 
 @_run_async

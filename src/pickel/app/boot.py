@@ -50,7 +50,7 @@ from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
 from pickel.tools.sandbox import SandboxPolicy
-from pickel.tools.services import ToolServices
+from pickel.tools.services import DelegationControl, ToolServices
 from pickel.tools.shell import LocalBashOperations
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 
@@ -257,6 +257,7 @@ class Boot:
         session_cwd: Path,
         operation_service: OperationService | None = None,
         wake_callback: Callable[[str], None] | None = None,
+        delegation_control: DelegationControl | None = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
@@ -266,6 +267,7 @@ class Boot:
             store=store,
             loaded_agent_package=loaded_agent_package,
             session_cwd=session_cwd,
+            delegation_control=delegation_control,
         )
         package_id = loaded_agent_package.version.package_version_id
         loaded_packages = {package_id: loaded_agent_package}
@@ -289,6 +291,7 @@ class Boot:
                 store=store,
                 loaded_agent_package=loaded_for(requested),
                 session_cwd=session_cwd,
+                delegation_control=delegation_control,
             ),
         )
         agent_driver = AgentDriver(
@@ -348,6 +351,7 @@ class Boot:
         store: CompositionStore,
         loaded_agent_package: LoadedAgentPackage,
         session_cwd: Path,
+        delegation_control: DelegationControl | None = None,
     ) -> RuntimeEffects:
         agent_id = loaded_agent_package.version.agent_id
         provider = loaded_agent_package.model_clients["primary"]
@@ -366,6 +370,7 @@ class Boot:
             bash=LocalBashOperations(sandbox=self.sandbox_policy),
             skill_store=self._build_skill_store(agent_id),
             artifact_service=artifact_service,
+            delegation=delegation_control,
         )
 
         # Hook 实现属于已加载 Package 的冻结执行贡献。恢复已有 Operation 时，
@@ -410,6 +415,7 @@ class Boot:
                     skill_store=services.skill_store,
                     host_calls=host_calls,
                     artifact_service=artifact_service,
+                    delegation=delegation_control,
                 ),
             )
             try:

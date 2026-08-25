@@ -113,8 +113,9 @@ OperationDriver
 | 6.3a Delegation durable acceptance | 完成 | `DelegationService` 只从父 `DelegateAgentIntent` 读取冻结 child Package；校验当前 ToolCall、WorkspaceBinding 与 delegation depth；SQLite/InMemory 一次事务创建空 child Session、初始 pending followup 和 AgentDelegation，支持并发幂等且不创建 child Operation/Node | 普通 child Agent 装配、启动恢复和父 ToolCall 结果属于后续批次 |
 | 6.3b-1 Headless Agent 激活 | 完成 | RuntimeHost 对普通 Session 使用当前 Package、对 delegated child 使用父 Intent 冻结 Package、对 active child 使用自身 Operation Package；完整构造后才 register/wake；headless Agent 独立持有 Generation handle，失败可重试，shutdown 等待 wake task 后释放 | delegation Tool adapter 尚未接入 |
 | 6.3b-2 启动恢复发现 | 完成 | RuntimeHost.create 通过共享 Store 的无分页 `list_runnable_session_ids()` 发现未归档且可运行的普通/child Session；只恢复 queued/running/cancelling 或 idle followup/steer，隔离单候选失败；active Operation 历史 Package 缺失时仅用当前 Package 装配外壳，delegated idle child 严格拒绝替换冻结 Package | delegation Tool adapter 与父 ToolCall 结果仍属后续批次 |
+| 6.3c-a `delegate_agent` durable start | 完成 | Tool 只返回原子接受后的 child Session/message handle；ready→intent_recorded 先冻结父 Operation Package，再调用窄 DelegationControl；ToolSpec 显式传递 replay policy，内置 Tool 使用 `safe`，激活失败只记录日志并由启动恢复兜底 | wait/result/cancel 不在本批实现 |
 
-第二十二轮验收基线：`843 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b-1 headless Agent 激活与 6.3b-2 启动恢复发现已接通。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第二十三轮验收基线：`851 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start 已接通。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

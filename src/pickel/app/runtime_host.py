@@ -22,6 +22,7 @@ from pickel.app.runtime_models import (
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.conversations.conversation_service import ConversationService
+from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.extensions_host.event_processor import ConversationExtensionContext
 from pickel.extensions_host.loader import (
@@ -36,6 +37,8 @@ from pickel.app.runtime_generation import (
 )
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.operations.operation_service import OperationService
+from pickel.operations.agent_delegation import AgentDelegation
+from pickel.operations.delegation_service import DelegationService
 from pickel.operations.agent_run_state import DelegateAgentIntent
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
@@ -44,6 +47,37 @@ from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 
 logger = logging.getLogger(__name__)
+
+
+class _RuntimeDelegationControl:
+    """把工具的 durable acceptance 接到当前 Host 的 child activation。"""
+
+    def __init__(self, host: "RuntimeHost", store: CompositionStore) -> None:
+        self._host = host
+        self._store = store
+
+    async def start_delegation(
+        self,
+        *,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str,
+        message: UserMessage,
+    ) -> AgentDelegation:
+        delegation = DelegationService(store=self._store).start_delegation(
+            parent_operation_id,
+            parent_step_id,
+            parent_tool_call_id,
+            message,
+        )
+        try:
+            await self._host.activate_agent(delegation.child_session_id, self._store)
+        except Exception:
+            logger.exception(
+                "Child Session 激活失败，将由下次启动恢复兜底: session_id=%s",
+                delegation.child_session_id,
+            )
+        return delegation
 
 
 class RuntimeHost:
@@ -212,6 +246,7 @@ class RuntimeHost:
                 session_cwd=session.cwd,
                 operation_service=OperationService(store),
                 wake_callback=self._agent_registry.wake,
+                delegation_control=_RuntimeDelegationControl(self, store),
             )
             self._agent_registry.register(agent)
             registered = True
@@ -475,6 +510,7 @@ class RuntimeHost:
                     session_cwd=session.cwd,
                     operation_service=operation_service,
                     wake_callback=self._agent_registry.wake,
+                    delegation_control=_RuntimeDelegationControl(self, store),
                 )
             conversation = ConversationRuntime(
                 loaded_agent_package=loaded,

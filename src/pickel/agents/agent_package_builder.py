@@ -236,7 +236,7 @@ class AgentPackageBuilder:
             description=entry.tool.spec.description,
             input_schema=entry.tool.spec.input_schema,
             output_schema=entry.tool.spec.output_schema,
-            replay_policy="never",
+            replay_policy=entry.tool.spec.replay_policy,
         )
 
     @staticmethod

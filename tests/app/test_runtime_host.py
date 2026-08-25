@@ -15,13 +15,14 @@ import pytest
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.agents.agent_package import package_version_id_for_content
 from pickel.app.boot import Boot
-from pickel.app.runtime_host import RuntimeHost
+from pickel.app.runtime_host import RuntimeHost, _RuntimeDelegationControl
 from pickel.app.runtime_models import ConversationRequest
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.extensions_host.loader import LoadResult
 from pickel.inbox.message import UserMessageSource
 from pickel.operations.operation_service import OperationService
+from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import DelegateAgentIntent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.workspaces.workspace_binding import WorkspaceBinding
@@ -211,6 +212,67 @@ def test_startup_recovery_isolates_candidate_failure(caplog) -> None:
 
         assert calls == ["bad", "good"]
         assert "启动恢复 Session 失败" in caplog.text
+
+
+def test_runtime_delegation_control_activates_accepted_child() -> None:
+    store = object()
+    host = SimpleNamespace(activate_agent=AsyncMock())
+    delegation = AgentDelegation(
+        child_session_id="child-session",
+        parent_operation_id="parent-operation",
+        parent_step_id="parent-step",
+        parent_tool_call_id="parent-tool",
+        initial_message_id="child-message",
+        created_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    service = SimpleNamespace(start_delegation=lambda *_args: delegation)
+
+    with patch(
+        "pickel.app.runtime_host.DelegationService", return_value=service
+    ) as service_type:
+        result = asyncio.run(
+            _RuntimeDelegationControl(host, store).start_delegation(
+                parent_operation_id="parent-operation",
+                parent_step_id="parent-step",
+                parent_tool_call_id="parent-tool",
+                message=UserMessage(),
+            )
+        )
+
+    assert result == delegation
+    service_type.assert_called_once_with(store=store)
+    host.activate_agent.assert_awaited_once_with("child-session", store)
+
+
+def test_runtime_delegation_control_preserves_acceptance_on_activation_failure(
+    caplog,
+) -> None:
+    store = object()
+    host = SimpleNamespace(
+        activate_agent=AsyncMock(side_effect=RuntimeError("package unavailable"))
+    )
+    delegation = AgentDelegation(
+        child_session_id="child-session",
+        parent_operation_id="parent-operation",
+        parent_step_id="parent-step",
+        parent_tool_call_id="parent-tool",
+        initial_message_id="child-message",
+        created_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    service = SimpleNamespace(start_delegation=lambda *_args: delegation)
+
+    with patch("pickel.app.runtime_host.DelegationService", return_value=service):
+        result = asyncio.run(
+            _RuntimeDelegationControl(host, store).start_delegation(
+                parent_operation_id="parent-operation",
+                parent_step_id="parent-step",
+                parent_tool_call_id="parent-tool",
+                message=UserMessage(),
+            )
+        )
+
+    assert result == delegation
+    assert "Child Session 激活失败" in caplog.text
 
 
 def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> None:

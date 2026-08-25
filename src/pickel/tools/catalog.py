@@ -9,6 +9,7 @@ from pickel.tools.file_tools import (
     ReadTool,
     WriteTool,
 )
+from pickel.tools.delegate_agent import delegate_agent
 from pickel.tools.shell import BashTool
 
 
@@ -22,6 +23,7 @@ def builtin_tools() -> list[BaseTool]:
         EditTool(formatter),
         WriteTool(formatter),
         BashTool(),
+        delegate_agent,
     ]
 
 

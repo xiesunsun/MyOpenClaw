@@ -36,6 +36,7 @@ from pickel.inbox.message import InboxMessage
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
+    DelegateAgentIntent,
     ModelRequestIntent,
     ModelStepState,
     ToolApproval,
@@ -423,7 +424,15 @@ class OperationDriver:
                 # 保留 Provider 原始顺序，不能用只含当前调用的列表覆盖批次。
                 next_calls = tuple(
                     (
-                        replace(call, status="intent_recorded")
+                        replace(
+                            call,
+                            status="intent_recorded",
+                            execution_intent=(
+                                DelegateAgentIntent(operation.agent_package_version_id)
+                                if call.tool_name == "delegate_agent"
+                                else call.execution_intent
+                            ),
+                        )
                         if call.tool_call_id == ready.tool_call_id
                         else call
                     )
