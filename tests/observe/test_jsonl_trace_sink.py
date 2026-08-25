@@ -9,7 +9,7 @@ from pathlib import Path
 import pickel.observe.jsonl_trace_sink as trace_module
 from pickel.config.paths import home_dir
 from pickel.observe.records import (
-    ObservationIdentity,
+    DiagnosticRecord,
     RequestSnapshotRecord,
     SpanRecord,
 )
@@ -180,7 +180,7 @@ def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
     sink.record(
         SpanRecord(
             name="pickel.provider.request",
-            identity=ObservationIdentity(session_id="s1", operation_id="t1"),
+            identity=ExecutionIdentity(session_id="s1", operation_id="t1"),
             duration_ms=12.5,
         )
     )
@@ -194,11 +194,21 @@ def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
     assert [record["trace_seq"] for record in records] == [0, 1]
 
 
+def test_observation_identity_沿用旧的空_operation_id输出(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    sink.record(DiagnosticRecord(name="diagnostic"))
+    sink.close()
+
+    record = json.loads(path.read_text())
+    assert record["operation_id"] == ""
+    assert "tool_call_id" not in record
+    assert "message_id" not in record
+
+
 def test_完整请求快照只在_full_模式落盘(tmp_path: Path):
     snapshot = RequestSnapshotRecord(
-        identity=ObservationIdentity(
-            session_id="s1", operation_id="t1", step_sequence=1
-        ),
+        identity=ExecutionIdentity(session_id="s1", operation_id="t1", step_sequence=1),
         provider="anthropic",
         model="claude-test",
         cache_order=("tools", "system", "messages"),

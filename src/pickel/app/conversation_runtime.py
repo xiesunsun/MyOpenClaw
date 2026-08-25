@@ -59,7 +59,6 @@ from pickel.observe.jsonl_trace_sink import (
 from pickel.observe.operation_report import export_operation_report
 from pickel.observe.records import (
     ErrorInfo,
-    ObservationIdentity,
     SpanTimer,
     observation_scope,
 )
@@ -201,7 +200,7 @@ class ConversationRuntime:
         started = time.perf_counter()
         timer = SpanTimer(
             "pickel.agent_run",
-            ObservationIdentity(
+            ExecutionIdentity(
                 session_id=self._session.session_id,
                 operation_id=operation_id,
             ),

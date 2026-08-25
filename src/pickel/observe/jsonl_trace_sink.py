@@ -214,7 +214,7 @@ class JsonlTraceSink:
             "record_type": record_type,
             "recorded_at": _iso_now(),
             "session_id": identity.session_id,
-            "operation_id": identity.operation_id,
+            "operation_id": identity.operation_id or "",
             "step_id": identity.step_id,
             "step_sequence": identity.step_sequence,
             "payload": observation.to_dict(),

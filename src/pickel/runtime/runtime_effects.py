@@ -23,13 +23,13 @@ from pickel.conversations.content_blocks import TextBlock
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
 from pickel.observe.records import (
-    ObservationIdentity,
     RequestSnapshotRecord,
     observation_requested,
     record_request_snapshot,
 )
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted, StreamDelta
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
@@ -175,7 +175,7 @@ class RuntimeEffects:
                 model=self.model_name,
                 request=snapshot,
                 cache_order=tuple(self.provider.request_cache_order),
-                identity=ObservationIdentity(
+                identity=ExecutionIdentity(
                     session_id=operation.session_id,
                     operation_id=operation.operation_id,
                     step_id=step.step_id if step is not None else None,

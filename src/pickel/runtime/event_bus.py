@@ -15,7 +15,6 @@ from typing import Callable
 from pickel.observe.records import (
     DiagnosticRecord,
     ErrorInfo,
-    ObservationIdentity,
     record_diagnostic,
 )
 from pickel.runtime.runtime_events import RuntimeEventBase, RuntimeEventHandler
@@ -62,12 +61,7 @@ class EventBus:
                 record_diagnostic(
                     DiagnosticRecord(
                         name="event_handler_error",
-                        identity=ObservationIdentity(
-                            session_id=stamped.envelope.identity.session_id,
-                            operation_id=stamped.envelope.identity.operation_id or "",
-                            step_id=stamped.envelope.identity.step_id,
-                            step_sequence=stamped.envelope.identity.step_sequence,
-                        ),
+                        identity=stamped.envelope.identity,
                         attributes={"handler": identifier},
                         error=ErrorInfo.from_exception(exc, kind="event_handler"),
                     )

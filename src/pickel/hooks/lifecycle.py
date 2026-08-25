@@ -28,7 +28,6 @@ from pickel.hooks.events import (
 from pickel.observe.records import (
     DiagnosticRecord,
     ErrorInfo,
-    ObservationIdentity,
     SpanTimer,
     record_diagnostic,
 )
@@ -68,13 +67,7 @@ async def _call(handler: Any, method: str, event: Any) -> Any:
     fn = getattr(handler, method, None)
     if fn is None:
         return None
-    execution_identity = event.identity
-    identity = ObservationIdentity(
-        session_id=execution_identity.session_id,
-        operation_id=execution_identity.operation_id or "",
-        step_id=execution_identity.step_id,
-        step_sequence=execution_identity.step_sequence,
-    )
+    identity = event.identity
     handler_name = f"{type(handler).__module__}.{type(handler).__qualname__}"
     timer = SpanTimer(
         f"pickel.hook.{method}",

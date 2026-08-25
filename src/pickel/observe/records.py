@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from typing import Any, Iterator, Literal, Protocol
 from uuid import uuid4
 
+from pickel.shared.execution_identity import ExecutionIdentity
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -46,19 +48,11 @@ class ErrorInfo:
 
 
 @dataclass(frozen=True)
-class ObservationIdentity:
-    session_id: str = ""
-    operation_id: str = ""
-    step_id: str | None = None
-    step_sequence: int | None = None
-
-
-@dataclass(frozen=True)
 class SpanRecord:
     """一次已完成操作；单记录避免 start/end 配对复杂度。"""
 
     name: str
-    identity: ObservationIdentity = field(default_factory=ObservationIdentity)
+    identity: ExecutionIdentity = field(default_factory=ExecutionIdentity)
     span_id: str = field(default_factory=lambda: str(uuid4()))
     parent_span_id: str | None = None
     started_at: datetime = field(default_factory=_now)
@@ -85,7 +79,7 @@ class SpanRecord:
 @dataclass(frozen=True)
 class DiagnosticRecord:
     name: str
-    identity: ObservationIdentity = field(default_factory=ObservationIdentity)
+    identity: ExecutionIdentity = field(default_factory=ExecutionIdentity)
     occurred_at: datetime = field(default_factory=_now)
     level: Literal["debug", "info", "warning", "error"] = "error"
     attributes: dict[str, Any] = field(default_factory=dict)
@@ -108,7 +102,7 @@ class RequestSnapshotRecord:
     provider: str
     model: str
     request: dict[str, Any]
-    identity: ObservationIdentity = field(default_factory=ObservationIdentity)
+    identity: ExecutionIdentity = field(default_factory=ExecutionIdentity)
     cache_order: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=_now)
 
@@ -187,7 +181,7 @@ class SpanTimer:
     def __init__(
         self,
         name: str,
-        identity: ObservationIdentity,
+        identity: ExecutionIdentity,
         *,
         attributes: dict[str, Any] | None = None,
         parent_span_id: str | None = None,
