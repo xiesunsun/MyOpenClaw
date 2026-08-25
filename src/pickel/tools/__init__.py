@@ -15,10 +15,9 @@ from pickel.tools.bus import (
     ToolSource,
     bus_with,
 )
-from pickel.tools.services import ActivationControl, ToolServices
+from pickel.tools.services import ToolServices
 
 __all__ = [
-    "ActivationControl",
     "BaseTool",
     "FunctionTool",
     "ToolActivation",

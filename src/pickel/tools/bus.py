@@ -71,19 +71,10 @@ class ToolLease:
 class ToolActivation:
     """一次 turn 的激活集计算输入。
 
-    allowed 是 agent.yaml 的 tools 白名单，人的授权、硬边界；
-    agent_disabled 是 agent 通过 tool_set_active 自我收窄的部分。
-    求交顺序保证 agent 只能收窄、永不扩张。
+    allowed 是 Package/agent 配置中的 tools 白名单，也是人的授权硬边界。
     """
 
     allowed: frozenset[str]
-    agent_disabled: frozenset[str] = frozenset()
-
-    def with_agent_disabled(self, names: Iterable[str]) -> ToolActivation:
-        return replace(self, agent_disabled=self.agent_disabled | frozenset(names))
-
-    def with_agent_enabled(self, names: Iterable[str]) -> ToolActivation:
-        return replace(self, agent_disabled=self.agent_disabled - frozenset(names))
 
 
 @dataclass(frozen=True)
@@ -236,13 +227,11 @@ class ToolBus:
         return [entry.name for entry in self.list(source=source)]
 
     def snapshot(self, activation: ToolActivation) -> ToolSnapshot:
-        """按激活集三层求交，取本 turn 的不可变视图。"""
+        """按配置允许集和总线启用状态取本 turn 的不可变视图。"""
         entries = tuple(
             entry
             for entry in self._entries.values()
-            if entry.enabled
-            and _activation_allows(entry.name, activation.allowed)
-            and entry.name not in activation.agent_disabled
+            if entry.enabled and _activation_allows(entry.name, activation.allowed)
         )
         return ToolSnapshot(entries=entries)
 

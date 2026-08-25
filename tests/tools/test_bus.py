@@ -191,7 +191,7 @@ class ToolBusLifecycleTests(unittest.TestCase):
 
 
 class ToolActivationTests(unittest.TestCase):
-    def test_snapshot_intersects_allowlist_enabled_and_agent_disabled(self) -> None:
+    def test_snapshot_intersects_allowlist_and_enabled(self) -> None:
         bus = ToolBus()
         bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
         bus.register(_stub_tool("write_file"), source=ToolSource.BUILTIN)
@@ -201,31 +201,11 @@ class ToolActivationTests(unittest.TestCase):
 
         activation = ToolActivation(
             allowed=frozenset({"read_file", "write_file", "shell_exec"}),
-            agent_disabled=frozenset({"shell_exec"}),
         )
         snapshot = bus.snapshot(activation)
 
-        # write_file 被 bus 禁用、shell_exec 被 agent 关闭、echo 不在白名单
-        self.assertEqual(("read_file",), snapshot.names)
-
-    def test_agent_cannot_widen_beyond_allowlist(self) -> None:
-        bus = ToolBus()
-        bus.register(_stub_tool("read_file"), source=ToolSource.BUILTIN)
-        bus.register(_stub_tool("shell_exec"), source=ToolSource.BUILTIN)
-
-        activation = ToolActivation(allowed=frozenset({"read_file"}))
-        # agent 把白名单外的工具从 disabled 里移出，也拉不进来
-        activation = activation.with_agent_enabled(["shell_exec"])
-
-        self.assertEqual(("read_file",), bus.snapshot(activation).names)
-
-    def test_with_agent_disabled_returns_new_instance(self) -> None:
-        activation = ToolActivation(allowed=frozenset({"a", "b"}))
-
-        narrowed = activation.with_agent_disabled(["b"])
-
-        self.assertEqual(frozenset(), activation.agent_disabled)
-        self.assertEqual(frozenset({"b"}), narrowed.agent_disabled)
+        # write_file 被 bus 禁用、echo 不在白名单
+        self.assertEqual(("read_file", "shell_exec"), snapshot.names)
 
     def test_allowlist_entry_missing_from_bus_is_skipped_not_raised(self) -> None:
         bus = ToolBus()
@@ -300,18 +280,6 @@ class WildcardActivationTests(unittest.TestCase):
         )
 
         self.assertEqual(("mcp__github__create_issue",), snapshot.names)
-
-    def test_agent_disabled_is_exact_and_beats_wildcard(self) -> None:
-        bus = self._bus_with_mcp_tools()
-
-        snapshot = bus.snapshot(
-            ToolActivation(
-                allowed=frozenset({"mcp__github__*"}),
-                agent_disabled=frozenset({"mcp__github__create_issue"}),
-            )
-        )
-
-        self.assertEqual(("mcp__github__list_repos",), snapshot.names)
 
     def test_missing_names_wildcard_only_when_nothing_matches(self) -> None:
         bus = self._bus_with_mcp_tools()
