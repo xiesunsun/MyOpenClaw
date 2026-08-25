@@ -33,9 +33,6 @@ class AgentRunMarker:
 class TraceEnhancement:
     tool_timings: dict[str, ToolTiming] = field(default_factory=dict)
     agent_run_markers: list[AgentRunMarker] = field(default_factory=list)
-    # 按 agent_run_started 分组；digest 本身即摘要
-    # (长度/名称/条数),发射端(RequestDigestEvent)保证无正文。
-    request_digests: list[list[dict]] = field(default_factory=list)
     request_snapshots: list[list[dict]] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
 
@@ -112,9 +109,6 @@ def read_trace(path: Path) -> TraceEnhancement | None:
             }
         elif event_type == "agent_run_interrupted" and markers:
             markers[-1].interrupted = True
-        elif event_type == "request_digest" and markers:
-            markers[-1].digests.append(_digest_fields(event))
-
     agent_run_spans = {
         str(span.get("_operation_id") or ""): span
         for span in spans
@@ -150,7 +144,6 @@ def read_trace(path: Path) -> TraceEnhancement | None:
     return TraceEnhancement(
         tool_timings=timings,
         agent_run_markers=[builder.freeze() for builder in markers],
-        request_digests=[builder.digests for builder in markers],
         request_snapshots=[builder.snapshots for builder in markers],
         metrics=_build_metrics(spans),
     )
@@ -250,7 +243,6 @@ class _MarkerBuilder:
         self.operation_id = operation_id
         self.failed: dict[str, str] | None = None
         self.interrupted = False
-        self.digests: list[dict] = []
         self.snapshots: list[dict] = []
         self.duration_ms: int | None = None
         self.outcome: str | None = None
@@ -263,26 +255,6 @@ class _MarkerBuilder:
             duration_ms=self.duration_ms,
             outcome=self.outcome,
         )
-
-
-def _digest_fields(event: dict) -> dict:
-    """白名单提取 digest:只收数值与名称字段,逐项重建不透传原 dict。"""
-    sections = []
-    for section in event.get("system_sections") or []:
-        if isinstance(section, dict):
-            sections.append(
-                {
-                    "name": str(section.get("name") or ""),
-                    "chars": int(section.get("chars") or 0),
-                }
-            )
-    return {
-        "system_sections": sections,
-        "tool_names": [str(name) for name in (event.get("tool_names") or [])],
-        "message_count": int(event.get("message_count") or 0),
-        "request_chars": int(event.get("request_chars") or 0),
-        "hook_injected_chars": int(event.get("hook_injected_chars") or 0),
-    }
 
 
 def _call_id(event: dict) -> str | None:

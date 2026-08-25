@@ -23,7 +23,6 @@ _PUBLIC_EVENT_TYPES = {
     "thinking_delta": "thinking.delta",
     "text_delta": "message.delta",
     "tool_call_args_delta": "tool.arguments.delta",
-    "request_digest": "request.prepared",
     "agent_run_interrupted": "agent_run.interrupted",
 }
 
