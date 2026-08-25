@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from pickel.shared.event_envelope import EventIdentity
-
-if TYPE_CHECKING:
-    from pickel.context.model_context import ModelContext
 
 
 @dataclass(frozen=True)
@@ -51,10 +48,3 @@ class PostToolBatchEvent(HookEventBase):
 @dataclass(frozen=True)
 class AgentRunEndEvent(HookEventBase):
     reason: str = "completed"
-
-
-@dataclass(frozen=True)
-class BeforeRequestEvent(HookEventBase):
-    """ModelContext 构建之后、provider.generate 之前；含拟发送上下文引用。"""
-
-    model_context: ModelContext | None = None
