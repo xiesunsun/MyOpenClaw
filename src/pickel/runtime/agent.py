@@ -40,10 +40,14 @@ class Agent:
         return self._inbox
 
     async def followup(self, message: UserMessage) -> str:
-        return await self._inbox.send(message, delivery="followup")
+        message_id = await self._inbox.send(message, delivery="followup")
+        self._driver.wake(self._session_id)
+        return message_id
 
     async def steer(self, message: UserMessage) -> str:
-        return await self._inbox.send(message, delivery="steer")
+        message_id = await self._inbox.send(message, delivery="steer")
+        self._driver.wake(self._session_id)
+        return message_id
 
     async def inject(self, message: UserMessage) -> str:
         return await self._inbox.send(message, delivery="inject")

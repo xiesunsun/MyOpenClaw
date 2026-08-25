@@ -32,6 +32,7 @@ from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.events import BeforeRequestEvent, PreToolUseEvent
+from pickel.inbox.message import InboxMessage
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
@@ -176,12 +177,46 @@ class OperationDriver:
                     assistant_message_node_id=None,
                     tool_calls=(),
                 )
-                state = self._commit(
-                    replace(state, current_step=step, status="running"), state
+                candidate = replace(
+                    state,
+                    current_step=step,
+                    status="running",
+                    revision=state.revision + 1,
                 )
+                if self._pending_step_messages(operation.session_id):
+                    if not self._claim_step_messages(
+                        operation=operation,
+                        previous=state,
+                        candidate=candidate,
+                    ):
+                        state = self._commit(candidate, state)
+                    else:
+                        state = candidate
+                else:
+                    state = self._commit(candidate, state)
                 continue
 
             if step.phase == "preparing_request":
+                # Context 构建前反复读取并批量 claim，确保这次请求看到完整快照。
+                pending = self._pending_step_messages(operation.session_id)
+                if pending:
+                    candidate = replace(state, revision=state.revision + 1)
+                    if self._claim_step_messages(
+                        operation=operation,
+                        previous=state,
+                        candidate=candidate,
+                    ):
+                        state = candidate
+                        continue
+                    refreshed = self._operations.load_agent_run_state(
+                        operation.operation_id
+                    )
+                    if refreshed.revision != state.revision:
+                        raise RuntimeError(
+                            "AgentRunState CAS 冲突，停止推进且不重放副作用"
+                        )
+                    if self._pending_step_messages(operation.session_id):
+                        raise RuntimeError("Step 消息 claim 冲突，停止推进")
                 context = await self._build_context(
                     operation=operation,
                     state=state,
@@ -197,7 +232,27 @@ class OperationDriver:
                     phase="request_ready",
                     request_intent=intent,
                 )
-                state = self._commit(replace(state, current_step=next_step), state)
+                next_state = replace(
+                    state,
+                    revision=state.revision + 1,
+                    current_step=next_step,
+                )
+                if not self._operations.commit_transition(
+                    state=next_state,
+                    expected_revision=state.revision,
+                    node=None,
+                ):
+                    refreshed = self._operations.load_agent_run_state(
+                        operation.operation_id
+                    )
+                    if (
+                        refreshed.revision == state.revision
+                        and self._pending_step_messages(operation.session_id)
+                    ):
+                        state = refreshed
+                        continue
+                    raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
+                state = next_state
                 continue
 
             if step.phase == "request_ready":
@@ -256,23 +311,70 @@ class OperationDriver:
                     last_assistant = result.assistant_message
                     continue
 
-                next_state = replace(
-                    state,
-                    status="succeeded",
-                    current_step=None,
-                    completed_step_count=state.completed_step_count + 1,
-                    final_assistant_node_id=assistant_node_id,
+                next_step = replace(
+                    step,
+                    phase="awaiting_tools",
+                    request_intent=None,
+                    assistant_message_node_id=assistant_node_id,
+                    tool_calls=(),
                 )
                 state = self._commit(
-                    next_state,
+                    replace(
+                        state,
+                        status="running",
+                        waiting_reason=None,
+                        current_step=next_step,
+                    ),
                     state,
                     message=result.assistant_message,
                     node_id=assistant_node_id,
                 )
                 last_assistant = result.assistant_message
-                return OperationDriveResult(
-                    operation_id, "succeeded", state, last_assistant
+                continue
+
+            if step.phase == "awaiting_tools" and not step.tool_calls:
+                final_node_id = step.assistant_message_node_id
+                assert final_node_id is not None
+                next_state = replace(
+                    state,
+                    revision=state.revision + 1,
+                    current_step=None,
+                    completed_step_count=state.completed_step_count + 1,
+                    status="succeeded",
+                    final_assistant_node_id=final_node_id,
                 )
+                if self._operations.commit_transition(
+                    state=next_state,
+                    expected_revision=state.revision,
+                    node=None,
+                ):
+                    state = next_state
+                    return OperationDriveResult(
+                        operation_id, "succeeded", state, last_assistant
+                    )
+                refreshed = self._operations.load_agent_run_state(
+                    operation.operation_id
+                )
+                if refreshed.revision != state.revision:
+                    raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
+                if not self._pending_step_messages(operation.session_id):
+                    raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
+                continue_state = replace(
+                    refreshed,
+                    revision=refreshed.revision + 1,
+                    current_step=None,
+                    completed_step_count=refreshed.completed_step_count + 1,
+                    status="running",
+                    waiting_reason=None,
+                )
+                if not self._operations.commit_transition(
+                    state=continue_state,
+                    expected_revision=refreshed.revision,
+                    node=None,
+                ):
+                    raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
+                state = continue_state
+                continue
 
             if step.phase != "awaiting_tools":
                 raise RuntimeError(f"未知 ModelStep phase: {step.phase}")
@@ -576,6 +678,27 @@ class OperationDriver:
                 system_sections=hook_contributions.system_sections,
                 messages=tuple(recalled) + hook_contributions.messages,
             ),
+        )
+
+    def _pending_step_messages(self, session_id: str) -> tuple[InboxMessage, ...]:
+        return self._operations.list_pending_step_messages(session_id=session_id)
+
+    def _claim_step_messages(
+        self,
+        *,
+        operation: SessionOperation,
+        previous: AgentRunState,
+        candidate: AgentRunState,
+    ) -> bool:
+        """以当前 Step 快照一次性 claim steer/inject。"""
+        pending = self._pending_step_messages(operation.session_id)
+        if not pending:
+            return False
+        return self._operations.claim_step_messages(
+            message_ids=tuple(item.message_id for item in pending),
+            state=candidate,
+            expected_revision=previous.revision,
+            updated_at=self._now(),
         )
 
     def _commit(

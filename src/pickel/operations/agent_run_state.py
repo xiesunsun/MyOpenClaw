@@ -185,8 +185,8 @@ class ModelStepState:
                 self.request_intent is None, "awaiting_tools 不能保留 request_intent"
             )
             _require(
-                self.assistant_message_node_id is not None and bool(self.tool_calls),
-                "awaiting_tools 必须有响应和工具",
+                self.assistant_message_node_id is not None,
+                "awaiting_tools 必须有响应",
             )
 
     def content_dict(self) -> dict[str, Any]:

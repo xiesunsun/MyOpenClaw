@@ -61,17 +61,26 @@ class _SerializedOperationDriver:
 def _session(*, active_operation_id="operation-1", archived_at=None):
     return SimpleNamespace(
         active_operation_id=active_operation_id,
+        active_node_id="node-1",
         archived_at=archived_at,
     )
 
 
-def _driver(session, operation_driver):
+def _driver(
+    session,
+    operation_driver,
+    *,
+    cancel_operation=None,
+    wake_callback=None,
+):
     return AgentDriver(
         conversation_store=_ConversationStore(session),
         inbox_store=object(),
         operation_service=object(),
         operation_driver=operation_driver,
         package_resolver=lambda **_: ("package-1", None),
+        cancel_operation=cancel_operation,
+        wake_callback=wake_callback,
     )
 
 
@@ -169,3 +178,120 @@ def test_agent_serializes_foreground_and_wake_drive_entries():
         assert operation_driver.max_active == 1
 
     asyncio.run(scenario())
+
+
+def test_idle_accepts_followup_after_inject_without_accepting_inject():
+    class InboxStore:
+        def list_pending(self, *, session_id):
+            assert session_id == "session-1"
+            return (
+                SimpleNamespace(message_id="inject", delivery="inject"),
+                SimpleNamespace(message_id="followup", delivery="followup"),
+            )
+
+    class Operations:
+        def __init__(self):
+            self.message = None
+
+        def accept_pending_message(self, **kwargs):
+            self.message = kwargs["message"]
+            return SimpleNamespace(
+                operation=SimpleNamespace(operation_id="operation-1")
+            )
+
+    operations = Operations()
+    driver = AgentDriver(
+        conversation_store=_ConversationStore(_session(active_operation_id=None)),
+        inbox_store=InboxStore(),
+        operation_service=operations,
+        operation_driver=_OperationDriver(SimpleNamespace(status="succeeded")),
+        package_resolver=lambda **_: ("package-1", None),
+    )
+
+    asyncio.run(driver.drive_once(session_id="session-1"))
+
+    assert operations.message.message_id == "followup"
+
+
+def test_agent_message_delivery_wakes_only_followup_and_steer():
+    class Inbox:
+        session_id = "session-1"
+
+        async def send(self, message, *, delivery):
+            return delivery
+
+    class Driver:
+        def __init__(self):
+            self.wakes = []
+
+        def wake(self, session_id):
+            self.wakes.append(session_id)
+
+        def cancel(self, **kwargs):
+            return True
+
+    async def scenario():
+        driver = Driver()
+        agent = Agent(session_id="session-1", inbox=Inbox(), driver=driver)
+        await agent.followup(SimpleNamespace())
+        await agent.steer(SimpleNamespace())
+        await agent.inject(SimpleNamespace())
+        assert driver.wakes == ["session-1", "session-1"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_cancel_false_does_not_wake():
+    class Inbox:
+        session_id = "session-1"
+
+    class Driver:
+        def __init__(self):
+            self.wakes = 0
+
+        def cancel(self, **kwargs):
+            return False
+
+        def wake(self, session_id):
+            del session_id
+            self.wakes += 1
+
+    driver = Driver()
+    agent = Agent(session_id="session-1", inbox=Inbox(), driver=driver)
+
+    assert not agent.cancel(reason="not active")
+    assert driver.wakes == 0
+
+
+@pytest.mark.parametrize("active_operation_id", [None])
+def test_driver_cancel_without_active_operation_is_idempotent_without_wake(
+    active_operation_id,
+):
+    wakes = []
+    cancel_calls = []
+    driver = _driver(
+        _session(active_operation_id=active_operation_id),
+        _OperationDriver(SimpleNamespace(status="succeeded")),
+        cancel_operation=lambda operation_id, *, reason: cancel_calls.append(
+            (operation_id, reason)
+        ),
+        wake_callback=wakes.append,
+    )
+
+    assert driver.cancel(session_id="session-1", reason="idle") is True
+    assert cancel_calls == []
+    assert wakes == []
+
+
+@pytest.mark.parametrize("cancel_result", [True, False])
+def test_driver_cancel_wakes_only_after_active_cancel_succeeds(cancel_result):
+    wakes = []
+    driver = _driver(
+        _session(active_operation_id="operation-1"),
+        _OperationDriver(SimpleNamespace(status="succeeded")),
+        cancel_operation=lambda operation_id, *, reason: cancel_result,
+        wake_callback=wakes.append,
+    )
+
+    assert driver.cancel(session_id="session-1", reason="user") is cancel_result
+    assert wakes == (["session-1"] if cancel_result else [])

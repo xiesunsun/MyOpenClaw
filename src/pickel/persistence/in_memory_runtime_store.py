@@ -801,16 +801,25 @@ class InMemoryRuntimeStore:
             and item.delivery in {"steer", "inject"}
             for item in self._inbox.values()
         )
-        if not has_pending:
-            return False
         current_step = current.current_step
         next_step = next_state.current_step
-        return (
+        intent_or_terminal = (
             current_step is not None
             and next_step is not None
             and current_step.phase == "preparing_request"
             and next_step.phase == "request_ready"
         ) or next_state.status == "succeeded"
+        if intent_or_terminal:
+            return has_pending
+        if (
+            current_step is not None
+            and current_step.phase == "awaiting_tools"
+            and not current_step.tool_calls
+            and next_state.status == "running"
+            and next_step is None
+        ):
+            return not has_pending
+        return False
 
     @staticmethod
     def _state_node_ids(state: AgentRunState) -> set[str]:

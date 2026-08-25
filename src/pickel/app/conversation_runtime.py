@@ -226,7 +226,8 @@ class ConversationRuntime:
                 )
 
         try:
-            await self._agent.followup(request.message)
+            # UI 前台拥有本次 when_idle drive，避免 followup 的自动 wake 抢先消费消息。
+            await self._agent.inbox.send(request.message, delivery="followup")
             result = await self._agent.when_idle(
                 host_calls=self._runtime_bus.host_calls.client,
                 consume_delta=consume_delta,

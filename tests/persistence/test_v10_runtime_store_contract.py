@@ -472,6 +472,66 @@ def test_commit_request_intent_and_success_ignore_pending_followup(
     )
 
 
+def _stopping_state(running: AgentRunState) -> AgentRunState:
+    return replace(
+        running,
+        revision=running.revision + 1,
+        current_step=ModelStepState(
+            "step-1",
+            1,
+            "awaiting_tools",
+            0,
+            None,
+            "message-1",
+            (),
+        ),
+    )
+
+
+def test_stopping_continue_requires_pending_step_message(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _, running, _ = _prepare_step(store, tmp_path)
+    stopping = _stopping_state(running)
+    assert store.commit_run_transition(
+        state=stopping, expected_revision=2, updated_at=NOW, node=None
+    )
+    continued = replace(
+        stopping,
+        revision=4,
+        current_step=None,
+        completed_step_count=1,
+    )
+    assert not store.commit_run_transition(
+        state=continued, expected_revision=3, updated_at=NOW, node=None
+    )
+    assert store.load_run_state("operation-1") == stopping
+
+    _send(store, "session-1", "steer-1", delivery="steer")
+    assert store.commit_run_transition(
+        state=continued, expected_revision=3, updated_at=NOW, node=None
+    )
+
+
+def test_stopping_continue_does_not_accept_followup_only(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _, running, _ = _prepare_step(store, tmp_path)
+    stopping = _stopping_state(running)
+    assert store.commit_run_transition(
+        state=stopping, expected_revision=2, updated_at=NOW, node=None
+    )
+    _send(store, "session-1", "followup-1", delivery="followup")
+    continued = replace(stopping, revision=4, current_step=None, completed_step_count=1)
+    assert not store.commit_run_transition(
+        state=continued, expected_revision=3, updated_at=NOW, node=None
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "kwargs"),
     (

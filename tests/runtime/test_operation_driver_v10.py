@@ -68,11 +68,13 @@ class _Provider:
 
 
 class _Operations:
-    def __init__(self, state, *, commit_transition=True, cas=True):
+    def __init__(self, state, *, commit_transition=True, cas=True, pending=()):
         self.state = state
         self.transition_calls = []
         self.cas = cas
         self.commit_transition_enabled = commit_transition
+        self.pending = tuple(pending)
+        self.claim_calls = []
 
     def load_operation(self, operation_id):
         return _operation()
@@ -91,6 +93,19 @@ class _Operations:
         if not self.cas:
             return False
         self.state = state
+        return True
+
+    def list_pending_step_messages(self, *, session_id):
+        assert session_id == "session-1"
+        return self.pending
+
+    def claim_step_messages(self, *, message_ids, state, expected_revision, updated_at):
+        del updated_at
+        self.claim_calls.append((message_ids, state, expected_revision))
+        if expected_revision != self.state.revision:
+            return False
+        self.state = state
+        self.pending = ()
         return True
 
 
@@ -196,6 +211,111 @@ async def test_request_intent_and_assistant_are_committed_as_separate_atomic_fac
     assert assistant_commits[0][1].node_id == "node-result"
     # Intent 先以 attempt=0 冻结；发起 Provider 前再单独 CAS 到 attempt=1。
     assert [item.current_step.request_attempt for item in request_states] == [0, 1]
+
+
+@_run_async
+async def test_first_step_claims_pending_steer_and_inject_before_context():
+    pending = (
+        SimpleNamespace(message_id="steer-1"),
+        SimpleNamespace(message_id="inject-1"),
+    )
+    operations = _Operations(
+        _queued_state(),
+        pending=pending,
+    )
+    provider = _Provider([AssistantMessage(content=(TextBlock(text="done"),))])
+
+    result = await _driver(operations, provider).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert [call[0] for call in operations.claim_calls] == [("steer-1", "inject-1")]
+    assert operations.claim_calls[0][1].current_step.phase == "preparing_request"
+
+
+def _stopping_state_for_driver() -> AgentRunState:
+    return AgentRunState(
+        operation_id="operation-1",
+        revision=3,
+        status="running",
+        waiting_reason=None,
+        completed_step_count=0,
+        current_step=ModelStepState(
+            "step-1", 1, "awaiting_tools", 0, None, "node-result", ()
+        ),
+        final_assistant_node_id=None,
+        error=None,
+        cancellation=None,
+    )
+
+
+class _StoppingOperations(_Operations):
+    def __init__(self, state, *, continue_commit=True):
+        super().__init__(state, pending=(SimpleNamespace(message_id="steer-1"),))
+        self.continue_commit = continue_commit
+        self.terminal_attempts = 0
+
+    def commit_transition(self, *, state, expected_revision, node):
+        if state.status == "succeeded":
+            self.terminal_attempts += 1
+            if self.terminal_attempts == 1:
+                return False
+        if state.current_step is None and state.status == "running":
+            if not self.continue_commit:
+                return False
+        return super().commit_transition(
+            state=state, expected_revision=expected_revision, node=node
+        )
+
+
+class _DisappearingStoppingOperations(_StoppingOperations):
+    def list_pending_step_messages(self, *, session_id):
+        pending = super().list_pending_step_messages(session_id=session_id)
+        self.pending = ()
+        return pending
+
+    def commit_transition(self, *, state, expected_revision, node):
+        if state.current_step is None and state.status == "running":
+            return False
+        return super().commit_transition(
+            state=state, expected_revision=expected_revision, node=node
+        )
+
+
+@_run_async
+async def test_stopping_terminal_guard_retries_as_continue_then_claims_next_step():
+    operations = _StoppingOperations(_stopping_state_for_driver())
+    provider = _Provider([AssistantMessage(content=(TextBlock(text="done"),))])
+
+    result = await _driver(operations, provider).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert any(state.status == "succeeded" for state, _ in operations.transition_calls)
+    assert any(
+        state.status == "running" and state.current_step is None
+        for state, _ in operations.transition_calls
+    )
+
+
+@_run_async
+async def test_stopping_continue_guard_conflict_stops_without_provider():
+    operations = _StoppingOperations(
+        _stopping_state_for_driver(), continue_commit=False
+    )
+    provider = _Provider([AssistantMessage(content=(TextBlock(text="must-not-run"),))])
+
+    with pytest.raises(RuntimeError, match="CAS"):
+        await _driver(operations, provider).drive_operation("operation-1")
+    assert provider.calls == 0
+
+
+@_run_async
+async def test_stopping_message_disappearing_after_guard_stops_without_provider():
+    operations = _DisappearingStoppingOperations(_stopping_state_for_driver())
+    provider = _Provider([AssistantMessage(content=(TextBlock(text="must-not-run"),))])
+
+    with pytest.raises(RuntimeError, match="CAS"):
+        await _driver(operations, provider).drive_operation("operation-1")
+    assert provider.calls == 0
 
 
 @_run_async

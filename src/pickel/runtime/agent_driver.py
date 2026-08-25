@@ -76,11 +76,15 @@ class AgentDriver:
             return AgentDriveResult(result)
 
         pending = self._inbox_store.list_pending(session_id=session_id)
-        if not pending:
+        message = next(
+            (item for item in pending if item.delivery in {"followup", "steer"}),
+            None,
+        )
+        if message is None:
             return AgentDriveResult(None)
         package_version_id, workspace_binding = self._package_resolver(session=session)
         accepted = self._operations.accept_pending_message(
-            message=pending[0],
+            message=message,
             agent_package_version_id=package_version_id,
             workspace_binding=workspace_binding,
             expected_node_id=session.active_node_id,
@@ -137,7 +141,10 @@ class AgentDriver:
             return True
         if self._cancel_operation is None:
             raise RuntimeError("AgentDriver 未配置 CancelOperation")
-        return self._cancel_operation(session.active_operation_id, reason=reason)
+        cancelled = self._cancel_operation(session.active_operation_id, reason=reason)
+        if cancelled:
+            self.wake(session_id)
+        return cancelled
 
     def wake(self, session_id: str) -> None:
         if self._wake_callback is not None:
