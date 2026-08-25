@@ -28,11 +28,11 @@ from pickel.observe.records import (
     record_request_snapshot,
 )
 from pickel.providers.base import Provider
-from pickel.providers.stream import StreamCompleted, StreamDelta
+from pickel.providers.stream import ToolCallArgsDelta, StreamCompleted, StreamDelta
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 
-StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
+StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 
 
 class ToolEffect(Protocol):
@@ -126,12 +126,19 @@ class RuntimeEffects:
             state=state,
             model_context=model_context,
         )
+        identity = ExecutionIdentity(
+            session_id=operation.session_id,
+            operation_id=operation.operation_id,
+            step_id=step.step_id,
+            step_sequence=step.step_sequence,
+        )
         started = time.perf_counter()
         first_delta: list[float | None] = [None]
         message = await asyncio.wait_for(
             self._consume_stream(
                 model_context=model_context,
                 consume_delta=consume_delta,
+                identity=identity,
                 started=started,
                 first_delta=first_delta,
             ),
@@ -221,6 +228,7 @@ class RuntimeEffects:
         *,
         model_context: ModelContext,
         consume_delta: StreamDeltaConsumer | None,
+        identity: ExecutionIdentity,
         started: float,
         first_delta: list[float | None],
     ) -> AssistantMessage:
@@ -228,7 +236,15 @@ class RuntimeEffects:
             if first_delta[0] is None:
                 first_delta[0] = round((time.perf_counter() - started) * 1000, 3)
             if consume_delta is not None:
-                consumed = consume_delta(delta)
+                delta_identity = replace(
+                    identity,
+                    tool_call_id=(
+                        delta.tool_call_id
+                        if isinstance(delta, ToolCallArgsDelta)
+                        else None
+                    ),
+                )
+                consumed = consume_delta(delta, delta_identity)
                 if inspect.isawaitable(consumed):
                     await consumed
             if isinstance(delta, StreamCompleted):

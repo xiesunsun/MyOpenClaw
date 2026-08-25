@@ -76,7 +76,14 @@ def test_思考增量与正文增量都出现():
 
 def test_工具参数增量不上屏():
     """partial_json 拼完前不是合法 JSON，展示半截参数只会制造噪音。"""
-    text = _render([ToolCallArgsDeltaEvent(tool_call_id="c1", partial_json='{"text"')])
+    text = _render(
+        [
+            ToolCallArgsDeltaEvent(
+                envelope=EventEnvelope(identity=ExecutionIdentity(tool_call_id="c1")),
+                partial_json='{"text"',
+            )
+        ]
+    )
 
     assert '{"text"' not in text
 

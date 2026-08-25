@@ -51,7 +51,7 @@ from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.validation import validate_json_schema
 
-StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
+StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 
 
 @dataclass(frozen=True)

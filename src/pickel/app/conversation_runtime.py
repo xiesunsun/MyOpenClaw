@@ -65,7 +65,6 @@ from pickel.observe.records import (
 from pickel.providers.stream import (
     TextDelta,
     ThinkingDelta,
-    ToolCallArgsDelta,
 )
 from pickel.app.runtime_generation import LoadedPackageHandle
 from pickel.runtime.agent import Agent
@@ -206,18 +205,8 @@ class ConversationRuntime:
             ),
         )
 
-        async def consume_delta(delta) -> None:
-            envelope = EventEnvelope(
-                identity=ExecutionIdentity(
-                    session_id=self._session.session_id,
-                    operation_id=self._active_operation_id or operation_id,
-                    tool_call_id=(
-                        delta.tool_call_id
-                        if isinstance(delta, ToolCallArgsDelta)
-                        else None
-                    ),
-                )
-            )
+        async def consume_delta(delta, identity: ExecutionIdentity) -> None:
+            envelope = EventEnvelope(identity=identity)
             if isinstance(delta, TextDelta):
                 await self._events.emit(
                     TextDeltaEvent(envelope=envelope, text=delta.text)
@@ -230,7 +219,6 @@ class ConversationRuntime:
                 await self._events.emit(
                     ToolCallArgsDeltaEvent(
                         envelope=envelope,
-                        tool_call_id=delta.tool_call_id,
                         partial_json=delta.partial_json,
                     )
                 )

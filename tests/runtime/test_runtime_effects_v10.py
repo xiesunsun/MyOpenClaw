@@ -6,12 +6,16 @@ from functools import wraps
 import pytest
 
 from pickel.context.model_context import ModelContext, SystemContent
-from pickel.operations.agent_run_state import AgentRunState, ModelStepState
+from pickel.operations.agent_run_state import (
+    AgentRunState,
+    ModelRequestIntent,
+    ModelStepState,
+)
 from pickel.operations.session_operation import SessionOperation
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 from pathlib import Path
 from datetime import datetime, timezone
-from pickel.providers.stream import StreamCompleted
+from pickel.providers.stream import StreamCompleted, TextDelta, ToolCallArgsDelta
 from pickel.runtime.runtime_effects import ModelExecutionBoundaryError, RuntimeEffects
 from pickel.tools.base import ToolExecutionResult
 from pickel.conversations.agent_message import AssistantMessage
@@ -30,13 +34,28 @@ class _Provider:
         yield StreamCompleted(AssistantMessage())
 
 
+class _StreamingProvider:
+    async def stream(self, context):
+        yield TextDelta("prefix")
+        yield ToolCallArgsDelta("tool-1", '{"a":')
+        yield ToolCallArgsDelta("tool-2", '{"b":')
+        yield StreamCompleted(AssistantMessage())
+
+
 def _state(*, phase: str) -> AgentRunState:
     step = ModelStepState(
         step_id="step-1",
         step_sequence=1,
         phase=phase,
         request_attempt=0,
-        request_intent=None,
+        request_intent=(
+            ModelRequestIntent(
+                model_context=ModelContext(system=SystemContent(), messages=()),
+                context_fingerprint="test",
+            )
+            if phase == "request_ready"
+            else None
+        ),
         assistant_message_node_id=None,
         tool_calls=(),
     )
@@ -64,6 +83,47 @@ async def test_provider_request_requires_persisted_request_intent() -> None:
             state=_state(phase="preparing_request"),
             model_context=context,
         )
+
+
+@_run_async
+async def test_stream_delta_identity_tracks_each_tool_call_without_carryover() -> None:
+    effects = RuntimeEffects(provider=_StreamingProvider())
+    seen = []
+
+    async def consume(delta, identity):
+        seen.append((delta, identity))
+
+    await effects.execute_model_request(
+        operation=_operation(),
+        state=_state(phase="request_ready"),
+        model_context=ModelContext(system=SystemContent(), messages=()),
+        consume_delta=consume,
+    )
+
+    assert [item[1].session_id for item in seen] == [
+        "session-1",
+        "session-1",
+        "session-1",
+        "session-1",
+    ]
+    assert [item[1].operation_id for item in seen] == [
+        "operation-1",
+        "operation-1",
+        "operation-1",
+        "operation-1",
+    ]
+    assert [item[1].step_id for item in seen] == [
+        "step-1",
+        "step-1",
+        "step-1",
+        "step-1",
+    ]
+    assert [item[1].tool_call_id for item in seen] == [
+        None,
+        "tool-1",
+        "tool-2",
+        None,
+    ]
 
 
 @_run_async

@@ -256,8 +256,11 @@ async def _emit_deltas(bus: EventBus) -> None:
     await bus.emit(TextDeltaEvent(envelope=envelope, text="你"))
     await bus.emit(
         ToolCallArgsDeltaEvent(
-            envelope=envelope,
-            tool_call_id="call-1",
+            envelope=EventEnvelope(
+                identity=ExecutionIdentity(
+                    session_id="s1", step_sequence=1, tool_call_id="call-1"
+                )
+            ),
             partial_json='{"text": "你',
         )
     )

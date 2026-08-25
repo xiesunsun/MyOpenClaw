@@ -247,14 +247,10 @@ class ToolCallArgsDeltaEvent(RuntimeEventBase):
 
     EVENT_TYPE: ClassVar[str] = "tool_call_args_delta"
 
-    tool_call_id: str = ""
     partial_json: str = ""
 
     def _payload(self) -> dict[str, Any]:
-        return {
-            "tool_call_id": self.tool_call_id,
-            "partial_json": self.partial_json,
-        }
+        return {"partial_json": self.partial_json}
 
 
 @dataclass(frozen=True)

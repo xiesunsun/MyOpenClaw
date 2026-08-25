@@ -23,12 +23,13 @@ from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 
 
-def _envelope() -> EventEnvelope:
+def _envelope(*, tool_call_id: str | None = None) -> EventEnvelope:
     return EventEnvelope(
         identity=ExecutionIdentity(
             session_id="s1",
             operation_id="t1",
             step_sequence=1,
+            tool_call_id=tool_call_id,
         ),
         event_sequence=3,
     )
@@ -208,7 +209,7 @@ def test_delta_事件可_json_序列化():
         ThinkingDeltaEvent(envelope=_envelope(), text="想"),
         TextDeltaEvent(envelope=_envelope(), text="你好"),
         ToolCallArgsDeltaEvent(
-            envelope=_envelope(), tool_call_id="c1", partial_json='{"a"'
+            envelope=_envelope(tool_call_id="c1"), partial_json='{"a"'
         ),
         AgentRunInterrupted(envelope=_envelope(), at_step=2, partial_text="写到一半"),
     ]
@@ -232,11 +233,17 @@ def test_tool_call_args_delta_事件载荷():
     from pickel.runtime.runtime_events import ToolCallArgsDeltaEvent
 
     data = ToolCallArgsDeltaEvent(
-        envelope=_envelope(), tool_call_id="c1", partial_json='{"a": 1}'
+        envelope=_envelope(tool_call_id="c1"), partial_json='{"a": 1}'
     ).to_dict()
 
     assert data["event_type"] == "tool_call_args_delta"
     assert data["tool_call_id"] == "c1"
+    assert (
+        "tool_call_id"
+        not in ToolCallArgsDeltaEvent(
+            envelope=_envelope(tool_call_id="c1"), partial_json='{"a": 1}'
+        )._payload()
+    )
     assert data["partial_json"] == '{"a": 1}'
 
 
