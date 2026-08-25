@@ -13,6 +13,7 @@ from pickel.hooks.events import (
     UserPromptSubmitEvent,
 )
 from pickel.hooks.lifecycle import LifecycleHooks
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 def test_user_input_block_takes_precedence() -> None:
@@ -26,7 +27,9 @@ def test_user_input_block_takes_precedence() -> None:
 
     decision = asyncio.run(
         LifecycleHooks([Allow(), Block()]).user_prompt_submit(
-            UserPromptSubmitEvent(prompt="hello")
+            UserPromptSubmitEvent(
+                identity=ExecutionIdentity(session_id="session-1"), prompt="hello"
+            )
         )
     )
 
@@ -50,7 +53,10 @@ def test_pre_tool_hooks_form_argument_transform_chain() -> None:
 
     decision = asyncio.run(
         LifecycleHooks([AddArgument("a", 1), AddArgument("b", 2)]).pre_tool_use(
-            PreToolUseEvent(arguments={"original": True})
+            PreToolUseEvent(
+                identity=ExecutionIdentity(session_id="session-1"),
+                arguments={"original": True},
+            )
         )
     )
 
@@ -65,7 +71,11 @@ def test_pre_tool_hook_failure_denies_execution() -> None:
 
     decision = asyncio.run(
         LifecycleHooks([FailingHook()]).pre_tool_use(
-            PreToolUseEvent(tool_name="echo", arguments={})
+            PreToolUseEvent(
+                identity=ExecutionIdentity(session_id="session-1"),
+                tool_name="echo",
+                arguments={},
+            )
         )
     )
 
@@ -86,6 +96,7 @@ def test_before_request_hooks_only_merge_ordered_context_contributions() -> None
             )
 
     event = BeforeRequestEvent(
+        identity=ExecutionIdentity(session_id="session-1"),
         visible_messages=[UserMessage((TextBlock("visible"),))],
         recall_messages=[UserMessage((TextBlock("recall"),))],
     )

@@ -15,18 +15,6 @@ def _now() -> datetime:
 
 
 @dataclass(frozen=True)
-class EventIdentity:
-    """一个事件属于哪个 Operation/ModelStep、发生在何时。"""
-
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    session_id: str = ""
-    operation_id: str = ""
-    step_id: str | None = None
-    step_sequence: int | None = None
-    occurred_at: datetime = field(default_factory=_now)
-
-
-@dataclass(frozen=True)
 class EventEnvelope:
     """Runtime 事件元数据；执行位置只由 ExecutionIdentity 表达。
 

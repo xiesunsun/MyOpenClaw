@@ -6,12 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pickel.conversations.agent_message import AgentMessage
-from pickel.shared.event_envelope import EventIdentity
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 @dataclass(frozen=True)
-class HookEventBase(EventIdentity):
-    """向后兼容的别名基类；身份字段全部来自 EventIdentity。"""
+class HookEventBase:
+    """Hook 同步控制事件的统一执行身份。"""
+
+    identity: ExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,6 @@ class UserPromptSubmitEvent(HookEventBase):
 @dataclass(frozen=True)
 class PreToolUseEvent(HookEventBase):
     tool_name: str = ""
-    tool_call_id: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     tool_source: str = ""
     tool_origin: str | None = None
@@ -33,7 +34,6 @@ class PreToolUseEvent(HookEventBase):
 @dataclass(frozen=True)
 class PostToolUseEvent(HookEventBase):
     tool_name: str = ""
-    tool_call_id: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     result_content: str = ""
     is_error: bool = False

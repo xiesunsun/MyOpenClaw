@@ -4,25 +4,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
 
 from pickel.hooks.events import PreToolUseEvent
-from pickel.shared.event_envelope import EventEnvelope, EventIdentity
+from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
 
 
-def test_identity_字段齐全且有默认值():
-    identity = EventIdentity()
+def test_execution_identity_承载_hook_执行身份():
+    identity = ExecutionIdentity(
+        session_id="s1", operation_id="o1", step_id="step-1", tool_call_id="call-1"
+    )
 
-    assert identity.event_id
-    assert identity.session_id == ""
-    assert identity.operation_id == ""
+    assert identity.session_id == "s1"
+    assert identity.operation_id == "o1"
     assert identity.step_sequence is None
-    assert identity.occurred_at.tzinfo is timezone.utc
-
-
-def test_每个_identity_的_event_id_唯一():
-    assert EventIdentity().event_id != EventIdentity().event_id
 
 
 def test_envelope_默认_event_sequence_为未分配():
@@ -63,27 +58,31 @@ def test_envelope_是_frozen():
         raise AssertionError("EventEnvelope 必须是 frozen")
 
 
-def test_hook_事件继承_identity():
-    """hook 事件复用同一组身份字段，但不带 event_sequence。"""
-    event = PreToolUseEvent(session_id="s1", operation_id="t1", tool_name="echo")
+def test_hook_事件组合_execution_identity():
+    event = PreToolUseEvent(
+        identity=ExecutionIdentity(session_id="s1", operation_id="t1"),
+        tool_name="echo",
+    )
 
-    assert isinstance(event, EventIdentity)
-    assert event.session_id == "s1"
+    assert event.identity.session_id == "s1"
+    assert not hasattr(event, "session_id")
     assert not hasattr(event, "event_sequence")
 
 
 def test_hook_事件仍可正常构造与_replace():
     """确认改基类没破坏既有 hook 用法。"""
     event = PreToolUseEvent(
-        session_id="s1",
-        operation_id="t1",
-        step_sequence=2,
+        identity=ExecutionIdentity(
+            session_id="s1", operation_id="t1", step_sequence=2, tool_call_id="c1"
+        ),
         tool_name="echo",
-        tool_call_id="c1",
         arguments={"text": "x"},
     )
-    updated = replace(event, step_sequence=3)
+    updated = replace(
+        event,
+        identity=replace(event.identity, step_sequence=3),
+    )
 
-    assert updated.step_sequence == 3
+    assert updated.identity.step_sequence == 3
     assert updated.tool_name == "echo"
-    assert isinstance(updated.occurred_at, datetime)
+    assert updated.identity.tool_call_id == "c1"

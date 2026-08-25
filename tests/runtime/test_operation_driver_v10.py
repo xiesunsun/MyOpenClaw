@@ -236,8 +236,8 @@ async def test_pre_tool_ask_freezes_updated_arguments_and_waits_for_approval():
         if name == "before_request":
             return ContextContributions()
         assert name == "pre_tool_use"
-        assert event.operation_id == "operation-1"
-        assert event.step_id == "step-1"
+        assert event.identity.operation_id == "operation-1"
+        assert event.identity.step_id == "step-1"
         return PreToolUseDecision(
             action="ask",
             updated_arguments={"approved_input": True},
@@ -275,8 +275,8 @@ async def test_pre_tool_deny_becomes_ordered_error_without_executing_tool():
         if _name == "before_request":
             return ContextContributions()
         return PreToolUseDecision(
-            action="deny" if event.tool_call_id == "tool-1" else "allow",
-            reason="策略拒绝" if event.tool_call_id == "tool-1" else None,
+            action="deny" if event.identity.tool_call_id == "tool-1" else "allow",
+            reason=("策略拒绝" if event.identity.tool_call_id == "tool-1" else None),
         )
 
     async def execute_tool(*, operation, state, tool_call_id, host_calls):
@@ -320,10 +320,10 @@ async def test_before_request_contributions_are_frozen_in_request_intent():
         if name != "before_request":
             return None
         hook_calls.append(event)
-        assert event.session_id == "session-1"
-        assert event.operation_id == "operation-1"
-        assert event.step_id == "step-1"
-        assert event.step_sequence == 1
+        assert event.identity.session_id == "session-1"
+        assert event.identity.operation_id == "operation-1"
+        assert event.identity.step_id == "step-1"
+        assert event.identity.step_sequence == 1
         assert event.visible_messages == ()
         assert event.recall_messages[0].content[0].text == "recall"
         return ContextContributions(

@@ -8,6 +8,7 @@ from pickel.app.boot import Boot
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.events import PreToolUseEvent
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolSnapshot
 from pickel.tools.sandbox import SandboxPolicy
 
@@ -57,12 +58,14 @@ def test_build_effects_invokes_hooks_from_loaded_package(tmp_path: Path) -> None
         session_cwd=tmp_path,
     )
     event = PreToolUseEvent(
-        session_id="session-1",
-        operation_id="operation-1",
-        step_id="step-1",
-        step_sequence=1,
+        identity=ExecutionIdentity(
+            session_id="session-1",
+            operation_id="operation-1",
+            step_id="step-1",
+            step_sequence=1,
+            tool_call_id="tool-1",
+        ),
         tool_name="bash",
-        tool_call_id="tool-1",
         arguments={"command": "pwd"},
     )
 
@@ -79,10 +82,10 @@ def test_build_effects_without_hooks_is_noop_allow(tmp_path: Path) -> None:
         session_cwd=tmp_path,
     )
     event = PreToolUseEvent(
-        session_id="session-1",
-        operation_id="operation-1",
+        identity=ExecutionIdentity(
+            session_id="session-1", operation_id="operation-1", tool_call_id="tool-1"
+        ),
         tool_name="bash",
-        tool_call_id="tool-1",
     )
 
     decision = asyncio.run(effects.invoke_hook("pre_tool_use", event))

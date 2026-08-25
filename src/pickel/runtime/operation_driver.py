@@ -47,6 +47,7 @@ from pickel.providers.stream import StreamDelta
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.shared.frozen_json import freeze_json_object
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.validation import validate_json_schema
 
@@ -438,12 +439,14 @@ class OperationDriver:
             decision = await effects.invoke_hook(
                 "pre_tool_use",
                 PreToolUseEvent(
-                    session_id=operation.session_id,
-                    operation_id=operation.operation_id,
-                    step_id=step.step_id,
-                    step_sequence=step.step_sequence,
+                    identity=ExecutionIdentity(
+                        session_id=operation.session_id,
+                        operation_id=operation.operation_id,
+                        step_id=step.step_id,
+                        step_sequence=step.step_sequence,
+                        tool_call_id=block.id,
+                    ),
                     tool_name=block.name,
-                    tool_call_id=block.id,
                     arguments=dict(block.arguments),
                     tool_source=tool.source.value,
                     tool_origin=tool.implementation_ref.name,
@@ -554,10 +557,12 @@ class OperationDriver:
         hook_contributions = await effects.invoke_hook(
             "before_request",
             BeforeRequestEvent(
-                session_id=operation.session_id,
-                operation_id=operation.operation_id,
-                step_id=step.step_id,
-                step_sequence=step.step_sequence,
+                identity=ExecutionIdentity(
+                    session_id=operation.session_id,
+                    operation_id=operation.operation_id,
+                    step_id=step.step_id,
+                    step_sequence=step.step_sequence,
+                ),
                 visible_messages=visible,
                 recall_messages=tuple(recalled),
             ),
