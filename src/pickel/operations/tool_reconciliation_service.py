@@ -103,6 +103,7 @@ class ToolReconciliationService:
             return current
 
         timestamp = reconciled_at or self._now()
+        operation = self._operations.load_operation(operation_id)
 
         if outcome == "not_started":
             if current.status == "waiting" and call.replay_policy == "never":
@@ -115,11 +116,23 @@ class ToolReconciliationService:
                     waiting_reason=None,
                     current_step=None,
                 )
-                return self._commit(
-                    next_state,
+                committed = self._operations.commit_transition(
+                    state=next_state,
                     expected_revision=expected_revision,
+                    node=None,
                     updated_at=timestamp,
                 )
+                if not committed:
+                    refreshed = self._operations.load_agent_run_state(operation_id)
+                    if refreshed.revision == expected_revision:
+                        # Store 门槛未满足时保留 cancelling，等待后代收敛。
+                        self._wake(operation.session_id)
+                        return refreshed
+                    raise StorageConflictError(
+                        "Tool reconciliation CAS 失败，Operation 已被其他动作修改"
+                    )
+                self._wake(operation.session_id)
+                return next_state
 
             next_state = replace(
                 current,
@@ -132,7 +145,6 @@ class ToolReconciliationService:
                 expected_revision=expected_revision,
                 updated_at=timestamp,
             )
-            operation = self._operations.load_operation(operation_id)
             self._wake(operation.session_id)
             return committed
 
@@ -157,7 +169,6 @@ class ToolReconciliationService:
             waiting_reason=None,
             current_step=next_step,
         )
-        operation = self._operations.load_operation(operation_id)
         session = self._conversations.load_conversation_session(operation.session_id)
         message = self._tool_result_message(completed_call, result)
         node = ConversationNode(

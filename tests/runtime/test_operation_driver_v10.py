@@ -139,6 +139,30 @@ def _queued_state() -> AgentRunState:
     )
 
 
+@_run_async
+async def test_recovered_cancelled_child_wakes_direct_parent():
+    state = replace(
+        _queued_state(),
+        status="cancelled",
+        cancellation=SimpleNamespace(cause="parent cancelled"),
+    )
+    operations = _Operations(state)
+    operations.parent_session_id = lambda operation_id: "parent-session"
+    woken: list[str] = []
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: pytest.fail("终态恢复不应加载 Package"),
+        effects_resolver=lambda _: pytest.fail("终态恢复不应解析 Effects"),
+        wake_callback=woken.append,
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "cancelled"
+    assert woken == ["parent-session"]
+
+
 def _loaded_package(*, replay_policy="safe", input_schema=None, tool_name="run"):
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,

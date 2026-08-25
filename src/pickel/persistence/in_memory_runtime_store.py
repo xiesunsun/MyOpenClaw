@@ -662,6 +662,46 @@ class InMemoryRuntimeStore:
             )
             return True
 
+    def discard_cancellation_messages(
+        self, *, root_operation_id: str, reason: str, handled_at: datetime
+    ) -> tuple[str, ...]:
+        """丢弃取消祖先发往真实后代的 pending AgentMessage。"""
+        if not reason:
+            raise ValueError("取消消息丢弃原因不能为空")
+        with self._lock:
+            graph = self._cancellation_graph_unlocked(root_operation_id)
+            discarded: list[str] = []
+            for message in tuple(self._inbox.values()):
+                if message.status != "pending":
+                    continue
+                if not self._is_cancellation_message_unlocked(message, graph):
+                    continue
+                self._inbox[message.message_id] = replace(
+                    message,
+                    status="discarded",
+                    outcome_reason=reason,
+                    handled_at=handled_at,
+                )
+                discarded.append(message.message_id)
+            return tuple(sorted(discarded))
+
+    def cancellation_ready(self, *, root_operation_id: str) -> bool:
+        with self._lock:
+            graph = self._cancellation_graph_unlocked(root_operation_id)
+            for operation_id in graph["operation_ids"] - {root_operation_id}:
+                state = self._run_states.get(operation_id)
+                if state is None or state.status not in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                }:
+                    return False
+            return not any(
+                message.status == "pending"
+                and self._is_cancellation_message_unlocked(message, graph)
+                for message in self._inbox.values()
+            )
+
     # Package and Artifact ---------------------------------------------
     def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
         content = deepcopy(version.content_dict())
@@ -754,6 +794,12 @@ class InMemoryRuntimeStore:
                 session_id=session.session_id,
                 current=current,
                 next_state=state,
+            ):
+                return False
+            if (
+                current.status == "cancelling"
+                and state.status == "cancelled"
+                and not self._cancellation_ready_unlocked(state.operation_id)
             ):
                 return False
             if node is not None:
@@ -1304,6 +1350,75 @@ class InMemoryRuntimeStore:
         ):
             return not has_pending
         return False
+
+    def _cancellation_graph_unlocked(self, root_operation_id: str) -> dict[str, object]:
+        """沿不可变 Delegation 关系返回取消所需的窄图投影。"""
+        operation_ids: set[str] = {root_operation_id}
+        descendants_by_operation: dict[str, set[str]] = {}
+        visited: set[str] = set()
+
+        def visit(operation_id: str) -> None:
+            if operation_id in visited:
+                return
+            visited.add(operation_id)
+            for delegation in self._delegations.values():
+                if delegation.parent_operation_id != operation_id:
+                    continue
+                child_session_id = delegation.child_session_id
+                descendants = descendants_by_operation.setdefault(operation_id, set())
+                descendants.add(child_session_id)
+                child_operations = [
+                    item
+                    for item in self._operations.values()
+                    if item.session_id == child_session_id
+                ]
+                for child_operation in child_operations:
+                    operation_ids.add(child_operation.operation_id)
+                    visit(child_operation.operation_id)
+                    descendants.update(
+                        descendants_by_operation.get(child_operation.operation_id, ())
+                    )
+
+        visit(root_operation_id)
+        return {
+            "operation_ids": operation_ids,
+            "descendants_by_operation": descendants_by_operation,
+        }
+
+    def _is_cancellation_message_unlocked(
+        self, message: InboxMessage, graph: dict[str, object]
+    ) -> bool:
+        source = message.source
+        if not isinstance(source, AgentMessageSource):
+            return False
+        descendants_by_operation = graph["descendants_by_operation"]
+        if not isinstance(descendants_by_operation, dict):
+            return False
+        target_sessions = descendants_by_operation.get(source.sender_operation_id)
+        sender_operation = self._operations.get(source.sender_operation_id)
+        return (
+            sender_operation is not None
+            and sender_operation.session_id == source.sender_session_id
+            and source.form == message.delivery
+            and isinstance(target_sessions, set)
+            and message.session_id in target_sessions
+        )
+
+    def _cancellation_ready_unlocked(self, root_operation_id: str) -> bool:
+        graph = self._cancellation_graph_unlocked(root_operation_id)
+        for operation_id in graph["operation_ids"] - {root_operation_id}:
+            state = self._run_states.get(operation_id)
+            if state is None or state.status not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+            }:
+                return False
+        return not any(
+            message.status == "pending"
+            and self._is_cancellation_message_unlocked(message, graph)
+            for message in self._inbox.values()
+        )
 
     @staticmethod
     def _state_node_ids(state: AgentRunState) -> set[str]:

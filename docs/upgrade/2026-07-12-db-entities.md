@@ -325,6 +325,11 @@ CAS AgentRunState → succeeded / failed / cancelled
 + ConversationSession.updated_at = now
 ```
 
+取消 reconciliation 先原子 discard 来源属于取消祖先、目标属于真实后代且仍
+pending 的 AgentMessage；`cancelling → cancelled` 再在同一终态事务重新检查
+AgentDelegation 递归后代均已终态且没有这类 pending 消息。不新增取消表、深度
+缓存或通用级联实体。
+
 Stopping check 与 pending next-step InboxMessage claim 同属该事务判断，避免消息落在终态边界丢失。
 
 ## 12. Archive 与 Delete

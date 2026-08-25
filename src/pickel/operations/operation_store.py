@@ -33,6 +33,16 @@ class OperationStore(Protocol):
 
     def load_delegation(self, child_session_id: str) -> AgentDelegation | None: ...
 
+    def list_delegations(
+        self, *, parent_operation_id: str
+    ) -> tuple[AgentDelegation, ...]: ...
+
+    def discard_cancellation_messages(
+        self, *, root_operation_id: str, reason: str, handled_at: datetime
+    ) -> tuple[str, ...]: ...
+
+    def cancellation_ready(self, *, root_operation_id: str) -> bool: ...
+
     def list_pending_step_messages(
         self, *, session_id: str
     ) -> tuple[InboxMessage, ...]: ...

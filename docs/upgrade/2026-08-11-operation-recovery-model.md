@@ -311,6 +311,12 @@ Parent Operation 取消必须沿 AgentDelegation 图递归处理全部非终态�
 5. 每个 child 用自己的 OperationDriver 协调 Tool Intent；
 6. Parent 在自身副作用和后代都安全后进入 cancelled。
 
+Store 的 `cancelling → cancelled` CAS 必须在同一事务重新确认：所有递归后代
+Operation 已进入 `succeeded/failed/cancelled`，且不存在仍为 pending、来源属于被取消
+祖先 Operation 并且目标属于其真实 Delegation 后代的 AgentMessage。门槛未满足返回
+竞争/未就绪的 false，不得直接写入 `cancelled`；child 收敛为 `cancelled` 后唤醒
+直接 parent，崩溃或未激活 Session 由下一次恢复 reconciliation 继续处理。
+
 ## 9. Operation 终态
 
 终态事务：

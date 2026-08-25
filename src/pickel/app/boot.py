@@ -293,6 +293,7 @@ class Boot:
                 session_cwd=session_cwd,
                 delegation_control=delegation_control,
             ),
+            wake_callback=wake_callback,
         )
         agent_driver = AgentDriver(
             conversation_store=conversation_store,

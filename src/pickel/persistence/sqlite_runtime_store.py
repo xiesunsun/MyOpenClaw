@@ -930,6 +930,66 @@ class SQLiteRuntimeStore:
             )
         return cursor.rowcount == 1
 
+    def discard_cancellation_messages(
+        self, *, root_operation_id: str, reason: str, handled_at: datetime
+    ) -> tuple[str, ...]:
+        """丢弃取消祖先发往真实后代的 pending AgentMessage。"""
+        if not reason:
+            raise ValueError("取消消息丢弃原因不能为空")
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            graph = self._cancellation_graph(connection, root_operation_id)
+            rows = connection.execute(
+                "SELECT * FROM agent_inbox_messages WHERE status = 'pending'"
+            ).fetchall()
+            discarded: list[str] = []
+            for row in rows:
+                message = self._message_from_row(row)
+                if not self._is_cancellation_message(connection, message, graph):
+                    continue
+                cursor = connection.execute(
+                    """
+                    UPDATE agent_inbox_messages
+                    SET status = 'discarded', outcome_reason = ?, handled_at = ?
+                    WHERE message_id = ? AND status = 'pending'
+                    """,
+                    (reason, handled_at.isoformat(), message.message_id),
+                )
+                if cursor.rowcount == 1:
+                    discarded.append(message.message_id)
+            connection.commit()
+            return tuple(sorted(discarded))
+
+    def cancellation_ready(self, *, root_operation_id: str) -> bool:
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            graph = self._cancellation_graph(connection, root_operation_id)
+            for operation_id in graph["operation_ids"] - {root_operation_id}:
+                row = connection.execute(
+                    "SELECT status FROM agent_run_states WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None or str(row["status"]) not in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                }:
+                    connection.rollback()
+                    return False
+            rows = connection.execute(
+                "SELECT * FROM agent_inbox_messages WHERE status = 'pending'"
+            ).fetchall()
+            ready = not any(
+                self._is_cancellation_message(
+                    connection, self._message_from_row(row), graph
+                )
+                for row in rows
+            )
+            connection.rollback()
+            return ready
+
     # -- Package / Artifact -------------------------------------------------
 
     def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
@@ -1093,6 +1153,15 @@ class SQLiteRuntimeStore:
                 session_id=str(session["session_id"]),
                 current_step=self._run_state_from_row(current_state_row).current_step,
                 next_state=state,
+            ):
+                connection.rollback()
+                return False
+            if (
+                str(current_state_row["status"]) == "cancelling"
+                and state.status == "cancelled"
+                and not self._cancellation_ready_in_connection(
+                    connection, state.operation_id
+                )
             ):
                 connection.rollback()
                 return False
@@ -1978,6 +2047,100 @@ class SQLiteRuntimeStore:
         ):
             return not has_pending
         return False
+
+    @staticmethod
+    def _cancellation_graph(
+        connection: sqlite3.Connection, root_operation_id: str
+    ) -> dict[str, object]:
+        """沿不可变 Delegation 关系返回取消所需的窄图投影。"""
+        operation_ids: set[str] = {root_operation_id}
+        descendants_by_operation: dict[str, set[str]] = {}
+        visited: set[str] = set()
+
+        def visit(operation_id: str) -> None:
+            if operation_id in visited:
+                return
+            visited.add(operation_id)
+            rows = connection.execute(
+                """
+                SELECT child_session_id FROM agent_delegations
+                WHERE parent_operation_id = ?
+                """,
+                (operation_id,),
+            ).fetchall()
+            for row in rows:
+                child_session_id = str(row["child_session_id"])
+                descendants = descendants_by_operation.setdefault(operation_id, set())
+                descendants.add(child_session_id)
+                child_rows = connection.execute(
+                    """
+                    SELECT operation_id FROM session_operations
+                    WHERE session_id = ?
+                    """,
+                    (child_session_id,),
+                ).fetchall()
+                for child_row in child_rows:
+                    child_operation_id = str(child_row["operation_id"])
+                    operation_ids.add(child_operation_id)
+                    visit(child_operation_id)
+                    descendants.update(
+                        descendants_by_operation.get(child_operation_id, ())
+                    )
+
+        visit(root_operation_id)
+        return {
+            "operation_ids": operation_ids,
+            "descendants_by_operation": descendants_by_operation,
+        }
+
+    @staticmethod
+    def _is_cancellation_message(
+        connection: sqlite3.Connection,
+        message: InboxMessage,
+        graph: dict[str, object],
+    ) -> bool:
+        source = message.source
+        if not isinstance(source, AgentMessageSource):
+            return False
+        descendants_by_operation = graph["descendants_by_operation"]
+        if not isinstance(descendants_by_operation, dict):
+            return False
+        target_sessions = descendants_by_operation.get(source.sender_operation_id)
+        sender = connection.execute(
+            "SELECT session_id FROM session_operations WHERE operation_id = ?",
+            (source.sender_operation_id,),
+        ).fetchone()
+        return (
+            sender is not None
+            and str(sender["session_id"]) == source.sender_session_id
+            and source.form == message.delivery
+            and isinstance(target_sessions, set)
+            and message.session_id in target_sessions
+        )
+
+    @classmethod
+    def _cancellation_ready_in_connection(
+        cls, connection: sqlite3.Connection, root_operation_id: str
+    ) -> bool:
+        graph = cls._cancellation_graph(connection, root_operation_id)
+        for operation_id in graph["operation_ids"] - {root_operation_id}:
+            row = connection.execute(
+                "SELECT status FROM agent_run_states WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None or str(row["status"]) not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+            }:
+                return False
+        rows = connection.execute(
+            "SELECT * FROM agent_inbox_messages WHERE status = 'pending'"
+        ).fetchall()
+        return not any(
+            cls._is_cancellation_message(connection, cls._message_from_row(row), graph)
+            for row in rows
+        )
 
     @staticmethod
     def _validate_message_artifacts(

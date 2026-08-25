@@ -79,6 +79,7 @@ class OperationDriver:
         step_id_factory: Callable[[], str] | None = None,
         node_id_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] | None = None,
+        wake_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
@@ -89,6 +90,7 @@ class OperationDriver:
         self._step_id = step_id_factory or (lambda: str(uuid4()))
         self._node_id = node_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._wake_callback = wake_callback
 
     async def drive_operation(
         self,
@@ -100,6 +102,10 @@ class OperationDriver:
         operation = self._operations.load_operation(operation_id)
         state = self._operations.load_agent_run_state(operation_id)
         if state.status in {"succeeded", "failed", "cancelled"}:
+            if state.status == "cancelled":
+                # Tool reconciliation 可能已经提交 child 终态；恢复 Driver 时仍要
+                # 推动 direct parent 重新检查后代门槛。
+                self._wake_parent(operation_id)
             return OperationDriveResult(operation_id, state.status, state, None)
         try:
             package = self._package_loader(operation.agent_package_version_id)
@@ -123,6 +129,8 @@ class OperationDriver:
 
         while True:
             if state.status in {"succeeded", "failed", "cancelled"}:
+                if state.status == "cancelled":
+                    self._wake_parent(operation_id)
                 return OperationDriveResult(
                     operation_id, state.status, state, last_assistant
                 )
@@ -132,6 +140,19 @@ class OperationDriver:
                 )
 
             if state.status == "cancelling":
+                wake_sessions = self._operations.reconcile_cancellation(
+                    operation_id,
+                    reason=(
+                        state.cancellation.cause
+                        if state.cancellation is not None
+                        else None
+                    ),
+                )
+                self._wake_sessions(wake_sessions)
+                refreshed = self._operations.load_agent_run_state(operation_id)
+                if refreshed.revision != state.revision:
+                    state = refreshed
+                    continue
                 step = state.current_step
                 if step is not None and any(
                     call.status == "intent_recorded" and call.replay_policy == "never"
@@ -140,9 +161,26 @@ class OperationDriver:
                     return OperationDriveResult(
                         operation_id, "cancelling", state, last_assistant
                     )
-                state = self._commit(
-                    replace(state, status="cancelled", current_step=None), state
-                )
+                if not self._operations.cancellation_ready(operation_id):
+                    return OperationDriveResult(
+                        operation_id, "cancelling", state, last_assistant
+                    )
+                cancelled = replace(state, status="cancelled", current_step=None)
+                if not self._operations.commit_transition(
+                    state=replace(cancelled, revision=state.revision + 1),
+                    expected_revision=state.revision,
+                    node=None,
+                    updated_at=self._now(),
+                ):
+                    refreshed = self._operations.load_agent_run_state(operation_id)
+                    if refreshed.revision != state.revision:
+                        state = refreshed
+                        continue
+                    return OperationDriveResult(
+                        operation_id, "cancelling", state, last_assistant
+                    )
+                state = replace(cancelled, revision=state.revision + 1)
+                self._wake_parent(operation_id)
                 return OperationDriveResult(
                     operation_id, "cancelled", state, last_assistant
                 )
@@ -691,6 +729,19 @@ class OperationDriver:
 
     def _pending_step_messages(self, session_id: str) -> tuple[InboxMessage, ...]:
         return self._operations.list_pending_step_messages(session_id=session_id)
+
+    def _wake_sessions(self, session_ids: tuple[str, ...]) -> None:
+        if self._wake_callback is None:
+            return
+        for session_id in session_ids:
+            self._wake_callback(session_id)
+
+    def _wake_parent(self, operation_id: str) -> None:
+        if self._wake_callback is None:
+            return
+        parent_session_id = self._operations.parent_session_id(operation_id)
+        if parent_session_id is not None:
+            self._wake_callback(parent_session_id)
 
     def _claim_step_messages(
         self,

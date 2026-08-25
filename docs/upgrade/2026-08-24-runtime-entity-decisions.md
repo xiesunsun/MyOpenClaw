@@ -2200,6 +2200,13 @@ flowchart LR
 
 取消只 discard 来源于被取消祖先 Operation 的 pending child 消息；不得用统一 `keep_inbox=True/False` 同时保留无效委派消息或删除无关用户输入。Parent 的 `delegate_agent` Tool 通过 child 状态协调结果，Parent 只有在自身 Tool Intent 和级联后代都达到安全边界后才能进入 `cancelled`。不增加 CascadingCancellationManager 或新的取消实体。
 
+实现边界固定为两个窄 Store 操作：按 AgentDelegation 图递归投影后代并在取消
+CAS 中检查终态门槛；在同一 Store 锁/SQLite 事务中，仅将已验证的祖先
+`AgentMessageSource` 发往真实后代且仍 pending 的消息标记 discarded。child
+Operation 只由自身 Driver 收敛，进入 `cancelled` 后唤醒 direct parent；live child
+通过 Registry 合并 wake，未激活 child 由启动恢复发现。User、Hook、Host、Runtime
+消息以及 child 向 parent 的 report 不属于清理范围。
+
 ### 13.8 wake、退休与 when_idle
 
 ```text
