@@ -39,7 +39,7 @@ from pickel.inbox.message import InboxMessage
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_delegation import AgentDelegation
-from pickel.operations.delegation_service import DelegationService
+from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
 from pickel.operations.agent_run_state import DelegateAgentIntent
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
@@ -104,6 +104,19 @@ class _RuntimeDelegationControl:
                 target_child_session_id,
             )
         return stored
+
+    async def list_child_agents(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+    ) -> tuple[ChildAgentSnapshot, ...]:
+        return DelegationService(store=self._store).list_child_agents(
+            sender_operation_id,
+            sender_step_id,
+            sender_tool_call_id,
+        )
 
     async def _activate_child(self, session_id: str) -> None:
         await self._host.activate_agent(session_id, self._store)

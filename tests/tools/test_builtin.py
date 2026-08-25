@@ -30,6 +30,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "bash",
                 "delegate_agent",
                 "send_message",
+                "list_agents",
             },
             set(definitions),
         )

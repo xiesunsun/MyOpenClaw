@@ -11,6 +11,7 @@ from pickel.tools.file_tools import (
 )
 from pickel.tools.delegate_agent import delegate_agent
 from pickel.tools.send_message import send_message
+from pickel.tools.list_agents import list_agents
 from pickel.tools.shell import BashTool
 
 
@@ -26,6 +27,7 @@ def builtin_tools() -> list[BaseTool]:
         BashTool(),
         delegate_agent,
         send_message,
+        list_agents,
     ]
 
 

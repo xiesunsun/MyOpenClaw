@@ -19,12 +19,18 @@ from pickel.agents.agent_package import (
     WorkspacePolicy,
     build_agent_package_version,
 )
-from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    UserMessage,
+    agent_message_to_dict,
+)
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import AgentMessageSource
 from pickel.operations.agent_run_state import (
     AgentRunState,
+    AgentRunError,
+    Cancellation,
     DelegateAgentIntent,
     ModelStepState,
     ToolCallState,
@@ -407,6 +413,272 @@ def _switch_parent_call_to_send_message(
         )
 
 
+def _switch_parent_call_to_list_agents(
+    store: Store,
+    *,
+    operation_id: str = "operation-1",
+    step_id: str = "step-1",
+    tool_call_id: str = "tool-list",
+) -> None:
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    call = ToolCallState(
+        tool_call_id=tool_call_id,
+        tool_name="list_agents",
+        arguments={},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    assert current.current_step is not None
+    switched = replace(
+        current,
+        current_step=replace(current.current_step, step_id=step_id, tool_calls=(call,)),
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, current_step_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                switched.revision,
+                switched.status,
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                operation_id,
+            ),
+        )
+
+
+def test_list_child_agents_returns_ready_without_mutating_facts(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_list_agents(store)
+    before = (
+        store.load_session(delegation.child_session_id),
+        store.list_operations(session_id=delegation.child_session_id),
+        store.list_pending(session_id=delegation.child_session_id),
+        store.list_delegations(parent_operation_id="operation-1"),
+    )
+
+    snapshots = DelegationService(store=store).list_child_agents(
+        "operation-1", "step-1", "tool-list"
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].to_dict() == {
+        "child_session_id": delegation.child_session_id,
+        "agent_id": "child-agent",
+        "status": "ready",
+        "operation_id": None,
+        "waiting_reason": None,
+        "completed_step_count": 0,
+        "final_assistant_node_id": None,
+        "error": None,
+    }
+    assert before == (
+        store.load_session(delegation.child_session_id),
+        store.list_operations(session_id=delegation.child_session_id),
+        store.list_pending(session_id=delegation.child_session_id),
+        store.list_delegations(parent_operation_id="operation-1"),
+    )
+
+
+def _accept_child_operation(
+    store: Store,
+    delegation_child_session_id: str,
+    child_package_id: str,
+    root: Path,
+) -> str:
+    operation_id = "child-operation"
+    operation = SessionOperation(
+        operation_id=operation_id,
+        session_id=delegation_child_session_id,
+        agent_package_version_id=child_package_id,
+        workspace_binding=WorkspaceBinding("workspace-1", root, root),
+        input_node_id="initial-message-1",
+        accepted_at=NOW,
+    )
+    state = AgentRunState(
+        operation_id=operation_id,
+        revision=1,
+        status="queued",
+        waiting_reason=None,
+        completed_step_count=0,
+        current_step=None,
+        final_assistant_node_id=None,
+        error=None,
+        cancellation=None,
+    )
+    assert store.accept_operation(
+        operation=operation, state=state, expected_node_id=None
+    )
+    return operation_id
+
+
+def _set_child_state(
+    store: Store,
+    operation_id: str,
+    state: AgentRunState,
+    *,
+    active: bool,
+) -> None:
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = state
+        session = store.load_session("child-session-1")
+        assert session is not None
+        store._sessions["child-session-1"] = replace(
+            session, active_operation_id=operation_id if active else None
+        )
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, waiting_reason = ?,
+                completed_step_count = ?, current_step_json = ?,
+                final_assistant_node_id = ?, error_json = ?,
+                cancellation_json = ?, updated_at = ?
+            WHERE operation_id = ?
+            """,
+            (
+                state.revision,
+                state.status,
+                state.waiting_reason,
+                state.completed_step_count,
+                (
+                    json.dumps(state.current_step.content_dict(), ensure_ascii=False)
+                    if state.current_step is not None
+                    else None
+                ),
+                state.final_assistant_node_id,
+                (
+                    json.dumps(state.to_dict()["error"], ensure_ascii=False)
+                    if state.error is not None
+                    else None
+                ),
+                (
+                    json.dumps(state.to_dict()["cancellation"], ensure_ascii=False)
+                    if state.cancellation is not None
+                    else None
+                ),
+                NOW.isoformat(),
+                operation_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE conversation_sessions SET active_operation_id = ? WHERE session_id = ?",
+            (operation_id if active else None, "child-session-1"),
+        )
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "waiting", "cancelling"])
+def test_list_child_agents_projects_active_state(
+    store: Store, tmp_path: Path, status: str
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    operation_id = _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    kwargs: dict[str, Any] = {
+        "status": status,
+        "waiting_reason": "tool_approval" if status == "waiting" else None,
+        "cancellation": (Cancellation("test", NOW) if status == "cancelling" else None),
+    }
+    _set_child_state(
+        store, operation_id, replace(current, revision=2, **kwargs), active=True
+    )
+    _switch_parent_call_to_list_agents(store)
+
+    snapshot = DelegationService(store=store).list_child_agents(
+        "operation-1", "step-1", "tool-list"
+    )[0]
+    assert snapshot.status == status
+    assert snapshot.operation_id == operation_id
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])
+def test_list_child_agents_projects_terminal_and_archived_state(
+    store: Store, tmp_path: Path, status: str
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    operation_id = _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    terminal = replace(
+        current,
+        revision=2,
+        status=status,
+        waiting_reason=None,
+        completed_step_count=3,
+        final_assistant_node_id=("assistant-node" if status == "succeeded" else None),
+        error=(AgentRunError("test", "failed", True) if status == "failed" else None),
+        cancellation=(Cancellation("test", NOW) if status == "cancelled" else None),
+    )
+    if status == "succeeded" and not isinstance(store, InMemoryRuntimeStore):
+        assistant = AssistantMessage(content=(TextBlock("done"),))
+        with store._connect() as connection:
+            connection.execute(
+                "INSERT INTO conversation_nodes VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "assistant-node",
+                    delegation.child_session_id,
+                    None,
+                    "agent_message",
+                    json.dumps(
+                        agent_message_to_dict(assistant),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    NOW.isoformat(),
+                ),
+            )
+    _set_child_state(store, operation_id, terminal, active=False)
+    _switch_parent_call_to_list_agents(store)
+
+    service = DelegationService(store=store)
+    snapshot = service.list_child_agents("operation-1", "step-1", "tool-list")[0]
+    assert snapshot.status == status
+    assert snapshot.operation_id == operation_id
+    store.archive_session(session_id=delegation.child_session_id, archived_at=NOW)
+    archived = service.list_child_agents("operation-1", "step-1", "tool-list")[0]
+    assert archived.status == "archived"
+
+
 def test_send_parent_followup_is_fifo_and_idempotent_after_claim(
     store: Store, tmp_path: Path
 ) -> None:
@@ -616,3 +888,12 @@ def test_send_parent_followup_allows_a_later_operation_of_parent_session(
         sender_operation_id="operation-2",
         form="followup",
     )
+    _switch_parent_call_to_list_agents(
+        store, operation_id="operation-2", step_id="step-3", tool_call_id="tool-list-2"
+    )
+    snapshots = DelegationService(store=store).list_child_agents(
+        "operation-2", "step-3", "tool-list-2"
+    )
+    assert [item.child_session_id for item in snapshots] == [
+        delegation.child_session_id
+    ]

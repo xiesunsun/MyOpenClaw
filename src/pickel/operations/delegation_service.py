@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from pickel.agents.agent_package import AgentPackageVersion
 from pickel.conversations.agent_message import UserMessage
-from pickel.inbox.message import AgentMessageSource, InboxMessage
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.inbox.message import AgentMessageSource, InboxMessage
 from pickel.operations.agent_delegation import AgentDelegation
-from pickel.operations.agent_run_state import AgentRunState, DelegateAgentIntent
+from pickel.operations.agent_run_state import (
+    AgentRunError,
+    AgentRunState,
+    AgentRunStatus,
+    DelegateAgentIntent,
+    WaitingReason,
+)
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.workspaces.workspace import Workspace
@@ -36,6 +43,16 @@ class DelegationStore(Protocol):
     ) -> AgentPackageVersion | None: ...
 
     def load_delegation(self, child_session_id: str) -> AgentDelegation | None: ...
+
+    def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]: ...
+
+    def list_delegations(
+        self, *, parent_operation_id: str
+    ) -> tuple[AgentDelegation, ...]: ...
+
+    def list_pending(
+        self, *, session_id: str, delivery: str | None = None
+    ) -> tuple[InboxMessage, ...]: ...
 
     def start_delegation(
         self,
@@ -234,6 +251,199 @@ class DelegationService:
             source=source,
             created_at=self._now(),
         )
+
+    def list_child_agents(
+        self,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+    ) -> tuple["ChildAgentSnapshot", ...]:
+        """读取当前 sender Session 的 direct child 快照。"""
+        operation = self._store.load_operation(sender_operation_id)
+        state = self._store.load_run_state(sender_operation_id)
+        if operation is None or state is None:
+            raise StorageIntegrityError("sender Operation 或 AgentRunState 不存在")
+        sender_session = self._store.load_session(operation.session_id)
+        if sender_session is None:
+            raise StorageIntegrityError("sender Session 不存在")
+        if sender_session.active_operation_id != sender_operation_id:
+            raise StorageConflictError(
+                "sender Operation 不是 Session 的 active Operation"
+            )
+        step = state.current_step
+        call = (
+            next(
+                (
+                    item
+                    for item in step.tool_calls
+                    if item.tool_call_id == sender_tool_call_id
+                ),
+                None,
+            )
+            if step is not None
+            else None
+        )
+        if (
+            state.status != "running"
+            or step is None
+            or step.step_id != sender_step_id
+            or step.phase != "awaiting_tools"
+            or call is None
+            or call.tool_name != "list_agents"
+            or call.status != "intent_recorded"
+            or call.execution_intent is not None
+            or call.arguments != {}
+        ):
+            raise StorageConflictError(
+                "sender ToolCall 不是当前 list_agents intent_recorded"
+            )
+
+        snapshots: list[tuple[datetime, str, ChildAgentSnapshot]] = []
+        for parent_operation in self._store.list_operations(
+            session_id=operation.session_id
+        ):
+            for delegation in self._store.list_delegations(
+                parent_operation_id=parent_operation.operation_id
+            ):
+                child = self._store.load_session(delegation.child_session_id)
+                if child is None:
+                    raise StorageIntegrityError("delegation child Session 不存在")
+                snapshots.append(
+                    (
+                        delegation.created_at,
+                        delegation.child_session_id,
+                        self._snapshot_child(child),
+                    )
+                )
+        snapshots.sort(key=lambda item: (item[0], item[1]))
+        return tuple(item[2] for item in snapshots)
+
+    def _snapshot_child(self, session: ConversationSession) -> "ChildAgentSnapshot":
+        operations = self._store.list_operations(session_id=session.session_id)
+        latest = operations[-1] if operations else None
+        if session.archived_at is not None:
+            return self._snapshot_terminal_or_archived(
+                session, latest, status="archived"
+            )
+        if session.active_operation_id is not None:
+            operation = self._store.load_operation(session.active_operation_id)
+            state = self._store.load_run_state(session.active_operation_id)
+            if (
+                operation is None
+                or state is None
+                or operation.session_id != session.session_id
+            ):
+                raise StorageIntegrityError("child Session 的 active Operation 不完整")
+            return self._snapshot_from_state(session, operation, state)
+        pending = self._store.list_pending(session_id=session.session_id)
+        if any(item.delivery in {"followup", "steer"} for item in pending):
+            return ChildAgentSnapshot(
+                child_session_id=session.session_id,
+                agent_id=session.agent_id,
+                status="ready",
+                operation_id=None,
+                waiting_reason=None,
+                completed_step_count=0,
+                final_assistant_node_id=None,
+                error=None,
+            )
+        if latest is None:
+            return ChildAgentSnapshot(
+                child_session_id=session.session_id,
+                agent_id=session.agent_id,
+                status="idle",
+                operation_id=None,
+                waiting_reason=None,
+                completed_step_count=0,
+                final_assistant_node_id=None,
+                error=None,
+            )
+        state = self._store.load_run_state(latest.operation_id)
+        if state is None or state.status not in {"succeeded", "failed", "cancelled"}:
+            raise StorageIntegrityError("child Session 最新 Operation 缺少终态")
+        return self._snapshot_from_state(session, latest, state)
+
+    def _snapshot_terminal_or_archived(
+        self,
+        session: ConversationSession,
+        operation: SessionOperation | None,
+        *,
+        status: "ChildAgentStatus",
+    ) -> "ChildAgentSnapshot":
+        if operation is None:
+            return ChildAgentSnapshot(
+                child_session_id=session.session_id,
+                agent_id=session.agent_id,
+                status=status,
+                operation_id=None,
+                waiting_reason=None,
+                completed_step_count=0,
+                final_assistant_node_id=None,
+                error=None,
+            )
+        state = self._store.load_run_state(operation.operation_id)
+        if state is None or state.status not in {"succeeded", "failed", "cancelled"}:
+            raise StorageIntegrityError("已归档 child Session 缺少终态 Operation")
+        return self._snapshot_from_state(
+            session,
+            operation,
+            state,
+            status=status,
+        )
+
+    @staticmethod
+    def _snapshot_from_state(
+        session: ConversationSession,
+        operation: SessionOperation,
+        state: AgentRunState,
+        *,
+        status: "ChildAgentStatus | None" = None,
+    ) -> "ChildAgentSnapshot":
+        return ChildAgentSnapshot(
+            child_session_id=session.session_id,
+            agent_id=session.agent_id,
+            status=status or state.status,
+            operation_id=operation.operation_id,
+            waiting_reason=state.waiting_reason,
+            completed_step_count=state.completed_step_count,
+            final_assistant_node_id=state.final_assistant_node_id,
+            error=state.error,
+        )
+
+
+ChildAgentStatus = AgentRunStatus | Literal["ready", "idle", "archived"]
+
+
+@dataclass(frozen=True)
+class ChildAgentSnapshot:
+    child_session_id: str
+    agent_id: str
+    status: ChildAgentStatus
+    operation_id: str | None
+    waiting_reason: WaitingReason | None
+    completed_step_count: int
+    final_assistant_node_id: str | None
+    error: AgentRunError | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "child_session_id": self.child_session_id,
+            "agent_id": self.agent_id,
+            "status": self.status,
+            "operation_id": self.operation_id,
+            "waiting_reason": self.waiting_reason,
+            "completed_step_count": self.completed_step_count,
+            "final_assistant_node_id": self.final_assistant_node_id,
+            "error": (
+                {
+                    "code": self.error.code,
+                    "message": self.error.message,
+                    "retryable": self.error.retryable,
+                }
+                if self.error is not None
+                else None
+            ),
+        }
 
 
 def _followup_message_id(

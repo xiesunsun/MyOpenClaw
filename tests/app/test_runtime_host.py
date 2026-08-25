@@ -277,6 +277,29 @@ def test_runtime_delegation_control_preserves_acceptance_on_activation_failure(
     assert "Child Session 激活失败" in caplog.text
 
 
+def test_runtime_delegation_control_lists_children_without_activation() -> None:
+    store = object()
+    registry = SimpleNamespace(wake=Mock())
+    host = SimpleNamespace(activate_agent=AsyncMock(), agent_registry=registry)
+    service = SimpleNamespace(list_child_agents=lambda *_args: ())
+
+    with patch(
+        "pickel.app.runtime_host.DelegationService", return_value=service
+    ) as service_type:
+        result = asyncio.run(
+            _RuntimeDelegationControl(host, store).list_child_agents(
+                sender_operation_id="parent-operation",
+                sender_step_id="parent-step",
+                sender_tool_call_id="list-tool",
+            )
+        )
+
+    assert result == ()
+    service_type.assert_called_once_with(store=store)
+    host.activate_agent.assert_not_awaited()
+    registry.wake.assert_not_called()
+
+
 def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> None:
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)

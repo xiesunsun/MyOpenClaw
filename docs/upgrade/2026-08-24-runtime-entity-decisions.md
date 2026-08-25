@@ -2059,6 +2059,8 @@ parent 后续任务使用 child `followup/steer`；child 报告使用 parent `st
 
 父 Operation 的 `send_message` Tool 只向 sender Session 的 direct child 追加 `followup`，不等待 child 回答。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生；ToolCall 的冻结 arguments 与 `intent_recorded` 状态已经是完整决定，不新增 `SendAgentMessageIntent`。Store 在同一事务中校验 sender Operation/Session、当前 ToolCall、AgentDelegation 直接父关系、目标 Session 和 `AgentMessageSource`，再分配目标 Session FIFO sequence。相同 message ID 且 target、delivery、message、source 完全一致时，即使消息已 claim 或 child 已归档，也返回已有 InboxMessage；新消息禁止写入归档 child。
 
+父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照不新增持久化字段；`wait_delegation` 保留为未来真正等待接口，不在本批伪装实现。
+
 child 的有效权限只能收窄：Parent 执行边界、child AgentPackage WorkspacePolicy 和 ToolPolicy 取交集；delegated child 第一阶段不允许通过交互式 approval 扩大权限。
 
 Delegation 深度从不可变父子图递归推导，并受 AgentRuntimePolicy.max_delegation_depth 约束，不在 Session 或 Delegation 重复保存 depth。
