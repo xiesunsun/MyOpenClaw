@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
+import time
 from pathlib import Path
 
 import pickel.observe.jsonl_trace_sink as trace_module
@@ -171,6 +174,230 @@ def test_standard_不写逐块_delta(tmp_path: Path):
 
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [record["event_type"] for record in records] == ["agent_run_interrupted"]
+
+
+def _delta_event(call_id: str = "call-1") -> ToolCallArgsDeltaEvent:
+    return ToolCallArgsDeltaEvent(
+        envelope=EventEnvelope(
+            identity=ExecutionIdentity(
+                session_id="s1",
+                operation_id="operation-1",
+                step_id="step-1",
+                step_sequence=1,
+                tool_call_id=call_id,
+            )
+        ),
+        partial_json="{}",
+    )
+
+
+def _replace_put(sink: JsonlTraceSink, put):
+    sink._buffer.put = put
+
+
+def test_delta_queue_full只报告首个丢帧且保留身份(tmp_path: Path):
+    diagnostics = []
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=diagnostics.append,
+    )
+    _replace_put(sink, lambda _item: (False, None))
+
+    sink(_delta_event("call-1"))
+    sink(_delta_event("call-2"))
+    assert sink.flush() is True
+    sink.close()
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.name == "trace_delta_dropped"
+    assert diagnostic.level == "warning"
+    assert diagnostic.identity.tool_call_id == "call-1"
+    assert diagnostic.occurred_at.tzinfo is not None
+    assert diagnostic.attributes == {
+        "reason": "queue_full",
+        "event_type": "tool_call_args_delta",
+        "records_dropped": 1,
+        "delta_records_dropped": 1,
+        "queue_capacity": 1,
+    }
+
+
+def test_高优先级入队报告被淘汰_delta(tmp_path: Path):
+    diagnostics = []
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=diagnostics.append,
+    )
+    delta = _delta_event("call-1")
+    evicted = trace_module._QueuedRecord(
+        value={},
+        low_priority=True,
+        identity=delta.envelope.identity,
+        event_type="tool_call_args_delta",
+    )
+    calls = []
+
+    def put(item):
+        calls.append(item)
+        return (True, evicted) if not item.low_priority else (True, None)
+
+    _replace_put(sink, put)
+    sink(delta)
+    sink.record(DiagnosticRecord(name="important"))
+    assert sink.flush() is True
+    sink.close()
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0].attributes["reason"] == "evicted_delta"
+    assert diagnostics[0].identity.tool_call_id == "call-1"
+    assert calls[-1].low_priority is False
+
+
+def test_delta成功入队后开启新的拥塞周期(tmp_path: Path):
+    diagnostics = []
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=diagnostics.append,
+    )
+    reject = lambda _item: (False, None)
+    accept = lambda item: (True, None)
+    _replace_put(sink, reject)
+    sink(_delta_event("call-1"))
+    assert sink.flush() is True
+    _replace_put(sink, accept)
+    sink(_delta_event("call-2"))
+    _replace_put(sink, reject)
+    sink(_delta_event("call-3"))
+    assert sink.flush() is True
+    sink.close()
+
+    assert [item.identity.tool_call_id for item in diagnostics] == [
+        "call-1",
+        "call-3",
+    ]
+
+
+def test_pending_diagnostic未发出时成功_delta不覆盖首条身份(tmp_path: Path):
+    diagnostics = []
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=diagnostics.append,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_emit = sink._emit_pending_diagnostic
+
+    def blocked_emit():
+        entered.set()
+        assert release.wait(1)
+        original_emit()
+
+    sink._emit_pending_diagnostic = blocked_emit
+    low_calls = 0
+
+    def put(item):
+        nonlocal low_calls
+        if not item.low_priority:
+            return True, None
+        low_calls += 1
+        return (False, None) if low_calls in {1, 3} else (True, None)
+
+    _replace_put(sink, put)
+    sink(_delta_event("call-1"))
+    assert entered.wait(1)
+    sink(_delta_event("call-2"))
+    sink(_delta_event("call-3"))
+
+    with sink._diagnostic_lock:
+        assert sink._pending_diagnostic is not None
+        assert sink._pending_diagnostic.identity.tool_call_id == "call-1"
+
+    release.set()
+    assert sink.flush() is True
+    sink.close()
+
+    assert [item.identity.tool_call_id for item in diagnostics] == ["call-1"]
+
+
+def test_diagnostic_callback重入_sink不会递归(tmp_path: Path):
+    diagnostics = []
+    callback_started = threading.Event()
+
+    def callback(diagnostic):
+        diagnostics.append(diagnostic)
+        callback_started.set()
+        sink.record(DiagnosticRecord(name="callback_record"))
+
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=callback,
+    )
+    _replace_put(sink, lambda _item: (False, None))
+    sink(_delta_event())
+    assert callback_started.wait(1)
+    sink.close()
+
+    assert len(diagnostics) == 1
+
+
+def test_close也会发出pending_diagnostic且只发一次(tmp_path: Path):
+    diagnostics = []
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=diagnostics.append,
+    )
+    _replace_put(sink, lambda _item: (False, None))
+    sink(_delta_event())
+    sink.close()
+    sink.close()
+
+    assert len(diagnostics) == 1
+
+
+def test_无callback时由writer记录一次warning(tmp_path: Path, caplog):
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+    )
+    _replace_put(sink, lambda _item: (False, None))
+    with caplog.at_level(logging.WARNING):
+        sink(_delta_event())
+        assert sink.flush() is True
+    sink.close()
+
+    assert [
+        record for record in caplog.records if "trace delta dropped" in record.message
+    ]
+
+
+def test_slow_diagnostic_callback不阻塞_enqueue(tmp_path: Path):
+    callback_started = threading.Event()
+    callback_release = threading.Event()
+
+    def callback(_diagnostic):
+        callback_started.set()
+        callback_release.wait(1)
+
+    sink = JsonlTraceSink(
+        tmp_path / "s1.jsonl",
+        TraceOptions(mode="full", queue_capacity=1),
+        diagnostic_callback=callback,
+    )
+    _replace_put(sink, lambda _item: (False, None))
+    started = time.perf_counter()
+    sink(_delta_event())
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.2
+    assert callback_started.wait(1)
+    callback_release.set()
+    sink.close()
 
 
 def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):

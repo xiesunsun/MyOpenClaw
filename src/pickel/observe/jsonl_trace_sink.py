@@ -11,15 +11,17 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pickel.config.paths import home_dir
 from pickel.observe.records import (
+    DiagnosticRecord,
     ObservationRecord,
     RequestSnapshotRecord,
     SpanRecord,
 )
 from pickel.runtime.runtime_events import RuntimeEventBase
+from pickel.shared.execution_identity import ExecutionIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,8 @@ class _QueuedRecord:
     value: dict[str, Any]
     low_priority: bool = False
     flush_barrier: threading.Event | None = None
+    identity: ExecutionIdentity | None = None
+    event_type: str | None = None
 
 
 class _TraceBuffer:
@@ -80,22 +84,22 @@ class _TraceBuffer:
         self._condition = threading.Condition()
         self._closed = False
 
-    def put(self, item: _QueuedRecord) -> tuple[bool, bool]:
-        """返回 (已接收, 是否淘汰了一条低优先级记录)。"""
+    def put(self, item: _QueuedRecord) -> tuple[bool, _QueuedRecord | None]:
+        """返回 (已接收, 被淘汰的低优先级记录)。"""
         with self._condition:
             if self._closed:
-                return False, False
-            evicted = False
+                return False, None
+            evicted: _QueuedRecord | None = None
             if len(self._items) >= self._capacity:
                 if item.low_priority:
-                    return False, False
+                    return False, None
                 for index, queued in enumerate(self._items):
                     if queued.low_priority:
                         del self._items[index]
-                        evicted = True
+                        evicted = queued
                         break
                 else:
-                    return False, False
+                    return False, None
             self._items.append(item)
             self._condition.notify()
             return True, evicted
@@ -113,6 +117,10 @@ class _TraceBuffer:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
+
+    def wake(self) -> None:
+        with self._condition:
+            self._condition.notify()
 
     def put_flush_barrier(self, barrier: threading.Event) -> bool:
         """控制记录不受容量限制，确保此前记录可被同步等待。"""
@@ -139,7 +147,12 @@ class JsonlTraceSink:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, path: Path, options: TraceOptions | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        options: TraceOptions | None = None,
+        diagnostic_callback: Callable[[DiagnosticRecord], None] | None = None,
+    ) -> None:
         self._path = Path(path)
         self._options = options or TraceOptions()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +166,11 @@ class JsonlTraceSink:
         self._written = 0
         self._dropped = 0
         self._delta_dropped = 0
+        self._diagnostic_callback = diagnostic_callback
+        self._diagnostic_lock = threading.Lock()
+        self._pending_diagnostic: DiagnosticRecord | None = None
+        self._delta_congestion_active = False
+        self._diagnostic_callback_active = False
         self._queue_high_watermark = 0
         self._rotation_index = 0
         self._thread = threading.Thread(
@@ -192,7 +210,12 @@ class JsonlTraceSink:
                 "recorded_at": _iso_now(),
             }
         )
-        self._enqueue(record, low_priority=event_type in _DELTA_EVENTS)
+        self._enqueue(
+            record,
+            low_priority=event_type in _DELTA_EVENTS,
+            identity=event.envelope.identity if event_type in _DELTA_EVENTS else None,
+            event_type=event_type if event_type in _DELTA_EVENTS else None,
+        )
 
     def record(self, observation: ObservationRecord) -> None:
         if self._closed:
@@ -245,28 +268,101 @@ class JsonlTraceSink:
             self._handle.flush()
             self._handle.close()
 
-    def _enqueue(self, record: dict[str, Any], *, low_priority: bool) -> None:
+    def _enqueue(
+        self,
+        record: dict[str, Any],
+        *,
+        low_priority: bool,
+        identity: ExecutionIdentity | None = None,
+        event_type: str | None = None,
+    ) -> None:
         with self._sequence_lock:
             record["trace_seq"] = self._next_trace_seq
             self._next_trace_seq += 1
         accepted, evicted = self._buffer.put(
-            _QueuedRecord(value=record, low_priority=low_priority)
+            _QueuedRecord(
+                value=record,
+                low_priority=low_priority,
+                identity=identity,
+                event_type=event_type,
+            )
         )
         if evicted:
             self._dropped += 1
             self._delta_dropped += 1
+            self._register_delta_drop("evicted_delta", evicted)
         if not accepted:
             self._dropped += 1
             if low_priority:
                 self._delta_dropped += 1
+                self._register_delta_drop(
+                    "queue_full",
+                    _QueuedRecord(
+                        value=record,
+                        low_priority=True,
+                        identity=identity,
+                        event_type=event_type,
+                    ),
+                )
             return
+        if low_priority:
+            with self._diagnostic_lock:
+                if (
+                    self._pending_diagnostic is None
+                    and not self._diagnostic_callback_active
+                ):
+                    self._delta_congestion_active = False
         self._queue_high_watermark = max(self._queue_high_watermark, self._buffer.size)
+
+    def _register_delta_drop(self, reason: str, item: _QueuedRecord) -> None:
+        with self._diagnostic_lock:
+            if self._delta_congestion_active or self._diagnostic_callback_active:
+                return
+            self._delta_congestion_active = True
+            self._pending_diagnostic = DiagnosticRecord(
+                name="trace_delta_dropped",
+                identity=item.identity,
+                level="warning",
+                attributes={
+                    "reason": reason,
+                    "event_type": item.event_type or "",
+                    "records_dropped": self._dropped,
+                    "delta_records_dropped": self._delta_dropped,
+                    "queue_capacity": max(1, self._options.queue_capacity),
+                },
+            )
+        self._buffer.wake()
+
+    def _has_pending_diagnostic(self) -> bool:
+        with self._diagnostic_lock:
+            return self._pending_diagnostic is not None
+
+    def _emit_pending_diagnostic(self) -> None:
+        with self._diagnostic_lock:
+            diagnostic = self._pending_diagnostic
+            self._pending_diagnostic = None
+            if diagnostic is None:
+                return
+            self._diagnostic_callback_active = True
+        try:
+            if self._diagnostic_callback is not None:
+                self._diagnostic_callback(diagnostic)
+            else:
+                logger.warning("trace delta dropped: %s", diagnostic.attributes)
+        except Exception:  # noqa: BLE001 — 诊断回调不能杀掉 writer
+            logger.exception("trace diagnostic callback failed")
+        finally:
+            with self._diagnostic_lock:
+                self._diagnostic_callback_active = False
 
     def _write_loop(self) -> None:
         timeout = max(0.01, self._options.flush_interval_ms / 1000)
-        while not self._closed or not self._buffer.empty:
+        while (
+            not self._closed or not self._buffer.empty or self._has_pending_diagnostic()
+        ):
             batch = self._buffer.take(self._options.batch_size, timeout)
             if not batch:
+                self._emit_pending_diagnostic()
                 self._flush()
                 continue
             barriers = [
@@ -285,6 +381,7 @@ class JsonlTraceSink:
                     self._handle.writelines(lines)
                     self._written += len(lines)
                 self._flush()
+                self._emit_pending_diagnostic()
             except Exception as exc:  # noqa: BLE001 — trace 永不阻断 Runtime
                 self._write_errors += 1
                 dropped = len(batch) - len(barriers)

@@ -1,7 +1,7 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：实施中；v10 数据闭包、Runtime 执行核心与 Context 唯一管道已接线
+**状态**：实施中；v10 数据闭包、Runtime 执行核心、Context 唯一管道与统一执行身份已接线
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -105,8 +105,9 @@ OperationDriver
 | 4.4 Observation 执行身份 | 完成 | Span、Diagnostic 与 Request Snapshot 直接组合 `ExecutionIdentity`，Hook/Event/Model Request 调用方不再转换身份；旧 `ObservationIdentity` 已删除；观测时间字段与既有 Trace JSON schema 保持不变 | HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.5 HostCall 执行身份 | 完成 | `HostCallContext` 只保留独立 `call_id`、统一 `ExecutionIdentity` 与 timeout；MCP Proxy 和嵌套 elicitation 直接复用 ToolCall 身份；Router 的 pending/cancel/dedup 仍以每次 Host 请求的 `call_id` 为权威 | Streaming 边界按后续小批次迁移 |
 | 4.6a Streaming 执行身份 | 完成 | Provider-neutral `StreamDelta` 保持无 Runtime 身份；RuntimeEffects 在已校验 Operation/Step 边界为每个 Delta 附加 `ExecutionIdentity`；ConversationRuntime 不再猜测身份；ToolCall Args Event 的重复 `tool_call_id` payload 已删除 | 4.6b Full Trace 丢帧 Diagnostic 验收 |
+| 4.6b Full Trace 丢帧 Diagnostic | 完成 | Full Trace 使用有界队列异步写入；每次连续 Delta 拥塞只在队列外报告首个 `trace_delta_dropped` Diagnostic，保留真实执行身份；慢回调不阻塞 Provider，flush/close 会排空单槽 pending diagnostic，且不参与恢复或可靠审计 | — |
 
-第十四轮验收基线：`771 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第十五轮验收基线：`779 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 
