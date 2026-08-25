@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pickel.conversations.agent_message import AgentMessage
 from pickel.shared.event_envelope import EventIdentity
 
 
@@ -48,3 +49,15 @@ class PostToolBatchEvent(HookEventBase):
 @dataclass(frozen=True)
 class AgentRunEndEvent(HookEventBase):
     reason: str = "completed"
+
+
+@dataclass(frozen=True)
+class BeforeRequestEvent(HookEventBase):
+    """请求 Intent 提交前，供 Hook 追加受限 Context 内容。"""
+
+    visible_messages: tuple[AgentMessage, ...] = ()
+    recall_messages: tuple[AgentMessage, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "visible_messages", tuple(self.visible_messages))
+        object.__setattr__(self, "recall_messages", tuple(self.recall_messages))

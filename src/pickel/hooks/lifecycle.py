@@ -6,6 +6,7 @@ import logging
 from dataclasses import replace
 from typing import Any, Protocol
 
+from pickel.context.model_context_builder import ContextContributions
 from pickel.hooks.decisions import (
     PostToolBatchDecision,
     PostToolUseDecision,
@@ -17,6 +18,7 @@ from pickel.hooks.decisions import (
     merge_user_prompt_decisions,
 )
 from pickel.hooks.events import (
+    BeforeRequestEvent,
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
@@ -47,6 +49,9 @@ class HookHandler(Protocol):
     async def post_tool_batch(
         self, event: PostToolBatchEvent
     ) -> PostToolBatchDecision | None: ...
+    async def before_request(
+        self, event: BeforeRequestEvent
+    ) -> ContextContributions | None: ...
     async def agent_run_end(
         self, event: AgentRunEndEvent
     ) -> AgentRunEndDecision | None: ...
@@ -143,6 +148,20 @@ class LifecycleHooks:
             if isinstance(result, PostToolBatchDecision):
                 texts.append(result.feedback_text)
         return PostToolBatchDecision(feedback_text=merge_feedback_texts(texts))
+
+    async def before_request(self, event: BeforeRequestEvent) -> ContextContributions:
+        """按 Handler 注册顺序合并受限追加内容；Hook 异常保持 fail-open。"""
+        system_sections = []
+        messages = []
+        for handler in self.handlers:
+            result = await _call(handler, "before_request", event)
+            if isinstance(result, ContextContributions):
+                system_sections.extend(result.system_sections)
+                messages.extend(result.messages)
+        return ContextContributions(
+            system_sections=tuple(system_sections),
+            messages=tuple(messages),
+        )
 
     async def agent_run_end(self, event: AgentRunEndEvent) -> AgentRunEndDecision:
         for handler in self.handlers:

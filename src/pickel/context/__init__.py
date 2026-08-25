@@ -1,6 +1,5 @@
 """当前 Context 值对象与窄协议导出。"""
 
-from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
 from pickel.context.model_context import (
     ModelContext,
     SystemContent,
@@ -21,7 +20,6 @@ from pickel.context.session_recall import (
 from pickel.context.window import apply_window, group_conversation_turns
 
 __all__ = [
-    "HookFeedback",
     "ContextContributions",
     "ModelContext",
     "Recall",
@@ -31,7 +29,6 @@ __all__ = [
     "SystemContent",
     "SystemSection",
     "ToolDefinition",
-    "append_hook_feedback",
     "apply_window",
     "group_conversation_turns",
     "model_context_from_dict",

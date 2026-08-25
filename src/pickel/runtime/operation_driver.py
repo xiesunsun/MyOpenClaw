@@ -31,7 +31,7 @@ from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.hooks.decisions import PreToolUseDecision
-from pickel.hooks.events import PreToolUseEvent
+from pickel.hooks.events import BeforeRequestEvent, PreToolUseEvent
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
@@ -182,7 +182,10 @@ class OperationDriver:
 
             if step.phase == "preparing_request":
                 context = await self._build_context(
-                    operation.session_id, package=package, effects=effects
+                    operation=operation,
+                    state=state,
+                    package=package,
+                    effects=effects,
                 )
                 intent = ModelRequestIntent(
                     model_context=context,
@@ -525,12 +528,18 @@ class OperationDriver:
 
     async def _build_context(
         self,
-        session_id: str,
         *,
+        operation: SessionOperation,
+        state: AgentRunState,
         package: AgentPackageVersion,
         effects: RuntimeEffects,
     ) -> ModelContext:
-        nodes = self._conversations.list_active_branch_nodes(session_id=session_id)
+        step = state.current_step
+        if step is None or step.phase != "preparing_request":
+            raise RuntimeError("Context 只能为 preparing_request Step 构建")
+        nodes = self._conversations.list_active_branch_nodes(
+            session_id=operation.session_id
+        )
         projected = ConversationProjector().project_conversation_messages(nodes)
         visible = tuple(
             apply_window(
@@ -539,13 +548,29 @@ class OperationDriver:
             )
         )
         recalled = await effects.retrieve_recall_messages(
-            session_id=session_id,
+            session_id=operation.session_id,
             visible_messages=visible,
         )
+        hook_contributions = await effects.invoke_hook(
+            "before_request",
+            BeforeRequestEvent(
+                session_id=operation.session_id,
+                operation_id=operation.operation_id,
+                step_id=step.step_id,
+                step_sequence=step.step_sequence,
+                visible_messages=visible,
+                recall_messages=tuple(recalled),
+            ),
+        )
+        if not isinstance(hook_contributions, ContextContributions):
+            hook_contributions = ContextContributions()
         return self._context_builder.build_model_context(
             package=package,
             visible_messages=visible,
-            contributions=ContextContributions(messages=tuple(recalled)),
+            contributions=ContextContributions(
+                system_sections=hook_contributions.system_sections,
+                messages=tuple(recalled) + hook_contributions.messages,
+            ),
         )
 
     def _commit(

@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import asyncio
 
+from pickel.context.model_context import SystemSection
+from pickel.context.model_context_builder import ContextContributions
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.hooks.decisions import PreToolUseDecision, UserPromptSubmitDecision
-from pickel.hooks.events import PreToolUseEvent, UserPromptSubmitEvent
+from pickel.hooks.events import (
+    BeforeRequestEvent,
+    PreToolUseEvent,
+    UserPromptSubmitEvent,
+)
 from pickel.hooks.lifecycle import LifecycleHooks
 
 
@@ -62,3 +70,37 @@ def test_pre_tool_hook_failure_denies_execution() -> None:
     )
 
     assert decision.action == "deny"
+
+
+def test_before_request_hooks_only_merge_ordered_context_contributions() -> None:
+    class AddContext:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def before_request(self, event):
+            assert event.visible_messages[0].content[0].text == "visible"
+            assert event.recall_messages[0].content[0].text == "recall"
+            return ContextContributions(
+                system_sections=(SystemSection(self.name, f"system-{self.name}"),),
+                messages=(UserMessage((TextBlock(f"message-{self.name}"),)),),
+            )
+
+    event = BeforeRequestEvent(
+        visible_messages=[UserMessage((TextBlock("visible"),))],
+        recall_messages=[UserMessage((TextBlock("recall"),))],
+    )
+    contributions = asyncio.run(
+        LifecycleHooks([AddContext("first"), AddContext("second")]).before_request(
+            event
+        )
+    )
+
+    assert isinstance(event.visible_messages, tuple)
+    assert [section.name for section in contributions.system_sections] == [
+        "first",
+        "second",
+    ]
+    assert [message.content[0].text for message in contributions.messages] == [
+        "message-first",
+        "message-second",
+    ]

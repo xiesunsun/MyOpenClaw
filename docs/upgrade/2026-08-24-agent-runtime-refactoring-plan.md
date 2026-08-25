@@ -1,7 +1,7 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：实施中；v10 数据闭包与 Runtime 执行核心已接线  
+**状态**：实施中；v10 数据闭包、Runtime 执行核心与 Context 唯一管道已接线
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -98,9 +98,9 @@ OperationDriver
 | 2.0 Agent Package v10 | Loader 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 当前 Config 仅能构建 primary，worker/utility 的配置来源归入配置升级批次 |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
 | 2.4 Host 控制面 | 完成 | `Agent.resume_operation(operation_id)` 精确身份恢复；cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`；`ToolReconciliationService` 对 `completed/not_started/unknown` 做单次 revision CAS，取消中的已完成结果经可恢复的两步 CAS 收敛 | 完整交互界面和 AgentRegistry 调度不在本批次 |
-| 3.0 Context 入口审计 | 部分完成 | 确认实际请求只有 `ModelContextBuilder` 一个创建入口；删除未接线的 BeforeRequest 整体 Context 覆盖路径；Anthropic 与 Gemini 的 generate/stream、full trace snapshot 分别复用同一 request builder；`/context` 优先读取已提交 Intent 并与纯 preview 明确区分 | Hook ContextContributions 接线 |
+| 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 与 Gemini 的 generate/stream、full trace snapshot 分别复用同一 request builder；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
 
-第七轮验收基线：`765 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject` 和 `NamedReference` 生产路径已删除。
+第八轮验收基线：`767 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference` 和 `HookFeedback` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

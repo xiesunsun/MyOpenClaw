@@ -9,8 +9,12 @@ from functools import wraps
 
 import pytest
 
-from pickel.context.model_context import ModelContext, SystemContent
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.context.model_context import ModelContext, SystemContent, SystemSection
+from pickel.context.model_context_builder import (
+    ContextContributions,
+    ModelContextBuilder,
+)
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
@@ -55,9 +59,11 @@ class _Provider:
     def __init__(self, messages):
         self.messages = list(messages)
         self.calls = 0
+        self.contexts = []
 
     async def stream(self, context):
         self.calls += 1
+        self.contexts.append(context)
         yield StreamCompleted(self.messages.pop(0))
 
 
@@ -120,10 +126,13 @@ def _queued_state() -> AgentRunState:
 def _loaded_package(*, replay_policy="safe", input_schema=None):
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
+        behavior_instruction="behavior",
+        skills=(),
         runtime_policy=SimpleNamespace(max_model_steps=8, context_turn_window=8),
         tools=(
             SimpleNamespace(
                 name="run",
+                description="run tool",
                 replay_policy=replay_policy,
                 source=SimpleNamespace(value="builtin"),
                 implementation_ref=SimpleNamespace(name="run"),
@@ -142,11 +151,14 @@ def _driver(
     replay_policy="safe",
     invoke_hook=None,
     input_schema=None,
+    recall_sources=(),
+    model_context_builder=None,
 ):
     effects = RuntimeEffects(
         provider=provider,
         execute_tool=tool,
         invoke_hook_effect=invoke_hook,
+        recall_sources=tuple(recall_sources),
     )
     return OperationDriver(
         operation_service=operations,
@@ -156,7 +168,7 @@ def _driver(
             input_schema=input_schema,
         ).version,
         effects_resolver=lambda package_version_id: effects,
-        model_context_builder=_ContextBuilder(),
+        model_context_builder=model_context_builder or _ContextBuilder(),
         step_id_factory=lambda: "step-1",
         node_id_factory=lambda: "node-result",
     )
@@ -221,6 +233,8 @@ async def test_pre_tool_ask_freezes_updated_arguments_and_waits_for_approval():
     )
 
     async def invoke_hook(name, event):
+        if name == "before_request":
+            return ContextContributions()
         assert name == "pre_tool_use"
         assert event.operation_id == "operation-1"
         assert event.step_id == "step-1"
@@ -258,6 +272,8 @@ async def test_pre_tool_deny_becomes_ordered_error_without_executing_tool():
     executed = []
 
     async def invoke_hook(_name, event):
+        if _name == "before_request":
+            return ContextContributions()
         return PreToolUseDecision(
             action="deny" if event.tool_call_id == "tool-1" else "allow",
             reason="策略拒绝" if event.tool_call_id == "tool-1" else None,
@@ -289,6 +305,60 @@ async def test_pre_tool_deny_becomes_ordered_error_without_executing_tool():
     assert [message.tool_call_id for message in tool_results] == ["tool-1", "tool-2"]
     assert tool_results[0].is_error is True
     assert tool_results[0].content[0].text == "工具调用被拒绝：策略拒绝"
+
+
+@_run_async
+async def test_before_request_contributions_are_frozen_in_request_intent():
+    class Recall:
+        async def provide(self, *, session_id, current_user_text):
+            assert session_id == "session-1"
+            return [UserMessage((TextBlock("recall"),))]
+
+    hook_calls = []
+
+    async def invoke_hook(name, event):
+        if name != "before_request":
+            return None
+        hook_calls.append(event)
+        assert event.session_id == "session-1"
+        assert event.operation_id == "operation-1"
+        assert event.step_id == "step-1"
+        assert event.step_sequence == 1
+        assert event.visible_messages == ()
+        assert event.recall_messages[0].content[0].text == "recall"
+        return ContextContributions(
+            system_sections=(SystemSection("request_hook", "hook system"),),
+            messages=(UserMessage((TextBlock("hook message"),)),),
+        )
+
+    provider = _Provider([AssistantMessage(content=(TextBlock(text="done"),))])
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        provider,
+        invoke_hook=invoke_hook,
+        recall_sources=(Recall(),),
+        model_context_builder=ModelContextBuilder(),
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert len(hook_calls) == 1
+    intent_states = [
+        state
+        for state, _node in operations.transition_calls
+        if state.current_step is not None
+        and state.current_step.request_intent is not None
+    ]
+    intent_context = intent_states[0].current_step.request_intent.model_context
+    assert intent_context == provider.contexts[0]
+    assert [section.name for section in intent_context.system.sections] == [
+        "behavior",
+        "request_hook",
+    ]
+    assert [message.content[0].text for message in intent_context.messages] == [
+        "recall",
+        "hook message",
+    ]
 
 
 @_run_async

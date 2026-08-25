@@ -6,6 +6,7 @@ from pickel.hooks.decisions import (
     UserPromptSubmitDecision,
 )
 from pickel.hooks.events import (
+    BeforeRequestEvent,
     PostToolBatchEvent,
     PostToolUseEvent,
     PreToolUseEvent,
@@ -17,6 +18,7 @@ from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 __all__ = [
     "LifecycleHooks",
     "NoopLifecycleHooks",
+    "BeforeRequestEvent",
     "UserPromptSubmitEvent",
     "PreToolUseEvent",
     "PostToolUseEvent",

@@ -2,7 +2,7 @@
 
 **日期**：2026-08-11  
 **更新日期**：2026-08-25
-**状态**：目标合同；v10 恢复主链、PreToolUse 与 Approval CAS 已实施，Host reconcile 控制面待完成
+**状态**：目标合同；v10 恢复主链、PreToolUse、Approval CAS 与 Host reconcile 控制面已实施
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
