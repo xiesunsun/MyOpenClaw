@@ -216,6 +216,94 @@ def test_store_creates_only_v10_and_rejects_v9(tmp_path: Path) -> None:
         SQLiteRuntimeStore(old_path).load_session("missing")
 
 
+def test_list_runnable_session_ids_ignores_history_limit_and_filters_inbox(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    _session(store, tmp_path)
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    for session_id in ("idle-steer", "idle-inject"):
+        root = tmp_path / session_id
+        root.mkdir()
+        store.create_session(
+            workspace=Workspace(f"workspace-{session_id}", root, now),
+            session=ConversationSession(
+                session_id,
+                "agent-1",
+                f"workspace-{session_id}",
+                root,
+                None,
+                None,
+                None,
+                None,
+                now,
+                now,
+                None,
+            ),
+        )
+    for message_id, session_id, delivery in (
+        ("followup", "session-1", "followup"),
+        ("steer", "idle-steer", "steer"),
+        ("inject", "idle-inject", "inject"),
+    ):
+        store.send_message(
+            message_id=message_id,
+            session_id=session_id,
+            delivery=delivery,
+            message=UserMessage(),
+            source=UserMessageSource(),
+            created_at=now,
+        )
+    assert store.list_runnable_session_ids() == ("idle-steer", "session-1")
+
+    package = _package()
+    store.insert_agent_package_version(package)
+    operation = SessionOperation(
+        "operation-runnable",
+        "session-1",
+        package.package_version_id,
+        WorkspaceBinding("workspace-1", tmp_path, None),
+        "followup",
+        now,
+    )
+    queued = AgentRunState(
+        "operation-runnable", 1, "queued", None, 0, None, None, None, None
+    )
+    assert store.accept_operation(
+        operation=operation, state=queued, expected_node_id=None
+    )
+    for status in ("queued", "running", "cancelling"):
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE agent_run_states
+                SET status = ?, cancellation_json = ?
+                WHERE operation_id = ?
+                """,
+                (
+                    status,
+                    (
+                        '{"cause":"startup",' f'"requested_at":"{now.isoformat()}"}}'
+                        if status == "cancelling"
+                        else None
+                    ),
+                    operation.operation_id,
+                ),
+            )
+        assert store.list_runnable_session_ids() == ("idle-steer", "session-1")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET status = 'waiting', waiting_reason = 'tool_approval',
+                cancellation_json = NULL
+            WHERE operation_id = ?
+            """,
+            (operation.operation_id,),
+        )
+    assert store.list_runnable_session_ids() == ("idle-steer",)
+
+
 def test_workspace_create_requires_directory_but_load_does_not(tmp_path: Path) -> None:
     store = SQLiteRuntimeStore(tmp_path / "runtime.db")
     missing = tmp_path / "gone"

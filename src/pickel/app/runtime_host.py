@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -41,6 +42,8 @@ from pickel.runtime.agent_registry import AgentRegistry
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeHost:
@@ -93,7 +96,9 @@ class RuntimeHost:
             raise
         boot.extension_result = result
         try:
-            return cls(boot, launch_agent_ids=launch_agent_ids)
+            host = cls(boot, launch_agent_ids=launch_agent_ids)
+            await host._recover_runnable_sessions()
+            return host
         except BaseException:
             await teardown_extensions(result, tool_bus=tool_bus)
             raise
@@ -109,6 +114,15 @@ class RuntimeHost:
     @property
     def load_result(self) -> LoadResult:
         return self._extension_result
+
+    async def _recover_runnable_sessions(self) -> None:
+        """启动时只恢复 Store 明确标出的可运行 Session。"""
+        store = self._boot.runtime_store()
+        for session_id in store.list_runnable_session_ids():
+            try:
+                await self.activate_agent(session_id, store)
+            except Exception:
+                logger.exception("启动恢复 Session 失败: session_id=%s", session_id)
 
     @property
     def active_generation(self) -> RuntimeGeneration:
@@ -167,11 +181,20 @@ class RuntimeHost:
         if package_id is None:
             loaded = boot.resolve_loaded_agent_package(session.agent_id, store=store)
         else:
-            loaded = boot.load_agent_package(
-                package_id,
-                store=store,
-                expected_agent_id=session.agent_id,
-            )
+            try:
+                loaded = boot.load_agent_package(
+                    package_id,
+                    store=store,
+                    expected_agent_id=session.agent_id,
+                )
+            except PackageLoadError:
+                if session.active_operation_id is None:
+                    raise
+                # Agent 外壳可先使用当前包；OperationDriver 仍会按 Operation
+                # 绑定的历史包精确加载，并把缺失记录为可恢复失败。
+                loaded = boot.resolve_loaded_agent_package(
+                    session.agent_id, store=store
+                )
         if loaded.version.agent_id != session.agent_id:
             raise ValueError("LoadedAgentPackage.agent_id 与 Session 不匹配")
         generation = self._active_generation

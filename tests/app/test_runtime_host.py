@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -19,6 +19,7 @@ from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import ConversationRequest
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
+from pickel.extensions_host.loader import LoadResult
 from pickel.inbox.message import UserMessageSource
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_run_state import DelegateAgentIntent
@@ -160,6 +161,58 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
         assert (root / "home" / "runtime.db").exists()
 
 
+def test_async_create_discovers_runnable_sessions_from_shared_store() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        boot = _boot(root)
+        store = SimpleNamespace(
+            list_runnable_session_ids=lambda: ("session-a", "session-b")
+        )
+        seen: list[tuple[str, object]] = []
+
+        async def activate(self, session_id, candidate_store):
+            seen.append((session_id, candidate_store))
+
+        with (
+            patch(
+                "pickel.app.runtime_host.load_extensions_async",
+                new=AsyncMock(return_value=LoadResult()),
+            ),
+            patch.object(boot, "runtime_store", return_value=store),
+            patch.object(RuntimeHost, "activate_agent", new=activate),
+        ):
+            host = asyncio.run(
+                RuntimeHost.create(
+                    boot.app_config,
+                    boot_factory=lambda *_args, **_kwargs: boot,
+                )
+            )
+
+        assert host.boot is boot
+        assert [item[0] for item in seen] == ["session-a", "session-b"]
+        assert all(item[1] is store for item in seen)
+
+
+def test_startup_recovery_isolates_candidate_failure(caplog) -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        host = RuntimeHost(_boot(root))
+        store = SimpleNamespace(list_runnable_session_ids=lambda: ("bad", "good"))
+        calls: list[str] = []
+
+        async def activate(session_id, _store):
+            calls.append(session_id)
+            if session_id == "bad":
+                raise RuntimeError("broken package")
+
+        with patch.object(host, "activate_agent", new=activate):
+            with patch.object(host.boot, "runtime_store", return_value=store):
+                asyncio.run(host._recover_runnable_sessions())
+
+        assert calls == ["bad", "good"]
+        assert "启动恢复 Session 失败" in caplog.text
+
+
 def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> None:
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -264,6 +317,34 @@ def test_headless_active_operation_package_wins_over_parent_intent() -> None:
                 store=store,
                 expected_agent_id="Pickle",
             )
+            conversation.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_active_operation_missing_package_uses_current_shell_only() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, current_loaded, child_package_id = _headless_fixture(
+                host, root, active_operation=True
+            )
+            missing = PackageLoadError("missing", child_package_id, "not found")
+            built = SimpleNamespace(session_id="child-session-1")
+            with (
+                patch.object(host.boot, "load_agent_package", side_effect=missing),
+                patch.object(
+                    host.boot,
+                    "resolve_loaded_agent_package",
+                    return_value=current_loaded,
+                ) as resolve,
+                patch.object(host.boot, "build_agent", return_value=built),
+                patch.object(host.agent_registry, "wake"),
+            ):
+                result = asyncio.run(host.activate_agent("child-session-1", store))
+
+            assert result is built
+            resolve.assert_called_once_with("Pickle", store=store)
             conversation.detach()
             asyncio.run(host.shutdown())
 

@@ -21,6 +21,8 @@ class ConversationStore(Protocol):
         self, *, limit: int = 20, cwd: str | None = None
     ) -> tuple[ConversationSession, ...]: ...
 
+    def list_runnable_session_ids(self) -> tuple[str, ...]: ...
+
     def append_node(
         self,
         *,

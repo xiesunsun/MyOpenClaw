@@ -208,6 +208,33 @@ class SQLiteRuntimeStore:
             rows = connection.execute(query, args).fetchall()
         return tuple(self._session_from_row(row) for row in rows)
 
+    def list_runnable_session_ids(self) -> tuple[str, ...]:
+        """返回启动恢复候选，不受历史查询的默认分页限制。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT s.session_id
+                FROM conversation_sessions AS s
+                LEFT JOIN agent_run_states AS state
+                  ON state.operation_id = s.active_operation_id
+                WHERE s.archived_at IS NULL
+                  AND (
+                    state.status IN ('queued', 'running', 'cancelling')
+                    OR (
+                      s.active_operation_id IS NULL
+                      AND EXISTS (
+                        SELECT 1
+                        FROM agent_inbox_messages AS message
+                        WHERE message.session_id = s.session_id
+                          AND message.status = 'pending'
+                          AND message.delivery IN ('followup', 'steer')
+                      )
+                    )
+                  )
+                ORDER BY s.session_id ASC
+                """).fetchall()
+        return tuple(str(row["session_id"]) for row in rows)
+
     def append_node(
         self, *, node: ConversationNode, expected_node_id: str | None
     ) -> bool:

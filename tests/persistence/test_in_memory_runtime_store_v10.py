@@ -19,7 +19,7 @@ from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import InboxMessage, UserMessageSource
-from pickel.operations.agent_run_state import AgentRunError, AgentRunState
+from pickel.operations.agent_run_state import AgentRunError, AgentRunState, Cancellation
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.errors import StorageIntegrityError
@@ -142,6 +142,74 @@ def test_accept_operation_is_atomic_and_uses_message_as_input_node(
     assert store.load_run_state("operation_1") == state
     assert store.list_pending(session_id="session_1") == ()
     assert store.load_session("session_1").active_operation_id == "operation_1"
+
+
+def test_list_runnable_session_ids_ignores_history_limit_and_filters_inbox(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    for session_id in ("idle-steer", "idle-inject"):
+        root = tmp_path / session_id
+        root.mkdir()
+        now = NOW
+        store.create_session(
+            workspace=Workspace(f"workspace-{session_id}", root, now),
+            session=ConversationSession(
+                session_id,
+                "agent_1",
+                f"workspace-{session_id}",
+                root,
+                None,
+                None,
+                None,
+                None,
+                now,
+                now,
+                None,
+            ),
+        )
+    store.send_message(
+        message_id="followup",
+        session_id="session_1",
+        delivery="followup",
+        message=UserMessage(),
+        source=UserMessageSource(),
+        created_at=NOW,
+    )
+    for message_id, session_id, delivery in (
+        ("steer", "idle-steer", "steer"),
+        ("inject", "idle-inject", "inject"),
+    ):
+        store.send_message(
+            message_id=message_id,
+            session_id=session_id,
+            delivery=delivery,
+            message=UserMessage(),
+            source=UserMessageSource(),
+            created_at=NOW,
+        )
+    assert store.list_sessions(limit=1)[0].session_id == "idle-inject"
+    assert store.list_runnable_session_ids() == ("idle-steer", "session_1")
+
+    # 先接受消息使 Session 进入 active，再直接改变状态作为 fixture，独立验证
+    # 查询合同而不把状态机转换路径混入测试。
+    operation, state = _operation("followup")
+    assert store.accept_operation(
+        operation=operation, state=state, expected_node_id=None
+    )
+    for status in ("queued", "running", "cancelling"):
+        store._run_states[operation.operation_id] = replace(
+            state,
+            status=status,
+            cancellation=(
+                Cancellation("startup", NOW) if status == "cancelling" else None
+            ),
+        )
+        assert store.list_runnable_session_ids() == ("idle-steer", "session_1")
+    store._run_states[operation.operation_id] = replace(
+        state, status="waiting", waiting_reason="tool_approval"
+    )
+    assert store.list_runnable_session_ids() == ("idle-steer",)
 
 
 def test_accept_operation_stale_cas_leaves_everything_untouched(tmp_path: Path) -> None:

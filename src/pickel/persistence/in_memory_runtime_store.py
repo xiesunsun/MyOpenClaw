@@ -142,6 +142,31 @@ class InMemoryRuntimeStore:
             )
             return tuple(values[:limit])
 
+    def list_runnable_session_ids(self) -> tuple[str, ...]:
+        """返回启动恢复候选，不受历史查询的默认分页限制。"""
+        with self._lock:
+            result: list[str] = []
+            for session in self._sessions.values():
+                if session.archived_at is not None:
+                    continue
+                if session.active_operation_id is not None:
+                    state = self._run_states.get(session.active_operation_id)
+                    if state is not None and state.status in {
+                        "queued",
+                        "running",
+                        "cancelling",
+                    }:
+                        result.append(session.session_id)
+                    continue
+                if any(
+                    item.session_id == session.session_id
+                    and item.status == "pending"
+                    and item.delivery in {"followup", "steer"}
+                    for item in self._inbox.values()
+                ):
+                    result.append(session.session_id)
+            return tuple(sorted(result))
+
     def append_node(
         self, *, node: ConversationNode, expected_node_id: str | None
     ) -> bool:
