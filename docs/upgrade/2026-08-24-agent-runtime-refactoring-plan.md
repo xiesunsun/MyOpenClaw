@@ -110,8 +110,9 @@ OperationDriver
 | 6.1 AgentRegistry | 完成 | `session_id → live Agent` 唯一映射；同 Session 普通 reopen 复用同一 Host/UI Adapter；幂等 wake 不丢运行期追加唤醒；Agent 锁串行前台与后台 drive；detach 按 expected Agent 注销；reload 仅在新代 attach 成功后替换 Agent，失败保留旧代 | active Operation 的 steer/inject 原子 claim 属于 6.2 |
 | 6.2a Step 消息持久化合同 | 完成 | SQLite/InMemory 以 `claim_step_messages` 一次提交 steer/inject claim、FIFO User Node 链、Session active node 与 State revision；请求 Intent 冻结和 succeeded 提交受 pending steer/inject 事务护栏约束；OperationService 不绕过状态机 | Driver stopping check 与 idle inject 过滤属于 6.2b |
 | 6.2b Step 消息执行路径 | 完成 | idle inject 保持 pending；followup/steer 触发 wake；steer/inject 仅在 preparing_request 安全边界 claim；Intent 冻结后、waiting 与 cancelling 不改当前 Step；无工具 Assistant Node 先持久化，再由事务护栏决定继续当前 Operation 或 succeeded；空闲 cancel 不触发 wake | — |
+| 6.3a Delegation durable acceptance | 完成 | `DelegationService` 只从父 `DelegateAgentIntent` 读取冻结 child Package；校验当前 ToolCall、WorkspaceBinding 与 delegation depth；SQLite/InMemory 一次事务创建空 child Session、初始 pending followup 和 AgentDelegation，支持并发幂等且不创建 child Operation/Node | 普通 child Agent 装配、启动恢复和父 ToolCall 结果属于后续批次 |
 
-第十九轮验收基线：`812 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry 与 6.2 Step 消息消费已接通。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第二十轮验收基线：`832 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与 6.3a Delegation durable acceptance 已接通。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

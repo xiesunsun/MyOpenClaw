@@ -23,11 +23,16 @@ from pickel.conversations.agent_message import AgentMessage, UserMessage
 from pickel.conversations.content_blocks import ArtifactBlock
 from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.inbox.message import InboxMessage, MessageDelivery, MessageSource
+from pickel.inbox.message import (
+    AgentMessageSource,
+    InboxMessage,
+    MessageDelivery,
+    MessageSource,
+)
 from pickel.operations.agent_delegation import AgentDelegation
-from pickel.operations.agent_run_state import AgentRunState
+from pickel.operations.agent_run_state import AgentRunState, DelegateAgentIntent
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.errors import StorageIntegrityError
+from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.workspaces.workspace import Workspace
 
 
@@ -635,6 +640,230 @@ class InMemoryRuntimeStore:
             ):
                 raise StorageIntegrityError("initial_message_id 已经委派")
             self._delegations[delegation.child_session_id] = delegation
+
+    def start_delegation(
+        self,
+        *,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str,
+        child_session: ConversationSession,
+        delegation: AgentDelegation,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> AgentDelegation:
+        with self._lock:
+            operation = self._operations.get(parent_operation_id)
+            state = self._run_states.get(parent_operation_id)
+            if operation is None or state is None:
+                raise StorageIntegrityError("parent Operation/State 不存在")
+            parent = self._sessions.get(operation.session_id)
+            workspace = self._workspaces.get(parent.workspace_id) if parent else None
+            if parent is None or workspace is None:
+                raise StorageIntegrityError("parent Session/Workspace 不存在")
+            if parent.active_operation_id != parent_operation_id:
+                raise StorageConflictError("parent Session 未指向 parent Operation")
+            if state.status != "running":
+                raise StorageConflictError("parent Operation 必须处于 running")
+            if (
+                operation.workspace_binding.workspace_id != parent.workspace_id
+                or operation.workspace_binding.working_directory != parent.cwd
+            ):
+                raise StorageIntegrityError("parent Operation.workspace_binding 漂移")
+            step = state.current_step
+            call = (
+                next(
+                    (
+                        item
+                        for item in step.tool_calls
+                        if item.tool_call_id == parent_tool_call_id
+                    ),
+                    None,
+                )
+                if step is not None
+                else None
+            )
+            if (
+                step is None
+                or step.step_id != parent_step_id
+                or step.phase != "awaiting_tools"
+                or call is None
+                or call.status != "intent_recorded"
+                or not isinstance(call.execution_intent, DelegateAgentIntent)
+            ):
+                raise StorageConflictError(
+                    "parent ToolCall 不满足 delegation acceptance"
+                )
+            child_package = self._packages.get(
+                call.execution_intent.child_package_version_id
+            )
+            parent_package = self._packages.get(operation.agent_package_version_id)
+            if child_package is None or parent_package is None:
+                raise StorageIntegrityError("parent/child AgentPackageVersion 不存在")
+            depth = self._delegation_depth_unlocked(operation.session_id)
+            if depth >= parent_package.runtime_policy.max_delegation_depth:
+                raise StorageConflictError("已达到最大 delegation depth")
+            expected_source = AgentMessageSource(
+                sender_session_id=operation.session_id,
+                sender_operation_id=operation.operation_id,
+                form="followup",
+            )
+            self._validate_delegation_request_unlocked(
+                operation=operation,
+                parent=parent,
+                child_package=child_package,
+                child_session=child_session,
+                delegation=delegation,
+                message_id=message_id,
+                parent_step_id=parent_step_id,
+                parent_tool_call_id=parent_tool_call_id,
+                message=message,
+                source=source,
+                expected_source=expected_source,
+            )
+            existing = next(
+                (
+                    item
+                    for item in self._delegations.values()
+                    if item.parent_tool_call_id == parent_tool_call_id
+                ),
+                None,
+            )
+            if existing is not None:
+                self._validate_idempotent_delegation_unlocked(
+                    existing=existing,
+                    parent_operation_id=parent_operation_id,
+                    parent_step_id=parent_step_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    child_package=child_package,
+                    workspace_id=parent.workspace_id,
+                    cwd=parent.cwd,
+                    message=message,
+                    source=source,
+                )
+                return existing
+            if child_session.session_id in self._sessions:
+                raise StorageConflictError("child Session ID 已存在")
+            if message_id in self._inbox:
+                raise StorageConflictError("initial InboxMessage ID 已存在")
+            sequence = (
+                max(
+                    (
+                        item.sequence
+                        for item in self._inbox.values()
+                        if item.session_id == child_session.session_id
+                    ),
+                    default=0,
+                )
+                + 1
+            )
+            stored = InboxMessage(
+                message_id=message_id,
+                session_id=child_session.session_id,
+                sequence=sequence,
+                delivery="followup",
+                message=message,
+                source=source,
+                created_at=created_at,
+            )
+            self._validate_content_artifacts_unlocked(message)
+            self._sessions[child_session.session_id] = child_session
+            self._inbox[message_id] = stored
+            self._delegations[child_session.session_id] = delegation
+            return delegation
+
+    def _delegation_depth_unlocked(self, session_id: str) -> int:
+        depth = 0
+        seen: set[str] = set()
+        while session_id not in seen:
+            seen.add(session_id)
+            delegation = self._delegations.get(session_id)
+            if delegation is None:
+                return depth
+            depth += 1
+            operation = self._operations.get(delegation.parent_operation_id)
+            if operation is None:
+                raise StorageIntegrityError("delegation parent Operation 不存在")
+            session_id = operation.session_id
+        raise StorageIntegrityError("delegation parent 链存在环")
+
+    def _validate_delegation_request_unlocked(
+        self,
+        *,
+        operation,
+        parent,
+        child_package,
+        child_session,
+        delegation,
+        message_id,
+        parent_step_id,
+        parent_tool_call_id,
+        message,
+        source,
+        expected_source,
+    ) -> None:
+        if delegation.parent_operation_id != operation.operation_id:
+            raise StorageIntegrityError("delegation parent_operation_id 不匹配")
+        if delegation.child_session_id != child_session.session_id:
+            raise StorageIntegrityError("delegation child_session_id 不匹配")
+        if (
+            delegation.parent_step_id != parent_step_id
+            or delegation.parent_tool_call_id != parent_tool_call_id
+            or delegation.initial_message_id != message_id
+        ):
+            raise StorageIntegrityError("delegation 身份字段不匹配")
+        if source != expected_source:
+            raise StorageIntegrityError("initial InboxMessage source 不匹配")
+        if child_session.agent_id != child_package.agent_id:
+            raise StorageIntegrityError("child Session.agent_id 不匹配 child Package")
+        if (
+            child_session.workspace_id != parent.workspace_id
+            or child_session.cwd != parent.cwd
+            or any(
+                value is not None
+                for value in (
+                    child_session.active_node_id,
+                    child_session.active_operation_id,
+                    child_session.title,
+                    child_session.title_source,
+                    child_session.archived_at,
+                )
+            )
+        ):
+            raise StorageIntegrityError("child Session 不是继承 Workspace 的空 Session")
+
+    def _validate_idempotent_delegation_unlocked(
+        self,
+        *,
+        existing,
+        parent_operation_id,
+        parent_step_id,
+        parent_tool_call_id,
+        child_package,
+        workspace_id,
+        cwd,
+        message,
+        source,
+    ) -> None:
+        child = self._sessions.get(existing.child_session_id)
+        initial = self._inbox.get(existing.initial_message_id)
+        if (
+            child is None
+            or initial is None
+            or existing.parent_operation_id != parent_operation_id
+            or existing.parent_step_id != parent_step_id
+            or existing.parent_tool_call_id != parent_tool_call_id
+            or child.agent_id != child_package.agent_id
+            or child.workspace_id != workspace_id
+            or child.cwd != cwd
+            or initial.message != message
+            or initial.source != source
+        ):
+            raise StorageConflictError(
+                "同一 parent ToolCall 的 delegation 请求语义冲突"
+            )
 
     def find_delegation_by_parent_tool_call(
         self, parent_tool_call_id: str

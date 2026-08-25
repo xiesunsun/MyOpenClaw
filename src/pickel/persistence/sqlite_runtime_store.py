@@ -22,10 +22,16 @@ from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import ArtifactBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.inbox.message import InboxMessage, MessageDelivery, MessageSource
+from pickel.inbox.message import (
+    AgentMessageSource,
+    InboxMessage,
+    MessageDelivery,
+    MessageSource,
+)
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import (
     AgentRunState,
+    DelegateAgentIntent,
     agent_run_state_from_content,
 )
 from pickel.operations.session_operation import SessionOperation
@@ -992,6 +998,330 @@ class SQLiteRuntimeStore:
                 )
         except sqlite3.IntegrityError as exc:
             raise StorageIntegrityError("AgentDelegation 写入失败") from exc
+
+    def start_delegation(
+        self,
+        *,
+        parent_operation_id: str,
+        parent_step_id: str,
+        parent_tool_call_id: str,
+        child_session: ConversationSession,
+        delegation: AgentDelegation,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> AgentDelegation:
+        """在一个事务内创建 child Session、Inbox 和 Delegation。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                operation_row = connection.execute(
+                    "SELECT * FROM session_operations WHERE operation_id = ?",
+                    (parent_operation_id,),
+                ).fetchone()
+                state_row = connection.execute(
+                    "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                    (parent_operation_id,),
+                ).fetchone()
+                if operation_row is None or state_row is None:
+                    raise StorageIntegrityError("parent Operation/State 不存在")
+                parent_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (operation_row["session_id"],),
+                ).fetchone()
+                if parent_row is None:
+                    raise StorageIntegrityError("parent Session 不存在")
+                workspace_row = connection.execute(
+                    "SELECT 1 FROM workspaces WHERE workspace_id = ?",
+                    (parent_row["workspace_id"],),
+                ).fetchone()
+                if workspace_row is None:
+                    raise StorageIntegrityError("parent Workspace 不存在")
+                state = self._run_state_from_row(state_row)
+                if parent_row["active_operation_id"] != parent_operation_id:
+                    raise StorageConflictError("parent Session 未指向 parent Operation")
+                if state.status != "running":
+                    raise StorageConflictError("parent Operation 必须处于 running")
+                operation = self._operation_from_row(operation_row)
+                if operation.workspace_binding.workspace_id != parent_row[
+                    "workspace_id"
+                ] or operation.workspace_binding.working_directory != Path(
+                    str(parent_row["cwd"])
+                ):
+                    raise StorageIntegrityError(
+                        "parent Operation.workspace_binding 漂移"
+                    )
+                step = state.current_step
+                call = (
+                    next(
+                        (
+                            item
+                            for item in step.tool_calls
+                            if item.tool_call_id == parent_tool_call_id
+                        ),
+                        None,
+                    )
+                    if step is not None
+                    else None
+                )
+                if (
+                    step is None
+                    or step.step_id != parent_step_id
+                    or step.phase != "awaiting_tools"
+                    or call is None
+                    or call.status != "intent_recorded"
+                    or not isinstance(call.execution_intent, DelegateAgentIntent)
+                ):
+                    raise StorageConflictError(
+                        "parent ToolCall 不满足 delegation acceptance"
+                    )
+                parent_package = self._load_package_in_transaction(
+                    connection, str(operation_row["agent_package_version_id"])
+                )
+                child_package = self._load_package_in_transaction(
+                    connection, call.execution_intent.child_package_version_id
+                )
+                if parent_package is None or child_package is None:
+                    raise StorageIntegrityError(
+                        "parent/child AgentPackageVersion 不存在"
+                    )
+                depth = self._delegation_depth_in_transaction(
+                    connection, str(operation_row["session_id"])
+                )
+                if depth >= parent_package.runtime_policy.max_delegation_depth:
+                    raise StorageConflictError("已达到最大 delegation depth")
+                expected_source = AgentMessageSource(
+                    sender_session_id=str(operation_row["session_id"]),
+                    sender_operation_id=parent_operation_id,
+                    form="followup",
+                )
+                self._validate_delegation_request(
+                    operation_id=parent_operation_id,
+                    parent_row=parent_row,
+                    child_package=child_package,
+                    child_session=child_session,
+                    delegation=delegation,
+                    message_id=message_id,
+                    parent_step_id=parent_step_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    message=message,
+                    source=source,
+                    expected_source=expected_source,
+                )
+                existing_row = connection.execute(
+                    "SELECT * FROM agent_delegations WHERE parent_tool_call_id = ?",
+                    (parent_tool_call_id,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._delegation_from_row(existing_row)
+                    existing_session = connection.execute(
+                        "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                        (existing.child_session_id,),
+                    ).fetchone()
+                    existing_message_row = connection.execute(
+                        "SELECT * FROM agent_inbox_messages WHERE message_id = ?",
+                        (existing.initial_message_id,),
+                    ).fetchone()
+                    existing_message = (
+                        self._message_from_row(existing_message_row)
+                        if existing_message_row is not None
+                        else None
+                    )
+                    if (
+                        existing_session is None
+                        or existing_message is None
+                        or existing.parent_operation_id != parent_operation_id
+                        or existing.parent_step_id != parent_step_id
+                        or existing.parent_tool_call_id != parent_tool_call_id
+                        or str(existing_session["agent_id"]) != child_package.agent_id
+                        or str(existing_session["workspace_id"])
+                        != str(parent_row["workspace_id"])
+                        or Path(str(existing_session["cwd"]))
+                        != Path(str(parent_row["cwd"]))
+                        or existing_message.message != message
+                        or existing_message.source != source
+                    ):
+                        raise StorageConflictError(
+                            "同一 parent ToolCall 的 delegation 请求语义冲突"
+                        )
+                    connection.commit()
+                    return existing
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM conversation_sessions WHERE session_id = ?",
+                        (child_session.session_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StorageConflictError("child Session ID 已存在")
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM agent_inbox_messages WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StorageConflictError("initial InboxMessage ID 已存在")
+                sequence = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_inbox_messages WHERE session_id = ?",
+                        (child_session.session_id,),
+                    ).fetchone()[0]
+                )
+                inbox_message = InboxMessage(
+                    message_id=message_id,
+                    session_id=child_session.session_id,
+                    sequence=sequence,
+                    delivery="followup",
+                    message=message,
+                    source=source,
+                    created_at=created_at,
+                )
+                self._validate_message_artifacts(connection, message)
+                connection.execute(
+                    "INSERT INTO conversation_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        child_session.session_id,
+                        child_session.agent_id,
+                        child_session.workspace_id,
+                        str(child_session.cwd),
+                        None,
+                        None,
+                        None,
+                        None,
+                        child_session.created_at.isoformat(),
+                        child_session.updated_at.isoformat(),
+                        None,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_inbox_messages (
+                        message_id, session_id, sequence, delivery, message_json,
+                        status, claimed_operation_id, claimed_step_id, outcome_reason,
+                        created_at, handled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        inbox_message.message_id,
+                        inbox_message.session_id,
+                        inbox_message.sequence,
+                        inbox_message.delivery,
+                        inbox_message.message_payload_json(),
+                        "pending",
+                        None,
+                        None,
+                        None,
+                        inbox_message.created_at.isoformat(),
+                        None,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO agent_delegations VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        delegation.child_session_id,
+                        delegation.parent_operation_id,
+                        delegation.parent_step_id,
+                        delegation.parent_tool_call_id,
+                        delegation.initial_message_id,
+                        delegation.created_at.isoformat(),
+                    ),
+                )
+                connection.commit()
+                return delegation
+            except (
+                sqlite3.IntegrityError,
+                StorageConflictError,
+                StorageIntegrityError,
+                ValueError,
+                TypeError,
+            ):
+                connection.rollback()
+                raise
+
+    @staticmethod
+    def _load_package_in_transaction(connection, package_id):
+        row = connection.execute(
+            "SELECT * FROM agent_package_versions WHERE package_version_id = ?",
+            (package_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return decode_agent_package_content(
+            package_version_id=package_id,
+            content=_object(row["content_json"]),
+            created_at=_time(row["created_at"]),
+        )
+
+    @staticmethod
+    def _delegation_depth_in_transaction(connection, session_id: str) -> int:
+        depth = 0
+        seen: set[str] = set()
+        while session_id not in seen:
+            seen.add(session_id)
+            row = connection.execute(
+                "SELECT parent_operation_id FROM agent_delegations WHERE child_session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return depth
+            depth += 1
+            operation = connection.execute(
+                "SELECT session_id FROM session_operations WHERE operation_id = ?",
+                (row["parent_operation_id"],),
+            ).fetchone()
+            if operation is None:
+                raise StorageIntegrityError("delegation parent Operation 不存在")
+            session_id = str(operation["session_id"])
+        raise StorageIntegrityError("delegation parent 链存在环")
+
+    @staticmethod
+    def _validate_delegation_request(
+        *,
+        operation_id,
+        parent_row,
+        child_package,
+        child_session,
+        delegation,
+        message_id,
+        parent_step_id,
+        parent_tool_call_id,
+        message,
+        source,
+        expected_source,
+    ) -> None:
+        del message
+        if delegation.parent_operation_id != operation_id:
+            raise StorageIntegrityError("delegation parent_operation_id 不匹配")
+        if delegation.child_session_id != child_session.session_id:
+            raise StorageIntegrityError("delegation child_session_id 不匹配")
+        if (
+            delegation.parent_step_id != parent_step_id
+            or delegation.parent_tool_call_id != parent_tool_call_id
+            or delegation.initial_message_id != message_id
+        ):
+            raise StorageIntegrityError("delegation 身份字段不匹配")
+        if source != expected_source:
+            raise StorageIntegrityError("initial InboxMessage source 不匹配")
+        if child_session.agent_id != child_package.agent_id:
+            raise StorageIntegrityError("child Session.agent_id 不匹配 child Package")
+        if (
+            child_session.workspace_id != parent_row["workspace_id"]
+            or child_session.cwd != Path(str(parent_row["cwd"]))
+            or any(
+                value is not None
+                for value in (
+                    child_session.active_node_id,
+                    child_session.active_operation_id,
+                    child_session.title,
+                    child_session.title_source,
+                    child_session.archived_at,
+                )
+            )
+        ):
+            raise StorageIntegrityError("child Session 不是继承 Workspace 的空 Session")
 
     def find_delegation_by_parent_tool_call(
         self, parent_tool_call_id: str

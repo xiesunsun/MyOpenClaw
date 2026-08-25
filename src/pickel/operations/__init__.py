@@ -13,6 +13,7 @@ from pickel.operations.agent_run_state import (
     ToolCallState,
 )
 from pickel.operations.agent_delegation import AgentDelegation
+from pickel.operations.delegation_service import DelegationService
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.tool_reconciliation_service import (
     ToolReconciliationOutcome,
@@ -25,6 +26,7 @@ __all__ = [
     "AgentRunState",
     "AgentRunError",
     "AgentDelegation",
+    "DelegationService",
     "Cancellation",
     "DelegateAgentIntent",
     "ModelRequestIntent",
