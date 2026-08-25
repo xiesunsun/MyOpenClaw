@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Protocol
 from uuid import uuid4
 
 from pickel.agents.agent_package import AgentPackageVersion
 from pickel.conversations.agent_message import UserMessage
+from pickel.inbox.message import AgentMessageSource, InboxMessage
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.inbox.message import AgentMessageSource
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import AgentRunState, DelegateAgentIntent
 from pickel.operations.session_operation import SessionOperation
@@ -48,6 +50,19 @@ class DelegationStore(Protocol):
         source: AgentMessageSource,
         created_at: datetime,
     ) -> AgentDelegation: ...
+
+    def send_parent_followup(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage: ...
 
 
 class DelegationService:
@@ -184,3 +199,54 @@ class DelegationService:
                 raise StorageIntegrityError("delegation parent Operation 不存在")
             session_id = operation.session_id
         raise StorageIntegrityError("delegation parent 链存在环")
+
+    def send_parent_followup(
+        self,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message: UserMessage,
+    ) -> InboxMessage:
+        """以稳定消息身份向当前 Operation 的 direct child 追加 followup。"""
+        if not sender_operation_id or not sender_step_id or not sender_tool_call_id:
+            raise ValueError("sender Operation、Step 和 ToolCall 身份不能为空")
+        if not target_child_session_id:
+            raise ValueError("child_session_id 不能为空")
+        message_id = _followup_message_id(
+            sender_operation_id, sender_step_id, sender_tool_call_id
+        )
+        operation = self._store.load_operation(sender_operation_id)
+        if operation is None:
+            raise StorageIntegrityError("sender Operation 不存在")
+        source = AgentMessageSource(
+            sender_session_id=operation.session_id,
+            sender_operation_id=sender_operation_id,
+            form="followup",
+        )
+        return self._store.send_parent_followup(
+            sender_operation_id=sender_operation_id,
+            sender_step_id=sender_step_id,
+            sender_tool_call_id=sender_tool_call_id,
+            target_child_session_id=target_child_session_id,
+            message_id=message_id,
+            message=message,
+            source=source,
+            created_at=self._now(),
+        )
+
+
+def _followup_message_id(
+    sender_operation_id: str, sender_step_id: str, sender_tool_call_id: str
+) -> str:
+    payload = json.dumps(
+        {
+            "sender_operation_id": sender_operation_id,
+            "sender_step_id": sender_step_id,
+            "sender_tool_call_id": sender_tool_call_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "message_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()

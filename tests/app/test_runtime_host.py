@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -216,7 +216,8 @@ def test_startup_recovery_isolates_candidate_failure(caplog) -> None:
 
 def test_runtime_delegation_control_activates_accepted_child() -> None:
     store = object()
-    host = SimpleNamespace(activate_agent=AsyncMock())
+    registry = SimpleNamespace(wake=Mock())
+    host = SimpleNamespace(activate_agent=AsyncMock(), agent_registry=registry)
     delegation = AgentDelegation(
         child_session_id="child-session",
         parent_operation_id="parent-operation",
@@ -242,6 +243,7 @@ def test_runtime_delegation_control_activates_accepted_child() -> None:
     assert result == delegation
     service_type.assert_called_once_with(store=store)
     host.activate_agent.assert_awaited_once_with("child-session", store)
+    registry.wake.assert_called_once_with("child-session")
 
 
 def test_runtime_delegation_control_preserves_acceptance_on_activation_failure(

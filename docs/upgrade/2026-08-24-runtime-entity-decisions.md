@@ -2057,6 +2057,8 @@ Root 与 Child 使用相同 Agent、Inbox、Operation 和 Conversation Tree。�
 
 parent 后续任务使用 child `followup/steer`；child 报告使用 parent `steer` 或安静的 `inject`；中断调用统一的 `Agent.cancel(keep_inbox=True)`。Agent 消息 source 记录 `sender_session_id + sender_operation_id` 形成因果来源；发送和控制权限仍通过 AgentDelegation 图校验，不能因 source 字段存在而跳过授权。
 
+父 Operation 的 `send_message` Tool 只向 sender Session 的 direct child 追加 `followup`，不等待 child 回答。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生；ToolCall 的冻结 arguments 与 `intent_recorded` 状态已经是完整决定，不新增 `SendAgentMessageIntent`。Store 在同一事务中校验 sender Operation/Session、当前 ToolCall、AgentDelegation 直接父关系、目标 Session 和 `AgentMessageSource`，再分配目标 Session FIFO sequence。相同 message ID 且 target、delivery、message、source 完全一致时，即使消息已 claim 或 child 已归档，也返回已有 InboxMessage；新消息禁止写入归档 child。
+
 child 的有效权限只能收窄：Parent 执行边界、child AgentPackage WorkspacePolicy 和 ToolPolicy 取交集；delegated child 第一阶段不允许通过交互式 approval 扩大权限。
 
 Delegation 深度从不可变父子图递归推导，并受 AgentRuntimePolicy.max_delegation_depth 约束，不在 Session 或 Delegation 重复保存 depth。

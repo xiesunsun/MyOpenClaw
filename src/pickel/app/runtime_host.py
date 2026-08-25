@@ -35,6 +35,7 @@ from pickel.app.runtime_generation import (
     LoadedPackageHandle,
     RuntimeGeneration,
 )
+from pickel.inbox.message import InboxMessage
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_delegation import AgentDelegation
@@ -71,13 +72,42 @@ class _RuntimeDelegationControl:
             message,
         )
         try:
-            await self._host.activate_agent(delegation.child_session_id, self._store)
+            await self._activate_child(delegation.child_session_id)
         except Exception:
             logger.exception(
                 "Child Session 激活失败，将由下次启动恢复兜底: session_id=%s",
                 delegation.child_session_id,
             )
         return delegation
+
+    async def send_parent_followup(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message: UserMessage,
+    ) -> InboxMessage:
+        stored = DelegationService(store=self._store).send_parent_followup(
+            sender_operation_id,
+            sender_step_id,
+            sender_tool_call_id,
+            target_child_session_id,
+            message,
+        )
+        try:
+            await self._activate_child(target_child_session_id)
+        except Exception:
+            logger.exception(
+                "Child Session 激活失败，将由下次启动恢复兜底: session_id=%s",
+                target_child_session_id,
+            )
+        return stored
+
+    async def _activate_child(self, session_id: str) -> None:
+        await self._host.activate_agent(session_id, self._store)
+        self._host.agent_registry.wake(session_id)
 
 
 class RuntimeHost:

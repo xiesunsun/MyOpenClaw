@@ -20,7 +20,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.artifacts.artifact import Artifact
 from pickel.conversations.agent_message import AgentMessage, UserMessage
-from pickel.conversations.content_blocks import ArtifactBlock
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import (
@@ -347,6 +347,114 @@ class InMemoryRuntimeStore:
                 session_id=session_id,
                 sequence=sequence,
                 delivery=delivery,
+                message=message,
+                source=source,
+                created_at=created_at,
+            )
+            self._inbox[message_id] = stored
+            return stored
+
+    def send_parent_followup(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        with self._lock:
+            operation = self._operations.get(sender_operation_id)
+            if operation is None:
+                raise StorageIntegrityError("sender Operation 不存在")
+            sender = self._sessions.get(operation.session_id)
+            if sender is None:
+                raise StorageIntegrityError("sender Session 不存在")
+            delegation = self._delegations.get(target_child_session_id)
+            target = self._sessions.get(target_child_session_id)
+            if delegation is None:
+                raise StorageConflictError("target 不是 sender Session 的 direct child")
+            parent_operation = self._operations.get(delegation.parent_operation_id)
+            if parent_operation is None:
+                raise StorageIntegrityError("delegation parent Operation 不存在")
+            if parent_operation.session_id != operation.session_id:
+                raise StorageConflictError("target 不是 sender Session 的 direct child")
+            if target is None:
+                raise StorageIntegrityError("target child Session 不存在")
+            if source != AgentMessageSource(
+                sender_session_id=operation.session_id,
+                sender_operation_id=sender_operation_id,
+                form="followup",
+            ):
+                raise StorageIntegrityError("send_message source 不匹配")
+            existing = self._inbox.get(message_id)
+            if existing is not None:
+                if (
+                    existing.session_id != target_child_session_id
+                    or existing.delivery != "followup"
+                    or existing.message != message
+                    or existing.source != source
+                ):
+                    raise StorageConflictError("send_message 的稳定 ID 语义冲突")
+                return existing
+            state = self._run_states.get(sender_operation_id)
+            if state is None:
+                raise StorageIntegrityError("sender AgentRunState 不存在")
+            if sender.active_operation_id != sender_operation_id:
+                raise StorageConflictError("sender Session 未指向 sender Operation")
+            if state.status != "running":
+                raise StorageConflictError("sender Operation 必须处于 running")
+            step = state.current_step
+            call = (
+                next(
+                    (
+                        item
+                        for item in step.tool_calls
+                        if item.tool_call_id == sender_tool_call_id
+                    ),
+                    None,
+                )
+                if step is not None
+                else None
+            )
+            expected_text = call.arguments.get("message") if call else None
+            if (
+                step is None
+                or step.step_id != sender_step_id
+                or step.phase != "awaiting_tools"
+                or call is None
+                or call.tool_name != "send_message"
+                or call.status != "intent_recorded"
+                or call.execution_intent is not None
+                or call.arguments.get("child_session_id") != target_child_session_id
+                or not isinstance(expected_text, str)
+                or message != UserMessage((TextBlock(expected_text),))
+            ):
+                raise StorageConflictError(
+                    "sender ToolCall 不是当前 send_message intent_recorded"
+                )
+            if target.archived_at is not None:
+                raise StorageConflictError("归档 child Session 不能接收新的消息")
+            self._validate_content_artifacts_unlocked(message)
+            sequence = (
+                max(
+                    (
+                        item.sequence
+                        for item in self._inbox.values()
+                        if item.session_id == target_child_session_id
+                    ),
+                    default=0,
+                )
+                + 1
+            )
+            stored = InboxMessage(
+                message_id=message_id,
+                session_id=target_child_session_id,
+                sequence=sequence,
+                delivery="followup",
                 message=message,
                 source=source,
                 created_at=created_at,

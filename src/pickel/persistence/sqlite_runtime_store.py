@@ -19,7 +19,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.artifacts.artifact import Artifact
 from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import ArtifactBlock
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import (
@@ -514,6 +514,171 @@ class SQLiteRuntimeStore:
                 return inbox_message
             except sqlite3.IntegrityError as exc:
                 raise StorageIntegrityError("InboxMessage 写入失败") from exc
+
+    def send_parent_followup(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        """原子校验 sender ToolCall 并向 direct child 追加 followup。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                operation_row = connection.execute(
+                    "SELECT * FROM session_operations WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                if operation_row is None:
+                    raise StorageIntegrityError("sender Operation 不存在")
+                sender_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (operation_row["session_id"],),
+                ).fetchone()
+                if sender_row is None:
+                    raise StorageIntegrityError("sender Session 不存在")
+                parent_row = connection.execute(
+                    """
+                    SELECT op.* FROM agent_delegations AS d
+                    JOIN session_operations AS op
+                      ON op.operation_id = d.parent_operation_id
+                    WHERE d.child_session_id = ?
+                    """,
+                    (target_child_session_id,),
+                ).fetchone()
+                if (
+                    parent_row is None
+                    or parent_row["session_id"] != operation_row["session_id"]
+                ):
+                    raise StorageConflictError(
+                        "target 不是 sender Session 的 direct child"
+                    )
+                target_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (target_child_session_id,),
+                ).fetchone()
+                if target_row is None:
+                    raise StorageIntegrityError("target child Session 不存在")
+                expected_source = AgentMessageSource(
+                    sender_session_id=str(operation_row["session_id"]),
+                    sender_operation_id=sender_operation_id,
+                    form="followup",
+                )
+                if source != expected_source:
+                    raise StorageIntegrityError("send_message source 不匹配")
+                existing_row = connection.execute(
+                    "SELECT * FROM agent_inbox_messages WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._message_from_row(existing_row)
+                    if (
+                        existing.session_id != target_child_session_id
+                        or existing.delivery != "followup"
+                        or existing.message != message
+                        or existing.source != source
+                    ):
+                        raise StorageConflictError("send_message 的稳定 ID 语义冲突")
+                    connection.commit()
+                    return existing
+                if sender_row["active_operation_id"] != sender_operation_id:
+                    raise StorageConflictError("sender Session 未指向 sender Operation")
+                state_row = connection.execute(
+                    "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                if state_row is None:
+                    raise StorageIntegrityError("sender AgentRunState 不存在")
+                state = self._run_state_from_row(state_row)
+                if state.status != "running":
+                    raise StorageConflictError("sender Operation 必须处于 running")
+                step = state.current_step
+                call = (
+                    next(
+                        (
+                            item
+                            for item in step.tool_calls
+                            if item.tool_call_id == sender_tool_call_id
+                        ),
+                        None,
+                    )
+                    if step is not None
+                    else None
+                )
+                expected_text = call.arguments.get("message") if call else None
+                if (
+                    step is None
+                    or step.step_id != sender_step_id
+                    or step.phase != "awaiting_tools"
+                    or call is None
+                    or call.tool_name != "send_message"
+                    or call.status != "intent_recorded"
+                    or call.execution_intent is not None
+                    or call.arguments.get("child_session_id") != target_child_session_id
+                    or not isinstance(expected_text, str)
+                    or message != UserMessage((TextBlock(expected_text),))
+                ):
+                    raise StorageConflictError(
+                        "sender ToolCall 不是当前 send_message intent_recorded"
+                    )
+                if target_row["archived_at"] is not None:
+                    raise StorageConflictError("归档 child Session 不能接收新的消息")
+                self._validate_message_artifacts(connection, message)
+                sequence = int(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence), 0) + 1
+                        FROM agent_inbox_messages WHERE session_id = ?
+                        """,
+                        (target_child_session_id,),
+                    ).fetchone()[0]
+                )
+                stored = InboxMessage(
+                    message_id=message_id,
+                    session_id=target_child_session_id,
+                    sequence=sequence,
+                    delivery="followup",
+                    message=message,
+                    source=source,
+                    created_at=created_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_inbox_messages (
+                        message_id, session_id, sequence, delivery, message_json,
+                        status, claimed_operation_id, claimed_step_id, outcome_reason,
+                        created_at, handled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stored.message_id,
+                        stored.session_id,
+                        stored.sequence,
+                        stored.delivery,
+                        stored.message_payload_json(),
+                        stored.status,
+                        stored.claimed_operation_id,
+                        stored.claimed_step_id,
+                        stored.outcome_reason,
+                        stored.created_at.isoformat(),
+                        None,
+                    ),
+                )
+                connection.commit()
+                return stored
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise StorageIntegrityError("send_message 写入失败") from exc
+            except (StorageConflictError, StorageIntegrityError, ValueError, TypeError):
+                connection.rollback()
+                raise
 
     def load_message(self, message_id: str) -> InboxMessage | None:
         self._ensure_schema()

@@ -29,6 +29,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "write",
                 "bash",
                 "delegate_agent",
+                "send_message",
             },
             set(definitions),
         )

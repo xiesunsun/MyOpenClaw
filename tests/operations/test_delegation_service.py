@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -337,3 +338,281 @@ def test_concurrent_acceptance_keeps_one_delegation(
         results = list(executor.map(accept, range(4)))
     assert len({item.child_session_id for item in results}) == 1
     assert len(store.list_delegations(parent_operation_id="operation-1")) == 1
+
+
+def _switch_parent_call_to_send_message(
+    store: Store,
+    child_session_id: str,
+    *,
+    operation_id: str = "operation-1",
+    step_id: str = "step-1",
+    tool_call_id: str = "tool-send",
+    message_text: str = "continue",
+) -> None:
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    call = ToolCallState(
+        tool_call_id=tool_call_id,
+        tool_name="send_message",
+        arguments={"child_session_id": child_session_id, "message": message_text},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    if current.current_step is None:
+        switched = replace(
+            current,
+            revision=current.revision + 1,
+            status="running",
+            current_step=ModelStepState(
+                step_id=step_id,
+                step_sequence=1,
+                phase="awaiting_tools",
+                request_attempt=0,
+                request_intent=None,
+                assistant_message_node_id="message-2",
+                tool_calls=(call,),
+            ),
+        )
+    else:
+        switched = replace(
+            current,
+            current_step=replace(current.current_step, tool_calls=(call,)),
+        )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, current_step_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                switched.revision,
+                switched.status,
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                operation_id,
+            ),
+        )
+
+
+def test_send_parent_followup_is_fifo_and_idempotent_after_claim(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_send_message(store, delegation.child_session_id)
+    service = DelegationService(store=store, now=lambda: NOW)
+    message = UserMessage((TextBlock("continue"),))
+
+    first = service.send_parent_followup(
+        "operation-1", "step-1", "tool-send", delegation.child_session_id, message
+    )
+    assert first.sequence == 2
+    assert first.source == AgentMessageSource(
+        sender_session_id="session-1",
+        sender_operation_id="operation-1",
+        form="followup",
+    )
+    child_operation = SessionOperation(
+        operation_id="child-operation",
+        session_id=delegation.child_session_id,
+        agent_package_version_id=child_package.package_version_id,
+        workspace_binding=WorkspaceBinding(
+            "workspace-1", tmp_path / "workspace", tmp_path / "workspace"
+        ),
+        input_node_id=delegation.initial_message_id,
+        accepted_at=NOW,
+    )
+    child_state = AgentRunState(
+        operation_id="child-operation",
+        revision=1,
+        status="queued",
+        waiting_reason=None,
+        completed_step_count=0,
+        current_step=None,
+        final_assistant_node_id=None,
+        error=None,
+        cancellation=None,
+    )
+    assert store.accept_operation(
+        operation=child_operation, state=child_state, expected_node_id=None
+    )
+    assert store.claim_message(
+        message_id=first.message_id,
+        operation_id="child-operation",
+        step_id=None,
+        handled_at=NOW,
+    )
+    retry = service.send_parent_followup(
+        "operation-1", "step-1", "tool-send", delegation.child_session_id, message
+    )
+    assert retry.message_id == first.message_id
+    assert retry == store.load_message(first.message_id)
+    assert retry.status == "claimed"
+
+
+def test_send_parent_followup_replays_existing_message_after_child_archive(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_send_message(store, delegation.child_session_id)
+    service = DelegationService(store=store, now=lambda: NOW)
+    message = UserMessage((TextBlock("continue"),))
+    first = service.send_parent_followup(
+        "operation-1", "step-1", "tool-send", delegation.child_session_id, message
+    )
+    assert store.discard_message(
+        message_id=delegation.initial_message_id,
+        reason="test cleanup",
+        handled_at=NOW,
+    )
+    assert store.discard_message(
+        message_id=first.message_id,
+        reason="test cleanup",
+        handled_at=NOW,
+    )
+    store.archive_session(session_id=delegation.child_session_id, archived_at=NOW)
+
+    retry = service.send_parent_followup(
+        "operation-1", "step-1", "tool-send", delegation.child_session_id, message
+    )
+    assert retry == store.load_message(first.message_id)
+    assert retry.status == "discarded"
+
+    _switch_parent_call_to_send_message(
+        store,
+        delegation.child_session_id,
+        tool_call_id="tool-send-new",
+        message_text="new",
+    )
+    with pytest.raises(StorageConflictError):
+        service.send_parent_followup(
+            "operation-1",
+            "step-1",
+            "tool-send-new",
+            delegation.child_session_id,
+            UserMessage((TextBlock("new"),)),
+        )
+
+
+def test_send_parent_followup_rejects_argument_or_target_mismatch(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_send_message(store, delegation.child_session_id)
+    service = DelegationService(store=store, now=lambda: NOW)
+
+    with pytest.raises(StorageConflictError):
+        service.send_parent_followup(
+            "operation-1",
+            "step-1",
+            "tool-send",
+            delegation.child_session_id,
+            UserMessage((TextBlock("different"),)),
+        )
+    with pytest.raises(StorageConflictError):
+        service.send_parent_followup(
+            "operation-1",
+            "step-1",
+            "tool-send",
+            "not-a-child",
+            UserMessage((TextBlock("continue"),)),
+        )
+
+
+def test_send_parent_followup_allows_a_later_operation_of_parent_session(
+    store: Store, tmp_path: Path
+) -> None:
+    parent_package, _ = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    parent = store.load_session("session-1")
+    assert parent is not None
+    if isinstance(store, InMemoryRuntimeStore):
+        store._sessions["session-1"] = replace(parent, active_operation_id=None)
+    else:
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE conversation_sessions SET active_operation_id = NULL WHERE session_id = ?",
+                ("session-1",),
+            )
+    input_message = store.send_message(
+        message_id="message-2",
+        session_id="session-1",
+        delivery="followup",
+        message=UserMessage((TextBlock("next parent turn"),)),
+        source=AgentMessageSource(
+            sender_session_id="session-1",
+            sender_operation_id="operation-2",
+            form="followup",
+        ),
+        created_at=NOW,
+    )
+    operation = SessionOperation(
+        operation_id="operation-2",
+        session_id="session-1",
+        agent_package_version_id=parent_package.package_version_id,
+        workspace_binding=WorkspaceBinding(
+            "workspace-1", tmp_path / "workspace", tmp_path / "workspace"
+        ),
+        input_node_id=input_message.message_id,
+        accepted_at=NOW,
+    )
+    queued = AgentRunState(
+        operation_id="operation-2",
+        revision=1,
+        status="queued",
+        waiting_reason=None,
+        completed_step_count=0,
+        current_step=None,
+        final_assistant_node_id=None,
+        error=None,
+        cancellation=None,
+    )
+    assert store.accept_operation(
+        operation=operation,
+        state=queued,
+        expected_node_id=parent.active_node_id,
+    )
+    _switch_parent_call_to_send_message(
+        store,
+        delegation.child_session_id,
+        operation_id="operation-2",
+        step_id="step-2",
+        tool_call_id="tool-send-2",
+        message_text="later",
+    )
+
+    sent = DelegationService(store=store, now=lambda: NOW).send_parent_followup(
+        "operation-2",
+        "step-2",
+        "tool-send-2",
+        delegation.child_session_id,
+        UserMessage((TextBlock("later"),)),
+    )
+    assert sent.source == AgentMessageSource(
+        sender_session_id="session-1",
+        sender_operation_id="operation-2",
+        form="followup",
+    )

@@ -10,6 +10,7 @@ from pickel.tools.file_tools import (
     WriteTool,
 )
 from pickel.tools.delegate_agent import delegate_agent
+from pickel.tools.send_message import send_message
 from pickel.tools.shell import BashTool
 
 
@@ -24,6 +25,7 @@ def builtin_tools() -> list[BaseTool]:
         WriteTool(formatter),
         BashTool(),
         delegate_agent,
+        send_message,
     ]
 
 

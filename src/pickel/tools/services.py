@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from pickel.conversations.agent_message import UserMessage
+    from pickel.inbox.message import InboxMessage
     from pickel.operations.agent_delegation import AgentDelegation
 
 if TYPE_CHECKING:  # 运行期不导入，避免 base ↔ shell / file_service 循环
@@ -48,6 +49,16 @@ class DelegationControl(Protocol):
         parent_tool_call_id: str,
         message: UserMessage,
     ) -> "AgentDelegation": ...
+
+    async def send_parent_followup(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        message: UserMessage,
+    ) -> "InboxMessage": ...
 
 
 @dataclass(frozen=True)
