@@ -339,6 +339,21 @@ class InMemoryRuntimeStore:
                 sorted(values, key=lambda item: (item.sequence, item.message_id))
             )
 
+    def list_pending_step_messages(
+        self, *, session_id: str
+    ) -> tuple[InboxMessage, ...]:
+        with self._lock:
+            values = [
+                item
+                for item in self._inbox.values()
+                if item.session_id == session_id
+                and item.status == "pending"
+                and item.delivery in {"steer", "inject"}
+            ]
+            return tuple(
+                sorted(values, key=lambda item: (item.sequence, item.message_id))
+            )
+
     def load_message(self, message_id: str) -> InboxMessage | None:
         with self._lock:
             return self._inbox.get(message_id)
@@ -475,6 +490,12 @@ class InMemoryRuntimeStore:
             session = self._require_session_unlocked(operation.session_id)
             if session.active_operation_id != state.operation_id:
                 return False
+            if self._transition_blocked_by_pending_step_messages_unlocked(
+                session_id=session.session_id,
+                current=current,
+                next_state=state,
+            ):
+                return False
             if node is not None:
                 if node.node_id in self._nodes:
                     raise StorageIntegrityError(
@@ -506,6 +527,88 @@ class InMemoryRuntimeStore:
                     if state.status in {"succeeded", "failed", "cancelled"}
                     else session.active_operation_id
                 ),
+                updated_at=updated_at,
+            )
+            return True
+
+    def claim_step_messages(
+        self,
+        *,
+        message_ids: tuple[str, ...],
+        state: AgentRunState,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> bool:
+        with self._lock:
+            if not message_ids or state.revision != expected_revision + 1:
+                return False
+            current = self._run_states.get(state.operation_id)
+            operation = self._operations.get(state.operation_id)
+            if current is None or operation is None:
+                return False
+            session = self._require_session_unlocked(operation.session_id)
+            step = state.current_step
+            if (
+                current.revision != expected_revision
+                or current.operation_id != state.operation_id
+                or state.status != "running"
+                or step is None
+                or step.phase != "preparing_request"
+                or session.archived_at is not None
+                or session.active_operation_id != state.operation_id
+            ):
+                return False
+            if len(set(message_ids)) != len(message_ids):
+                return False
+            messages: list[InboxMessage] = []
+            for message_id in message_ids:
+                message = self._inbox.get(message_id)
+                if (
+                    message is None
+                    or message.session_id != operation.session_id
+                    or message.status != "pending"
+                    or message.delivery not in {"steer", "inject"}
+                    or message.message_id in self._nodes
+                ):
+                    return False
+                messages.append(message)
+            if [item.sequence for item in messages] != sorted(
+                item.sequence for item in messages
+            ):
+                return False
+            parent_node_id = session.active_node_id
+            nodes: list[ConversationNode] = []
+            try:
+                for message in messages:
+                    node = ConversationNode(
+                        node_id=message.message_id,
+                        session_id=operation.session_id,
+                        parent_node_id=parent_node_id,
+                        content_type="agent_message",
+                        content=message.message,
+                        created_at=message.created_at,
+                    )
+                    self._validate_content_artifacts_unlocked(node.content)
+                    nodes.append(node)
+                    parent_node_id = node.node_id
+                self._validate_state_references_unlocked(state, pending_node=None)
+            except (StorageIntegrityError, ValueError, TypeError):
+                return False
+
+            for node in nodes:
+                self._nodes[node.node_id] = node
+            for message in messages:
+                self._inbox[message.message_id] = replace(
+                    message,
+                    status="claimed",
+                    claimed_operation_id=state.operation_id,
+                    claimed_step_id=step.step_id,
+                    handled_at=updated_at,
+                )
+            self._run_states[state.operation_id] = state
+            self._sessions[session.session_id] = replace(
+                session,
+                active_node_id=nodes[-1].node_id,
                 updated_at=updated_at,
             )
             return True
@@ -684,6 +787,30 @@ class InMemoryRuntimeStore:
 
     def _validate_state_nodes_unlocked(self, state: AgentRunState) -> None:
         self._validate_state_references_unlocked(state, pending_node=None)
+
+    def _transition_blocked_by_pending_step_messages_unlocked(
+        self,
+        *,
+        session_id: str,
+        current: AgentRunState,
+        next_state: AgentRunState,
+    ) -> bool:
+        has_pending = any(
+            item.session_id == session_id
+            and item.status == "pending"
+            and item.delivery in {"steer", "inject"}
+            for item in self._inbox.values()
+        )
+        if not has_pending:
+            return False
+        current_step = current.current_step
+        next_step = next_state.current_step
+        return (
+            current_step is not None
+            and next_step is not None
+            and current_step.phase == "preparing_request"
+            and next_step.phase == "request_ready"
+        ) or next_state.status == "succeeded"
 
     @staticmethod
     def _state_node_ids(state: AgentRunState) -> set[str]:

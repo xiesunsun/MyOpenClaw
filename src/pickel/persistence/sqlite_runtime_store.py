@@ -504,6 +504,22 @@ class SQLiteRuntimeStore:
             rows = connection.execute(query, args).fetchall()
         return tuple(self._message_from_row(row) for row in rows)
 
+    def list_pending_step_messages(
+        self, *, session_id: str
+    ) -> tuple[InboxMessage, ...]:
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_inbox_messages
+                WHERE session_id = ? AND status = 'pending'
+                  AND delivery IN ('steer', 'inject')
+                ORDER BY sequence ASC, message_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(self._message_from_row(row) for row in rows)
+
     def claim_message(
         self,
         *,
@@ -693,6 +709,21 @@ class SQLiteRuntimeStore:
             if session is None or session["active_operation_id"] != state.operation_id:
                 connection.rollback()
                 return False
+            current_state_row = connection.execute(
+                "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                (state.operation_id,),
+            ).fetchone()
+            if current_state_row is None:
+                connection.rollback()
+                return False
+            if self._transition_blocked_by_pending_step_messages(
+                connection=connection,
+                session_id=str(session["session_id"]),
+                current_step=self._run_state_from_row(current_state_row).current_step,
+                next_state=state,
+            ):
+                connection.rollback()
+                return False
             if node is not None:
                 if node.session_id != str(session["session_id"]):
                     raise StorageIntegrityError(
@@ -786,6 +817,153 @@ class SQLiteRuntimeStore:
                     state.operation_id,
                 ),
             )
+        return True
+
+    def claim_step_messages(
+        self,
+        *,
+        message_ids: tuple[str, ...],
+        state: AgentRunState,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> bool:
+        self._ensure_schema()
+        if not message_ids or state.revision != expected_revision + 1:
+            return False
+        if len(set(message_ids)) != len(message_ids):
+            return False
+        step = state.current_step
+        if step is None or step.phase != "preparing_request":
+            return False
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute(
+                    "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                    (state.operation_id,),
+                ).fetchone()
+                operation = connection.execute(
+                    "SELECT session_id FROM session_operations WHERE operation_id = ?",
+                    (state.operation_id,),
+                ).fetchone()
+                if current is None or operation is None:
+                    connection.rollback()
+                    return False
+                session = self._require_session(
+                    connection, str(operation["session_id"])
+                )
+                if (
+                    int(current["revision"]) != expected_revision
+                    or session["archived_at"] is not None
+                    or session["active_operation_id"] != state.operation_id
+                    or state.status != "running"
+                ):
+                    connection.rollback()
+                    return False
+                messages: list[sqlite3.Row] = []
+                for message_id in message_ids:
+                    message = connection.execute(
+                        "SELECT * FROM agent_inbox_messages WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()
+                    if (
+                        message is None
+                        or str(message["session_id"]) != str(operation["session_id"])
+                        or message["status"] != "pending"
+                        or message["delivery"] not in {"steer", "inject"}
+                        or connection.execute(
+                            "SELECT 1 FROM conversation_nodes WHERE node_id = ?",
+                            (message_id,),
+                        ).fetchone()
+                        is not None
+                    ):
+                        connection.rollback()
+                        return False
+                    messages.append(message)
+                if [int(row["sequence"]) for row in messages] != sorted(
+                    int(row["sequence"]) for row in messages
+                ):
+                    connection.rollback()
+                    return False
+                parent_node_id = _optional(session["active_node_id"])
+                nodes: list[ConversationNode] = []
+                for row in messages:
+                    node = self._message_to_node(row, parent_node_id=parent_node_id)
+                    self._validate_node_artifacts(connection, node)
+                    nodes.append(node)
+                    parent_node_id = node.node_id
+                for node in nodes:
+                    connection.execute(
+                        "INSERT INTO conversation_nodes VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            node.node_id,
+                            node.session_id,
+                            node.parent_node_id,
+                            node.content_type,
+                            node.content_json(),
+                            node.created_at.isoformat(),
+                        ),
+                    )
+                for message in messages:
+                    cursor = connection.execute(
+                        """
+                        UPDATE agent_inbox_messages
+                        SET status = 'claimed', claimed_operation_id = ?,
+                            claimed_step_id = ?, handled_at = ?
+                        WHERE message_id = ? AND status = 'pending'
+                        """,
+                        (
+                            state.operation_id,
+                            step.step_id,
+                            updated_at.isoformat(),
+                            message["message_id"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        connection.rollback()
+                        return False
+                cursor = connection.execute(
+                    """
+                    UPDATE agent_run_states
+                    SET revision = ?, status = ?, waiting_reason = ?,
+                        completed_step_count = ?, current_step_json = ?,
+                        final_assistant_node_id = ?, error_json = ?,
+                        cancellation_json = ?, updated_at = ?
+                    WHERE operation_id = ? AND revision = ?
+                    """,
+                    (
+                        *self._run_state_values(state, updated_at=updated_at)[1:],
+                        state.operation_id,
+                        expected_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
+                cursor = connection.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET active_node_id = ?, updated_at = ?
+                    WHERE session_id = ? AND active_operation_id = ?
+                    """,
+                    (
+                        nodes[-1].node_id,
+                        updated_at.isoformat(),
+                        operation["session_id"],
+                        state.operation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
+            except (
+                sqlite3.IntegrityError,
+                StorageIntegrityError,
+                ValueError,
+                TypeError,
+            ):
+                connection.rollback()
+                return False
         return True
 
     def load_delegation(self, child_session_id: str) -> AgentDelegation | None:
@@ -1067,6 +1245,33 @@ class SQLiteRuntimeStore:
         connection: sqlite3.Connection, node: ConversationNode
     ) -> None:
         SQLiteRuntimeStore._validate_message_artifacts(connection, node.content)
+
+    @staticmethod
+    def _transition_blocked_by_pending_step_messages(
+        *,
+        connection: sqlite3.Connection,
+        session_id: str,
+        current_step: Any,
+        next_state: AgentRunState,
+    ) -> bool:
+        pending = connection.execute(
+            """
+            SELECT 1 FROM agent_inbox_messages
+            WHERE session_id = ? AND status = 'pending'
+              AND delivery IN ('steer', 'inject')
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        if pending is None:
+            return False
+        next_step = next_state.current_step
+        return (
+            current_step is not None
+            and next_step is not None
+            and current_step.phase == "preparing_request"
+            and next_step.phase == "request_ready"
+        ) or next_state.status == "succeeded"
 
     @staticmethod
     def _validate_message_artifacts(

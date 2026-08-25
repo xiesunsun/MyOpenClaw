@@ -26,12 +26,15 @@ from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.context.model_context import ModelContext, SystemContent
 from pickel.inbox.message import InboxMessage, UserMessageSource
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
     Cancellation,
+    ModelRequestIntent,
+    ModelStepState,
 )
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.errors import StorageIntegrityError
@@ -320,6 +323,153 @@ def test_run_state_revision_is_exactly_one_and_expired_cas_is_noop(
         node=None,
     )
     assert store.load_run_state("operation-1") == running
+
+
+def _prepare_step(
+    store: Store, root: Path
+) -> tuple[AgentRunState, AgentRunState, ModelStepState]:
+    _, _, initial = _accept_one(store, root)
+    step = ModelStepState("step-1", 1, "preparing_request", 0, None, None, ())
+    running = replace(initial, revision=2, status="running", current_step=step)
+    assert store.commit_run_transition(
+        state=running,
+        expected_revision=1,
+        updated_at=NOW,
+        node=None,
+    )
+    return initial, running, step
+
+
+def test_claim_step_messages_batches_fifo_nodes_and_excludes_followup(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _, running, step = _prepare_step(store, tmp_path)
+    _send(store, "session-1", "steer-1", delivery="steer")
+    _send(store, "session-1", "followup-1", delivery="followup")
+    _send(store, "session-1", "inject-1", delivery="inject")
+
+    assert [
+        message.message_id
+        for message in store.list_pending_step_messages(session_id="session-1")
+    ] == ["steer-1", "inject-1"]
+    next_state = replace(running, revision=3)
+    assert store.claim_step_messages(
+        message_ids=("steer-1", "inject-1"),
+        state=next_state,
+        expected_revision=2,
+        updated_at=NOW,
+    )
+
+    first = store.load_node("steer-1")
+    second = store.load_node("inject-1")
+    assert first is not None and second is not None
+    assert first.parent_node_id == "message-1"
+    assert second.parent_node_id == "steer-1"
+    assert store.load_session("session-1").active_node_id == "inject-1"
+    assert store.load_message("steer-1").claimed_operation_id == "operation-1"
+    assert store.load_message("steer-1").claimed_step_id == step.step_id
+    assert store.load_message("inject-1").claimed_step_id == step.step_id
+    assert store.load_message("followup-1").status == "pending"
+    assert store.load_run_state("operation-1") == next_state
+
+
+def test_claim_step_messages_rejects_expired_cross_session_and_partial_batches(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _create_session(store, "session-2", "workspace-2", tmp_path / "two")
+    _, running, _ = _prepare_step(store, tmp_path)
+    _send(store, "session-1", "steer-1", delivery="steer")
+    _send(store, "session-1", "inject-1", delivery="inject")
+    _send(store, "session-2", "steer-2", delivery="steer")
+
+    next_state = replace(running, revision=3)
+    for message_ids, expected_revision in (
+        (("inject-1", "steer-1"), 2),
+        (("steer-1", "steer-1"), 2),
+        (("steer-1", "missing"), 2),
+        (("steer-2",), 2),
+        (("steer-1", "inject-1"), 1),
+    ):
+        assert not store.claim_step_messages(
+            message_ids=message_ids,
+            state=next_state,
+            expected_revision=expected_revision,
+            updated_at=NOW,
+        )
+    assert store.load_node("steer-1") is None
+    assert store.load_node("inject-1") is None
+    assert store.load_message("steer-1").status == "pending"
+    assert store.load_message("inject-1").status == "pending"
+    assert store.load_session("session-1").active_node_id == "message-1"
+    assert store.load_run_state("operation-1") == running
+
+
+def test_commit_request_intent_and_success_stop_when_step_messages_are_pending(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _, running, step = _prepare_step(store, tmp_path)
+    _send(store, "session-1", "steer-1", delivery="steer")
+    request_ready = replace(
+        running,
+        revision=3,
+        current_step=replace(
+            step,
+            phase="request_ready",
+            request_intent=ModelRequestIntent(ModelContext(SystemContent(), ()), "fp"),
+        ),
+    )
+    assert not store.commit_run_transition(
+        state=request_ready,
+        expected_revision=2,
+        updated_at=NOW,
+        node=None,
+    )
+    assert store.load_run_state("operation-1") == running
+
+    terminal = replace(
+        running,
+        revision=3,
+        status="succeeded",
+        current_step=None,
+        final_assistant_node_id="message-1",
+    )
+    assert not store.commit_run_transition(
+        state=terminal,
+        expected_revision=2,
+        updated_at=NOW,
+        node=None,
+    )
+    assert store.load_session("session-1").active_operation_id == "operation-1"
+
+
+def test_commit_request_intent_and_success_ignore_pending_followup(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _, running, step = _prepare_step(store, tmp_path)
+    _send(store, "session-1", "followup-1", delivery="followup")
+    request_ready = replace(
+        running,
+        revision=3,
+        current_step=replace(
+            step,
+            phase="request_ready",
+            request_intent=ModelRequestIntent(ModelContext(SystemContent(), ()), "fp"),
+        ),
+    )
+    assert store.commit_run_transition(
+        state=request_ready,
+        expected_revision=2,
+        updated_at=NOW,
+        node=None,
+    )
 
 
 @pytest.mark.parametrize(

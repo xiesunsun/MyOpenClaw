@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,11 @@ from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.inbox.message import InboxMessage, UserMessageSource
-from pickel.operations.agent_run_state import AgentRunError, AgentRunState
+from pickel.operations.agent_run_state import (
+    AgentRunError,
+    AgentRunState,
+    ModelStepState,
+)
 from pickel.operations.operation_service import (
     OperationNotFoundError,
     OperationService,
@@ -181,6 +186,60 @@ def test_duplicate_active_operation_is_cas_failure(setup_store: Any) -> None:
         )
         is None
     )
+
+
+def test_claim_step_messages_validates_state_transition_before_store(
+    setup_store: Any,
+) -> None:
+    store, package, message, root = setup_store
+    service = _service(store)
+    accepted = service.accept_pending_message(
+        message=message,
+        agent_package_version_id=package.package_version_id,
+        workspace_binding=_binding(root),
+        expected_node_id=None,
+    )
+    assert accepted is not None
+    step = ModelStepState("step-1", 1, "preparing_request", 0, None, None, ())
+    running = replace(accepted.state, revision=2, status="running", current_step=step)
+    assert service.commit_transition(
+        state=running,
+        expected_revision=1,
+        node=None,
+        updated_at=NOW,
+    )
+    step_message = store.send_message(
+        message_id="steer-1",
+        session_id="session-1",
+        delivery="steer",
+        message=UserMessage(),
+        source=UserMessageSource(),
+        created_at=NOW,
+    )
+
+    invalid_step = replace(step, step_id="step-2")
+    with pytest.raises(StorageIntegrityError):
+        service.claim_step_messages(
+            message_ids=(step_message.message_id,),
+            state=replace(running, revision=3, current_step=invalid_step),
+            expected_revision=2,
+            updated_at=NOW,
+        )
+    with pytest.raises(StorageIntegrityError):
+        service.claim_step_messages(
+            message_ids=(step_message.message_id,),
+            state=replace(running, revision=3, completed_step_count=2),
+            expected_revision=2,
+            updated_at=NOW,
+        )
+    assert not service.claim_step_messages(
+        message_ids=(step_message.message_id,),
+        state=replace(running, revision=3),
+        expected_revision=1,
+        updated_at=NOW,
+    )
+    assert store.load_run_state("operation-1") == running
+    assert store.load_message(step_message.message_id).status == "pending"
 
 
 @pytest.mark.parametrize(

@@ -108,8 +108,9 @@ OperationDriver
 | 4.6b Full Trace 丢帧 Diagnostic | 完成 | Full Trace 使用有界队列异步写入；每次连续 Delta 拥塞只在队列外报告首个 `trace_delta_dropped` Diagnostic，保留真实执行身份；慢回调不阻塞 Provider，flush/close 会排空单槽 pending diagnostic，且不参与恢复或可靠审计 | — |
 | 5.0 Persistence 收敛 | 完成 | SQLite/InMemory 统一为 v10 窄领域合同；Operation/State 只能通过原子 `accept_operation` 创建，`commit_run_transition` 是唯一 State CAS 提交入口；旧通用生产路径已删除；递归 CTE 沿 `parent_node_id → node_id` 主键回溯，1,000/10,000 Node 与 EXPLAIN 查询计划通过 | — |
 | 6.1 AgentRegistry | 完成 | `session_id → live Agent` 唯一映射；同 Session 普通 reopen 复用同一 Host/UI Adapter；幂等 wake 不丢运行期追加唤醒；Agent 锁串行前台与后台 drive；detach 按 expected Agent 注销；reload 仅在新代 attach 成功后替换 Agent，失败保留旧代 | active Operation 的 steer/inject 原子 claim 属于 6.2 |
+| 6.2a Step 消息持久化合同 | 完成 | SQLite/InMemory 以 `claim_step_messages` 一次提交 steer/inject claim、FIFO User Node 链、Session active node 与 State revision；请求 Intent 冻结和 succeeded 提交受 pending steer/inject 事务护栏约束；OperationService 不绕过状态机 | Driver stopping check 与 idle inject 过滤属于 6.2b |
 
-第十七轮验收基线：`788 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 已接通 AgentRegistry。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第十八轮验收基线：`798 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry 与 6.2a Step 消息持久化合同已接通。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

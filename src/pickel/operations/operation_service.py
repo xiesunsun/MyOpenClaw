@@ -99,6 +99,30 @@ class OperationService:
     def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]:
         return self._store.list_operations(session_id=session_id)
 
+    def list_pending_step_messages(
+        self, *, session_id: str
+    ) -> tuple[InboxMessage, ...]:
+        return self._store.list_pending_step_messages(session_id=session_id)
+
+    def claim_step_messages(
+        self,
+        *,
+        message_ids: tuple[str, ...],
+        state: AgentRunState,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> bool:
+        current = self.load_agent_run_state(state.operation_id)
+        if current.revision != expected_revision:
+            return False
+        self._state_machine.validate_transition(current=current, next_state=state)
+        return self._store.claim_step_messages(
+            message_ids=message_ids,
+            state=state,
+            expected_revision=expected_revision,
+            updated_at=updated_at,
+        )
+
     def load_agent_run_state(self, operation_id: str) -> AgentRunState:
         self.load_operation(operation_id)
         state = self._store.load_run_state(operation_id)
