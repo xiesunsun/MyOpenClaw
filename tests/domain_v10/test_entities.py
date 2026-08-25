@@ -202,6 +202,31 @@ def test_delegate_intent_codec_and_approval_combinations() -> None:
         )
 
 
+def test_rejected_tool_call_requires_reason_and_has_no_intent_or_result() -> None:
+    rejected = ToolCallState(
+        "tool_3", "echo", {}, "rejected", None, "safe", None, "hook denied", None, None
+    )
+    assert rejected.status == "rejected"
+
+    with pytest.raises(ValueError, match="rejected 必须有 rejected 原因"):
+        ToolCallState(
+            "tool_4", "echo", {}, "rejected", None, "safe", None, None, None, None
+        )
+    with pytest.raises(ValueError, match="rejected 不能有 execution_intent"):
+        ToolCallState(
+            "tool_5",
+            "echo",
+            {},
+            "rejected",
+            None,
+            "safe",
+            DelegateAgentIntent("package-child"),
+            "hook denied",
+            None,
+            None,
+        )
+
+
 def test_operation_and_workspace_binding_are_frozen(tmp_path: Path) -> None:
     workspace = Workspace("workspace_1", tmp_path, NOW)
     binding = WorkspaceBinding(workspace.workspace_id, workspace.root_path, None)

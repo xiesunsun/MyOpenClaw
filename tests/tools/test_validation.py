@@ -1,5 +1,10 @@
 from pickel.tools.base import BaseTool, ToolExecutionResult, ToolSpec
-from pickel.tools.validation import validate_tool_arguments, validate_tool_result
+from pickel.shared.frozen_json import freeze_json_object
+from pickel.tools.validation import (
+    validate_json_schema,
+    validate_tool_arguments,
+    validate_tool_result,
+)
 
 
 class _Tool(BaseTool):
@@ -28,6 +33,15 @@ def test_validate_tool_arguments_reports_json_path():
 
     assert error is not None
     assert "$.id" in error
+
+
+def test_validate_frozen_tool_schema_without_loading_implementation():
+    schema = freeze_json_object(_Tool.spec.input_schema)
+    error = validate_json_schema({"id": "7"}, schema)
+
+    assert error is not None
+    assert "$.id" in error
+    assert validate_json_schema({"id": 7}, schema) is None
 
 
 def test_validate_tool_result_uses_structured_content():

@@ -211,6 +211,7 @@ def _awaiting_tools(
     status: str = "ready",
     approval: ToolApproval | None = None,
     execution_intent=None,
+    decision_reason: str | None = None,
     result_node_id: str | None = None,
     is_error: bool | None = None,
 ) -> ModelStepState:
@@ -230,7 +231,7 @@ def _awaiting_tools(
                 approval,
                 "safe",
                 execution_intent,
-                None,
+                decision_reason,
                 result_node_id,
                 is_error,
             ),
@@ -402,12 +403,50 @@ def test_multiple_approvals_can_be_decided_one_at_a_time() -> None:
     machine.validate_transition(current=current, next_state=next_state)
 
 
+def test_rejection_sources_and_completion_transition() -> None:
+    machine = AgentRunStateMachine()
+    timestamp = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    approval = ToolApproval(timestamp, "tool_policy", "needs approval", None)
+    current = AgentRunState(
+        "operation-1",
+        1,
+        "waiting",
+        "tool_approval",
+        0,
+        _awaiting_tools(status="waiting_approval", approval=approval),
+        None,
+        None,
+        None,
+    )
+    rejected_approval = ToolApproval(
+        timestamp,
+        "tool_policy",
+        "needs approval",
+        ToolApprovalDecision("denied", timestamp, "user-1", "unsafe"),
+    )
+    rejected = _running_with_step(
+        2,
+        _awaiting_tools(status="rejected", approval=rejected_approval),
+    )
+    machine.validate_transition(current=current, next_state=rejected)
+
+    completed = _running_with_step(
+        3,
+        _awaiting_tools(
+            status="completed",
+            approval=rejected_approval,
+            result_node_id="result-1",
+            is_error=True,
+        ),
+    )
+    machine.validate_transition(current=rejected, next_state=completed)
+
+
 @pytest.mark.parametrize(
     "old_status,new_status",
     [
         ("waiting_approval", "intent_recorded"),
-        ("ready", "denied"),
-        ("denied", "intent_recorded"),
+        ("rejected", "intent_recorded"),
         ("intent_recorded", "ready"),
         ("completed", "intent_recorded"),
     ],
@@ -424,7 +463,7 @@ def test_tool_call_illegal_transitions_are_rejected(
             "needs approval",
             None,
         )
-    elif old_status == "denied":
+    elif old_status == "rejected":
         approval = ToolApproval(
             datetime(2026, 8, 25, tzinfo=timezone.utc),
             "tool_policy",
@@ -447,7 +486,7 @@ def test_tool_call_illegal_transitions_are_rejected(
         else None
     )
     next_approval = approval
-    if new_status == "denied" and next_approval is None:
+    if new_status == "rejected" and next_approval is None:
         next_approval = ToolApproval(
             datetime(2026, 8, 25, tzinfo=timezone.utc),
             "tool_policy",
@@ -476,6 +515,9 @@ def test_tool_call_illegal_transitions_are_rejected(
                 status=new_status,
                 approval=next_approval,
                 execution_intent=next_intent,
+                decision_reason=(
+                    "rejected by hook" if new_status == "rejected" else None
+                ),
                 result_node_id="result-1" if new_status == "completed" else None,
                 is_error=False if new_status == "completed" else None,
             ),

@@ -24,7 +24,7 @@ ModelStepPhase = Literal["preparing_request", "request_ready", "awaiting_tools"]
 ToolCallStatus = Literal[
     "waiting_approval",
     "ready",
-    "denied",
+    "rejected",
     "intent_recorded",
     "completed",
 ]
@@ -56,7 +56,7 @@ _PHASES = {"preparing_request", "request_ready", "awaiting_tools"}
 _TOOL_STATUSES = {
     "waiting_approval",
     "ready",
-    "denied",
+    "rejected",
     "intent_recorded",
     "completed",
 }
@@ -127,11 +127,16 @@ class ToolCallState:
         if self.status == "waiting_approval":
             if self.approval is None or self.approval.decision is not None:
                 raise ValueError("waiting_approval 必须有未决 approval")
-        if self.status == "denied":
-            if self.approval is None or self.approval.decision is None:
-                raise ValueError("denied 必须有 approval decision")
-            if self.approval.decision.outcome != "denied":
-                raise ValueError("denied 必须对应 denied approval")
+        if self.status == "rejected":
+            if self.execution_intent is not None:
+                raise ValueError("rejected 不能有 execution_intent")
+            if self.approval is not None:
+                if self.approval.decision is None:
+                    raise ValueError("rejected 必须有 rejected 原因")
+                if self.approval.decision.outcome != "denied":
+                    raise ValueError("rejected 必须对应 denied approval")
+            elif not self.decision_reason:
+                raise ValueError("rejected 必须有 rejected 原因")
         if self.status in {"ready", "intent_recorded"} and self.approval is not None:
             if (
                 self.approval.decision is not None

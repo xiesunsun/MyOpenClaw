@@ -2,7 +2,7 @@
 
 **日期**：2026-08-11  
 **更新日期**：2026-08-25
-**状态**：目标合同；v10 恢复主链与 Approval CAS 已实施，Host reconcile 控制面待完成
+**状态**：目标合同；v10 恢复主链、PreToolUse 与 Approval CAS 已实施，Host reconcile 控制面待完成
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
@@ -198,15 +198,19 @@ class ToolCallState:
 stateDiagram-v2
     [*] --> ready: 无需审批
     [*] --> waiting_approval: 需要审批
-    [*] --> completed: 参数无效或 Hook 拒绝
+    [*] --> rejected: 未知 Tool、参数无效或 Hook 拒绝
     waiting_approval --> ready: approved
-    waiting_approval --> denied: denied
-    denied --> completed: Driver 提交错误 ToolResult
+    waiting_approval --> rejected: denied
+    rejected --> completed: Driver 提交错误 ToolResult
     ready --> intent_recorded: Intent commit
     intent_recorded --> completed: Result commit
 ```
 
-Provider ToolCall 顺序就是列表顺序。tool_call_id、tool_name、冻结 arguments 和 replay_policy 创建后不可修改。`completed` 必须有 result_node_id 和 is_error；其他状态两者为空。
+`rejected` 表示 Tool Intent 前已确定不执行：用户拒绝由
+`approval.decision.outcome = denied` 承载，Hook、未知 Tool 和参数非法由非空
+`decision_reason` 承载。Provider ToolCall 顺序就是列表顺序。tool_call_id、
+tool_name、冻结 arguments 和 replay_policy 创建后不可修改。`completed` 必须有
+result_node_id 和 is_error；其他状态两者为空。
 
 ## 6. Tool Intent 与恢复
 
@@ -251,7 +255,7 @@ Driver CAS → waiting_approval
 → AgentRegistry.wake(session_id)
 ```
 
-多个审批可以逐个决定，但存在任意 waiting_approval 时 Driver 不执行 Tool。全部决定后，Driver 按 Provider ToolCall 原始顺序执行 ready 调用并为 denied 调用生成错误 ToolResult。
+多个审批可以逐个决定，但存在任意 waiting_approval 时 Driver 不执行 Tool。全部决定后，Driver 按 Provider ToolCall 原始顺序执行 ready 调用并为 rejected 调用生成错误 ToolResult。
 
 相同决定可幂等成功；过期 revision、冲突决定、已取消 Operation 必须拒绝。不使用 per-session Lock 替代 CAS，不做忽略调用方前置条件的指数退避盲重试。
 
@@ -323,7 +327,7 @@ waiting Operation 不轮询；批准、reconcile 或 cancel 必须先提交状�
 2. 恢复只从 active_operation_id 读取当前状态，不扫描历史。
 3. Request Intent 后崩溃不重跑 Context；Tool Intent 后崩溃不静默重放。
 4. 多审批、Approval/Cancel 和 Tool Result 并发由 revision CAS 防止丢更新。
-5. denied ToolResult 保持 Provider 原始 ToolCall 顺序。
+5. rejected ToolResult 保持 Provider 原始 ToolCall 顺序。
 6. cancelling 可跨崩溃继续，未知 Tool 副作用不会被直接标记 cancelled。
 7. Parent 取消不会留下 running/waiting 的孤儿后代。
 8. 终态 State 与 Session.active_operation_id 清空原子一致。

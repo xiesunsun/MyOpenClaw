@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 
+from pickel.shared.frozen_json import thaw_json
 from pickel.tools.base import BaseTool, ToolExecutionResult
 
 
 def validate_tool_arguments(tool: BaseTool, arguments: dict[str, Any]) -> str | None:
     """验证模型或 Hook 生成的参数；合法时返回 ``None``。"""
-    return _validate(arguments, tool.spec.input_schema)
+    return validate_json_schema(arguments, tool.spec.input_schema)
+
+
+def validate_json_schema(value: Any, schema: Mapping[str, Any]) -> str | None:
+    """验证冻结定义中的 JSON Schema，不要求加载 Tool 实例。"""
+    return _validate(value, schema)
 
 
 def validate_tool_result(tool: BaseTool, result: ToolExecutionResult) -> str | None:
@@ -25,10 +32,11 @@ def validate_tool_result(tool: BaseTool, result: ToolExecutionResult) -> str | N
             return f"$.structured_content 不是 JSON 数据: {exc}"
     if tool.spec.output_schema is None or result.is_error:
         return None
-    return _validate(result.structured_content, tool.spec.output_schema)
+    return validate_json_schema(result.structured_content, tool.spec.output_schema)
 
 
-def _validate(value: Any, schema: dict[str, Any]) -> str | None:
+def _validate(value: Any, schema: Mapping[str, Any]) -> str | None:
+    schema = thaw_json(schema)
     try:
         validator_class = validator_for(schema)
         validator_class.check_schema(schema)

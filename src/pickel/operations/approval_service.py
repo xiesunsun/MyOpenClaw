@@ -156,7 +156,7 @@ class ApprovalService:
         )
         next_call = replace(
             current_call,
-            status="ready" if outcome == "approved" else "denied",
+            status="ready" if outcome == "approved" else "rejected",
             approval=replace(approval, decision=decision),
         )
         assert current.current_step is not None

@@ -228,9 +228,9 @@ class AgentRunStateMachine:
             ):
                 raise StorageIntegrityError("ToolCallState 身份和参数不能改变")
             allowed = {
-                "waiting_approval": {"waiting_approval", "ready", "denied"},
+                "waiting_approval": {"waiting_approval", "ready", "rejected"},
                 "ready": {"ready", "intent_recorded"},
-                "denied": {"denied", "completed"},
+                "rejected": {"rejected", "completed"},
                 "intent_recorded": {"intent_recorded", "completed"},
                 "completed": {"completed"},
             }[current.status]
@@ -269,10 +269,10 @@ class AgentRunStateMachine:
                             raise StorageIntegrityError(
                                 "ready ToolCall 必须有 approved 决定"
                             )
-                    elif next_call.status == "denied":
+                    elif next_call.status == "rejected":
                         if decision is None or decision.outcome != "denied":
                             raise StorageIntegrityError(
-                                "denied ToolCall 必须有 denied 决定"
+                                "rejected ToolCall 必须有 denied 决定"
                             )
                     elif decision is not None:
                         raise StorageIntegrityError("waiting_approval 不能提前写入决定")
@@ -284,11 +284,16 @@ class AgentRunStateMachine:
                     or next_call.is_error != current.is_error
                 ):
                     raise StorageIntegrityError("ToolResult 不能被改写或清除")
-            if current.status in {"intent_recorded", "denied"} and (
+            if current.status in {"intent_recorded", "rejected"} and (
                 next_call.status == current.status
                 and next_call.result_node_id != current.result_node_id
             ):
                 raise StorageIntegrityError("ToolResult 只能在完成时首次写入")
+            if (
+                current.status == "rejected"
+                and next_call.decision_reason != current.decision_reason
+            ):
+                raise StorageIntegrityError("rejected decision_reason 不能被改写")
 
     @staticmethod
     def _validate_completion(

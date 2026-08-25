@@ -30,18 +30,25 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_node import ConversationNode
+from pickel.hooks.decisions import PreToolUseDecision
+from pickel.hooks.events import PreToolUseEvent
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
     ModelRequestIntent,
     ModelStepState,
+    ToolApproval,
     ToolCallState,
+    ToolReplayPolicy,
 )
+from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_service import OperationService
 from pickel.providers.stream import StreamDelta
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
+from pickel.shared.frozen_json import freeze_json_object
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
 
@@ -211,10 +218,17 @@ class OperationDriver:
                     context_fingerprint=step.request_intent.context_fingerprint,
                 )
                 assistant_node_id = self._node_id()
-                tool_calls = _tool_calls_from_assistant(
-                    result.assistant_message, package=package
+                tool_calls = await self._prepare_tool_calls(
+                    result.assistant_message,
+                    operation=operation,
+                    state=state,
+                    package=package,
+                    effects=effects,
                 )
                 if tool_calls:
+                    has_waiting_approval = any(
+                        call.status == "waiting_approval" for call in tool_calls
+                    )
                     next_step = replace(
                         step,
                         phase="awaiting_tools",
@@ -223,7 +237,14 @@ class OperationDriver:
                         tool_calls=tool_calls,
                     )
                     state = self._commit(
-                        replace(state, current_step=next_step),
+                        replace(
+                            state,
+                            status="waiting" if has_waiting_approval else "running",
+                            waiting_reason=(
+                                "tool_approval" if has_waiting_approval else None
+                            ),
+                            current_step=next_step,
+                        ),
                         state,
                         message=result.assistant_message,
                         node_id=assistant_node_id,
@@ -252,24 +273,10 @@ class OperationDriver:
             if step.phase != "awaiting_tools":
                 raise RuntimeError(f"未知 ModelStep phase: {step.phase}")
 
-            waiting = _waiting_tool_call(step.tool_calls)
-            if waiting is not None:
-                return OperationDriveResult(
-                    operation_id,
-                    "waiting",
-                    self._commit(
-                        replace(
-                            state, status="waiting", waiting_reason="tool_approval"
-                        ),
-                        state,
-                    ),
-                    last_assistant,
-                )
-
             pending = next(
                 (call for call in step.tool_calls if call.status != "completed"), None
             )
-            if pending is not None and pending.status == "denied":
+            if pending is not None and pending.status == "rejected":
                 result_node_id = self._node_id()
                 completed = replace(
                     pending,
@@ -282,8 +289,10 @@ class OperationDriver:
                     for call in step.tool_calls
                 )
                 decision = pending.approval.decision if pending.approval else None
-                reason = decision.reason if decision is not None else None
-                content = "工具调用未获批准"
+                reason = (
+                    decision.reason if decision is not None else pending.decision_reason
+                )
+                content = "工具调用被拒绝"
                 if reason:
                     content = f"{content}：{reason}"
                 state = self._commit(
@@ -394,6 +403,126 @@ class OperationDriver:
                 continue
             raise RuntimeError("ToolCallState 存在无法推进的状态")
 
+    async def _prepare_tool_calls(
+        self,
+        message: AssistantMessage,
+        *,
+        operation: SessionOperation,
+        state: AgentRunState,
+        package: AgentPackageVersion,
+        effects: RuntimeEffects,
+    ) -> tuple[ToolCallState, ...]:
+        """在 AssistantMessage 提交前冻结 PreToolUse 的最终决定。"""
+        step = state.current_step
+        if step is None or step.phase != "request_ready":
+            raise RuntimeError("PreToolUse 必须发生在 request_ready ModelStep")
+        tools = {tool.name: tool for tool in package.tools}
+        calls: list[ToolCallState] = []
+        for block in message.content:
+            if not isinstance(block, ToolCallBlock):
+                continue
+            tool = tools.get(block.name)
+            if tool is None:
+                calls.append(
+                    _rejected_tool_call(
+                        block,
+                        arguments=dict(block.arguments),
+                        reason=f"工具不可用: {block.name}",
+                    )
+                )
+                continue
+
+            decision = await effects.invoke_hook(
+                "pre_tool_use",
+                PreToolUseEvent(
+                    session_id=operation.session_id,
+                    operation_id=operation.operation_id,
+                    step_id=step.step_id,
+                    step_sequence=step.step_sequence,
+                    tool_name=block.name,
+                    tool_call_id=block.id,
+                    arguments=dict(block.arguments),
+                    tool_source=tool.source.value,
+                    tool_origin=tool.implementation_ref.name,
+                ),
+            )
+            if not isinstance(decision, PreToolUseDecision):
+                decision = PreToolUseDecision()
+            try:
+                arguments = (
+                    dict(decision.updated_arguments)
+                    if decision.updated_arguments is not None
+                    else dict(block.arguments)
+                )
+                freeze_json_object(arguments)
+            except (TypeError, ValueError):
+                calls.append(
+                    _rejected_tool_call(
+                        block,
+                        arguments=dict(block.arguments),
+                        reason="PreToolUse Hook 返回了无效参数",
+                    )
+                )
+                continue
+
+            if decision.action == "deny":
+                calls.append(
+                    _rejected_tool_call(
+                        block,
+                        arguments=arguments,
+                        reason=decision.reason or "工具调用被 Hook 拒绝",
+                        replay_policy=tool.replay_policy,
+                    )
+                )
+                continue
+            validation_error = validate_json_schema(arguments, tool.input_schema)
+            if validation_error is not None:
+                calls.append(
+                    _rejected_tool_call(
+                        block,
+                        arguments=arguments,
+                        reason=f"工具参数无效: {validation_error}",
+                        replay_policy=tool.replay_policy,
+                    )
+                )
+                continue
+            if decision.action == "ask":
+                calls.append(
+                    ToolCallState(
+                        tool_call_id=block.id,
+                        tool_name=block.name,
+                        arguments=arguments,
+                        status="waiting_approval",
+                        approval=ToolApproval(
+                            requested_at=self._now(),
+                            requested_by="hook",
+                            reason=decision.reason,
+                            decision=None,
+                        ),
+                        replay_policy=tool.replay_policy,
+                        execution_intent=None,
+                        decision_reason=None,
+                        result_node_id=None,
+                        is_error=None,
+                    )
+                )
+                continue
+            calls.append(
+                ToolCallState(
+                    tool_call_id=block.id,
+                    tool_name=block.name,
+                    arguments=arguments,
+                    status="ready",
+                    approval=None,
+                    replay_policy=tool.replay_policy,
+                    execution_intent=None,
+                    decision_reason=None,
+                    result_node_id=None,
+                    is_error=None,
+                )
+            )
+        return tuple(calls)
+
     async def _build_context(
         self,
         session_id: str,
@@ -457,32 +586,25 @@ def _fingerprint(context: ModelContext) -> str:
     return hashlib.sha256(context.to_json().encode("utf-8")).hexdigest()
 
 
-def _tool_calls_from_assistant(
-    message: AssistantMessage, *, package: AgentPackageVersion
-) -> tuple[ToolCallState, ...]:
-    tools = {tool.name: tool for tool in package.tools}
-    return tuple(
-        ToolCallState(
-            tool_call_id=block.id,
-            tool_name=block.name,
-            arguments=block.arguments,
-            status="ready",
-            approval=None,
-            replay_policy=(
-                tools[block.name].replay_policy if block.name in tools else "never"
-            ),
-            execution_intent=None,
-            decision_reason=None,
-            result_node_id=None,
-            is_error=None,
-        )
-        for block in message.content
-        if isinstance(block, ToolCallBlock)
+def _rejected_tool_call(
+    block: ToolCallBlock,
+    *,
+    arguments: dict[str, object],
+    reason: str,
+    replay_policy: ToolReplayPolicy = "never",
+) -> ToolCallState:
+    return ToolCallState(
+        tool_call_id=block.id,
+        tool_name=block.name,
+        arguments=arguments,
+        status="rejected",
+        approval=None,
+        replay_policy=replay_policy,
+        execution_intent=None,
+        decision_reason=reason,
+        result_node_id=None,
+        is_error=None,
     )
-
-
-def _waiting_tool_call(calls: Sequence[ToolCallState]) -> ToolCallState | None:
-    return next((call for call in calls if call.status == "waiting_approval"), None)
 
 
 def _tool_result_message(

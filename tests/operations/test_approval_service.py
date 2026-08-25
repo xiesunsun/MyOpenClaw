@@ -156,7 +156,7 @@ def test_decide_last_approval_resumes_running_and_duplicate_is_idempotent() -> N
 
     assert state.status == "running"
     assert state.waiting_reason is None
-    assert state.current_step.tool_calls[0].status == "denied"
+    assert state.current_step.tool_calls[0].status == "rejected"
     assert duplicate == state
     assert woken == ["session-1"]
 

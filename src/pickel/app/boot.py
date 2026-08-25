@@ -30,6 +30,7 @@ from pickel.conversations.conversation_store import ConversationStore
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.shared.frozen_json import thaw_json
 from pickel.inbox.store import InboxStore
+from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
@@ -362,6 +363,21 @@ class Boot:
             artifact_service=artifact_service,
         )
 
+        # Hook 实现属于已加载 Package 的冻结执行贡献。恢复已有 Operation 时，
+        # 这里只能使用 LoadedAgentPackage.lifecycle_hooks，不能重新从当前
+        # Generation 的 ExtensionRegistry 求值。
+        lifecycle_hooks = (
+            LifecycleHooks(list(loaded_agent_package.lifecycle_hooks))
+            if loaded_agent_package.lifecycle_hooks
+            else NoopLifecycleHooks()
+        )
+
+        async def invoke_hook(hook_name: str, event: Any) -> Any:
+            hook = getattr(lifecycle_hooks, hook_name, None)
+            if hook is None:
+                return None
+            return await hook(event)
+
         async def execute_tool(*, operation, state, tool_call_id: str, host_calls=None):
             call = next(
                 item
@@ -400,6 +416,7 @@ class Boot:
         return RuntimeEffects(
             provider=provider,
             execute_tool=execute_tool,
+            invoke_hook_effect=invoke_hook,
             recall_sources=tuple(loaded_agent_package.recall_sources),
             provider_name=loaded_agent_package.version.model_policy.primary.provider,
             model_name=loaded_agent_package.version.model_policy.primary.model,

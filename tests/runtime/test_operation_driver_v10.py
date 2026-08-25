@@ -20,6 +20,7 @@ from pickel.operations.agent_run_state import (
     ToolCallState,
 )
 from pickel.operations.session_operation import SessionOperation
+from pickel.hooks.decisions import PreToolUseDecision
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -116,22 +117,43 @@ def _queued_state() -> AgentRunState:
     )
 
 
-def _loaded_package(*, replay_policy="safe"):
+def _loaded_package(*, replay_policy="safe", input_schema=None):
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
         runtime_policy=SimpleNamespace(max_model_steps=8, context_turn_window=8),
-        tools=(SimpleNamespace(name="run", replay_policy=replay_policy),),
+        tools=(
+            SimpleNamespace(
+                name="run",
+                replay_policy=replay_policy,
+                source=SimpleNamespace(value="builtin"),
+                implementation_ref=SimpleNamespace(name="run"),
+                input_schema=input_schema or {"type": "object"},
+            ),
+        ),
     )
     return SimpleNamespace(version=version)
 
 
-def _driver(operations, provider, *, tool=None, replay_policy="safe"):
-    effects = RuntimeEffects(provider=provider, execute_tool=tool)
+def _driver(
+    operations,
+    provider,
+    *,
+    tool=None,
+    replay_policy="safe",
+    invoke_hook=None,
+    input_schema=None,
+):
+    effects = RuntimeEffects(
+        provider=provider,
+        execute_tool=tool,
+        invoke_hook_effect=invoke_hook,
+    )
     return OperationDriver(
         operation_service=operations,
         conversation_service=_Conversation(),
         package_loader=lambda package_version_id: _loaded_package(
-            replay_policy=replay_policy
+            replay_policy=replay_policy,
+            input_schema=input_schema,
         ).version,
         effects_resolver=lambda package_version_id: effects,
         model_context_builder=_ContextBuilder(),
@@ -193,6 +215,165 @@ async def test_tool_replay_policy_and_intent_before_effect():
 
 
 @_run_async
+async def test_pre_tool_ask_freezes_updated_arguments_and_waits_for_approval():
+    tool_message = AssistantMessage(
+        content=(ToolCallBlock(id="tool-1", name="run", arguments={"old": True}),)
+    )
+
+    async def invoke_hook(name, event):
+        assert name == "pre_tool_use"
+        assert event.operation_id == "operation-1"
+        assert event.step_id == "step-1"
+        return PreToolUseDecision(
+            action="ask",
+            updated_arguments={"approved_input": True},
+            reason="需要确认",
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message]),
+        invoke_hook=invoke_hook,
+    ).drive_operation("operation-1")
+
+    assert result.status == "waiting"
+    assert result.state.waiting_reason == "tool_approval"
+    call = result.state.current_step.tool_calls[0]
+    assert call.status == "waiting_approval"
+    assert dict(call.arguments) == {"approved_input": True}
+    assert call.approval is not None
+    assert call.approval.requested_by == "hook"
+    assert call.approval.reason == "需要确认"
+
+
+@_run_async
+async def test_pre_tool_deny_becomes_ordered_error_without_executing_tool():
+    tool_message = AssistantMessage(
+        content=(
+            ToolCallBlock(id="tool-1", name="run", arguments={}),
+            ToolCallBlock(id="tool-2", name="run", arguments={}),
+        )
+    )
+    executed = []
+
+    async def invoke_hook(_name, event):
+        return PreToolUseDecision(
+            action="deny" if event.tool_call_id == "tool-1" else "allow",
+            reason="策略拒绝" if event.tool_call_id == "tool-1" else None,
+        )
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        executed.append(tool_call_id)
+        return SimpleNamespace(
+            content="ok", content_blocks=[], is_error=False, structured_content=None
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+        invoke_hook=invoke_hook,
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert executed == ["tool-2"]
+    tool_results = [
+        node.content
+        for _, node in operations.transition_calls
+        if node is not None
+        and node.content_type == "agent_message"
+        and hasattr(node.content, "tool_call_id")
+    ]
+    assert [message.tool_call_id for message in tool_results] == ["tool-1", "tool-2"]
+    assert tool_results[0].is_error is True
+    assert tool_results[0].content[0].text == "工具调用被拒绝：策略拒绝"
+
+
+@_run_async
+async def test_unknown_tool_is_rejected_before_intent_or_execution():
+    tool_message = AssistantMessage(
+        content=(ToolCallBlock(id="tool-1", name="missing", arguments={}),)
+    )
+    executed = []
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        executed.append(tool_call_id)
+        return SimpleNamespace(
+            content="must not run",
+            content_blocks=[],
+            is_error=False,
+            structured_content=None,
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert executed == []
+    rejected_states = [
+        state
+        for state, _node in operations.transition_calls
+        if state.current_step is not None
+        and any(call.status == "rejected" for call in state.current_step.tool_calls)
+    ]
+    assert rejected_states
+    call = rejected_states[0].current_step.tool_calls[0]
+    assert call.execution_intent is None
+    assert call.decision_reason == "工具不可用: missing"
+
+
+@_run_async
+async def test_updated_arguments_are_validated_before_intent():
+    tool_message = AssistantMessage(
+        content=(ToolCallBlock(id="tool-1", name="run", arguments={"id": 1}),)
+    )
+    executed = []
+
+    async def invoke_hook(_name, _event):
+        return PreToolUseDecision(updated_arguments={"id": "invalid"})
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        executed.append(tool_call_id)
+        return SimpleNamespace(
+            content="must not run",
+            content_blocks=[],
+            is_error=False,
+            structured_content=None,
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+        invoke_hook=invoke_hook,
+        input_schema={
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "required": ["id"],
+        },
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert executed == []
+    rejected = next(
+        call
+        for state, _node in operations.transition_calls
+        if state.current_step is not None
+        for call in state.current_step.tool_calls
+        if call.status == "rejected"
+    )
+    assert dict(rejected.arguments) == {"id": "invalid"}
+    assert rejected.decision_reason.startswith("工具参数无效: $.id")
+
+
+@_run_async
 async def test_safe_and_never_tool_intent_recovery_have_different_outcomes():
     for replay_policy, expected in (("safe", "executed"), ("never", "waiting")):
         call = ToolCallState(
@@ -239,12 +420,12 @@ async def test_safe_and_never_tool_intent_recovery_have_different_outcomes():
 
 
 @_run_async
-async def test_denied_tool_call_becomes_error_result_in_provider_order():
-    denied = ToolCallState(
+async def test_rejected_tool_call_becomes_error_result_in_provider_order():
+    rejected = ToolCallState(
         tool_call_id="tool-1",
         tool_name="run",
         arguments={},
-        status="denied",
+        status="rejected",
         approval=ToolApproval(
             requested_at=datetime.now(timezone.utc),
             requested_by="tool_policy",
@@ -263,7 +444,7 @@ async def test_denied_tool_call_becomes_error_result_in_provider_order():
         is_error=None,
     )
     ready = replace(
-        denied,
+        rejected,
         tool_call_id="tool-2",
         status="ready",
         approval=None,
@@ -279,7 +460,7 @@ async def test_denied_tool_call_becomes_error_result_in_provider_order():
             request_attempt=1,
             request_intent=None,
             assistant_message_node_id="assistant-1",
-            tool_calls=(denied, ready),
+            tool_calls=(rejected, ready),
         ),
     )
     executed = []
@@ -308,7 +489,7 @@ async def test_denied_tool_call_becomes_error_result_in_provider_order():
     ]
     assert [message.tool_call_id for message in tool_results] == ["tool-1", "tool-2"]
     assert tool_results[0].is_error is True
-    assert tool_results[0].content[0].text == "工具调用未获批准：风险过高"
+    assert tool_results[0].content[0].text == "工具调用被拒绝：风险过高"
 
 
 @_run_async

@@ -1114,11 +1114,11 @@ ToolCallState 有稳定 `tool_call_id`，但不单独建表，只作为有序列
 stateDiagram-v2
     [*] --> ready: Hook 允许且无需批准
     [*] --> waiting_approval: 需要用户批准
-    [*] --> completed: Hook 拒绝或参数无效
+    [*] --> rejected: 未知 Tool、Hook 拒绝或参数无效
 
     waiting_approval --> ready: 用户批准
-    waiting_approval --> denied: 用户拒绝
-    denied --> completed: Driver 按原始顺序提交拒绝结果
+    waiting_approval --> rejected: 用户拒绝
+    rejected --> completed: Driver 按原始顺序提交拒绝结果
     ready --> intent_recorded: Intent 已提交
     intent_recorded --> completed: Result 已提交
 ```
@@ -1128,7 +1128,7 @@ stateDiagram-v2
 ```text
 waiting_approval
 ready
-denied
+rejected
 intent_recorded
 completed
 ```
@@ -1176,7 +1176,10 @@ Provider arguments
 → ToolCallState.arguments
 ```
 
-恢复时不重新运行 PreToolUse，也不从 AssistantMessage 重新推算参数。模型返回未知 Tool、参数无效或 Hook 拒绝时，不执行 Tool，直接写入模型可见错误 ToolResult，并创建 `completed` ToolCallState。
+PreToolUse 在 AssistantMessage 与 ToolCallState 首次提交前运行；其最终参数和决定随
+ToolCallState 一起冻结。恢复时不重新运行 PreToolUse，也不从 AssistantMessage
+重新推算参数。模型返回未知 Tool、参数无效或 Hook 拒绝时创建 `rejected`，Driver
+随后按 Provider 原始顺序写入模型可见错误 ToolResult 并转换为 `completed`。
 
 ### 7.5 用户批准
 
@@ -1195,14 +1198,14 @@ ToolCallState.status = ready
 ToolCallState.approval.decision = approved
 ```
 
-用户拒绝后更新为 `denied`，不在审批请求的提交顺序中直接写 ToolResult：
+用户拒绝后更新为 `rejected`，不在审批请求的提交顺序中直接写 ToolResult：
 
 ```text
-ToolCallState.status = denied
+ToolCallState.status = rejected
 ToolCallState.approval.decision = denied
 ```
 
-同一 Step 可能有多个 Tool Call，审批决定可能乱序到达。当且仅当不存在 `waiting_approval` 时，原子设置 `AgentRunState.status = running`、清空 `waiting_reason` 并调用 `AgentRegistry.wake(session_id)`。Driver 恢复后按 Provider Tool Call 原始顺序，将 `denied` 转换成模型可见错误 ToolResult，避免 Conversation Tree 的结果顺序变成用户点击顺序。拒绝路径不经过 `intent_recorded`，明确表示工具没有执行。
+同一 Step 可能有多个 Tool Call，审批决定可能乱序到达。当且仅当不存在 `waiting_approval` 时，原子设置 `AgentRunState.status = running`、清空 `waiting_reason` 并调用 `AgentRegistry.wake(session_id)`。Driver 恢复后按 Provider Tool Call 原始顺序，将 `rejected` 转换成模型可见错误 ToolResult，避免 Conversation Tree 的结果顺序变成用户点击顺序。拒绝路径不经过 `intent_recorded`，明确表示工具没有执行。
 
 ### 7.6 Tool Intent
 
@@ -1310,8 +1313,8 @@ Tool 通过 ArtifactService 先写入不可变 Blob 和 Artifact 元数据，再
 ToolCallState 位于 `current_step_json`，SQLite 只检查 JSON 合法；dataclass 和 StateMachine 校验：
 
 ```text
-waiting_approval → ready / denied
-denied → completed
+waiting_approval → ready / rejected
+rejected → completed
 ready → intent_recorded
 intent_recorded → completed
 completed → 无后续状态
@@ -3312,7 +3315,7 @@ class ToolApprovalDecision:
 | --- | --- |
 | `ready` | 无需审批，或 decision 为 `approved` |
 | `waiting_approval` | 有请求，decision 为空 |
-| `denied` | decision 为 `denied`，尚未生成 ToolResult |
+| `rejected` | approval decision 为 `denied`，或无 approval 且 decision_reason 非空；尚未生成 ToolResult |
 | `intent_recorded` | 不存在未决审批 |
 | `completed` | 已经形成最终 ToolResult |
 
@@ -3342,7 +3345,7 @@ sequenceDiagram
 
 批准不能实现为 `await HostCallClient.call(CONFIRMATION_CALL)`：Host 离线或进程崩溃会丢失 Future，重启后也无法判断等待原因。正确流程是先提交 `waiting_approval`，再发送事实通知；Host 重新连接后从 Store 查询待审批项并提交决定。
 
-一个 Step 有多个审批时，决定可以逐个保存，但只在全部完成后唤醒 Driver。Driver 对 `ready` 的调用记录 Tool Intent 后执行，对 `denied` 的调用生成错误 ToolResult；所有结果仍按 Provider Tool Call 原始顺序提交。
+一个 Step 有多个审批时，决定可以逐个保存，但只在全部完成后唤醒 Driver。Driver 对 `ready` 的调用记录 Tool Intent 后执行，对 `rejected` 的调用生成错误 ToolResult；所有结果仍按 Provider Tool Call 原始顺序提交。
 
 ### 19.4 CAS、幂等和取消
 

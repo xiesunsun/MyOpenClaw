@@ -97,9 +97,9 @@ OperationDriver
 | 1.3b Session 删除语义 | 完成 | 单 Session 与显式子树删除前置条件、双 Store 一致性；旧 Object/Reference 生产模块与测试已删除 | 后代取消属于阶段 6 |
 | 2.0 Agent Package v10 | Loader 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 当前 Config 仅能构建 primary，worker/utility 的配置来源归入配置升级批次 |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
-| 2.4 Host 控制面 | 部分完成 | cancel 持久化入口；`ApprovalService` 的待审批投影、完整 Step/Tool 身份、单次 revision CAS、幂等决定与最后审批唤醒；Driver 按原始顺序生成 denied ToolResult | Tool Policy/Hook 产生 `waiting_approval` 的入口，以及 `resume_operation` / `reconcile_tool_call` 显式入口 |
+| 2.4 Host 控制面 | 部分完成 | cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`、更新参数冻结与 schema 校验；`ask → waiting_approval`，拒绝统一为 `rejected` 并按原始顺序生成 ToolResult | `resume_operation` / `reconcile_tool_call` 显式入口 |
 
-第三轮验收基线：`738 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject` 和 `NamedReference` 生产路径已删除。
+第三轮验收基线：`746 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject` 和 `NamedReference` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 
