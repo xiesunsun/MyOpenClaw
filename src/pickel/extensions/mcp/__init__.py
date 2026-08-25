@@ -17,15 +17,12 @@ from pickel.extensions.mcp.state import McpExtensionState
 
 logger = logging.getLogger(__name__)
 
-_state: McpExtensionState | None = None
-
 
 class McpExtensionConfig(BaseModel):
     enabled: bool = True
 
 
 async def setup(host) -> None:
-    global _state
     config = host.config(McpExtensionConfig)
     if config is not None and not config.enabled:
         return
@@ -36,12 +33,7 @@ async def setup(host) -> None:
     loaded = load_mcp_config(home=home_dir(), project_root=project_root)
     state = McpExtensionState(diagnostics=loaded.diagnostics)
     host.register_mcp_status_source(state)
-    _state = state
+    # 状态属于本次 ExtensionInstance；由 Host 的 Scope 管理，不能放在
+    # 模块变量里，否则 reload 时旧 Generation 会被新实例覆盖。
+    host.add_disposer(state.close)
     await state.start(loaded.servers.values(), host=host)
-
-
-async def teardown() -> None:
-    global _state
-    if _state is not None:
-        await _state.close()
-        _state = None

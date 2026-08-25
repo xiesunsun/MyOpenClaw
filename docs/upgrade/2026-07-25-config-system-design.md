@@ -1,8 +1,8 @@
 # 配置系统升级设计
 
-> **后续命名说明（2026-08-10）**：本文的配置分层结论保持不变；运行层的 `Agent`、`Run`、`SessionEntry` 等目标态名称，已由 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md) 替代。
+> **当前命名说明（2026-08-25）**：本文只权威定义 Pickel 的配置来源、合并和写回；Runtime 实体与方法名称以 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md) 为准。
 
-**状态**：设计稿（修订）；**产品名确认 pickel**  
+**状态**：配置合同；**产品名确认 pickel**
 **范围**：配置分层、全局会话库与目录过滤、实体命名、与现有模块衔接  
 **标杆**：pi（settings / models / auth 拆分）、Claude Code / Codex（全局会话 + 按目录过滤）
 
@@ -33,15 +33,15 @@
 | 项目覆盖目录 | **`.pickel/`** |
 | PyPI（现） | `pickel-agent`（可维持或后收） |
 | 默认 Agent 人设 | `Pickle`（角色名，可与产品拼写不同） |
-| 代码包（现） | `pickel` → **目标迁为 `pickel`**（实现阶段分步，不叠永久双包） |
+| 代码包 | **`pickel`**（保持） |
 
-家目录与项目点目录以 **pickel** 为准，**不再使用** `.pickel` / `~/.pickel` 作为目标路径。
+家目录与项目点目录固定使用 `~/.pickel/` 和 `.pickel/`；不再并行维护其他拼写或第二套路径。
 
 **命名原则（强制）**
 
 - 直接、短、与文件同词：`Settings` ↔ `settings.json`
 - **能对齐操作系统概念的，优先对齐**（见 §4.0）
-- 禁止为迁就旧代码引入 Manager / Registry / Runtime / Effective / Store 等空壳层名
+- 配置侧禁止为迁就旧代码引入 Manager / Registry / Runtime / Effective / Store 等空壳层名；Runtime 领域中职责明确的 AgentRegistry、RuntimeHost 等不受此条影响
 - 旧实体名与行为冲突时：**改行为、改名或删除**，不叠兼容壳
 - 对话 **Session** 只表示会话落库，不借用为「运行时配置」前缀
 
@@ -118,7 +118,8 @@ flowchart TB
   CLI --> C
   SP --> C
   C --> AC["AppConfig 只读结果"]
-  AC --> Asm["组装 Agent / Run / Provider"]
+  AC --> Def["解析 AgentDefinition"]
+  Def --> Pkg["冻结 AgentPackageVersion"]
 ```
 
 | 优先级（低→高） | 来源 | 写盘 |
@@ -179,12 +180,11 @@ Session 回答「这本对话存了什么」；Environ 回答「这个进程此�
 
 | 名称 | 职责 |
 |------|------|
-| **ConversationSession** | 一本对话的身份和当前提交视图 |
+| **ConversationSession** | 一本对话的身份、Conversation Tree 与活动位置 |
 | **ConversationNode** | 对话树中的不可变位置 |
-| **ConversationEntry** | Node 与内容解析后的只读投影 |
-| **ConversationStore** | `sessions.db` 的持久化窄接口 |
+| **ConversationStore** | `sessions.db` 中 Session/Node 的持久化窄接口 |
 
-### 4.3 Agent Package Snapshot
+### 4.3 Agent Package Version
 
 Pickel 设置始终是唯一可编辑源，不增加 `package.yaml` 或第二套 Agent 配置。
 
@@ -199,10 +199,11 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 ```
 
 - `AgentDefinition` 保存现有设置解析后的来源和选择。
-- `AgentPackageVersion` 冻结 behavior、无密钥模型参数、Skill 全文、工具 schema，以及现有 `react_max_steps` / `context_cli_turn_window` 解析出的 Runtime 设置；ID 为内容 digest。
+- `AgentPackageVersion` 冻结 behavior、`primary/worker/utility` ModelPolicy、无密钥模型参数、AgentRuntimePolicy、WorkspacePolicy、Skill 全文、ToolVersion 与 ExtensionVersion；ID 为规范内容 digest。
 - `LoadedAgentPackage` 持有进程内 ToolSnapshot、SkillManifest 和现阶段运行对象，不能直接持久化。
-- `api_key`、token、password、authorization 等秘密不得进入 Snapshot；只记录所需秘密名称。
+- `api_key`、token、password、authorization 等秘密不得进入 AgentPackageVersion；只记录所需 SecretRef。
 - 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。
+- Environ、Settings 或 Agent 文件变化只影响未来接受的 Operation；已有 Operation 继续使用其 package_version_id 和 workspace_binding。
 - 当前新 Runtime 的验收 Provider 为 Anthropic；已有其他 Provider 设置不扩展新能力。
 
 ### 4.4 废弃 / 禁止的命名
@@ -213,7 +214,7 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 | SettingsManager | 重 | Settings |
 | ModelCatalog | 术语 | Models |
 | AuthStore | 重 | Auth |
-| AgentRegistry | 企业味 | Agents |
+| 配置侧 AgentRegistry | 与运行时注册表同名 | `Agents`；运行时 `AgentRegistry` 保留 |
 | SessionSettings / SessionPatch / SessionOverride | 误绑对话 Session；属进程运行态 | Environ |
 
 旧代码里的 `AppConfig.load(path)`、`from_config_path` 等：**实现阶段直接改行为与调用点**，不保留双轨类型。
@@ -328,7 +329,7 @@ Environ                 # 对齐 Unix process environment：属进程，不属�
 ```
 
 - **全局存储**：所有目录、所有 agent 的会话进同一库  
-- **不是** 项目旁点目录里的 sessions.db（现状 `.pickel/`，勿再放进 `.pickel/`）  
+- **不是** 项目旁 `.pickel/sessions.db`；项目 `.pickel/` 只保存配置覆盖
 - **不是** agent `workspace_path` 下的库  
 
 ### 6.2 按目录过滤（对齐 Claude Code / Codex）
@@ -350,9 +351,9 @@ flowchart TD
 | `pickel sessions delete <id>` | 按 id，不限目录 |
 | resume 指定 id | 按 id，不限目录（id 全局唯一） |
 
-### 6.3 Session 封面需增加的字段
+### 6.3 配置系统关注的 Session 字段
 
-相对现有 `sessions` 表（见 `docs/upgrade/2026-07-12-db-entities.md`），增加：
+完整 Session 表结构以数据库实体合同为准；配置与列表过滤只关心：
 
 | 列 | 类型 | 说明 |
 |----|------|------|
@@ -407,32 +408,33 @@ flowchart TB
   end
 
   subgraph app_pkg["app（包名目标 pickel.app）"]
-    Boot
+    Host[RuntimeHost]
   end
 
-  subgraph run_pkg["运行"]
-    Run
-    Strategy["ExecutionStrategy<br/>ReAct / 后续 PlanExecute / Reflection…"]
-    Provider
+  subgraph runtime_pkg["运行"]
+    Registry[AgentRegistry]
+    Agent
+    Driver[AgentDriver → OperationDriver]
+    Generation[RuntimeGeneration]
   end
 
   subgraph ui_pkg["交互"]
     Chat["ChatLoop 保留名"]
   end
 
-  subgraph data["会话"]
-    Sessions
+  subgraph data["持久化"]
+    Store[Conversation / Inbox / Operation Stores]
   end
 
   Config --> AppConfig
-  AppConfig --> Boot
-  Boot --> Run
-  Boot --> Sessions
-  Environ --> Run
-  Run --> Strategy
-  Run --> Provider
-  Chat --> Run
-  Strategy --> Sessions
+  AppConfig --> Host
+  Environ --> Host
+  Host --> Generation
+  Host --> Registry
+  Registry --> Agent
+  Agent --> Driver
+  Driver --> Store
+  Chat --> Registry
 ```
 
 | 现有 | 目标 |
@@ -441,31 +443,35 @@ flowchart TB
 | `providers` 嵌在 AppConfig | `Models` + `Auth` 合成 `ModelConfig` |
 | `agents` 大表 | `Agents` 扫目录 |
 | `root/.pickel/sessions.db` | `Sessions` → `~/.pickel/sessions.db` |
-| `AppAssembly` | **Boot** |
-| `AgentRuntimeContext` + `RunDependencies` | 合并为 **Run**（唯一运行资源袋） |
-| `AgentCoordinator` | **`Run.turn(...)`**（turn 边界：hook + 写 user + 调 strategy） |
+| `AppAssembly` / `Boot` | `RuntimeHost` Composition Root |
+| `AgentRuntimeContext` + `RunDependencies` | 删除；Package 实现进入 LoadedAgentPackage，Host 服务显式注入 RuntimeEffects |
+| `AgentCoordinator` / `Run.turn(...)` | `Agent.followup()` → Inbox → AgentDriver |
 | `BaseLLMProvider` | **Provider** |
-| `DefaultProviderResolver` / `DefaultToolResolver` | **删除**，Boot/Run 内直接调函数 |
-| `ExecutionStrategy` / `ReActStrategy` | **保留**（见 §7.4） |
+| `DefaultProviderResolver` / `DefaultToolResolver` | 删除；RuntimeGeneration 构建时按 ImplementationRef 解析 |
+| `ExecutionStrategy` / `ReActStrategy` | 删除；默认 Tool Loop 由 OperationDriver 推进 |
 | `ChatLoop` | **保留名与职责**（CLI 交互壳） |
 
-### 7.2 合成 ModelConfig
+### 7.2 冻结 ModelVersion 与 Package
 
 ```mermaid
 sequenceDiagram
-  participant CLI
   participant Config
   participant Models
   participant Auth
   participant Env as Environ
-  participant Prov as Provider
+  participant Package as Package Builder
+  participant Loader as RuntimeGeneration Loader
 
-  CLI->>Config: selection
+  Config->>Env: 读取未来 Operation 的进程覆盖
   Config->>Models: 能力字段
-  Config->>Auth: api_key / api_base
-  Config->>Env: 叠 Environ
-  Config->>Prov: ModelConfig
+  Config->>Auth: 非敏感 endpoint + SecretRef
+  Config->>Package: ModelSelection + 非敏感参数 + SecretRef
+  Package-->>Package: 冻结 AgentPackageVersion
+  Loader->>Auth: load 时解析 SecretRef
+  Loader->>Loader: 构建 LoadedAgentPackage
 ```
+
+Auth 的 Secret 值不进入 AgentDefinition 或 AgentPackageVersion；Package 只保存 SecretRef。`api_base` 等非敏感 endpoint 进入 ModelVersion，因此 endpoint 改变会产生新 Package ID，Secret 值轮换不会。接受 Operation 前使用当前 Secret 校验可装载性，恢复时按原 Package Version 再解析 SecretRef。
 
 ### 7.3 CLI
 
@@ -478,43 +484,43 @@ sequenceDiagram
 | `/model` 或等价 | 改 Environ；可选写入 Settings |
 | 旧 `--config yaml` | 仅迁移期：一次性导入后提示改用分层文件；**不长期保留双配置模型** |
 
-### 7.4 运行层（已拍板）
+### 7.4 运行层（当前合同）
 
 目标调用链：
 
 ```text
-Boot(config)
-  └─ Run.open(agent, …)          # provider / tools / workspace / shell / assembler / …
-        ├─ Environ               # 进程内 model/thinking 等
-        └─ turn(session, text)   # 原 AgentCoordinator.run_turn
-              └─ strategy.execute(run, session)   # ExecutionStrategy
-                    └─ 当前：ReActStrategy
-                    └─ 后续：PlanExecute / Reflection / dynamic workflow（后话）
+RuntimeHost(Config + AppConfig + Environ)
+├── RuntimeGeneration
+│   └── LoadedAgentPackage cache
+└── AgentRegistry
+    └── Agent
+        ├── AgentInbox
+        └── AgentDriver
+            └── OperationDriver
 
-ChatLoop                         # 仅 UI：输入、渲染、斜杠命令 → Run.turn
+ChatLoop                         # UI：输入、渲染、斜杠命令
+└── AgentHandle.followup/steer/inject/cancel
 ```
 
 | 类型 | 决议 |
 |------|------|
-| **ExecutionStrategy** | **保留**。后续接 plan-and-execute、reflection；再往后可扩展为 dynamic workflow。抽象有存在价值 |
-| **ReActStrategy** | **保留**，作为第一种 strategy 实现 |
 | **ChatLoop** | **保留**名与职责，不改成 Repl |
-| **Run** | 替代 RuntimeContext + RunDependencies；`open` 构造，`turn` 跑一轮用户输入 |
-| **Boot** | 替代 AppAssembly；读 Config，产 Run / Sessions |
+| **Agent** | Root/Child 平等的消息、取消和等待接口 |
+| **AgentDriver** | 消费持久化 Inbox，接受或恢复 Operation |
+| **OperationDriver** | 推进默认 Agent Tool Loop，不经 Strategy |
+| **RuntimeHost** | 读取 Config，管理 Generation、Registry 和 reload |
 | **Provider** | 替代 BaseLLMProvider |
-| **Resolver 类** | 删除 |
+| **Resolver 类** | 只允许按 ImplementationRef 解析的窄函数，不创建通用 Resolver 层 |
 
 ```mermaid
 flowchart LR
-  ChatLoop --> Turn["Run.turn"]
-  Turn --> ES["ExecutionStrategy"]
-  ES --> ReAct
-  ES --> PE["PlanExecute 后续"]
-  ES --> Refl["Reflection 后续"]
-  ES --> Dyn["dynamic workflow 后话"]
+  ChatLoop --> Agent
+  Agent --> Inbox[InboxMessage]
+  Inbox --> AD[AgentDriver]
+  AD --> OD[OperationDriver]
 ```
 
-实现顺序建议：配置 P0 时 Boot 直接 `Run.open`，顺手删掉 `AgentRuntimeContext`；Strategy 层次不动。
+不为未来 PlanExecute/Reflection 预留 Strategy 接口。出现真实且不可由 Package/Prompt/Tool 合同表达的第二种流程后，才讨论窄用途 `RunWorkflow`。
 
 ---
 
@@ -533,7 +539,9 @@ flowchart LR
 1. deep merge；数组整表替换  
 2. 按 scope（global / project）只写变更字段  
 3. 文件锁  
-4. API 分离：`patch_session` vs `set_settings(..., save=True)`
+4. API 分离：`set_environ(...)` 只改进程覆盖；`set_settings(..., save=True)` 写入文件
+
+Environ 变化不修改 ConversationSession 或 active Operation。下一个 Operation 接受时，Package Builder 使用最新 Environ 冻结新的 AgentPackageVersion；waiting/resume Operation 继续使用原 package_version_id。
 
 Agent 经工具改配置：第一期可不做；先做 CLI / 斜杠命令。密钥字段禁止 agent 随意写。
 
@@ -603,11 +611,11 @@ flowchart TD
 
 | 阶段 | 内容 | 验收 |
 |------|------|------|
-| **P0** | Config / Settings / Models / Auth；路径用 `~/.pickel`；会话库全局 + `cwd`；Boot + Run.open（删 RuntimeContext） | chat 可用；列表默认可按目录滤 |
+| **P0** | Config / Settings / Models / Auth；路径用 `~/.pickel`；会话库全局 + `cwd`；RuntimeHost 读取 AppConfig | chat 可用；列表默认可按目录滤 |
 | **P1** | Agents 目录发现；迁移命令；删对 yaml 大表依赖 | 无 `config.yaml` agents 段可运行 |
-| **P2** | Settings 写回；Environ；`/model` 等；Coordinator → `Run.turn`；Provider 改名 | 运行时改配置；运行层命名到位 |
-| **P3** | 去掉旧 `--config`；扫掉 `.pickel` 路径；代码包名迁 `pickel`（可分 PR） | 与本文一致 |
-| **后话** | PlanExecute / Reflection strategy；再 dynamic workflow | Strategy 接口稳定后扩展 |
+| **P2** | Settings 写回；Environ；`/model` 等；Package Builder 冻结未来 Operation 设置 | 运行时改配置且不改变 active Operation |
+| **P3** | 去掉旧 `--config` 和项目旁 `.pickel/sessions.db` 读取路径 | 与本文一致 |
+| **后话** | 只有真实第二种流程出现时讨论 RunWorkflow | 不预留 Strategy 公共层 |
 
 ---
 
@@ -620,7 +628,7 @@ flowchart TD
 5. **sessions.db 全局唯一**；列表默认按 `cwd` 过滤；`--all` 看全部  
 6. **命名不欠债**：旧名直接改删，不叠兼容类型  
 7. agent workspace ≠ session cwd ≠ 会话库路径  
-8. 产品与路径统一 **pickel**（`pickel` CLI、`~/.pickel`、`.pickel`）；代码包目标 `pickel`  
+8. 产品与路径统一 **pickel**（`pickel` CLI、`pickel` 包、`~/.pickel`、`.pickel`）
 
 ---
 
@@ -639,7 +647,7 @@ flowchart TD
 ## 14. 小结
 
 - 配置：分层文件 + **Config** 合并 → **AppConfig**；写用 **Settings**，模型用 **Models**，密钥用 **Auth**，角色用 **Agents**，进程覆盖用 **Environ**。  
-- 产品：**pickel**（CLI / `~/.pickel` / `.pickel`）；代码包目标从 `pickel` 迁到 `pickel`。  
+- 产品：**pickel**（CLI / Python 包 / `~/.pickel` / `.pickel`）。
 - 会话：**全局一个 db**（`~/.pickel/sessions.db`）；交互只看当前目录；管理命令可看全部。  
-- 运行：**Boot** → **Run**（`open` / `turn`）→ **ExecutionStrategy**（**保留**，ReAct 为首，后续 plan-execute / reflection / workflow）；**ChatLoop** 保留；**Provider** 去 Base 前缀。  
-- 命名与路径以本文为准；实现时改旧代码，不为旧账保留第二套实体。
+- 运行：**RuntimeHost** → **AgentRegistry** → **Agent / AgentDriver** → **OperationDriver**；ChatLoop 只作为 UI，Provider 去 Base 前缀。
+- 配置命名与路径以本文为准；Runtime 命名以命名合同为准。实现时改旧代码，不为旧账保留第二套实体。

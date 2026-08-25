@@ -27,7 +27,7 @@ def test_model_context_holds_system_messages_tools():
 
 def test_system_content_from_text_and_as_text():
     empty = SystemContent.from_text("")
-    assert empty.sections == []
+    assert empty.sections == ()
     assert empty.as_text() == ""
 
     content = SystemContent.from_text("you are pickle")

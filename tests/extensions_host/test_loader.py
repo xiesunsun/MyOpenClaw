@@ -5,6 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import pytest
+
 from pickel.extensions_host.loader import load_extensions
 from pickel.tools.bus import ToolBus, ToolSource
 
@@ -63,6 +65,14 @@ def setup(host):
 
 _ASYNC_EXT = """
 async def setup(host):
+    host.add_recall_source(lambda scope: f"recall-from-{host.name}")
+"""
+
+_VERSIONED_EXT = """
+__version__ = "1.2.3"
+
+def setup(host):
+    host.add_hook_handler(lambda scope: f"hook-from-{host.name}")
     host.add_recall_source(lambda scope: f"recall-from-{host.name}")
 """
 
@@ -178,6 +188,79 @@ class LoaderDiscoveryTests(unittest.TestCase):
             )
 
             self.assertEqual([], result.errors)
+
+    def test_publishes_exact_version_with_source_digest_and_sanitized_config(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_extension(home, "versioned", _VERSIONED_EXT)
+
+            result = load_extensions(
+                tool_bus=ToolBus(),
+                app_config=_app_config(
+                    {
+                        "versioned": {
+                            "endpoint": "https://example.test",
+                            "api_token": "do-not-persist",
+                            "nested": {"password": "also-secret", "enabled": True},
+                        }
+                    }
+                ),
+                home=home,
+                builtin_package=None,
+            )
+
+            version = result.extension_versions["versioned"]
+            self.assertEqual(version, result.registry.extension_versions["versioned"])
+            self.assertEqual("1.2.3", version.version)
+            self.assertEqual("1.2.3", version.implementation_ref.version)
+            self.assertEqual(64, len(version.implementation_ref.digest or ""))
+            self.assertEqual(
+                {
+                    "endpoint": "https://example.test",
+                    "nested": {"enabled": True},
+                },
+                version.config,
+            )
+            self.assertEqual(
+                [
+                    "extensions.versioned.api_token",
+                    "extensions.versioned.nested.password",
+                ],
+                [ref.name for ref in version.required_secret_refs],
+            )
+
+            scope = SimpleNamespace(agent_id="Pickle", app_config=None)
+            hooks, recalls = result.registry.resolve_extension_contributions(
+                version, scope
+            )
+            self.assertEqual(("hook-from-versioned",), hooks)
+            self.assertEqual(("recall-from-versioned",), recalls)
+
+    def test_exact_extension_evaluation_does_not_swallow_factory_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_extension(
+                home,
+                "broken_factory",
+                """
+def setup(host):
+    def boom(scope):
+        raise RuntimeError('factory boom')
+    host.add_recall_source(boom)
+""",
+            )
+            result = load_extensions(
+                tool_bus=ToolBus(),
+                app_config=_app_config(),
+                home=home,
+                builtin_package=None,
+            )
+            version = result.extension_versions["broken_factory"]
+            scope = SimpleNamespace(agent_id="Pickle", app_config=None)
+            with pytest.raises(RuntimeError, match="factory boom"):
+                result.registry.resolve_extension_contributions(version, scope)
 
 
 class LoaderIsolationTests(unittest.TestCase):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -28,6 +29,7 @@ class McpServerRuntime:
         self._reconnect_lock = asyncio.Lock()
         self._status = "connecting"
         self._last_error: str | None = None
+        self._tool_leases: list[Any] = []
 
     async def start(self) -> None:
         self._status = "connecting"
@@ -35,7 +37,7 @@ class McpServerRuntime:
         self._connection = McpConnection(self.spec)
         try:
             await self._connection.open()
-            self._register_tools()
+            await self._register_tools()
         except Exception as exc:
             self._status = "failed"
             self._last_error = _safe_error(exc)
@@ -155,21 +157,46 @@ class McpServerRuntime:
 
     async def close(self) -> None:
         try:
+            await self._close_tool_leases()
             if self._connection is not None:
                 await self._connection.close()
         finally:
             self._connection = None
-            self._host.unregister_mcp_origin(self.spec.name)
             self._status = "closed"
 
-    def _register_tools(self) -> None:
-        # 先卸后注：server 升级后消失的工具被剔除
-        self._host.unregister_mcp_origin(self.spec.name)
+    async def _close_tool_leases(self) -> None:
+        leases = self._tool_leases
+        self._tool_leases = []
+        for lease in reversed(leases):
+            try:
+                await lease.close()
+            except Exception:
+                # 一个工具的精确清理失败不能阻止其余工具和连接释放。
+                logger.exception(
+                    "MCP server '%s' tool lease close failed", self.spec.name
+                )
+
+    async def _register_tools(self) -> None:
+        # 重连先关闭本次 runtime 捕获的精确 leases。不能按 server origin
+        # 批量注销，因为同名工具可能已经属于另一代 ExtensionInstance。
+        await self._close_tool_leases()
         assert self._connection is not None
-        for tool in self._connection.tools:
-            self._host.register_mcp_tool(
-                McpProxyTool(self, tool), server=self.spec.name
-            )
+        try:
+            for tool in self._connection.tools:
+                proxy = McpProxyTool(self, tool)
+                name_or_lease = self._host.register_mcp_tool(
+                    proxy, server=self.spec.name
+                )
+                self._tool_leases.append(
+                    _McpToolLease(
+                        self._host,
+                        name_or_lease,
+                        proxy,
+                    )
+                )
+        except BaseException:
+            await self._close_tool_leases()
+            raise
 
     async def _reconnect(self) -> None:
         async with self._reconnect_lock:
@@ -180,16 +207,16 @@ class McpServerRuntime:
             if self._connection is not None:
                 await self._connection.close()
                 self._connection = None
+            await self._close_tool_leases()
             connection = McpConnection(self.spec)
             try:
                 await connection.open()
             except McpConnectionError as exc:
-                self._host.unregister_mcp_origin(self.spec.name)
                 self._status = "failed"
                 self._last_error = _safe_error(exc)
                 raise
             self._connection = connection
-            self._register_tools()
+            await self._register_tools()
             self._status = "connected"
             self._last_error = None
 
@@ -214,3 +241,42 @@ def _safe_error(exc: Exception) -> str:
     """状态输出只保留有限错误文本，不包含配置 env 或启动参数。"""
     message = str(exc).strip() or type(exc).__name__
     return message[:500]
+
+
+class _McpToolLease:
+    """兼容旧 Host 返回名称与新 Host 返回精确 Lease 的适配层。
+
+    当前 Host 的 ``register_mcp_tool`` 在 setup draft 阶段返回名称；新的
+    Host 可以直接返回 ContributionLease。旧返回值也会在关闭时按捕获的
+    ToolEntry 身份删除，绝不按 origin 猜测或批量注销。
+    """
+
+    def __init__(self, host: Any, registration: Any, tool: Any) -> None:
+        self._host = host
+        self._registration = registration
+        self._tool = tool
+        self._closed = False
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._registration, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+            return
+
+        # 仅用于迁移期旧 Host：名称不能唯一标识一次注册，因此还要检查
+        # 当前 Entry 是否仍指向本次创建的 proxy。
+        name = self._registration
+        bus = getattr(self._host, "_tool_bus", None)
+        if bus is None:
+            return
+        try:
+            entry = bus.get(name)
+        except KeyError:
+            return
+        if entry.tool is self._tool:
+            bus._remove_entry(entry)

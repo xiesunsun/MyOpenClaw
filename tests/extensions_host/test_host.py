@@ -139,17 +139,6 @@ class McpHostApiTests(unittest.TestCase):
         self.assertEqual("github", bus.get(qualified).origin)
         self.assertIs(ToolSource.MCP, bus.get(qualified).source)
 
-    def test_unregister_mcp_origin_removes_only_that_server(self) -> None:
-        bus = ToolBus()
-        host = self._mcp_host(bus)
-        host.register_mcp_tool(_stub_tool("a"), server="github")
-        host.register_mcp_tool(_stub_tool("b"), server="jira")
-
-        removed = host.unregister_mcp_origin("github")
-
-        self.assertEqual(["mcp__github__a"], removed)
-        self.assertEqual(["mcp__jira__b"], bus.list_names(source=ToolSource.MCP))
-
     def test_app_config_is_exposed(self) -> None:
         host = self._mcp_host(ToolBus())
 

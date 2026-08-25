@@ -1,4 +1,4 @@
-"""MCP extension 的进程级状态所有者。"""
+"""单个 MCP ExtensionInstance 的状态所有者。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class McpExtensionState:
-    """持有全部 server runtime，包括启动失败但需要被观察的 server。"""
+    """持有本次 ExtensionInstance 的 server runtime。"""
 
     def __init__(self, *, diagnostics: Iterable[str] = ()) -> None:
         self._runtimes: dict[str, McpServerRuntime] = {}

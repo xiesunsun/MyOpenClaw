@@ -24,10 +24,8 @@ def test_user_message_round_trip():
 
 def test_user_message_with_artifact_reference_round_trip():
     reference = ArtifactReference(
-        artifact_id="artifact_1",
-        digest="a" * 64,
+        artifact_id="artifact_" + "a" * 64,
         media_type="image/png",
-        size_bytes=42,
         display_name="chart.png",
     )
     msg = UserMessage(content=[ArtifactBlock(artifact=reference, alt_text="chart")])
@@ -35,7 +33,7 @@ def test_user_message_with_artifact_reference_round_trip():
     payload = agent_message_to_dict(msg)
 
     assert payload["content"][0]["type"] == "artifact"
-    assert payload["content"][0]["artifact"]["artifact_id"] == "artifact_1"
+    assert payload["content"][0]["artifact"]["artifact_id"] == reference.artifact_id
     assert agent_message_from_dict(payload) == msg
 
 

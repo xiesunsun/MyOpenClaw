@@ -2,72 +2,66 @@
 
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
-from pickel.agents.agent_package import AgentPackageVersion, AgentSkillVersion
-from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
+from pickel.agents.agent_package import AgentPackageVersion, SkillVersion
 from pickel.context.model_context import (
     ModelContext,
     SystemContent,
     SystemSection,
     ToolDefinition,
 )
-from pickel.context.projection import ConversationProjector
 from pickel.context.templates_loader import load_templates
-from pickel.context.window import apply_window
 from pickel.conversations.agent_message import AgentMessage
-from pickel.conversations.conversation_node import ConversationEntry
+
+
+@dataclass(frozen=True)
+class ContextContributions:
+    """Recall/Hook 在 Intent 提交前产生的受限、不可变追加内容。"""
+
+    system_sections: tuple[SystemSection, ...] = ()
+    messages: tuple[AgentMessage, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "system_sections", tuple(self.system_sections))
+        object.__setattr__(self, "messages", tuple(self.messages))
 
 
 class ModelContextBuilder:
     """只从冻结 Package、持久化会话事实和显式旁路输入构造请求。"""
 
-    def __init__(
-        self,
-        projector: ConversationProjector | None = None,
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> None:
-        self._projector = projector or ConversationProjector()
-        self._environ = os.environ if environ is None else environ
-
     def build_model_context(
         self,
         *,
-        agent_package_version: AgentPackageVersion,
-        conversation_entries: Sequence[ConversationEntry],
-        recalled_messages: Sequence[AgentMessage] = (),
-        hook_feedback: Sequence[HookFeedback] = (),
+        package: AgentPackageVersion,
+        visible_messages: Sequence[AgentMessage],
+        contributions: ContextContributions = ContextContributions(),
     ) -> ModelContext:
-        messages = self._projector.project_conversation_messages(conversation_entries)
-        messages = apply_window(
-            messages,
-            turn_window=agent_package_version.runtime.context_turn_window,
-        )
-        messages.extend(recalled_messages)
         return ModelContext(
-            system=self._build_system(agent_package_version),
-            messages=append_hook_feedback(messages, list(hook_feedback)),
-            tools=[
+            system=self._build_system(package, contributions=contributions),
+            messages=tuple(visible_messages) + contributions.messages,
+            tools=tuple(
                 ToolDefinition(
                     name=tool.name,
                     description=tool.description,
                     input_schema=tool.input_schema,
                 )
-                for tool in agent_package_version.tools
-            ],
+                for tool in package.tools
+            ),
         )
 
-    def _build_system(self, version: AgentPackageVersion) -> SystemContent:
-        active_skills = [
-            skill for skill in version.skills if skill.status != "archived"
-        ]
+    def _build_system(
+        self,
+        version: AgentPackageVersion,
+        *,
+        contributions: ContextContributions,
+    ) -> SystemContent:
         sections = []
         behavior = version.behavior_instruction.strip()
         if behavior:
             sections.append(SystemSection(name="behavior", text=behavior))
-        if active_skills:
+        if version.skills:
             sections.append(
                 SystemSection(
                     name="skills_guidance",
@@ -77,30 +71,19 @@ class ModelContextBuilder:
             sections.append(
                 SystemSection(
                     name="skills_catalog",
-                    text=self._format_skill_catalog(active_skills),
+                    text=self._format_skill_catalog(version.skills),
                 )
             )
-        return SystemContent(sections=sections)
+        sections.extend(contributions.system_sections)
+        return SystemContent(sections=tuple(sections))
 
     def _format_skill_catalog(
         self,
-        skills: Sequence[AgentSkillVersion],
+        skills: Sequence[SkillVersion],
     ) -> str:
         lines = ["Available skills:"]
         for skill in skills:
-            marks = []
-            if skill.version:
-                marks.append(f"v{skill.version}")
-            if skill.status == "stale":
-                marks.append("stale")
-            missing = [
-                name for name in skill.required_env if not self._environ.get(name)
-            ]
-            if missing:
-                marks.append(f"unavailable: needs {', '.join(missing)}")
-            suffix = f" ({'; '.join(marks)})" if marks else ""
-            lines.append(
-                f"- {skill.name}: {skill.description} "
-                f"(read {skill.source_path}){suffix}"
-            )
+            version = f" v{skill.version}" if skill.version else ""
+            lines.append(f"\n## {skill.name}{version}\n{skill.description}")
+            lines.append(skill.content)
         return "\n".join(lines)

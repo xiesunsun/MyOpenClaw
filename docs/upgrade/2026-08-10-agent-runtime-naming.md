@@ -1,302 +1,279 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**状态**：已实施，作为 Runtime 演进的命名合同
-**范围**：Agent Runtime、持久化实体、执行状态、多模态与多 Agent 的代码命名
-**不在范围**：具体 Provider 协议、数据库列级说明和产品排期
+**更新日期**：2026-08-25
+**状态**：目标合同，实施中
+**范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
+**不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
-本文只定义“一个概念叫什么、负责什么”。后续设计和实现出现同义名称时，以本文为准；历史设计稿仍可说明当时的实现，但不再决定目标态命名。
+本文只回答“一个概念叫什么、负责什么”。数据库字段遵循 [`数据库实体设计`](./2026-07-12-db-entities.md)，执行恢复遵循 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)，详细理由遵循 [`Runtime 实体决策`](./2026-08-24-runtime-entity-decisions.md)。旧实现出现同义名称时，以本文为目标态。
 
 ## 1. 命名原则
 
 1. 一个概念只有一个名称，一个名称只表达一种生命周期。
-2. 实体名说明“它是什么”，方法名说明“它做什么”。
-3. 跨模块类型使用完整名称，不用脱离上下文后含义不明的缩写。
-4. `State`、`Event`、`Snapshot`、`Definition`、`Version`、`Reference` 各有固定语义，禁止混用。
-5. 不为迁就旧代码保留永久别名；迁移完成后删除旧名。
-6. 禁止用 `Manager`、`Processor`、`Handler`、`Util`、`Object`、`Context` 掩盖多种职责。
-7. 底层存储可以使用通用类型，但领域层必须暴露带业务含义的类型和方法。
+2. Entity 表示稳定身份；Value Object 表示无独立生命周期的数据；Service/Driver 只承担窄行为。
+3. `State` 只表示可持久化、可恢复的当前执行状态。
+4. `Definition` 是可编辑来源，`Version` 是不可修改且可稳定引用的冻结内容。
+5. `Intent` 表示外部副作用发生前已经提交的精确决定。
+6. `Event` 是可丢失通知，不是恢复事实；`Trace` 是可丢失诊断副本。
+7. 禁止用 `Manager`、`Coordinator`、`Processor`、`Handler`、`Context` 或任意资源袋掩盖多种职责。
+8. 迁移完成后删除旧名，不保留永久 Alias、Adapter 或双轨生产路径。
 
-固定后缀的含义：
+固定后缀：
 
-| 后缀 | 只表示 |
+| 后缀 | 唯一语义 |
 | --- | --- |
-| `State` | 可持久化、可恢复的当前执行状态 |
-| `Event` | 已发生、供订阅者观察的通知 |
-| `Snapshot` | 在明确边界捕获的完整只读视图 |
-| `Definition` | 用户可以编辑的源定义 |
-| `Version` | 不可修改、可稳定引用的已解析版本 |
-| `Reference` | 可以移动、指向另一持久化实体的引用 |
-| `Entry` | Node 与内容解析后的只读视图 |
-| `Operation` | 已被 Session 接受、可恢复且有终态的工作 |
-| `Run` | 一次用户输入到最终回答的 Agent 执行 |
-| `Step` | AgentRun 内的一次模型请求、响应和工具批次 |
+| `State` | 可更新、可恢复的当前状态 |
+| `Intent` | 跨越外部执行边界前冻结的决定 |
+| `Event` | 已发生事实或生命周期的进程内通知 |
+| `Snapshot` | 明确边界捕获的完整只读诊断视图 |
+| `Definition` | 用户可编辑的源定义 |
+| `Version` | 内容冻结、创建后不修改的版本 |
+| `Reference` | 对另一稳定 Entity 的值引用；不表示可移动数据库指针 |
+| `Operation` | 已被 Session 接受、可恢复且具有明确终态的工作 |
+| `Step` | AgentRun 中一次模型请求、响应和工具批次 |
+| `Driver` | 重复推进一个明确状态机直到等待或终态 |
 
 ## 2. 执行层级
 
 ```text
 ConversationSession
-└── SessionOperation
-    ├── AgentRun
-    │   └── ModelStep
-    │       └── ToolCall
-    ├── HistoryCompaction
-    └── HistoryNavigation
+└── SessionOperation                 不可变执行身份
+    └── AgentRunState                当前唯一执行状态
+        └── ModelStepState?          当前模型步骤
+            └── ToolCallState[]      当前工具调用状态
 ```
 
-| 名称 | 唯一含义 | 持久化 |
+| 名称 | 唯一含义 | 是否独立落库 |
+| --- | --- | ---: |
+| `ConversationSession` | 一棵 Conversation Tree、一个活动位置和 Inbox 归属 | 是 |
+| `SessionOperation` | Session 接受的一次不可变 AgentRun 身份与执行环境绑定 | 是 |
+| `AgentRunState` | 一个 Operation 的当前可恢复状态 | 是，一行 CAS 更新 |
+| `ModelStepState` | 当前模型请求、响应及工具批次 | 否，嵌入 AgentRunState |
+| `ToolCallState` | 当前 ToolCall 的审批、Intent、执行与结果状态 | 否，嵌入 ModelStepState |
+
+当前只有一种 SessionOperation：AgentRun。因此不保存 `operation_type`，也不创建独立 `AgentRun` 表。只有第二种工作同时需要 Session 接受、持久化、恢复、resume/cancel 和明确终态时，才给 SessionOperation 增加类型判别。
+
+`Turn`、`Job`、`Task` 不作为 Runtime 核心实体。统一身份：
+
+```text
+session_id
+operation_id
+step_id
+tool_call_id
+message_id
+```
+
+不再为同一执行维护 `turn_id`、`run_id`、`batch_id` 或 `lane_id`。
+
+## 3. Runtime 组件
+
+```mermaid
+flowchart LR
+    H[RuntimeHost] --> G[RuntimeGeneration]
+    H --> R[AgentRegistry]
+    R --> A[Agent]
+    A --> I[AgentInbox]
+    A --> D[AgentDriver]
+    D --> O[OperationDriver]
+    O --> S[AgentRunStateMachine]
+    O --> E[RuntimeEffects]
+```
+
+| 名称 | 唯一职责 |
+| --- | --- |
+| `RuntimeHost` | 进程启动、shutdown、配置 reload 和 RuntimeGeneration 切换 |
+| `RuntimeGeneration` | 一代完整可执行贡献及其生命周期所有权 |
+| `ContributionScope` | 注册贡献和外部资源的 LIFO 撤销边界 |
+| `AgentRegistry` | 单进程 `session_id → live Agent` 唯一映射、引用与唤醒 |
+| `AgentHandle` | 一个调用方对 live Agent 的精确、幂等引用 |
+| `Agent` | Root/Child 平等的消息、取消和等待接口 |
+| `AgentInbox` | 持久化 InboxMessage 的内存窄投影，不保存第二份队列 |
+| `AgentDriver` | 判断 Session 是否 runnable，串行接受或恢复 Operation |
+| `OperationDriver` | 推进一个已有 Operation，直到 waiting 或终态 |
+| `AgentRunStateMachine` | 校验 AgentRunState、ModelStepState 和 ToolCallState 转换 |
+| `RuntimeEffects` | Provider、Tool、Hook、Recall、Timer 等外部作用的窄执行边界 |
+
+删除目标态中的 `AgentRuntime` 和 `RuntimeBindings`。前者的接受/调度职责分别进入 AgentDriver 与 OperationDriver；后者的 Package 实现进入 LoadedAgentPackage，Host 级服务显式传给 RuntimeEffects。
+
+`ConversationRuntime` 只允许作为 Host/UI Adapter 临时存在；它不拥有业务状态机、Context、Provider 或 Tool Loop。迁移完成后若无独立产品职责则删除。
+
+## 4. Agent Package
+
+| 名称 | 唯一职责 |
+| --- | --- |
+| `AgentDefinition` | 从 Pickel 配置、AGENT.md 等来源解析出的可编辑蓝图 |
+| `AgentPackageVersion` | 内容寻址、不可修改的一次执行配置快照 |
+| `LoadedAgentPackage` | 当前 RuntimeGeneration 中解析了 Secret 与可执行实现的 Package |
+| `LoadedPackageHandle` | Operation 对 LoadedAgentPackage 和 Generation 的引用 |
+| `ModelPolicy` | `primary / worker / utility` 三层模型选择 |
+| `AgentRuntimePolicy` | 最大 Step、Context Window、Delegation 深度等执行限制 |
+| `WorkspacePolicy` | Package 声明的文件访问范围 |
+| `WorkspaceBinding` | Operation 接受时冻结的实际执行目录和安全边界 |
+
+每个 SessionOperation 接受时绑定确定的 `AgentPackageVersion` 和 `WorkspaceBinding`。Definition、Settings 或 Environ 的后续变化只影响未来 Operation。
+
+## 5. 持久化实体
+
+| 名称 | 身份 | 职责 |
 | --- | --- | --- |
-| `ConversationSession` | 一棵可分支的会话树及其活动位置 | 是 |
-| `SessionOperation` | Session 接受的一次可恢复操作 | 是 |
-| `AgentRun` | 一次用户输入到最终回答的完整执行 | 是 |
-| `ModelStep` | 一次模型请求、响应及其工具批次 | 通过 OperationState 表达 |
-| `ToolCall` | 一次具体工具调用 | 是 |
-| `HistoryCompaction` | 一次会话历史压缩 | 是 |
-| `HistoryNavigation` | 一次会话树位置移动 | 是 |
+| `Workspace` | `workspace_id` | 实际目录的长期身份 |
+| `ConversationSession` | `session_id` | 会话树、活动位置、active Operation 和归档状态 |
+| `ConversationNode` | `node_id` | 树位置与 Provider-neutral 类型化内容 |
+| `InboxMessage` | `message_id` | 持久化输入、FIFO、delivery 和 claim 结果 |
+| `SessionOperation` | `operation_id` | 不可变执行身份、Package 与 Workspace 绑定 |
+| `AgentRunState` | `operation_id` | 当前可恢复执行状态 |
+| `AgentPackageVersion` | `package_version_id` | 内容寻址配置快照 |
+| `Artifact` | `artifact_id` | 内容寻址二进制元数据 |
+| `AgentDelegation` | `child_session_id` | Parent Operation 与长期 child Session 的因果关系 |
 
-`Turn` 不再作为 Runtime 核心执行实体。界面或统计可以把一问一答投影为 conversation turn，但持久化、事件和恢复统一使用上表术语。
+ConversationNode 直接保存 `agent_message` 或 `history_compaction` 内容。目标态删除：
 
-持久化操作统一使用 `operation_id`。模型步骤使用 `step_id`，工具调用使用 `tool_call_id`；不再为同一执行同时维护 `turn_id`、`run_id` 和 `operation_id`。
+- `ImmutableObject`
+- `NamedReference`
+- `StorageCommit`
+- `ConversationEntry`
+- `ConversationNode → Object` 间接层
+- Operation State 历史 Snapshot 链
 
-## 3. Runtime 与 Agent
+`ConversationSession.active_node_id` 是活动位置的唯一权威；`active_operation_id` 是恢复当前 Operation 的唯一入口；`AgentRunState.revision` 是执行状态 CAS 权威。
 
-### 3.1 Runtime 层级
-
-| 名称 | 职责 |
-| --- | --- |
-| `RuntimeHost` | 进程级入口，创建和管理活动会话 |
-| `ConversationRuntime` | 一个活动 Session 面向 Host 的控制与观察接口 |
-| `AgentRuntime` | 接受并驱动 SessionOperation 的核心运行引擎 |
-| `RuntimeBindings` | Provider、工具、Hook 等进程内实现的只读绑定 |
-| `RuntimeBus` | Runtime 的事件与 Host Call 组合边界；保留现名 |
-
-`AgentRuntime` 不能成为新的依赖资源袋。它持有窄接口并协调 Operation；Provider、工具和 Hook 的具体实现通过 `RuntimeBindings` 提供。
-
-### 3.2 Agent 层级
-
-| 名称 | 职责 |
-| --- | --- |
-| `AgentDefinition` | 从用户文件读取的、可编辑的 Agent 源定义 |
-| `AgentPackageVersion` | 解析完成、不可修改、可按 ID 或 digest 引用的 Agent 版本 |
-| `LoadedAgentPackage` | 当前进程中已解析出工具和 Skill 实现的 Package |
-
-每个 `AgentRun` 在接受时绑定确定的 `AgentPackageVersion`。运行中修改 Definition 不得改变已经开始的 Operation。
-
-现有的 `Provider`、`UserMessage`、`AssistantMessage`、`ToolCall`、`HostCall` 和 `RuntimeBus` 已能直接表达职责，继续保留；禁止为了形式统一做无意义改名。
-
-## 4. 持久化实体
-
-存储底层采用不可变对象、会话节点、可移动引用和原子事务：
-
-| 名称 | 含义 |
-| --- | --- |
-| `ImmutableObject` | 创建后不可更新的 JSON 对象 |
-| `ConversationNode` | 内容在会话树中的位置 |
-| `NamedReference` | 指向 Object 或 Node 的可移动持久化引用 |
-| `StorageTransaction` | 原子提交的一组 Object、Node 和 Reference 变化 |
-| `ConversationEntry` | ConversationNode 与其内容解析后的只读视图 |
+## 6. Context
 
 ```text
-NamedReference ──► ImmutableObject
-               └► ConversationNode ──► ImmutableObject
+ConversationProjector
+    Conversation Tree → Conversation Messages
+
+ContextWindow
+    Conversation Messages → Visible Messages
+
+RuntimeEffects
+    Visible Messages → Recall/Hook ContextContributions
+
+ModelContextBuilder
+    Package + Visible Messages + Contributions → ModelContext
+
+Provider Request Mapper
+    ModelContext → Provider wire request
 ```
 
-`commit_sequence` 表示 Session 内的持久化提交顺序；`event_sequence` 表示 EventBus 内的观测事件顺序。二者作用域不同，不可比较。共享 `commit_sequence` 用于事务排序、审计和 Watch cursor，不通过扫描历史恢复当前 Operation。
-
-当前 Operation 的唯一恢复入口是：
-
-```text
-OperationStateReference
-└── SessionOperationState
-    ├── AgentRunState
-    ├── HistoryCompactionState
-    └── HistoryNavigationState
-```
-
-每次状态转换创建新的不可变 State，并移动 `OperationStateReference`。旧 State 保留用于审计，但恢复不执行历史 reducer。
-
-### 4.1 会话树字段与方法
-
-| 当前名称 | 目标名称 |
+| 名称 | 唯一职责 |
 | --- | --- |
-| `Session` | `ConversationSession` |
-| `SessionEntry`（持久化节点） | `ConversationNode` |
-| Node 与内容的组合结果 | `ConversationEntry` |
-| `leaf_id` | `active_node_id` |
-| `active_path()` | `list_active_branch_entries()` |
-| `move_leaf()` | `move_active_branch_to()` |
-| `append_user()` | `append_user_message()` |
-| `append_assistant()` | `append_assistant_message()` |
+| `ConversationProjector` | 沿固定 leaf 投影 AgentMessage 和 HistoryCompaction |
+| `ContextWindow` | 只裁剪 Conversation Messages |
+| `ContextContributions` | Recall/Hook 返回的深度不可变追加数据 |
+| `ModelContextBuilder` | 创建唯一 Provider-neutral ModelContext |
+| `ModelContext` | 深度不可变的 system/messages/tools |
+| `ModelRequestIntent` | 当前 Step 已决定发送的完整 ModelContext 和 fingerprint |
+| `AnthropicRequestMapper` | ModelContext 到 Anthropic wire 的纯映射 |
 
-若以后引入共享历史的 Lane，活动位置命名为 `SessionLane.active_node_id`。不再并列使用 `leaf_id`、`head_id`、`cursor_id` 和 `current_entry_id`。
+删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`PreparedContext` 和 Provider 周围的二次组装。`prepare()` 统一为 `build_model_context()`；generate、stream、count_tokens 和 RequestSnapshot 复用同一 Provider Mapper。
 
-## 5. Operation 状态与副作用
+## 7. Tool、Approval 与 HostCall
 
-### 5.1 状态名称
-
-Provider 请求使用：
-
-```text
-ModelRequestReady
-ModelRequestIntentRecorded
-ModelRequestRetryScheduled
-ModelRequestCompleted
-```
-
-工具调用使用：
-
-```text
-ToolCallReady
-ToolCallIntentRecorded
-ToolCallCompleted
-```
-
-`IntentRecorded` 表示“执行意图已经持久化，但外部操作是否已经发生并不确定”。禁止用 `started` 表示这个状态，也不使用含义不明的 `effect_pending`。
-
-### 5.2 执行组件
-
-| 名称 | 只负责 |
+| 名称 | 语义 |
 | --- | --- |
-| `OperationDriver` | 推进 Operation，直到暂停或结束 |
-| `OperationStateMachine` | 校验状态并决定合法转换 |
-| `RuntimeEffects` | 持久化、模型、工具、Hook 和 Timer 等副作用 |
-| `ModelContextBuilder` | 构造 Provider-neutral 的 ModelContext |
-| `ConversationProjector` | 将会话分支投影成模型可见消息 |
-| `AnthropicRequestMapper` | 将 ModelContext 映射为 Anthropic 请求 |
-| `ToolCallExecutor` | 准备、校验并执行 ToolCall |
+| `ToolCallState` | 当前 ToolCall 的持久化状态 |
+| `ToolExecutionIntent` | Tool 外部副作用前冻结的工具特定决定 |
+| `ToolReplayPolicy` | `safe / never` 自动重放策略 |
+| `ToolApproval` | 嵌入 ToolCallState 的持久化审批请求和决定 |
+| `ApprovalService` | 通过 revision CAS 接受批准或拒绝 |
+| `HostCallSpec` | 瞬时、类型化 Host 能力定义 |
+| `HostCallRouter` | 进程内 Host 请求—响应路由，不负责恢复 |
 
-推荐方法名：
+`HostCall` 不等于可恢复外部等待。需要重启后继续等待的交互必须由所属业务状态机持久化；当前只实现 ToolApproval。
 
-```python
-decide_next_action()
-drive_operation()
-resume_operation()
-cancel_operation()
+## 8. 多模态与多 Agent
 
-build_model_context()
-project_conversation_messages()
-
-commit_operation_state()
-execute_model_request()
-execute_tool_call()
-invoke_hook()
-wait_until()
-```
-
-### 5.3 Workflow
-
-可靠推进属于 `OperationDriver`，不能由 Strategy 负责。模型如何思考主要由 Agent Package、Prompt、Context 和工具合同约束。
-
-如果未来确实需要显式、可替换的流程约束，统一命名为 `RunWorkflow`，例如 `PlanAndExecuteWorkflow`。默认 Tool Loop 是 AgentRun 的基础执行语义，不命名为 `ReActStrategy`，也不与 `AgentLoop`、`ExecutionStrategy` 建立多套同义抽象。
-
-## 6. 多模态与 Artifact
-
-消息由明确的 Block 组成：
+消息内容使用明确 Block：
 
 ```text
-MessageBlock
+ContentBlock
 ├── TextBlock
 ├── ArtifactBlock
 ├── ThinkingBlock
 └── ToolCallBlock
 ```
 
-| 名称 | 含义 |
-| --- | --- |
-| `Artifact` | 图片、音频、视频、文件或其他二进制生成物的持久化元数据 |
-| `ArtifactReference` | Message 或 Tool Result 对 Artifact 的稳定引用 |
-| `ArtifactBlock` | 消息中的多模态内容块，内部持有 ArtifactReference |
-| `BlobStore` | 按 digest 保存和读取实际字节 |
+`ArtifactReference` 是消息内的值对象；`Artifact` 是全局持久化元数据；`BlobStore` 保存实际字节。
 
-`ArtifactReference` 使用完整名称，不缩写为 `ArtifactRef`。Provider Adapter 负责将 Artifact 转为 base64、URL 或 Provider 文件引用；领域消息不直接保存 Provider 专有格式。
-
-## 7. 多 Agent
-
-Lane 表示共享历史上的独立活动位置，不表示 Agent。Subagent 使用隔离的 Session 或 AgentRun：
-
-| 名称 | 含义 |
-| --- | --- |
-| `SessionLane` | 共享同一会话树的独立活动位置 |
-| `SessionFork` | 复制会话分支形成的新 Session |
-| `AgentDelegation` | 父 Operation 与被委派 AgentRun 的持久化关系 |
-| `DelegatedAgentRun` | 由另一个 AgentRun 发起的子 AgentRun |
+Root 与 Child 都是同一个 `Agent` 类型。Child 使用独立 ConversationSession，通过 AgentDelegation 连接 Parent Operation；不引入 `RootAgent`、`ChildAgent`、`DelegatedAgentRun`、`SessionLane` 或 Agent Team 层级。
 
 推荐方法名：
 
 ```python
-fork_session()
-start_delegated_run()
-wait_for_delegated_run()
-cancel_delegated_run()
+Agent.followup()
+Agent.steer()
+Agent.inject()
+Agent.cancel()
+Agent.when_idle()
+
+start_delegation() -> child_session_id
+wait_delegation()
+cancel_delegation()
 ```
 
-不使用无法说明创建对象的 `spawn()`、`child()`、`subtask()` 或 `fork_agent()`。
+## 9. Observation 与生命周期
 
-## 8. 动词约束
+| 名称 | 职责 |
+| --- | --- |
+| `ExecutionIdentity` | session/operation/step/tool/message 的统一引用 |
+| `RuntimeEvent` | fact/lifecycle/delta 的进程内 tagged union |
+| `EventEnvelope` | event_id、identity、时间和单 stream 顺序 |
+| `SpanRecord` | 一次调用或阶段的测量层级 |
+| `DiagnosticRecord` | 结构化诊断 |
+| `RequestSnapshotRecord` | 已提交 ModelContext 映射出的 Provider 请求快照 |
+| `TraceSink` | 可丢失诊断副本输出，不是恢复或审计权威 |
+
+## 10. 动词合同
 
 | 动词 | 固定语义 |
 | --- | --- |
-| `create` | 创建有身份的领域实体 |
-| `build` | 从确定输入组装无副作用值对象 |
-| `resolve` | 按规则选择并校验一个实现或配置 |
-| `load` | 从持久层读取已知身份的实体 |
-| `find` | 按条件查找零或一个实体 |
-| `list` | 返回有顺序的实体集合 |
-| `insert` | 写入不可变实体，重复 ID 必须失败 |
-| `append` | 在有顺序的结构末端增加内容 |
-| `move` | 改变 NamedReference 的指向 |
-| `commit` | 原子提交事务或状态转换 |
-| `project` | 从持久事实派生只读视图 |
+| `create` | 创建有稳定身份的 Entity |
+| `build` | 从确定输入纯组装 Value Object |
+| `resolve` | 按规则选择并校验配置或实现 |
+| `load` | 按身份读取一个持久化 Entity |
+| `find` | 按条件读取零或一个结果 |
+| `list` | 返回有确定顺序的集合 |
+| `insert` | 写入不可变 Entity |
+| `append` | 向有序结构增加内容 |
+| `accept` | Session 从 Inbox 原子创建 Operation |
+| `claim` | 原子消费 pending InboxMessage |
+| `commit` | 原子提交状态转换和关联事实 |
+| `project` | 从持久化事实派生只读值 |
 | `execute` | 发生真实计算或外部调用 |
-| `drive` | 重复推进状态机直到暂停或终止 |
+| `drive` | 推进状态机直到等待或终态 |
+| `wake` | 通知 AgentDriver 重新检查数据库 runnable work |
+| `close` | 释放内存资源或引用，不改变业务 Session |
+| `archive` | 将 Session 变为持久化只读状态 |
 
-避免单独使用 `save()`、`update()`、`write()`、`set()`、`process()`、`handle()`。必须从方法名看出目标实体和语义，例如 `commit_operation_state()`、`move_reference()`。
+避免单独使用 `save/update/write/set/process/handle`；方法名必须表达目标和语义，例如 `commit_agent_run_state()`、`claim_step_messages()`。
 
-## 9. 当前代码迁移映射
+## 11. 历史名称迁移
 
-| 当前名称 | 目标名称或处理 |
+| 历史名称 | 目标处理 |
 | --- | --- |
-| `Agent` | `AgentDefinition`；运行时版本另建 `AgentPackageVersion` |
-| `Run` | 拆为 `AgentRuntime` 与 `RuntimeBindings` |
-| `RuntimeConversation` | `ConversationRuntime` |
-| `TurnState` | `AgentRunState` |
-| `StepState` | `ModelStepState` |
-| `turn_id` | `operation_id` |
-| `ExecutionStrategy` | 删除；有真实流程需求时使用 `RunWorkflow` |
-| `ReActStrategy` | 拆入 OperationDriver、状态机、Context、Effects 和 Tool 执行组件 |
-| `ContextAssembler` | 删除 |
-| `prepare()` | `build_model_context()` |
-| `SessionEntry` | 拆为 `ConversationNode` 与 `ConversationEntry` |
-| `ImageContent` | `ArtifactBlock` + `ArtifactReference` |
-| `TextContent` | `TextBlock` |
-| `ThinkingContent` | `ThinkingBlock` |
-| `ToolCallContent` | `ToolCallBlock`；运行时执行实体使用 `ToolCall` |
+| `Run` | 删除；拆入 RuntimeHost、Agent、Driver 和 Effects |
+| `AgentRuntime` | 删除；接受/调度进入 AgentDriver，推进进入 OperationDriver |
+| `RuntimeBindings` | 删除；Package 实现进入 LoadedAgentPackage，Host 服务显式注入 |
+| `ExecutionStrategy` / `ReActStrategy` | 删除；默认 Tool Loop 属于 OperationDriver |
+| `ContextAssembler` / `prepare()` | 删除；使用 ModelContextBuilder.build_model_context() |
+| `TurnState` / `StepState` | `AgentRunState` / `ModelStepState` |
+| `SessionEntry` / `ConversationEntry` | 删除；ConversationNode 直接保存类型化内容 |
+| `leaf_id` / NamedReference active | `ConversationSession.active_node_id` |
+| `current_commit_sequence` | 删除；按领域使用自然 CAS 或 AgentRunState.revision |
+| `execution_policy` | 删除；ToolCallStatus + ToolApproval 表达 |
+| `pending_context_feedback` | 删除；使用 InboxMessage.inject |
 
-这张表描述目标态，不要求机械地逐类改名。遇到职责混合时必须先拆分，再命名；禁止把旧类原封不动改成新名字。
+## 12. 验收约束
 
-当前关键方法的目标映射：
-
-| 当前方法 | 目标方法或处理 |
-| --- | --- |
-| `Run.open()` | 由 Composition Root 创建 `AgentRuntime` 和 `RuntimeBindings` |
-| `Run.reload()` | `RuntimeHost.reload_agent_runtime()` |
-| `Run.turn()` | `AgentRuntime.start_agent_run()` |
-| `ExecutionStrategy.execute()` | 删除，由 `OperationDriver.drive_operation()` 接管推进 |
-| `ContextAssembler.assemble()` | 删除 |
-| `prepare()` | `ModelContextBuilder.build_model_context()` |
-| `Session.active_path()` | `ConversationSession.list_active_branch_entries()` |
-| `Session.move_leaf()` | `ConversationSession.move_active_branch_to()` |
-
-## 10. 验收约束
-
-完成相关重构时至少满足：
-
-1. 代码中不存在同时表示同一执行的 `turn_id`、`run_id`、`operation_id`。
-2. `AgentRuntime` 不直接实现 Context 组装、Provider 映射和工具执行细节。
-3. `ConversationNode` 不内嵌可变运行状态。
-4. `ConversationEntry` 只作为读取视图，不作为第二份持久化真源。
-5. `RuntimeEffects` 之外的 Operation 过程代码不直接执行 Provider、工具或 Hook。
-6. `AgentPackageVersion` 和 `ArtifactReference` 都可脱离进程内对象稳定恢复。
-7. 删除完成迁移的旧名和兼容别名，测试、事件和文档同步采用新名称。
-
-当前实现已经完成上述目标态切换：应用入口为 `RuntimeHost → ConversationRuntime → AgentRuntime`，默认 Tool Loop 由 `OperationDriver` 与 `OperationStateMachine` 推进；旧 `Agent`、`Run`、Strategy、`ContextAssembler`、Session Repository 及 `pickel.runs` 包已删除。外部 Recall、Provider、Tool、Hook 和持久化提交统一跨越 `RuntimeEffects`。
+1. 代码和当前合同中不存在同义的 Run/AgentRuntime/Strategy 执行入口。
+2. 同一 Session 在单进程只有一个 live Agent 和一个 AgentDriver task。
+3. OperationDriver 不组装 Context，不持有 Host/UI 状态，不成为依赖资源袋。
+4. ModelContext 只有一个 Builder，Provider 只映射 wire。
+5. ConversationNode 不保存运行状态，AgentRunState 不保存历史消息内容。
+6. 当前 Operation 通过 Session.active_operation_id 恢复，不扫描历史 Operation。
+7. Tool 外部副作用前必须提交 ToolExecutionIntent；未知结果不得静默重放。
+8. RuntimeGeneration reload 后旧 Operation 继续引用原 LoadedAgentPackage，所有贡献可逆序撤销。
+9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane。
+10. 完成迁移的旧公共类型、表和兼容路径必须删除。

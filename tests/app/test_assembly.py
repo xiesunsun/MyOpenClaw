@@ -10,7 +10,7 @@ from pickel.app.boot import Boot
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
-def test_build_agent_runtime_captures_current_pickel_settings() -> None:
+def test_loaded_package_captures_current_pickel_settings() -> None:
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         (root / "agents" / "Pickle").mkdir(parents=True)
@@ -43,12 +43,11 @@ def test_build_agent_runtime_captures_current_pickel_settings() -> None:
         )
 
         with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
-            loaded, runtime = Boot.from_config(
+            loaded = Boot.from_config(
                 app_config_from_yaml_file(config_path)
-            ).build_agent_runtime()
+            ).resolve_loaded_agent_package()
 
-        version = runtime.bindings.agent_package_version
-        assert loaded.version == version
-        assert version.runtime.max_model_steps == 12
-        assert version.runtime.context_turn_window == 6
-        assert version.model.provider == "anthropic"
+        version = loaded.version
+        assert version.runtime_policy.max_model_steps == 12
+        assert version.runtime_policy.context_turn_window == 6
+        assert version.model_policy.primary.provider == "anthropic"

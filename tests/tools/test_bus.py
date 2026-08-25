@@ -130,6 +130,22 @@ class ToolBusRegistrationTests(unittest.TestCase):
 
 
 class ToolBusLifecycleTests(unittest.TestCase):
+    def test_registration_lease_does_not_remove_later_same_name_entry(self) -> None:
+        bus = ToolBus()
+        first = bus.register_lease(
+            _stub_tool("echo"), source=ToolSource.MCP, origin="github"
+        )
+        replacement = _stub_tool("echo")
+        bus.register(replacement, source=ToolSource.MCP, origin="github")
+
+        import asyncio
+
+        asyncio.run(first.close())
+
+        self.assertIs(replacement, bus.get("mcp__github__echo").tool)
+        asyncio.run(first.close())
+        self.assertEqual(["mcp__github__echo"], bus.list_names())
+
     def test_unregister_removes_single_entry(self) -> None:
         bus = ToolBus()
         bus.register(_stub_tool("echo"), source=ToolSource.BUILTIN)

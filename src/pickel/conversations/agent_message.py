@@ -5,7 +5,7 @@ message entry 的 payload 即版本化 AgentMessage。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pickel.conversations.content_blocks import (
@@ -16,6 +16,7 @@ from pickel.conversations.content_blocks import (
     content_blocks_from_list,
     content_blocks_to_list,
 )
+from pickel.shared.frozen_json import freeze_json, thaw_json
 
 PAYLOAD_VERSION = 3
 SUPPORTED_PAYLOAD_VERSIONS = frozenset({1, 2, 3})
@@ -51,26 +52,41 @@ class ModelResponseMetadata:
 
 @dataclass(frozen=True)
 class UserMessage:
-    content: list[UserContent] = field(default_factory=list)
+    content: tuple[UserContent, ...] = ()
     role: Literal["user"] = "user"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
 
 
 @dataclass(frozen=True)
 class AssistantMessage:
-    content: list[AssistantContent] = field(default_factory=list)
+    content: tuple[AssistantContent, ...] = ()
     metadata: ModelResponseMetadata | None = None
     role: Literal["assistant"] = "assistant"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
 
 
 @dataclass(frozen=True)
 class ToolResultMessage:
     tool_call_id: str
     tool_name: str
-    content: list[ToolResultContent] = field(default_factory=list)
+    content: tuple[ToolResultContent, ...] = ()
     is_error: bool = False
     # 工具返回给模型的结构化数据。运行时诊断仍留在 ToolExecutionResult。
     structured_content: Any | None = None
     role: Literal["tool"] = "tool"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
+        if self.structured_content is not None:
+            object.__setattr__(
+                self,
+                "structured_content",
+                freeze_json(self.structured_content),
+            )
 
 
 AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
@@ -168,7 +184,7 @@ def agent_message_to_dict(message: AgentMessage) -> dict[str, Any]:
             "tool_name": message.tool_name,
             "content": content_blocks_to_list(list(message.content)),
             "is_error": message.is_error,
-            "structured_content": message.structured_content,
+            "structured_content": thaw_json(message.structured_content),
         }
     raise TypeError(f"不支持的 AgentMessage 类型: {type(message)!r}")
 

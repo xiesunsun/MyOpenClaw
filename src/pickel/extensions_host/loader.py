@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection
 from dataclasses import dataclass, field
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -19,11 +20,13 @@ import pkgutil
 from types import ModuleType
 from typing import Any
 
+from pickel.agents.agent_package import ExtensionVersion, ImplementationRef
+from pickel.agents.agent_package_builder import sanitize_extension_config
 from pickel.config.paths import home_dir
 from pickel.extensions_host.errors import ExtensionLoadError
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
-from pickel.tools.bus import ToolBus, ToolSource
+from pickel.tools.bus import ToolBus
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,8 @@ class LoadResult:
     registry: ExtensionRegistry = field(default_factory=ExtensionRegistry)
     errors: list[ExtensionLoadError] = field(default_factory=list)
     modules: dict[str, ModuleType] = field(default_factory=dict)
+    hosts: dict[str, ExtensionHost] = field(default_factory=dict)
+    extension_versions: dict[str, ExtensionVersion] = field(default_factory=dict)
 
 
 def load_extensions(
@@ -100,20 +105,36 @@ async def load_extensions_async(
             )
             continue
 
+        try:
+            extension_version = extension_version_for_module(
+                name, module, sections.get(name)
+            )
+        except Exception as exc:
+            result.errors.append(
+                ExtensionLoadError(
+                    f"Failed to snapshot extension '{name}' implementation: {exc}"
+                )
+            )
+            logger.exception("Failed to snapshot extension '%s'", name)
+            continue
+
         host = ExtensionHost(
             name=name,
             config_section=sections.get(name),
             tool_bus=tool_bus,
             registry=result.registry,
             app_config=app_config,
+            defer_publish=True,
+            extension_version=extension_version,
         )
         try:
             outcome = setup(host)
             if inspect.isawaitable(outcome):
                 await outcome
+            host.publish()
         except Exception as exc:
-            # 回滚半装状态：它可能已经注册了一部分工具
-            tool_bus.unregister_origin(ToolSource.EXTENSION, name)
+            # setup rollback 与正常卸载统一走精确 Scope.close()。
+            await host.scope.close()
             result.errors.append(
                 ExtensionLoadError(f"Extension '{name}' setup failed: {exc}")
             )
@@ -121,22 +142,18 @@ async def load_extensions_async(
             continue
 
         result.modules[name] = module
+        result.hosts[name] = host
+        result.extension_versions[name] = extension_version
 
     return result
 
 
 async def teardown_extensions(result: LoadResult, *, tool_bus: ToolBus) -> None:
-    """卸载：调各 extension 可选的 teardown，并摘掉它们注册的工具。"""
-    for name, module in result.modules.items():
-        teardown = getattr(module, "teardown", None)
-        if teardown is not None:
-            try:
-                outcome = teardown()
-                if inspect.isawaitable(outcome):
-                    await outcome
-            except Exception:
-                logger.exception("Extension '%s' teardown failed", name)
-        tool_bus.unregister_origin(ToolSource.EXTENSION, name)
+    """卸载所有 Extension；每个实例只通过自己的 Scope 精确清理。"""
+    for name in reversed(tuple(result.modules)):
+        host = result.hosts.get(name)
+        if host is not None:
+            await host.scope.close()
 
 
 def _discover(home: Path | None, builtin_package: str | None) -> dict[str, Any]:
@@ -192,3 +209,80 @@ def _import_from_path(name: str, path: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def extension_version_for_module(
+    extension_id: str,
+    module: ModuleType,
+    config_section: Any,
+) -> ExtensionVersion:
+    """捕获当前实际模块的 ExtensionVersion。
+
+    digest 只覆盖模块源文件（包则覆盖包内所有 ``.py`` 文件），并使用相对
+    路径和文件内容组成规范输入，因此不受临时目录、mtime 或 pycache 影响。
+    """
+    if not extension_id:
+        raise ValueError("extension_id 不能为空")
+    config, refs = sanitize_extension_config(config_section or {}, extension_id)
+    version = _declared_version(module)
+    return ExtensionVersion(
+        extension_id=extension_id,
+        implementation_ref=ImplementationRef(
+            "extension",
+            extension_id,
+            version=version,
+            digest=_module_source_digest(module),
+        ),
+        version=version,
+        config=config,
+        required_secret_refs=refs,
+    )
+
+
+def _declared_version(module: ModuleType) -> str | None:
+    """读取模块公开声明的版本；未声明时保持 None。"""
+    for name in ("__version__", "EXTENSION_VERSION", "VERSION"):
+        value = getattr(module, name, None)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise TypeError(f"{name} 必须是非空字符串")
+        return value.strip()
+    return None
+
+
+def _module_source_digest(module: ModuleType) -> str:
+    files, root = _module_source_files(module)
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _module_source_files(module: ModuleType) -> tuple[tuple[Path, ...], Path]:
+    raw_file = getattr(module, "__file__", None)
+    if not raw_file:
+        raise ValueError("模块没有 __file__，无法生成实现 digest")
+    module_file = Path(raw_file).resolve()
+    if module_file.suffix == ".pyc":
+        source = module_file.with_suffix(".py")
+        if source.is_file():
+            module_file = source
+    if not module_file.is_file():
+        raise ValueError(f"模块源文件不存在: {module_file}")
+    if module_file.name == "__init__.py":
+        root = module_file.parent
+        files = tuple(
+            sorted(root.rglob("*.py"), key=lambda path: path.relative_to(root))
+        )
+    else:
+        root = module_file.parent
+        files = (module_file,)
+    if not files:
+        raise ValueError(f"模块没有可哈希的 Python 源文件: {module_file}")
+    return files, root

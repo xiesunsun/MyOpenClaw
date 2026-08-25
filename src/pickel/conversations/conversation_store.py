@@ -1,67 +1,52 @@
-"""Conversation 领域依赖的持久化窄接口。"""
+"""Conversation 领域的 v10 持久化窄接口。"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Protocol
 
-from pickel.conversations.conversation_node import ConversationEntry
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.persistence.immutable_object import ImmutableObject
-from pickel.persistence.named_reference import NamedReference
-from pickel.persistence.storage_transaction import StorageTransaction
+from pickel.workspaces.workspace import Workspace
 
 
 class ConversationStore(Protocol):
-    def create_conversation_session(
-        self,
-        *,
-        session_id: str,
-        agent_id: str,
-        cwd: str,
-        created_at: datetime | None = None,
+    def create_session(
+        self, *, workspace: Workspace, session: ConversationSession
     ) -> None: ...
 
-    def load_conversation_session(
-        self,
-        session_id: str,
-    ) -> ConversationSession | None: ...
+    def load_session(self, session_id: str) -> ConversationSession | None: ...
 
-    def list_conversation_sessions(
-        self,
-        *,
-        limit: int = 20,
-        cwd: str | None = None,
-    ) -> list[ConversationSession]: ...
+    def list_sessions(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> tuple[ConversationSession, ...]: ...
 
-    def archive_conversation_session(
+    def append_node(
         self,
         *,
-        session_id: str,
-        archived_at: datetime,
-    ) -> None: ...
+        node: ConversationNode,
+        expected_node_id: str | None,
+    ) -> bool: ...
 
-    def delete_conversation_session(self, *, session_id: str) -> None: ...
+    def load_node(self, node_id: str) -> ConversationNode | None: ...
 
-    def begin_storage_transaction(
+    def list_branch_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]: ...
+
+    def move_active_node(
         self,
         *,
         session_id: str,
-        expected_commit_sequence: int,
-    ) -> StorageTransaction: ...
+        expected_node_id: str | None,
+        new_node_id: str | None,
+        updated_at: datetime,
+    ) -> bool: ...
 
-    def load_immutable_object(self, object_id: str) -> ImmutableObject | None: ...
+    def archive_session(self, *, session_id: str, archived_at: datetime) -> None: ...
 
-    def find_named_reference(
-        self,
-        *,
-        session_id: str,
-        reference_name: str,
-    ) -> NamedReference | None: ...
+    def unarchive_session(self, *, session_id: str, updated_at: datetime) -> None: ...
 
-    def list_active_branch_entries(
-        self,
-        *,
-        session_id: str,
-        reference_name: str = "conversation/active",
-    ) -> list[ConversationEntry]: ...
+    def delete_session(self, *, session_id: str) -> None: ...
+
+    def delete_session_tree(self, *, session_id: str) -> None: ...

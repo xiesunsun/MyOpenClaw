@@ -1,45 +1,47 @@
-"""按纯状态机决定推进 AgentRun 的默认 Tool Loop。"""
+"""OperationDriver：推进一个已接受的 SessionOperation。
+
+接受 Inbox、恢复 active Operation 属于 AgentDriver；本类只消费一个已有
+Operation，并严格执行 ``intent commit -> 外部副作用 -> 结果 commit``。
+"""
 
 from __future__ import annotations
 
-import copy
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+import hashlib
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from uuid import uuid4
 
-from pickel.context.model_context_builder import ModelContextBuilder
-from pickel.context.hook_feedback import HookFeedback, append_hook_feedback
+from pickel.agents.agent_package import AgentPackageVersion
+from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.context.model_context import ModelContext
+from pickel.context.model_context_builder import (
+    ContextContributions,
+    ModelContextBuilder,
+)
+from pickel.context.projection import ConversationProjector
+from pickel.context.window import apply_window
 from pickel.conversations.agent_message import (
+    AgentMessage,
     AssistantMessage,
     ToolResultMessage,
-    agent_message_from_dict,
+    UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
-from pickel.operations.agent_run_state import AgentRunState, ToolCallState
+from pickel.conversations.conversation_node import ConversationNode
+from pickel.operations.agent_run_state import (
+    AgentRunError,
+    AgentRunState,
+    ModelRequestIntent,
+    ModelStepState,
+    ToolCallState,
+)
 from pickel.operations.operation_service import OperationService
-from pickel.hooks.events import (
-    BeforeRequestEvent,
-    PostToolBatchEvent,
-    PostToolUseEvent,
-    PreToolUseEvent,
-    AgentRunEndEvent,
-)
 from pickel.providers.stream import StreamDelta
-from pickel.runtime.agent_run_progress import (
-    AgentRunProgress,
-    AgentRunProgressConsumer,
-    ModelStepStartedProgress,
-    ToolCallCompletedProgress,
-    ToolCallStartedProgress,
-)
-from pickel.runtime.operation_state_machine import OperationStateMachine
-from pickel.runtime.runtime_bindings import RuntimeBindings
+from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
-from pickel.runtime.host_calls import HostCallClient
 from pickel.tools.base import ToolExecutionResult
-from pickel.tools.validation import validate_tool_arguments
 
 StreamDeltaConsumer = Callable[[StreamDelta], None | Awaitable[None]]
 
@@ -53,495 +55,413 @@ class OperationDriveResult:
 
 
 class OperationDriver:
-    """协调状态、Context 和 Effects；不直接执行任何真实副作用。"""
+    """唯一的 Agent Tool Loop；不接受新消息，不拥有 Store。"""
 
     def __init__(
         self,
         *,
-        bindings: RuntimeBindings,
         operation_service: OperationService,
         conversation_service: ConversationService,
-        runtime_effects: RuntimeEffects,
+        package_loader: Callable[[str], AgentPackageVersion],
+        effects_resolver: Callable[[str], RuntimeEffects],
         model_context_builder: ModelContextBuilder | None = None,
-        state_machine: OperationStateMachine | None = None,
+        state_machine: AgentRunStateMachine | None = None,
         step_id_factory: Callable[[], str] | None = None,
         node_id_factory: Callable[[], str] | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
-        self._bindings = bindings
-        self._operation_service = operation_service
-        self._conversation_service = conversation_service
-        self._effects = runtime_effects
+        self._operations = operation_service
+        self._conversations = conversation_service
+        self._package_loader = package_loader
+        self._effects_resolver = effects_resolver
         self._context_builder = model_context_builder or ModelContextBuilder()
-        self._state_machine = state_machine or OperationStateMachine()
-        self._step_id_factory = step_id_factory or (lambda: str(uuid4()))
-        self._node_id_factory = node_id_factory or (lambda: str(uuid4()))
+        self._state_machine = state_machine or AgentRunStateMachine()
+        self._step_id = step_id_factory or (lambda: str(uuid4()))
+        self._node_id = node_id_factory or (lambda: str(uuid4()))
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def drive_operation(
         self,
         operation_id: str,
         *,
         consume_delta: StreamDeltaConsumer | None = None,
-        consume_progress: AgentRunProgressConsumer | None = None,
-        host_calls: HostCallClient | None = None,
+        host_calls=None,
     ) -> OperationDriveResult:
-        """推进直到成功、终态或需要人工恢复的暂停点。"""
-        operation = self._operation_service.load_session_operation(operation_id)
-        state = self._operation_service.load_agent_run_state(operation_id)
-        owned_model_intent_step_id: str | None = None
-        owned_tool_intents: set[str] = set()
-
-        # 进程重启后 Provider intent 可显式 retry；Tool intent 默认不可重放。
-        if (
-            state.current_step is not None
-            and state.current_step.phase == "model_request_intent_recorded"
-        ):
-            state = self._commit(
-                self._state_machine.schedule_model_request_retry(state)
+        operation = self._operations.load_operation(operation_id)
+        state = self._operations.load_agent_run_state(operation_id)
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            return OperationDriveResult(operation_id, state.status, state, None)
+        try:
+            package = self._package_loader(operation.agent_package_version_id)
+            effects = self._effects_resolver(operation.agent_package_version_id)
+        except PackageLoadError as exc:
+            failed = replace(
+                state,
+                status="failed",
+                current_step=None,
+                error=AgentRunError(
+                    code=exc.code,
+                    message=str(exc),
+                    retryable=True,
+                ),
             )
-        if self._has_unknown_tool_effect(state):
-            waiting = self._state_machine.pause_for_unknown_tool_effect(state)
-            state = self._commit(waiting)
-            return OperationDriveResult(operation_id, "waiting", state)
+            state = self._commit(failed, state)
+            return OperationDriveResult(operation_id, "failed", state, None)
+        if package.package_version_id != operation.agent_package_version_id:
+            raise RuntimeError("Package Loader 返回了错误的 AgentPackageVersion")
+        last_assistant: AssistantMessage | None = None
 
         while True:
-            decision = self._state_machine.decide_next_action(state)
-            if decision.action == "done":
-                return OperationDriveResult(operation_id, state.status, state)
-            if decision.action == "pause":
-                return OperationDriveResult(operation_id, "waiting", state)
-            if decision.action == "start_model_step":
-                state = self._commit(
-                    self._state_machine.start_model_step(
-                        state,
-                        step_id=self._step_id_factory(),
-                    )
+            if state.status in {"succeeded", "failed", "cancelled"}:
+                return OperationDriveResult(
+                    operation_id, state.status, state, last_assistant
                 )
-                assert state.current_step is not None
-                await self._notify_progress(
-                    consume_progress,
-                    ModelStepStartedProgress(
-                        operation_id=state.operation_id,
-                        step_id=state.current_step.step_id,
-                        step_sequence=state.current_step.step_sequence,
-                    ),
+            if state.status == "waiting":
+                return OperationDriveResult(
+                    operation_id, "waiting", state, last_assistant
                 )
-                continue
-            if decision.action == "record_model_request_intent":
-                state = self._commit(
-                    self._state_machine.record_model_request_intent(state)
-                )
-                assert state.current_step is not None
-                owned_model_intent_step_id = state.current_step.step_id
-                continue
-            if decision.action == "execute_model_request":
+
+            if state.status == "cancelling":
                 step = state.current_step
-                assert step is not None
-                if owned_model_intent_step_id != step.step_id:
-                    state = self._commit(
-                        self._state_machine.schedule_model_request_retry(state)
-                    )
-                    continue
-                entries = self._conversation_service.list_active_branch_entries(
-                    session_id=operation.session_id
-                )
-                context = self._context_builder.build_model_context(
-                    agent_package_version=self._bindings.agent_package_version,
-                    conversation_entries=entries,
-                )
-                recalled_messages = await self._effects.retrieve_recall_messages(
-                    session_id=operation.session_id,
-                    visible_messages=context.messages,
-                )
-                context = ModelContext(
-                    system=context.system,
-                    messages=append_hook_feedback(
-                        [*context.messages, *recalled_messages],
-                        [
-                            HookFeedback(
-                                source_event="PersistedHookFeedback",
-                                text=text,
-                            )
-                            for text in state.model_context_feedback
-                        ],
-                    ),
-                    tools=context.tools,
-                )
-                before = await self._effects.invoke_hook(
-                    "before_request",
-                    BeforeRequestEvent(
-                        session_id=operation.session_id,
-                        operation_id=operation.operation_id,
-                        step_id=step.step_id,
-                        step_sequence=step.step_sequence,
-                        model_context=context,
-                    ),
-                )
-                if before.model_context is not None:
-                    context = before.model_context
-                if before.feedback_text:
-                    context = ModelContext(
-                        system=context.system,
-                        messages=append_hook_feedback(
-                            context.messages,
-                            [
-                                HookFeedback(
-                                    source_event="BeforeRequest",
-                                    text=before.feedback_text,
-                                )
-                            ],
-                        ),
-                        tools=context.tools,
-                    )
-                result = await self._effects.execute_model_request(
-                    state=state,
-                    model_context=context,
-                    consume_delta=consume_delta,
-                )
-                assistant_node_id = self._node_id_factory()
-                next_state = self._state_machine.record_model_request_completed(
-                    state,
-                    assistant_message_node_id=assistant_node_id,
-                )
-                state = self._effects.commit_operation_state(
-                    state=next_state,
-                    appended_message=result.assistant_message,
-                    appended_message_node_id=assistant_node_id,
-                ).state
-                owned_model_intent_step_id = None
-                continue
-            if decision.action == "prepare_tool_calls":
-                assistant = self._load_current_assistant_message(
-                    operation.session_id,
-                    state,
-                )
-                tool_calls = []
-                for block in assistant.content:
-                    if not isinstance(block, ToolCallBlock):
-                        continue
-                    entry = self._bindings.tool_snapshot.get(block.name)
-                    arguments = dict(block.arguments)
-                    action = "allow"
-                    reason = None
-                    if entry is not None:
-                        pre = await self._effects.invoke_hook(
-                            "pre_tool_use",
-                            PreToolUseEvent(
-                                session_id=operation.session_id,
-                                operation_id=operation.operation_id,
-                                step_id=state.current_step.step_id,
-                                step_sequence=state.current_step.step_sequence,
-                                tool_name=block.name,
-                                tool_call_id=block.id,
-                                arguments=arguments,
-                                tool_source=entry.source.value,
-                                tool_origin=entry.origin,
-                            ),
-                        )
-                        if pre.updated_arguments is not None:
-                            arguments = dict(pre.updated_arguments)
-                        action = pre.action
-                        reason = pre.reason
-                        invalid = validate_tool_arguments(entry.tool, arguments)
-                        if invalid is not None:
-                            action = "deny"
-                            reason = "Hook 修改后的工具参数不符合 schema：" f"{invalid}"
-                    tool_calls.append(
-                        ToolCallState(
-                            tool_call_id=block.id,
-                            tool_name=block.name,
-                            arguments=arguments,
-                            execution_state="ready",
-                            execution_policy=(
-                                "deny"
-                                if action == "deny"
-                                else "confirm" if action == "ask" else "execute"
-                            ),
-                            decision_reason=reason,
-                        )
-                    )
-                state = self._commit(
-                    self._state_machine.prepare_tool_calls(
-                        state,
-                        tool_calls=tuple(tool_calls),
-                    )
-                )
-                continue
-            if decision.action == "record_tool_call_intent":
-                assert decision.tool_call_id is not None
-                state = self._commit(
-                    self._state_machine.record_tool_call_intent(
-                        state,
-                        tool_call_id=decision.tool_call_id,
-                    )
-                )
-                owned_tool_intents.add(decision.tool_call_id)
-                continue
-            if decision.action == "execute_tool_call":
-                assert decision.tool_call_id is not None
-                if decision.tool_call_id not in owned_tool_intents:
-                    state = self._commit(
-                        self._state_machine.pause_for_unknown_tool_effect(state)
-                    )
-                    return OperationDriveResult(operation_id, "waiting", state)
-                progress_tool_call = self._find_tool_call(
-                    state,
-                    decision.tool_call_id,
-                )
-                assert state.current_step is not None
-                call_index = next(
-                    index
-                    for index, call in enumerate(state.current_step.tool_calls)
-                    if call.tool_call_id == decision.tool_call_id
-                )
-                await self._notify_progress(
-                    consume_progress,
-                    ToolCallStartedProgress(
-                        operation_id=state.operation_id,
-                        step_id=state.current_step.step_id,
-                        step_sequence=state.current_step.step_sequence,
-                        tool_call=progress_tool_call,
-                        call_index=call_index,
-                        total_calls=len(state.current_step.tool_calls),
-                    ),
-                )
-                result = await self._effects.execute_tool_call(
-                    state=state,
-                    tool_call_id=decision.tool_call_id,
-                    host_calls=host_calls,
-                )
-                tool_call = self._find_tool_call(state, decision.tool_call_id)
-                entry = self._bindings.tool_snapshot.get(tool_call.tool_name)
-                post = await self._effects.invoke_hook(
-                    "post_tool_use",
-                    PostToolUseEvent(
-                        session_id=operation.session_id,
-                        operation_id=operation.operation_id,
-                        step_id=state.current_step.step_id,
-                        step_sequence=state.current_step.step_sequence,
-                        tool_name=tool_call.tool_name,
-                        tool_call_id=tool_call.tool_call_id,
-                        arguments=dict(tool_call.arguments),
-                        result_content=result.content,
-                        is_error=result.is_error,
-                        tool_source=entry.source.value if entry is not None else "",
-                        tool_origin=entry.origin if entry is not None else None,
-                    ),
-                )
-                result_node_id = self._node_id_factory()
-                next_state = self._state_machine.record_tool_call_completed(
-                    state,
-                    tool_call_id=decision.tool_call_id,
-                    result_message_node_id=result_node_id,
-                    is_error=result.is_error,
-                    feedback_text=post.feedback_text,
-                )
-                state = self._effects.commit_operation_state(
-                    state=next_state,
-                    appended_message=self._build_tool_result_message(
-                        tool_call,
-                        result,
-                    ),
-                    appended_message_node_id=result_node_id,
-                ).state
-                await self._notify_progress(
-                    consume_progress,
-                    ToolCallCompletedProgress(
-                        operation_id=state.operation_id,
-                        step_id=next_state.current_step.step_id,
-                        step_sequence=next_state.current_step.step_sequence,
-                        tool_call=tool_call,
-                        call_index=call_index,
-                        total_calls=len(next_state.current_step.tool_calls),
-                        result=copy.deepcopy(result),
-                    ),
-                )
-                owned_tool_intents.remove(decision.tool_call_id)
-                continue
-            if decision.action == "invoke_post_tool_batch_hook":
-                step = state.current_step
-                assert step is not None
-                outcomes = [
-                    {
-                        "tool_call_id": call.tool_call_id,
-                        "tool_name": call.tool_name,
-                        "is_error": call.is_error,
-                    }
+                if step is not None and any(
+                    call.status == "intent_recorded" and call.replay_policy == "never"
                     for call in step.tool_calls
-                ]
-                batch = await self._effects.invoke_hook(
-                    "post_tool_batch",
-                    PostToolBatchEvent(
-                        session_id=operation.session_id,
-                        operation_id=operation.operation_id,
-                        step_id=step.step_id,
-                        step_sequence=step.step_sequence,
-                        outcomes=outcomes,
-                    ),
-                )
-                state = self._commit(
-                    self._state_machine.record_post_tool_batch_hook_completed(
-                        state,
-                        feedback_text=batch.feedback_text,
-                    )
-                )
-                continue
-            if decision.action == "complete_model_step":
-                state = self._commit(self._state_machine.complete_model_step(state))
-                continue
-            if decision.action == "archive_model_step":
-                step = state.current_step
-                assert step is not None
-                if (
-                    step.step_sequence
-                    >= self._bindings.agent_package_version.runtime.max_model_steps
                 ):
-                    message = AssistantMessage(
-                        content=[
-                            TextBlock(
-                                text=("Reached the maximum number of reasoning steps.")
-                            )
-                        ]
-                    )
-                    node_id = self._node_id_factory()
-                    next_state = self._state_machine.finish_agent_run(
-                        state,
-                        final_assistant_node_id=node_id,
-                    )
-                    state = self._effects.commit_operation_state(
-                        state=next_state,
-                        appended_message=message,
-                        appended_message_node_id=node_id,
-                    ).state
-                    await self._invoke_agent_run_end(operation.session_id, state)
                     return OperationDriveResult(
-                        operation_id,
-                        "succeeded",
-                        state,
-                        message,
+                        operation_id, "cancelling", state, last_assistant
                     )
                 state = self._commit(
-                    self._state_machine.archive_completed_model_step(state)
+                    replace(state, status="cancelled", current_step=None), state
+                )
+                return OperationDriveResult(
+                    operation_id, "cancelled", state, last_assistant
+                )
+
+            if state.status == "queued":
+                state = self._commit(replace(state, status="running"), state)
+                continue
+
+            step = state.current_step
+            if step is None:
+                if state.completed_step_count >= package.runtime_policy.max_model_steps:
+                    state = self._commit(
+                        replace(
+                            state,
+                            status="failed",
+                            error=AgentRunError(
+                                code="max_model_steps_exceeded",
+                                message="AgentRun 已达到最大模型 Step 数",
+                                retryable=False,
+                            ),
+                        ),
+                        state,
+                    )
+                    return OperationDriveResult(
+                        operation_id, "failed", state, last_assistant
+                    )
+                step = ModelStepState(
+                    step_id=self._step_id(),
+                    step_sequence=state.completed_step_count + 1,
+                    phase="preparing_request",
+                    request_attempt=0,
+                    request_intent=None,
+                    assistant_message_node_id=None,
+                    tool_calls=(),
+                )
+                state = self._commit(
+                    replace(state, current_step=step, status="running"), state
                 )
                 continue
-            if decision.action == "finish_agent_run":
-                assistant = self._load_current_assistant_message(
-                    operation.session_id,
+
+            if step.phase == "preparing_request":
+                context = await self._build_context(
+                    operation.session_id, package=package, effects=effects
+                )
+                intent = ModelRequestIntent(
+                    model_context=context,
+                    context_fingerprint=_fingerprint(context),
+                )
+                next_step = replace(
+                    step,
+                    phase="request_ready",
+                    request_intent=intent,
+                )
+                state = self._commit(replace(state, current_step=next_step), state)
+                continue
+
+            if step.phase == "request_ready":
+                # 只读取持久化 intent；恢复时不重新执行 Context/Recall/Hook。
+                assert step.request_intent is not None
+                state = self._commit(
+                    replace(
+                        state,
+                        current_step=replace(
+                            step, request_attempt=step.request_attempt + 1
+                        ),
+                    ),
                     state,
                 )
                 step = state.current_step
-                assert step is not None
-                assert step.assistant_message_node_id is not None
-                state = self._commit(
-                    self._state_machine.finish_agent_run(
-                        state,
-                        final_assistant_node_id=step.assistant_message_node_id,
-                    )
+                assert step is not None and step.request_intent is not None
+                result = await effects.execute_model_request(
+                    operation=operation,
+                    state=state,
+                    model_context=step.request_intent.model_context,
+                    consume_delta=consume_delta,
+                    context_fingerprint=step.request_intent.context_fingerprint,
                 )
-                await self._invoke_agent_run_end(operation.session_id, state)
+                assistant_node_id = self._node_id()
+                tool_calls = _tool_calls_from_assistant(
+                    result.assistant_message, package=package
+                )
+                if tool_calls:
+                    next_step = replace(
+                        step,
+                        phase="awaiting_tools",
+                        request_intent=None,
+                        assistant_message_node_id=assistant_node_id,
+                        tool_calls=tool_calls,
+                    )
+                    state = self._commit(
+                        replace(state, current_step=next_step),
+                        state,
+                        message=result.assistant_message,
+                        node_id=assistant_node_id,
+                    )
+                    last_assistant = result.assistant_message
+                    continue
+
+                next_state = replace(
+                    state,
+                    status="succeeded",
+                    current_step=None,
+                    completed_step_count=state.completed_step_count + 1,
+                    final_assistant_node_id=assistant_node_id,
+                )
+                state = self._commit(
+                    next_state,
+                    state,
+                    message=result.assistant_message,
+                    node_id=assistant_node_id,
+                )
+                last_assistant = result.assistant_message
+                return OperationDriveResult(
+                    operation_id, "succeeded", state, last_assistant
+                )
+
+            if step.phase != "awaiting_tools":
+                raise RuntimeError(f"未知 ModelStep phase: {step.phase}")
+
+            waiting = _waiting_tool_call(step.tool_calls)
+            if waiting is not None:
                 return OperationDriveResult(
                     operation_id,
-                    "succeeded",
-                    state,
-                    assistant,
+                    "waiting",
+                    self._commit(
+                        replace(
+                            state, status="waiting", waiting_reason="tool_approval"
+                        ),
+                        state,
+                    ),
+                    last_assistant,
                 )
-            raise RuntimeError(f"未实现的 Operation action: {decision.action}")
 
-    def _commit(self, state: AgentRunState) -> AgentRunState:
-        return self._effects.commit_operation_state(state=state).state
+            ready = next(
+                (call for call in step.tool_calls if call.status == "ready"), None
+            )
+            executable: ToolCallState | None = None
+            if ready is not None:
+                # 保留 Provider 原始顺序，不能用只含当前调用的列表覆盖批次。
+                next_calls = tuple(
+                    (
+                        replace(call, status="intent_recorded")
+                        if call.tool_call_id == ready.tool_call_id
+                        else call
+                    )
+                    for call in step.tool_calls
+                )
+                state = self._commit(
+                    replace(state, current_step=replace(step, tool_calls=next_calls)),
+                    state,
+                )
+                assert state.current_step is not None
+                executable = next(
+                    call
+                    for call in state.current_step.tool_calls
+                    if call.tool_call_id == ready.tool_call_id
+                )
+            else:
+                recorded = next(
+                    (
+                        call
+                        for call in step.tool_calls
+                        if call.status == "intent_recorded"
+                    ),
+                    None,
+                )
+                if recorded is not None and recorded.replay_policy == "never":
+                    state = self._commit(
+                        replace(
+                            state,
+                            status="waiting",
+                            waiting_reason="tool_reconciliation",
+                        ),
+                        state,
+                    )
+                    return OperationDriveResult(
+                        operation_id, "waiting", state, last_assistant
+                    )
+                executable = recorded
 
-    async def _invoke_agent_run_end(
+            if executable is not None:
+                result = await effects.execute_tool_call(
+                    operation=operation,
+                    state=state,
+                    tool_call_id=executable.tool_call_id,
+                    host_calls=host_calls,
+                )
+                result_node_id = self._node_id()
+                completed = replace(
+                    next(
+                        call
+                        for call in state.current_step.tool_calls
+                        if call.tool_call_id == executable.tool_call_id
+                    ),
+                    status="completed",
+                    result_node_id=result_node_id,
+                    is_error=result.is_error,
+                )
+                calls = tuple(
+                    (
+                        completed
+                        if call.tool_call_id == executable.tool_call_id
+                        else call
+                    )
+                    for call in state.current_step.tool_calls
+                )
+                next_step = replace(state.current_step, tool_calls=calls)
+                message = _tool_result_message(executable, result)
+                state = self._commit(
+                    replace(state, current_step=next_step),
+                    state,
+                    message=message,
+                    node_id=result_node_id,
+                )
+                continue
+
+            if all(call.status == "completed" for call in step.tool_calls):
+                state = self._commit(
+                    replace(
+                        state,
+                        current_step=None,
+                        completed_step_count=state.completed_step_count + 1,
+                        status="running",
+                        waiting_reason=None,
+                    ),
+                    state,
+                )
+                continue
+            raise RuntimeError("ToolCallState 存在无法推进的状态")
+
+    async def _build_context(
         self,
         session_id: str,
-        state: AgentRunState,
-    ) -> None:
-        await self._effects.invoke_hook(
-            "agent_run_end",
-            AgentRunEndEvent(
-                session_id=session_id,
-                operation_id=state.operation_id,
-                step_id=(
-                    state.current_step.step_id
-                    if state.current_step is not None
-                    else None
-                ),
-                step_sequence=(
-                    state.current_step.step_sequence
-                    if state.current_step is not None
-                    else None
-                ),
-                reason=state.status,
-            ),
-        )
-
-    @staticmethod
-    async def _notify_progress(
-        consumer: AgentRunProgressConsumer | None,
-        progress: AgentRunProgress,
-    ) -> None:
-        if consumer is None:
-            return
-        result = consumer(progress)
-        if hasattr(result, "__await__"):
-            await result
-
-    @staticmethod
-    def _has_unknown_tool_effect(state: AgentRunState) -> bool:
-        step = state.current_step
-        return bool(
-            step is not None
-            and step.phase == "tool_calls_running"
-            and any(
-                call.execution_state == "intent_recorded" for call in step.tool_calls
+        *,
+        package: AgentPackageVersion,
+        effects: RuntimeEffects,
+    ) -> ModelContext:
+        nodes = self._conversations.list_active_branch_nodes(session_id=session_id)
+        projected = ConversationProjector().project_conversation_messages(nodes)
+        visible = tuple(
+            apply_window(
+                projected,
+                turn_window=package.runtime_policy.context_turn_window,
             )
         )
+        recalled = await effects.retrieve_recall_messages(
+            session_id=session_id,
+            visible_messages=visible,
+        )
+        return self._context_builder.build_model_context(
+            package=package,
+            visible_messages=visible,
+            contributions=ContextContributions(messages=tuple(recalled)),
+        )
 
-    def _load_current_assistant_message(
+    def _commit(
         self,
-        session_id: str,
         state: AgentRunState,
-    ) -> AssistantMessage:
-        step = state.current_step
-        if step is None or step.assistant_message_node_id is None:
-            raise RuntimeError("ModelStepState 没有 AssistantMessage 引用")
-        for entry in reversed(
-            self._conversation_service.list_active_branch_entries(session_id=session_id)
+        previous: AgentRunState,
+        *,
+        message: AgentMessage | None = None,
+        node_id: str | None = None,
+    ) -> AgentRunState:
+        next_state = replace(state, revision=previous.revision + 1)
+        node = None
+        if message is not None:
+            if node_id is None:
+                raise ValueError("提交 AgentMessage 时必须提供 node_id")
+            operation = self._operations.load_operation(next_state.operation_id)
+            session = self._conversations.load_conversation_session(
+                operation.session_id
+            )
+            node = ConversationNode(
+                node_id=node_id,
+                session_id=operation.session_id,
+                parent_node_id=session.active_node_id,
+                content_type="agent_message",
+                content=message,
+                created_at=self._now(),
+            )
+        if not self._operations.commit_transition(
+            state=next_state,
+            expected_revision=previous.revision,
+            node=node,
         ):
-            if entry.node.node_id != step.assistant_message_node_id:
-                continue
-            message = agent_message_from_dict(entry.object.content)
-            if not isinstance(message, AssistantMessage):
-                raise RuntimeError("assistant_message_node_id 未指向 AssistantMessage")
-            return message
-        raise RuntimeError(
-            f"AssistantMessage 节点不存在: {step.assistant_message_node_id}"
-        )
+            raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
+        return next_state
 
-    @staticmethod
-    def _find_tool_call(
-        state: AgentRunState,
-        tool_call_id: str,
-    ) -> ToolCallState:
-        step = state.current_step
-        if step is not None:
-            for tool_call in step.tool_calls:
-                if tool_call.tool_call_id == tool_call_id:
-                    return tool_call
-        raise RuntimeError(f"ToolCallState 不存在: {tool_call_id}")
 
-    @staticmethod
-    def _build_tool_result_message(
-        tool_call: ToolCallState,
-        result: ToolExecutionResult,
-    ) -> ToolResultMessage:
-        content = (
-            copy.deepcopy(result.content_blocks)
-            if result.content_blocks
-            else [TextBlock(text=result.content)]
+def _fingerprint(context: ModelContext) -> str:
+    return hashlib.sha256(context.to_json().encode("utf-8")).hexdigest()
+
+
+def _tool_calls_from_assistant(
+    message: AssistantMessage, *, package: AgentPackageVersion
+) -> tuple[ToolCallState, ...]:
+    tools = {tool.name: tool for tool in package.tools}
+    return tuple(
+        ToolCallState(
+            tool_call_id=block.id,
+            tool_name=block.name,
+            arguments=block.arguments,
+            status="ready",
+            approval=None,
+            replay_policy=(
+                tools[block.name].replay_policy if block.name in tools else "never"
+            ),
+            execution_intent=None,
+            decision_reason=None,
+            result_node_id=None,
+            is_error=None,
         )
-        return ToolResultMessage(
-            tool_call_id=tool_call.tool_call_id,
-            tool_name=tool_call.tool_name,
-            content=content,
-            is_error=result.is_error,
-            structured_content=copy.deepcopy(result.structured_content),
-        )
+        for block in message.content
+        if isinstance(block, ToolCallBlock)
+    )
+
+
+def _waiting_tool_call(calls: Sequence[ToolCallState]) -> ToolCallState | None:
+    return next((call for call in calls if call.status == "waiting_approval"), None)
+
+
+def _tool_result_message(
+    call: ToolCallState, result: ToolExecutionResult
+) -> ToolResultMessage:
+    content = tuple(result.content_blocks) or (TextBlock(text=result.content),)
+    return ToolResultMessage(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        content=content,
+        is_error=result.is_error,
+        structured_content=result.structured_content,
+    )

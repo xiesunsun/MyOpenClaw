@@ -1,9 +1,7 @@
 import textwrap
 import unittest
-import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
@@ -66,21 +64,3 @@ class SandboxWiringTests(unittest.TestCase):
             self.assertTrue(policy.enabled)
             self.assertTrue(policy.strict)
             self.assertEqual(root.resolve(), policy.project_root.resolve())
-
-    def test_build_agent_runtime_passes_policy_to_local_bash(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            boot = self._boot(root)
-
-            def _provider(config, *, artifact_service):
-                return SimpleNamespace(artifact_service=artifact_service)
-
-            with unittest.mock.patch(
-                "pickel.app.boot.AnthropicProvider.from_config",
-                side_effect=_provider,
-            ):
-                _, runtime = boot.build_agent_runtime()
-
-            bash = runtime.bindings.tool_services.bash
-            self.assertIsNotNone(bash.sandbox)
-            self.assertTrue(bash.sandbox.strict)

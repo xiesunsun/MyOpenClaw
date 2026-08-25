@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import os
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.app.boot import Boot
 from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import ConversationRequest
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
+from pickel.inbox.message import UserMessageSource
+from pickel.operations.operation_service import OperationService
+from pickel.workspaces.workspace_binding import WorkspaceBinding
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
@@ -72,3 +79,45 @@ def test_runtime_host_keeps_ephemeral_conversation_off_disk() -> None:
 
         assert conversation.persistence == "ephemeral"
         assert not (root / "home" / "runtime.db").exists()
+
+
+def test_runtime_host_keeps_recovery_path_open_when_exact_package_cannot_load() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            first = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            store = first.persistence_store
+            now = datetime(2026, 8, 25, tzinfo=timezone.utc)
+            message = store.send_message(
+                message_id="message-1",
+                session_id=first.session.session_id,
+                delivery="followup",
+                message=UserMessage((TextBlock("resume"),)),
+                source=UserMessageSource(),
+                created_at=now,
+            )
+            accepted = OperationService(store).accept_pending_message(
+                message=message,
+                agent_package_version_id=(first.agent_definition.package_version_id),
+                workspace_binding=WorkspaceBinding(
+                    workspace_id=first.session.workspace_id,
+                    working_directory=first.session.cwd,
+                    allowed_root=first.session.cwd,
+                ),
+                expected_node_id=first.session.active_node_id,
+            )
+            assert accepted is not None
+            error = PackageLoadError(
+                "extension_unavailable",
+                accepted.operation.agent_package_version_id,
+                "missing",
+            )
+            with patch.object(host.boot, "load_agent_package", side_effect=error):
+                reopened = host.open_conversation(
+                    ConversationRequest(session_id=first.session.session_id)
+                )
+
+        assert reopened.session.session_id == first.session.session_id

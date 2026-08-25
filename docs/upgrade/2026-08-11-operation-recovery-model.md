@@ -1,136 +1,322 @@
 # Operation 持久化与恢复模型
 
 **日期**：2026-08-11  
-**状态**：已实施（阶段 3）
-**范围**：SessionOperation、AgentRunState、ModelStepState、ToolCallState、Agent Package 绑定与恢复语义  
-**不在范围**：Runtime 组件拆分、观测事件、多模态 Artifact、多 Agent 调度
+**更新日期**：2026-08-25
+**状态**：目标合同；v10 恢复主链已实施，Approval 与 Host reconcile 控制面待完成
+**范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
+**不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
-命名遵循 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md)，底层事务遵循 [`数据库实体设计`](./2026-07-12-db-entities.md)。
+命名遵循 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md)，表结构和原子事务遵循 [`数据库实体设计`](./2026-07-12-db-entities.md)。
 
-## 1. 结论
+## 1. 恢复模型
 
 ```text
-SessionOperation（不可变身份记录）
-├── agent_package_version_id
-├── accepted_commit_sequence
-└── operation/<operation_id>/state（NamedReference）
-    └── ImmutableObject(session_operation_state)
-        └── AgentRunState
-            └── ModelStepState
-                └── ToolCallState[]
+ConversationSession.active_operation_id
+└── SessionOperation                         不可变
+    ├── agent_package_version_id
+    ├── workspace_binding_json
+    ├── input_node_id
+    └── AgentRunState                        当前一行，revision CAS
+        └── ModelStepState?                  current_step_json
+            ├── ModelRequestIntent?
+            └── ToolCallState[]
+                ├── ToolApproval?
+                └── ToolExecutionIntent?
 ```
 
-- Operation 被 Session 接受时即持久化，不能先启动协程再补记录。
-- 每次状态转换创建新的不可变 State，并移动唯一状态引用。
-- 恢复只读取最新状态引用，不扫描 Event 或重放 reducer。
-- 一个 AgentRun 在接受时绑定一个已持久化的 `AgentPackageVersion`。
-- `operation_id`、`step_id`、`tool_call_id` 分别是三个层级的身份；序号只排序，不充当身份。
+恢复只读取这条链，不扫描历史 State、Event、Trace 或 reducer。数据库保存“下一步判断所需事实”，不保存 Python 协程和 Provider stream buffer。
 
-## 2. `session_operations`
+## 2. Operation 接受
 
-| 列 | 类型 | 约束 | 含义 |
+InboxMessage 进入数据库不等于 Operation 已开始。AgentDriver 只在 Session 空闲时触发 OperationService 接受：
+
+```text
+CAS claim waking InboxMessage
++ 按 sequence 插入输入 ConversationNode
++ insert SessionOperation
++ insert AgentRunState(revision=1, status=queued)
++ move ConversationSession.active_node_id
++ set ConversationSession.active_operation_id
++ mark InboxMessage claimed
++ commit
+```
+
+SessionOperation 字段：
+
+```python
+@dataclass(frozen=True)
+class SessionOperation:
+    operation_id: OperationId
+    session_id: SessionId
+    agent_package_version_id: AgentPackageVersionId
+    workspace_binding: WorkspaceBinding
+    input_node_id: ConversationNodeId
+    accepted_at: datetime
+```
+
+接受前必须确认：
+
+- Session 未归档且 active_operation_id 为空；
+- Package Version 存在、agent_id 匹配且当前所需 Secret/实现可装载；
+- WorkspaceBinding 与 Session.workspace_id 一致；
+- 被 claim 的 InboxMessage 仍为 pending。
+
+任一步失败全部回滚。Definition、Settings 或 Environ 的后续变化不改变已接受 Operation。
+
+## 3. AgentRunState
+
+```python
+@dataclass(frozen=True)
+class AgentRunState:
+    operation_id: OperationId
+    revision: int
+    status: AgentRunStatus
+    waiting_reason: WaitingReason | None
+    completed_step_count: int
+    current_step: ModelStepState | None
+    final_assistant_node_id: ConversationNodeId | None
+    error: AgentRunError | None
+    cancellation: Cancellation | None
+```
+
+状态：
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> running
+    queued --> cancelling
+    running --> waiting
+    waiting --> running
+    running --> succeeded
+    running --> failed
+    running --> cancelling
+    waiting --> failed
+    waiting --> cancelling
+    cancelling --> cancelled
+```
+
+终态为 `succeeded / failed / cancelled`，不能返回运行态。第一版 waiting_reason 只有：
+
+```text
+tool_approval
+tool_reconciliation
+```
+
+Package、Secret 或冻结实现装载失败不增加 `blocked/suspended/runtime_unavailable` 状态；写入 `failed` 和稳定的 retryable AgentRunError。用户修复环境后创建新 Operation，不让旧 Operation 在无状态承载的情况下假装可恢复。
+
+每次转换必须满足：
+
+```text
+new.revision = current.revision + 1
+UPDATE ... WHERE revision = expected_revision
+```
+
+CAS 零行表示状态已经变化。调用方重新读取；Approval 等外部决定不得丢弃调用方 expected_revision 后盲目重放。
+
+## 4. ModelStepState 与 ModelRequestIntent
+
+```python
+@dataclass(frozen=True)
+class ModelStepState:
+    step_id: StepId
+    step_sequence: int
+    phase: Literal[
+        "preparing_request",
+        "request_ready",
+        "awaiting_tools",
+    ]
+    request_attempt: int
+    request_intent: ModelRequestIntent | None
+    assistant_message_node_id: ConversationNodeId | None
+    tool_calls: tuple[ToolCallState, ...]
+```
+
+约束：
+
+| phase | request_intent | assistant node | tool_calls |
 | --- | --- | --- | --- |
-| `operation_id` | TEXT | PK | Operation 稳定身份 |
-| `session_id` | TEXT | FK → sessions | 所属会话 |
-| `operation_type` | TEXT | `agent_run` 等 | 工作类型 |
-| `agent_package_version_id` | TEXT | FK → agent_package_versions，AgentRun 必填 | 接受时冻结的 Agent Package |
-| `accepted_commit_sequence` | INTEGER | FK → storage_commits | 接受操作的原子提交 |
-| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
+| `preparing_request` | NULL | NULL | 空 |
+| `request_ready` | 必填 | NULL | 空 |
+| `awaiting_tools` | NULL | 必填 | 非空 |
 
-第一版只接受 `agent_run`。后续 HistoryCompaction、HistoryNavigation 和 Delegation 复用同一 Operation 身份，不另建 Turn/Job/Task 表。
+Step 完成时清空 current_step 并递增 completed_step_count；不保存 completed Step ID 列表，也不增加 completed phase。
 
-## 3. 接受事务
+ModelRequestIntent：
 
-一次 AgentRun 接受提交必须共享同一个 `commit_sequence`：
-
-```text
-insert SessionOperation
-insert UserMessage ImmutableObject
-append ConversationNode
-move conversation/active
-insert initial AgentRunState ImmutableObject
-move operation/<operation_id>/state
-commit
+```python
+@dataclass(frozen=True)
+class ModelRequestIntent:
+    model_context: ModelContext
+    context_fingerprint: str
 ```
 
-任一步失败则 Operation、用户消息、状态与 Reference 全部不可见。禁止接受后仍使用未绑定 Package 的“当前配置”。
-
-## 4. 状态对象
-
-`session_operation_state@1` 的持久化内容：
-
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `operation_id` | string | 所属 Operation |
-| `operation_type` | `agent_run` | 状态种类 |
-| `revision` | integer | 从 1 递增 |
-| `status` | enum | `queued/running/waiting/succeeded/failed/cancelled` |
-| `user_message_node_id` | string | 接受事务写入的用户消息节点 |
-| `current_step` | ModelStepState/null | 当前模型步骤 |
-| `completed_step_ids` | string[] | 已完成步骤的稳定身份 |
-| `final_assistant_node_id` | string/null | 成功终态的回答节点 |
-| `error` | object/null | 可恢复的失败摘要，不保存 Python exception |
-| `model_context_feedback` | string[] | 已持久化、待注入后续 ModelContext 的 Hook 反馈 |
-
-`ModelStepState`：
-
-| 字段 | 含义 |
-| --- | --- |
-| `step_id` | 稳定身份 |
-| `step_sequence` | Operation 内从 1 递增的显示顺序 |
-| `phase` | Provider/Tool Loop 当前持久化阶段 |
-| `assistant_message_node_id` | 已落盘的模型输出节点，可空 |
-| `tool_calls` | 有序 ToolCallState 列表 |
-| `retry_count` | 已持久化的模型请求重试次数 |
-| `post_tool_batch_hook_completed` | PostToolBatch Hook 是否已经跨越执行边界 |
-
-`ToolCallState` 还持久化 `execution_policy`、`decision_reason`、结果节点与错误标记。Hook 对参数和执行策略的决定因此不是进程内临时状态，恢复后不会重新询问模型来猜测。
-
-状态 Reference 使用 `operation/<operation_id>/state`。State 中的 `revision` 与 Reference 的 `commit_sequence` 含义不同：revision 只排序该 Operation 的状态版本；Reference `commit_sequence` 是 Session 的持久化提交顺序。
-
-## 5. Tool 恢复语义
-
-| ToolCallState | 崩溃后语义 |
-| --- | --- |
-| `ready` | 尚未跨越执行边界；恢复后可记录 intent 并执行 |
-| `intent_recorded` | 外部结果未知；默认禁止自动重放 |
-| `completed` | 结果消息已持久化；继续后续 Tool Loop |
-
-安全顺序固定为：
+完整 ModelContext 包含 Provider-neutral `system + messages + tool definitions`。它在 Recall/Hook/Window 完成后、Provider 调用前持久化，原因是动态贡献和裁剪结果无法保证重算一致。
 
 ```text
-ToolCallReady
-→ commit ToolCallIntentRecorded
-→ execute external tool
-→ atomically append ToolResultMessage + commit ToolCallCompleted
+preparing_request
+→ ConversationProjector
+→ ContextWindow
+→ Recall / Hook ContextContributions
+→ ModelContextBuilder
+→ CAS commit request_ready + ModelRequestIntent
+→ CAS request_attempt += 1
+→ Provider Mapper / stream
 ```
 
-`intent_recorded` 不等于“工具一定执行过”，只表示真实世界副作用可能已经发生。恢复时：
+恢复：
 
-1. 工具有稳定幂等键和显式 reconcile 能力时，可查询结果后提交 completed；
-2. 否则暂停等待 Host 决策，或写入明确的中断 ToolResult；
-3. 禁止 Runtime 猜测“应该没执行”并静默重放。
+| 持久化状态 | 动作 |
+| --- | --- |
+| `preparing_request` | Provider 尚未调用，可重新投影并执行 Recall/Hook |
+| `request_ready` | 直接读取 Intent，不重跑 Context 管道；用相同输入重新发起 Provider 请求 |
+| stream 中断 | 丢弃内存 buffer，从持久化 Intent 重发完整请求 |
+| AssistantMessage 已提交 | 不重发 Provider；按 awaiting_tools 或 Step 完成继续 |
 
-Host 核实外部结果后调用 `record_reconciled_tool_result()`，结果消息与 `waiting → running` 状态转换在同一提交中完成；随后 `resume_operation()` 从已完成 ToolCall 继续。Host 也可以通过 `cancel_operation()` 明确结束 Operation。
+逐 Chunk 不进入业务数据库；full Trace 的副本不可用于恢复。
 
-这就是 Operation Record 支持续执行的边界：它能确定从哪个状态继续，也能确定哪些动作不能安全自动继续；它不承诺恢复已经丢失的 Python 协程。
+## 5. ToolCallState
 
-## 6. 状态转换约束
+```python
+@dataclass(frozen=True)
+class ToolCallState:
+    tool_call_id: ToolCallId
+    tool_name: str
+    arguments: FrozenJSON
+    status: ToolCallStatus
+    approval: ToolApproval | None
+    replay_policy: Literal["safe", "never"]
+    execution_intent: ToolExecutionIntent | None
+    decision_reason: str | None
+    result_node_id: ConversationNodeId | None
+    is_error: bool | None
+```
 
-- 新状态 `revision = current.revision + 1`。
-- 提交同时校验 Session `current_commit_sequence` 与状态 Reference 当前 `commit_sequence`。
-- 终态不能回到运行态。
-- `succeeded` 必须有 `final_assistant_node_id`。
-- `failed/cancelled` 不得留下可自动执行的 `ready` ToolCall。
-- State 只能引用同 Session、已存在或同事务新建的 Node。
-- AgentRun 的 Package ID 创建后不可改变。
+状态机：
 
-## 7. 阶段 3 验收
+```mermaid
+stateDiagram-v2
+    [*] --> ready: 无需审批
+    [*] --> waiting_approval: 需要审批
+    [*] --> completed: 参数无效或 Hook 拒绝
+    waiting_approval --> ready: approved
+    waiting_approval --> denied: denied
+    denied --> completed: Driver 提交错误 ToolResult
+    ready --> intent_recorded: Intent commit
+    intent_recorded --> completed: Result commit
+```
 
-1. 接受 AgentRun 时 Operation、用户消息、初始 State 和两个 Reference 原子成功或全部回滚。
-2. Package Version 不存在时拒绝接受。
-3. State revision 与 Reference CAS 冲突可复现，失败不消耗 `commit_sequence`。
-4. 进程重启后按 `operation/<id>/state` 一次读取恢复最新 AgentRunState。
-5. `intent_recorded` ToolCall 不被自动重放。
-6. 核心持久化身份不再新增 `turn_id`。
-7. Host 可原子补交未知 ToolCall 结果并继续，或显式取消 Operation。
+Provider ToolCall 顺序就是列表顺序。tool_call_id、tool_name、冻结 arguments 和 replay_policy 创建后不可修改。`completed` 必须有 result_node_id 和 is_error；其他状态两者为空。
+
+## 6. Tool Intent 与恢复
+
+安全顺序：
+
+```text
+ready
+→ resolve ToolExecutionIntent
+→ CAS commit intent_recorded
+→ execute real Tool with tool_call_id as default idempotency key
+→ atomically append ToolResult + commit completed
+```
+
+`intent_recorded` 表示工具可能未开始、正在执行或已完成但结果未提交。重启不能从该状态推断“尚未执行”。
+
+恢复决策：
+
+```mermaid
+flowchart TD
+    I[intent_recorded] --> R{有 reconciler?}
+    R -->|有| Q[查询外部结果]
+    Q -->|已完成| C[提交 ToolResult]
+    Q -->|确认未开始| P{replay_policy}
+    Q -->|未知| W[waiting / tool_reconciliation]
+    R -->|无| P
+    P -->|safe| E[相同 tool_call_id 重放]
+    P -->|never| W
+```
+
+Host reconcile 必须带 expected revision。确认结果时，ToolResult、ToolCall completed、AgentRun running 和 waiting_reason 清空在一致事务中提交；无法确认则保持 waiting。`outcome_unknown` 不作为 ToolCallStatus。
+
+## 7. Tool Approval
+
+Approval 是 ToolCallState 内的持久化值，不是同步 HostCall：
+
+```text
+Driver CAS → waiting_approval
+→ 返回，不持有 Future
+→ Host 查询 pending approval
+→ ApprovalService CAS approved / denied
+→ 所有审批已有决定后 AgentRun running
+→ AgentRegistry.wake(session_id)
+```
+
+多个审批可以逐个决定，但存在任意 waiting_approval 时 Driver 不执行 Tool。全部决定后，Driver 按 Provider ToolCall 原始顺序执行 ready 调用并为 denied 调用生成错误 ToolResult。
+
+相同决定可幂等成功；过期 revision、冲突决定、已取消 Operation 必须拒绝。不使用 per-session Lock 替代 CAS，不做忽略调用方前置条件的指数退避盲重试。
+
+## 8. Cancel 与级联取消
+
+取消顺序：
+
+```text
+CAS AgentRunState → cancelling + Cancellation
++ 可选 discard 目标 InboxMessage
+→ commit
+→ abort current in-memory effect
+→ AgentRegistry.wake(session_id)
+→ OperationDriver 协调 Provider/Tool Intent
+→ CAS cancelled + clear Session.active_operation_id
+```
+
+Provider stream 可以中止；intent_recorded ToolCall 必须先 reconcile，不能直接假设未执行。waiting approval 在 cancelling 后失效，迟到决定因 status/revision 不匹配被拒绝。
+
+Parent Operation 取消必须沿 AgentDelegation 图递归处理全部非终态后代：
+
+1. 逐个幂等 CAS 写入 child cancelling；
+2. wake child Session，不依赖 child 是否 live；
+3. Parent 在 cancelling 恢复时重复检查，补齐崩溃窗口；
+4. 只 discard source.sender_operation_id 属于取消祖先集合的 pending Agent 消息；
+5. 每个 child 用自己的 OperationDriver 协调 Tool Intent；
+6. Parent 在自身副作用和后代都安全后进入 cancelled。
+
+## 9. Operation 终态
+
+终态事务：
+
+```text
+CAS AgentRunState → succeeded / failed / cancelled
++ ConversationSession.active_operation_id = NULL
++ updated_at = now
+```
+
+`succeeded` 必须引用 final_assistant_node_id；`failed` 必须保存稳定 AgentRunError；`cancelled` 必须保存 Cancellation。失败和取消不回滚已提交 ConversationNode。
+
+Driver 在提交 succeeded 前执行 stopping check：若存在 pending steer/inject，则 claim 并继续当前 Operation；否则终态并释放 active_operation_id。与终态并发到达的消息由事务顺序明确归入当前或下一 Operation，不丢失。
+
+## 10. 启动恢复
+
+Host 启动时扫描：
+
+```text
+未归档 Session
+AND (
+  active Operation status IN (queued, running, cancelling)
+  OR pending followup/steer 存在
+)
+```
+
+waiting Operation 不轮询；批准、reconcile 或 cancel 必须先提交状态变化，再显式 wake。只有 pending inject 的 Session 保持 idle。
+
+恢复已有 Operation 必须按其 AgentPackageVersion 和 WorkspaceBinding 加载。精确 Secret 或实现不可用时写入 retryable `failed`，禁止换用当前同名 Provider、Tool、Hook 或 Extension。
+
+## 11. 验收
+
+1. Operation 接受事实原子成功或全部回滚。
+2. 恢复只从 active_operation_id 读取当前状态，不扫描历史。
+3. Request Intent 后崩溃不重跑 Context；Tool Intent 后崩溃不静默重放。
+4. 多审批、Approval/Cancel 和 Tool Result 并发由 revision CAS 防止丢更新。
+5. denied ToolResult 保持 Provider 原始 ToolCall 顺序。
+6. cancelling 可跨崩溃继续，未知 Tool 副作用不会被直接标记 cancelled。
+7. Parent 取消不会留下 running/waiting 的孤儿后代。
+8. 终态 State 与 Session.active_operation_id 清空原子一致。

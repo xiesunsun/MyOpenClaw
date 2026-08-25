@@ -1,268 +1,379 @@
 # 数据库实体设计
 
 **初稿日期**：2026-07-12
-**更新日期**：2026-08-11
-**状态**：已实施（SQLite schema v9）
-**范围**：SQLite 中的会话、不可变对象、会话节点、可移动引用、Package、Operation、Artifact 元数据、Agent Delegation 和原子提交
-**不在范围**：Artifact Blob 实现细节、Operation 状态字段和多 Agent 调度策略
+**更新日期**：2026-08-25
+**状态**：目标合同，待 schema v10 实施
+**范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
+**不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 
-本文定义持久化事实和事务边界。实体名称遵循 [`2026-08-10-agent-runtime-naming.md`](./2026-08-10-agent-runtime-naming.md)；旧 `SessionEntry`、`leaf_id` 和 `session_entries` 合同已被本文替代。
+实体名称遵循 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md)，状态转换与恢复遵循 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。本文替换 schema v9 的 `ImmutableObject + NamedReference + StorageCommit` 目标模型；旧表只作为迁移来源，不再决定 Runtime 领域接口。
 
-## 1. 目标模型
+## 1. 目标关系
 
-```text
-ConversationSession
-├── StorageCommit(sequence)
-├── ConversationNode ──► ImmutableObject
-├── NamedReference ─────► ConversationNode | ImmutableObject
-└── SessionOperation ───► AgentPackageVersion
-
-ConversationEntry = ConversationNode + ImmutableObject（只读投影，不落库）
+```mermaid
+erDiagram
+    WORKSPACE ||--o{ CONVERSATION_SESSION : contains
+    CONVERSATION_SESSION ||--o{ CONVERSATION_NODE : contains
+    CONVERSATION_SESSION ||--o{ AGENT_INBOX_MESSAGE : receives
+    CONVERSATION_SESSION ||--o{ SESSION_OPERATION : accepts
+    CONVERSATION_SESSION }o--o| CONVERSATION_NODE : active_node
+    CONVERSATION_SESSION }o--o| SESSION_OPERATION : active_operation
+    SESSION_OPERATION ||--|| AGENT_RUN_STATE : current_state
+    SESSION_OPERATION }o--|| AGENT_PACKAGE_VERSION : freezes
+    CONVERSATION_SESSION ||--o| AGENT_DELEGATION : child
+    SESSION_OPERATION ||--o{ AGENT_DELEGATION : parent
 ```
 
-| 实体 | 是否可更新 | 含义 |
-| --- | --- | --- |
-| `ConversationSession` | 仅封面状态可变 | 会话身份、归属和当前提交序号 |
-| `StorageCommit` | 否 | Session 内一次成功原子提交 |
-| `ImmutableObject` | 否 | 版本化 JSON 内容 |
-| `ConversationNode` | 否 | Object 在会话树中的位置 |
-| `NamedReference` | 以追加新版本移动 | 指向 Node 或 Object 的具名指针 |
-| `ConversationEntry` | 不落库 | Node 与 Object 解析后的读取视图 |
-| `SessionOperation` | 否 | Session 接受的工作身份；状态内容见 Operation 恢复合同 |
-| `Artifact` | 否 | 多模态二进制的内容寻址元数据；字节不进入 SQLite |
+目标表：
 
-## 2. 共享 commit_sequence
+```text
+workspaces
+conversation_sessions
+conversation_nodes
+agent_inbox_messages
+agent_package_versions
+session_operations
+agent_run_states
+artifacts
+agent_delegations
+```
 
-`commit_sequence` 是单个 Session 内的持久化提交顺序，从 `1` 严格递增。
+不建立：
 
-- 一个 `StorageTransaction` 只分配一个 `commit_sequence`。
-- 同一事务插入的 Object、Node 和 Reference 版本共享该序号。
-- 事务回滚不得消耗 `commit_sequence`。
-- `commit_sequence` 用于审计、增量 Watch 和并发检查，不用于扫描历史恢复当前状态。
-- EventBus 另行分配进程内 `event_sequence`；二者不可比较，也不能互相充当 cursor。
+- `storage_commits`
+- `immutable_objects`
+- `named_references`
+- `conversation_entries`
+- `model_step_states`
+- `tool_call_states`
+- `artifact_references`
+- `tool_approvals`
+- `runtime_events / observations / trace_spans`
 
-## 3. 表结构
+ModelStepState、ToolCallState 和 ToolApproval 嵌入 `agent_run_states.current_step_json`；ArtifactReference 嵌入 ConversationNode 消息内容；Trace 不进入业务数据库。
 
-### 3.1 `sessions`
+跨表不变量：
 
-| 列 | 类型 | 约束 | 含义 |
-| --- | --- | --- | --- |
-| `session_id` | TEXT | PK | UUID |
-| `agent_id` | TEXT | NOT NULL | 创建时使用的 Agent Definition 标识 |
-| `cwd` | TEXT | NOT NULL | 规范化工作目录 |
-| `current_commit_sequence` | INTEGER | NOT NULL, DEFAULT 0 | 最近成功提交序号 |
-| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
-| `updated_at` | TEXT | NOT NULL | UTC ISO8601 |
-| `status` | TEXT | NOT NULL | `active` / `archived` |
-| `title` | TEXT | NULL | 展示标题 |
+```text
+ConversationNode.parent_node_id 与 active_node_id 必须属于同一 Session
+SessionOperation.input_node_id 必须属于同一 Session
+ConversationSession.active_operation_id 必须属于同一 Session
+AgentRunState 引用的 Node 必须属于其 Operation 所属 Session
+WorkspaceBinding.workspace_id = ConversationSession.workspace_id
+AgentDelegation.initial_message_id 属于 child_session_id
+```
 
-`sessions` 不保存 `leaf_id`。活动节点由 `conversation/active` NamedReference 唯一表达。
+能用复合外键表达的关系必须使用 `UNIQUE(session_id, id) + FOREIGN KEY(session_id, id)`，并在跨表接受事务需要时声明 deferred；JSON 内引用和无法直接用 SQLite FK 表达的关系由事务服务与 dataclass 同时校验。
 
-### 3.2 `storage_commits`
+## 2. `workspaces`
 
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
-| `session_id` | TEXT | FK → sessions |
-| `commit_sequence` | INTEGER | Session 内递增 |
-| `commit_id` | TEXT | 全局唯一 UUID |
-| `committed_at` | TEXT | UTC ISO8601 |
+| `workspace_id` | TEXT | PK |
+| `root_path` | TEXT | UNIQUE NOT NULL |
+| `created_at` | TEXT | NOT NULL，UTC ISO8601 |
 
-主键：`(session_id, commit_sequence)`；`commit_id` 唯一。
+`root_path` 创建前执行 `expanduser → absolute → realpath` 并确认目录存在。路径创建后不可修改；目录后来缺失不删除记录，也不保存派生 status。
 
-### 3.3 `immutable_objects`
-
-| 列 | 类型 | 约束 | 含义 |
-| --- | --- | --- | --- |
-| `object_id` | TEXT | PK | UUID |
-| `object_type` | TEXT | NOT NULL | 如 `agent_message`、`history_compaction` |
-| `schema_version` | INTEGER | NOT NULL | 对象自身 schema 版本 |
-| `digest` | TEXT | NOT NULL | 规范 JSON envelope 的 SHA-256 |
-| `content_json` | TEXT | NOT NULL | JSON object |
-| `created_session_id` | TEXT | NOT NULL | 首次创建所在 Session |
-| `created_commit_sequence` | INTEGER | NOT NULL | 首次创建所在提交 |
-| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
-
-对象只能 INSERT，禁止 UPDATE。第一阶段不按 digest 自动合并对象；digest 用于校验和后续内容寻址。
-
-### 3.4 `conversation_nodes`
-
-| 列 | 类型 | 约束 | 含义 |
-| --- | --- | --- | --- |
-| `node_id` | TEXT | PK | UUID |
-| `session_id` | TEXT | FK → sessions | 所属会话 |
-| `parent_node_id` | TEXT | NULL | 同 Session 父节点；根节点为空 |
-| `object_id` | TEXT | FK → immutable_objects | 节点内容 |
-| `created_commit_sequence` | INTEGER | NOT NULL | 创建节点的提交序号 |
-| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
-
-节点只能 INSERT。`parent_node_id` 必须为空或指向同 Session 已存在/同事务新建的节点。
-
-### 3.5 `named_references`
-
-NamedReference 的移动通过追加版本表达，不覆盖旧行。
+## 3. `conversation_sessions`
 
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
-| `session_id` | TEXT | FK → sessions |
-| `reference_name` | TEXT | 如 `conversation/active` |
-| `commit_sequence` | INTEGER | 本次移动所在提交 |
-| `target_kind` | TEXT | `node` / `object` |
-| `target_id` | TEXT | 目标 ID |
+| `session_id` | TEXT | PK |
+| `agent_id` | TEXT | NOT NULL，不可修改 |
+| `workspace_id` | TEXT | FK → workspaces，NOT NULL，不可修改 |
+| `cwd` | TEXT | NOT NULL，规范化绝对路径，不可修改 |
+| `active_node_id` | TEXT | NULL，指向同 Session ConversationNode |
+| `active_operation_id` | TEXT | NULL，指向同 Session 非终态 SessionOperation |
+| `title` | TEXT | NULL |
+| `title_source` | TEXT | NULL / `generated` / `user` |
+| `created_at` | TEXT | NOT NULL |
+| `updated_at` | TEXT | NOT NULL |
+| `archived_at` | TEXT | NULL |
 
-主键：`(session_id, reference_name, commit_sequence)`。当前 Reference 是同名行中 `commit_sequence` 最大的一条。
+约束：
 
-### 3.6 `agent_package_versions`
-
-| 列 | 类型 | 约束 | 含义 |
-| --- | --- | --- | --- |
-| `package_version_id` | TEXT | PK | `agentpkg_<digest>` |
-| `digest` | TEXT | UNIQUE | Snapshot 内容 SHA-256 |
-| `agent_id` | TEXT | NOT NULL | Pickel 设置中的 Agent ID |
-| `content_json` | TEXT | NOT NULL | 不含密钥的完整 Package Snapshot |
-| `created_at` | TEXT | NOT NULL | UTC ISO8601 |
-
-Package Snapshot 直接从 Pickel 现有 `AppConfig / AgentConfig / ModelConfig / Skill / ToolBus` 解析；不引入第二套配置文件。相同内容重复插入幂等，ID 相同但内容不同必须失败。
-
-### 3.7 `session_operations`
-
-Operation 身份表使用 `operation_id` 主键，并以 `(session_id, accepted_commit_sequence)` 关联接受它的 `StorageCommit`，以 `agent_package_version_id` 关联冻结的 Package。状态不覆盖此行，而是通过 `operation/<operation_id>/state` NamedReference 指向不可变 State；完整字段和转换约束见 [`Operation 持久化与恢复模型`](./2026-08-11-operation-recovery-model.md)。
-
-### 3.8 `artifacts` 与 BlobStore
-
-| 列 | 类型 | 含义 |
-| --- | --- | --- |
-| `artifact_id` | TEXT PK | `artifact_<sha256>` 稳定身份 |
-| `digest` | TEXT | Blob 字节 SHA-256 |
-| `media_type` | TEXT | Provider-neutral MIME type |
-| `size_bytes` | INTEGER | Blob 大小 |
-| `blob_key` | TEXT | BlobStore 内部内容寻址键 |
-| `created_at` | TEXT | UTC ISO8601 |
-
-SQLite 只保存不可变元数据；实际字节由 `BlobStore` 保存。默认本地实现使用 `sha256/<前两位>/<剩余 digest>`，以后可以替换为对象存储而不改变 `ArtifactReference` 和消息 schema。消息 payload v3 使用 `ArtifactBlock(artifact=ArtifactReference)`，禁止直接持久化 base64、临时 URL 或 Provider 文件 ID。Blob 先写、元数据后写，失败可能留下可 GC 的孤立 Blob，但绝不能留下指向不存在 Blob 的已提交消息。
-
-### 3.9 `agent_delegations`
-
-| 列 | 类型 | 含义 |
-| --- | --- | --- |
-| `delegation_id` | TEXT PK | 委派关系稳定身份 |
-| `parent_operation_id` | TEXT FK | 发起委派的父 AgentRun |
-| `parent_step_id` | TEXT | 发起委派的父 ModelStep |
-| `parent_tool_call_id` | TEXT NULL | 若通过工具发起，记录父 ToolCall |
-| `child_operation_id` | TEXT UNIQUE FK | 被委派的 AgentRun |
-| `child_session_id` | TEXT | child 所属隔离 Session |
-| `created_commit_sequence` | INTEGER | child Operation 接受提交 |
-| `created_at` | TEXT | UTC ISO8601 |
-
-`AgentDelegation` 与 child `SessionOperation` 必须在 child Session 的同一 StorageTransaction 中创建。一个 child Operation 只能有一个父关系。Lane 只表示同一会话树上的独立活动位置，不表示 Agent；动态子 Agent 默认创建隔离 Session，避免多个执行者竞争同一 `conversation/active`。
-
-## 4. StorageTransaction
-
-唯一写边界：
-
-```python
-transaction = store.begin_storage_transaction(
-    session_id=session_id,
-    expected_commit_sequence=current_commit_sequence,
-)
-object_id = transaction.insert_immutable_object(...)
-node_id = transaction.append_conversation_node(
-    object_id=object_id,
-    parent_node_id=active_node_id,
-)
-transaction.move_named_reference(
-    reference_name="conversation/active",
-    target_kind="node",
-    target_id=node_id,
-    expected_current_commit_sequence=active_reference_commit_sequence,
-)
-commit = transaction.commit()
+```sql
+CHECK (
+    (title IS NULL AND title_source IS NULL)
+    OR
+    (title IS NOT NULL AND title_source IN ('generated', 'user'))
+),
+CHECK (archived_at IS NULL OR active_operation_id IS NULL)
 ```
 
-事务必须：
+不保存 `status`、`version`、`current_commit_sequence`、`next_sequence` 或 parent Session 字段。Archive 由 `archived_at` 表达；运行状态由 `active_operation_id → agent_run_states` 推导。
 
-1. 校验 Session 当前 `commit_sequence` 与调用方预期一致；
-2. 校验 Object、Node 和 Reference 目标；
-3. 分配 `current_commit_sequence + 1`；
-4. 写入全部不可变事实和 Reference 新版本；
-5. 插入 StorageCommit；
-6. 更新 Session `current_commit_sequence/updated_at`；
-7. 任一步失败则全部回滚且不消耗 `commit_sequence`。
+索引：
 
-Reference move 还需校验 `expected_current_commit_sequence`：
+```sql
+CREATE INDEX idx_conversation_sessions_cwd_updated
+ON conversation_sessions(cwd, updated_at DESC);
+```
 
-- `None` 表示调用方预期该 Reference 尚不存在；
-- 整数表示调用方最后读取的 Reference 版本；
-- 不匹配时抛并发冲突，禁止静默覆盖。
+## 4. `conversation_nodes`
 
-## 5. 会话树写入
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `node_id` | TEXT | PK |
+| `session_id` | TEXT | FK → conversation_sessions，NOT NULL |
+| `parent_node_id` | TEXT | NULL，同 Session parent |
+| `content_type` | TEXT | `agent_message` / `history_compaction` |
+| `content_json` | TEXT | NOT NULL，合法 JSON object |
+| `created_at` | TEXT | NOT NULL |
 
-追加用户消息、Assistant 消息、工具结果、Compaction 和 HostCall 的底层动作完全相同：
+Node 创建后不可更新。内容直接保存在 Node，不再经过 ImmutableObject；格式随 SQLite schema migration 统一升级，不保存逐行 `content_version`。
+
+使用 `UNIQUE(session_id, node_id)` 和复合外键保证 parent 属于同一 Session，并保留：
+
+```sql
+CREATE INDEX idx_conversation_nodes_session_parent
+ON conversation_nodes(session_id, parent_node_id);
+```
+
+`active_node_id` 是当前选中分支终点。沿 parent 回溯使用 `node_id` PK；查询 child 分支使用上述索引。不增加 Closure Table、materialized path、Branch 或 Lane 表。
+
+## 5. `agent_inbox_messages`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `message_id` | TEXT | PK |
+| `session_id` | TEXT | FK → conversation_sessions，NOT NULL |
+| `sequence` | INTEGER | NOT NULL，Session 内单调递增 |
+| `delivery` | TEXT | `followup` / `steer` / `inject` |
+| `message_json` | TEXT | NOT NULL，Provider-neutral UserMessage |
+| `status` | TEXT | `pending` / `claimed` / `discarded` |
+| `claimed_operation_id` | TEXT | NULL FK → session_operations |
+| `claimed_step_id` | TEXT | NULL |
+| `outcome_reason` | TEXT | NULL |
+| `created_at` | TEXT | NOT NULL |
+| `handled_at` | TEXT | NULL |
+
+```sql
+UNIQUE(session_id, sequence)
+```
+
+字段组合：
 
 ```text
-insert ImmutableObject
-→ append ConversationNode(parent = 当前 active node)
-→ move conversation/active
-→ commit
+pending   → claim 字段、handled_at、outcome_reason 为空
+claimed   → claimed_operation_id、handled_at 必填，outcome_reason 为空
+discarded → claim 字段为空，handled_at、outcome_reason 必填
 ```
 
-业务方法使用明确名称：
+`message_json.source` 是判别联合：`user`、`agent(sender_session_id, sender_operation_id, form)`、`hook(hook_id)`、`host(call_id)`、`runtime(reason)`。source 用于因果归因和级联取消，不授予权限。
 
-- `append_user_message()`
-- `append_assistant_message()`
-- `append_tool_result_message()`
-- `append_history_compaction()`
-- `append_host_call_request()`
-- `append_host_call_response()`
-- `move_active_branch_to()`
+Message 被 claim 后创建 `ConversationNode.node_id = message_id`；discarded Message 不进入 Conversation Tree。状态本身是自然 CAS，写入带 `WHERE status = 'pending'`，不增加 revision。
 
-禁止先修改内存 Session 再 flush。成功提交后由 Store 返回新的 `ConversationEntry` 和 Session 只读视图。
+Session 内 sequence 在插入事务中使用 `MAX(sequence)+1` 或等价原子 SQL 分配；唯一约束解决竞争，不给 Session 增加计数器字段。
 
-## 6. 读取与投影
+## 6. `agent_package_versions`
 
-`list_active_branch_entries(session_id)`：
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `package_version_id` | TEXT | PK，`agentpkg_<sha256(canonical content)>` |
+| `agent_id` | TEXT | NOT NULL |
+| `format_version` | INTEGER | NOT NULL |
+| `content_json` | TEXT | NOT NULL，完整非敏感 Package |
+| `created_at` | TEXT | NOT NULL，不参与内容身份 |
 
-1. 读取最新 `conversation/active` Reference；
-2. 使用递归 CTE 从 active node 沿 parent 回溯；
-3. 根到叶排序；
-4. JOIN ImmutableObject；
-5. 返回 `ConversationEntry`。
+不保存独立 `digest`。相同规范内容得到相同 ID，重复插入必须幂等；相同 ID 内容不同视为损坏。
 
-`ConversationEntry` 只包含读取所需的 Node 与解析对象，不拥有独立 Repository，也不能写回数据库。
+`content_json` 冻结 behavior、ModelPolicy、AgentRuntimePolicy、WorkspacePolicy、Skill 全文、ToolVersion 和 ExtensionVersion。只保存 SecretRef，不保存 Secret；Package 子对象不单独建表。
 
-Context、Session Preview 与 OpenViking 都消费同一个活动分支读取接口，禁止分别重建树遍历逻辑。
+## 7. `session_operations`
 
-`ConversationProjector.project_conversation_messages()` 是 Context 的唯一消息投影算法。压缩对象使用 `history_compaction`，并以 `first_kept_node_id` 引用当前分支上的 `ConversationNode`；不再创建指向旧 `SessionEntry` 的 `first_kept_entry_id`。
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `operation_id` | TEXT | PK |
+| `session_id` | TEXT | FK → conversation_sessions，NOT NULL |
+| `agent_package_version_id` | TEXT | FK → agent_package_versions，NOT NULL |
+| `workspace_binding_json` | TEXT | NOT NULL，创建后不可修改 |
+| `input_node_id` | TEXT | FK → conversation_nodes，同 Session，NOT NULL |
+| `accepted_at` | TEXT | NOT NULL |
 
-## 7. 并发与损坏数据
+SessionOperation 创建后不可更新。不保存 `operation_type`、`status`、`accepted_commit_sequence` 或通用 `created_at`。当前只有 AgentRun；状态只存在 `agent_run_states`。
 
-- 一个 Session 同时只允许一个期望 sequence 成功提交；其他提交收到冲突并重新读取。
-- Node、Object 重复 ID 必须失败。
-- Reference 目标不存在、跨 Session parent、Object content 非 JSON object 必须失败。
-- digest 与读取内容不一致视为存储损坏。
-- parent 环无法由正常 append 产生；读取检测到环时必须报错。
+使用 `UNIQUE(session_id, operation_id)` 支持 ConversationSession.active_operation_id 的同 Session 复合外键。
 
-## 8. 删除与归档
+## 8. `agent_run_states`
 
-- 归档只改变 Session status，不删除事实。
-- 删除 Session 在一个事务中级联删除 Commit、Node 和 Reference。
-- ImmutableObject 随创建 Session 删除；全局 Artifact 元数据、Blob 与 AgentPackageVersion 不随单个 Session 级联删除，后续由引用扫描 GC。
-- 禁止删除单个 Node、Object、Commit 或 Reference 历史版本。
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `operation_id` | TEXT | PK/FK → session_operations |
+| `revision` | INTEGER | NOT NULL，初始 1 |
+| `status` | TEXT | 见下方枚举 |
+| `waiting_reason` | TEXT | NULL / `tool_approval` / `tool_reconciliation` |
+| `completed_step_count` | INTEGER | NOT NULL，DEFAULT 0 |
+| `current_step_json` | TEXT | NULL，合法 JSON object |
+| `final_assistant_node_id` | TEXT | NULL FK → conversation_nodes |
+| `error_json` | TEXT | NULL |
+| `cancellation_json` | TEXT | NULL |
+| `updated_at` | TEXT | NOT NULL |
 
-## 9. Schema 策略
+```text
+status = queued / running / waiting / cancelling / succeeded / failed / cancelled
+```
 
-当前 Runtime 使用 `PRAGMA user_version = 9`，包含 `agent_package_versions`、`session_operations`、`artifacts` 与 `agent_delegations`。运行时只接受空库或 v9，不在请求路径中逐版补表。
+数据库 CHECK：
 
-- Runtime 不提供 v3/v4 双读或双写。
-- 当前预发布阶段默认使用新库。
-- 若需要保留 v3 数据，只提供一次性、事务化离线迁移；迁移完成后删除旧表，不在 Runtime 中保留兼容分支。
-- schema 版本不支持时必须明确报错，不能在旧表上静默补列。
+- `waiting` 必须有 waiting_reason，其他状态必须为空；
+- `cancelling/cancelled` 必须有 cancellation_json；
+- `failed` 必须有 error_json；
+- `succeeded` 必须有 final_assistant_node_id；
+- `revision >= 1`、`completed_step_count >= 0`。
 
-## 10. 验收
+复杂 Step/Tool 跨字段约束由 frozen dataclass 和 AgentRunStateMachine 校验。状态更新必须是：
 
-1. Object、Node、Reference 和 Commit 原子成功或全部回滚。
-2. 失败事务不消耗 sequence。
-3. Reference CAS 冲突可复现且不会覆盖较新指针。
-4. 活动分支、分叉与移动 Reference 的读取顺序正确。
-5. Context、Preview、OpenViking 共用活动分支读取接口。
-6. 代码中删除 `Session`、`SessionEntry`、`leaf_id`、`active_path()` 和旧 Repository。
-7. SQLite 中删除 `session_entries`，不保留运行期兼容路径。
+```sql
+UPDATE agent_run_states
+SET revision = revision + 1, ...
+WHERE operation_id = :operation_id
+  AND revision = :expected_revision;
+```
+
+更新零行表示并发冲突，调用方重新读取；不得静默覆盖或盲目重放外部决定。
+
+## 9. `artifacts`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `artifact_id` | TEXT | PK，`artifact_<sha256(bytes)>` |
+| `size_bytes` | INTEGER | NOT NULL，`>= 0` |
+| `created_at` | TEXT | NOT NULL |
+
+不保存独立 digest、media_type 或 blob_key。BlobStore 直接以 artifact_id 寻址；media_type 和 display_name 属于消息中的 ArtifactReference。
+
+Blob 先写，Artifact 元数据后写，ConversationNode 引用最后提交。允许 GC 清理孤立 Blob/Artifact，但已提交 Node 不得引用不存在的 Artifact。
+
+## 10. `agent_delegations`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `child_session_id` | TEXT | PK/FK → conversation_sessions |
+| `parent_operation_id` | TEXT | FK → session_operations，NOT NULL |
+| `parent_step_id` | TEXT | NOT NULL |
+| `parent_tool_call_id` | TEXT | UNIQUE NOT NULL |
+| `initial_message_id` | TEXT | UNIQUE FK → agent_inbox_messages，NOT NULL |
+| `created_at` | TEXT | NOT NULL |
+
+不保存 `delegation_id`、`child_operation_id`、parent_session_id、status、created_commit_sequence 或 delegation_depth。Depth 从不可变关系图推导，并与父 Operation 冻结 Package 中的 max_delegation_depth 比较。
+
+父 ToolCall Intent 先冻结 `child_package_version_id`；随后一个事务创建 child Session、Delegation 和初始 pending followup InboxMessage。Child Operation 由自己的 AgentDriver 后续 claim 产生。
+
+## 11. 原子事务合同
+
+### 11.1 创建 Session
+
+```text
+resolve/create Workspace
++ insert ConversationSession
+```
+
+初始 active_node_id、active_operation_id、title、title_source、archived_at 全为空。不创建空 Root Node。
+
+### 11.2 发送 InboxMessage
+
+```text
+确认 Session.archived_at IS NULL
++ 分配 Session 内 sequence
++ insert pending InboxMessage
+```
+
+followup/steer 提交后 wake；inject 只持久化不单独 wake。
+
+### 11.3 接受 Operation
+
+```text
+CAS 选中 InboxMessage 仍 pending
++ 按 sequence 插入 User ConversationNode
++ insert SessionOperation
++ insert AgentRunState revision=1
++ CAS move active_node_id
++ set active_operation_id
++ mark InboxMessage claimed
+```
+
+前置条件：Session 未归档、`active_operation_id IS NULL`、active_node_id 仍等于调用方读取值。任一步失败全部回滚。
+
+### 11.4 Step 消息 claim
+
+```text
+CAS AgentRunState.revision
++ claim pending steer/inject
++ 按 sequence 插入 User ConversationNode
++ move active_node_id
++ 写 claimed_operation_id / claimed_step_id
++ revision + 1
+```
+
+### 11.5 Model/Tool Intent 与结果
+
+ModelRequestIntent 必须在 Provider 调用前 CAS 写入 current_step_json。ToolExecutionIntent 必须在真实 Tool 副作用前 CAS 写入。完整 AssistantMessage、ToolResult ConversationNode、active_node_id 和对应 State 转换在各自同一事务提交。
+
+### 11.6 Operation 终态
+
+```text
+CAS AgentRunState → succeeded / failed / cancelled
++ ConversationSession.active_operation_id = NULL
++ ConversationSession.updated_at = now
+```
+
+Stopping check 与 pending next-step InboxMessage claim 同属该事务判断，避免消息落在终态边界丢失。
+
+## 12. Archive 与 Delete
+
+Archive 要求 active_operation_id 为空且不存在 pending InboxMessage；提交 `archived_at=now`。归档后拒绝 send、accept 和 active node move。Unarchive 清空 archived_at。
+
+公共 delete 要求 Session 已归档、空闲、无 pending Inbox 且无 AgentDelegation。显式 `delete_session_tree` 可删除完整 child 子树，但要求所有目标均归档、空闲且根没有外部 parent Delegation。
+
+删除 Session 级联删除其 Node、InboxMessage、Operation、AgentRunState 和子树内 Delegation；Artifact 交给 GC，Workspace 与 AgentPackageVersion 保留。
+
+## 13. 恢复查询
+
+进程启动只查询：
+
+```text
+未归档 Session
+AND (
+    active Operation status IN (queued, running, cancelling)
+    OR pending followup/steer 存在
+)
+```
+
+waiting Operation、仅 pending inject 和纯历史 Session 不预加载。外部状态变化提交后显式 `AgentRegistry.wake(session_id)`。
+
+恢复当前执行只走：
+
+```text
+ConversationSession.active_operation_id
+→ SessionOperation
+→ AgentPackageVersion + WorkspaceBinding
+→ AgentRunState
+```
+
+不扫描历史 Operation、Event 或 State revision。
+
+## 14. Schema 与迁移
+
+目标 schema 为 SQLite v10。Runtime 最终只读写 v10 领域表，不保留 v9 双读/双写。迁移批次必须提供一次性、事务化的 v9 → v10 转换：
+
+1. 将 active NamedReference 投影为 ConversationSession.active_node_id；
+2. 将 Node + ImmutableObject 压平为 ConversationNode；
+3. 将最新 Operation State Reference 投影为 agent_run_states 当前行；
+4. 转换 Package、Artifact 和 Delegation 字段；
+5. 校验全部引用和状态后删除旧通用表；
+6. 任一步失败回滚，保留 v9 原库备份。
+
+不在 Runtime 请求路径保留旧 schema 兼容分支。
+
+## 15. 验收
+
+1. 接受 Operation 的七项事实原子成功或全部回滚。
+2. Session.active_operation_id 与 AgentRunState 终态始终一致。
+3. AgentRunState revision CAS、Inbox status CAS 和 active_node_id 自然 CAS 均有冲突测试。
+4. 跨 Session parent、Node/Result 引用和 WorkspaceBinding 被拒绝。
+5. Tool Intent 后崩溃不会被当成未执行静默重放。
+6. 多审批、Approval/Cancel 和 stopping check 并发不丢更新。
+7. Conversation 分叉与 1,000/10,000 Node 长分支查询计划通过基准。
+8. v10 中不存在 ImmutableObject、NamedReference、StorageCommit 和 ConversationEntry 生产路径。

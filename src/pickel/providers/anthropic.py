@@ -24,6 +24,7 @@ from pickel.conversations.content_blocks import (
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
+    thaw_json,
 )
 from pickel.providers.base import Provider
 from pickel.providers.stream import (
@@ -304,7 +305,7 @@ class AnthropicProvider(Provider):
                         "type": "tool_use",
                         "id": block.id,
                         "name": block.name,
-                        "input": block.arguments,
+                        "input": thaw_json(block.arguments),
                     }
                 )
         return blocks
@@ -332,7 +333,7 @@ class AnthropicProvider(Provider):
                     "type": "text",
                     "text": "structured_content: "
                     + json.dumps(
-                        message.structured_content,
+                        thaw_json(message.structured_content),
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
@@ -360,9 +361,7 @@ class AnthropicProvider(Provider):
     ) -> dict[str, Any]:
         reference = block.artifact
         if artifact_service is None:
-            raise ValueError(
-                "Anthropic ArtifactBlock 需要 RuntimeBindings.artifact_service"
-            )
+            raise ValueError("Anthropic ArtifactBlock 需要 ArtifactService")
         data = base64.b64encode(artifact_service.load_artifact_bytes(reference)).decode(
             "ascii"
         )
@@ -390,7 +389,7 @@ class AnthropicProvider(Provider):
             {
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": tool.input_schema,
+                "input_schema": thaw_json(tool.input_schema),
             }
             for tool in tools
         ]

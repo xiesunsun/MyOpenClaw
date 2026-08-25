@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Literal, Mapping, Sequence
 
 from pickel.artifacts.artifact import (
     ArtifactReference,
     artifact_reference_from_dict,
 )
+from pickel.shared.frozen_json import freeze_json_object, thaw_json
 
 
 @dataclass(frozen=True)
@@ -37,9 +38,12 @@ class ThinkingBlock:
 class ToolCallBlock:
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: Mapping[str, Any]
     thought_signature: str | None = None
     type: Literal["tool_call"] = "tool_call"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", freeze_json_object(self.arguments))
 
 
 MessageBlock = TextBlock | ArtifactBlock | ThinkingBlock | ToolCallBlock
@@ -56,7 +60,19 @@ def content_block_to_dict(block: MessageBlock) -> dict[str, Any]:
             "artifact": block.artifact.content_dict(),
             "alt_text": block.alt_text,
         }
-    return asdict(block)
+    if isinstance(block, TextBlock):
+        return {"text": block.text, "type": block.type}
+    if isinstance(block, ThinkingBlock):
+        return {"text": block.text, "signature": block.signature, "type": block.type}
+    if isinstance(block, ToolCallBlock):
+        return {
+            "id": block.id,
+            "name": block.name,
+            "arguments": thaw_json(block.arguments),
+            "thought_signature": block.thought_signature,
+            "type": block.type,
+        }
+    raise TypeError(f"不支持的 content block: {type(block)!r}")
 
 
 def content_block_from_dict(data: dict[str, Any]) -> MessageBlock:
@@ -85,13 +101,13 @@ def content_block_from_dict(data: dict[str, Any]) -> MessageBlock:
         return ToolCallBlock(
             id=data["id"],
             name=data["name"],
-            arguments=dict(arguments),
+            arguments=arguments,
             thought_signature=data.get("thought_signature"),
         )
     raise ValueError(f"未知 content block type: {block_type!r}")
 
 
-def content_blocks_to_list(blocks: list[MessageBlock]) -> list[dict[str, Any]]:
+def content_blocks_to_list(blocks: Sequence[MessageBlock]) -> list[dict[str, Any]]:
     return [content_block_to_dict(block) for block in blocks]
 
 

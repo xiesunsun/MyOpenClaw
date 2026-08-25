@@ -12,9 +12,14 @@ from pickel.conversations.content_blocks import (
     ThinkingBlock,
     ToolCallBlock,
 )
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
+from pickel.conversations.conversation_session import ConversationSession
 
 __all__ = [
     "ArtifactBlock",
+    "ConversationNode",
+    "ConversationSession",
+    "HistoryCompaction",
     "AgentMessage",
     "AssistantMessage",
     "TextBlock",

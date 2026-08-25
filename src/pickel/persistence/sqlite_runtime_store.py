@@ -1,1184 +1,1332 @@
-"""SQLite Runtime 存储：共享 commit_sequence 与原子事务。"""
+"""SQLite v10 Runtime Store。
+
+该适配器直接读写 v10 领域实体。旧库必须先显式执行一次迁移。
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from pickel.artifacts.artifact import Artifact
 from pickel.agents.agent_package import (
     AgentPackageVersion,
-    agent_package_digest,
-    agent_package_version_from_content,
+    decode_agent_package_content,
+    package_version_id_for_content,
 )
-from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
+from pickel.artifacts.artifact import Artifact
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import ArtifactBlock
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.inbox.message import InboxMessage, MessageDelivery, MessageSource
 from pickel.operations.agent_delegation import AgentDelegation
+from pickel.operations.agent_run_state import (
+    AgentRunState,
+    agent_run_state_from_content,
+)
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.immutable_object import (
-    ImmutableObject,
-    immutable_object_digest,
+from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
+from pickel.persistence.sqlite_schema_v10 import (
+    SCHEMA_VERSION,
+    UnsupportedSchemaVersionError,
+    create_schema,
 )
-from pickel.persistence.named_reference import NamedReference
-from pickel.persistence.storage_transaction import (
-    StorageCommit,
-    StorageConflictError,
-    StorageIntegrityError,
-    StorageTransaction,
-)
-
-SCHEMA_VERSION = 9
+from pickel.workspaces.workspace import Workspace
 
 
 class UnsupportedStorageSchemaError(RuntimeError):
-    pass
+    """数据库需要先经过显式 schema 迁移。"""
+
+
+_PACKAGE_ID = re.compile(r"^agentpkg_[0-9a-f]{64}$")
 
 
 class SQLiteRuntimeStore:
-    """Runtime 持久化窄接口的 SQLite 组合实现。"""
+    """Conversation、Inbox、Operation 等 v10 实体的直接 SQLite 适配器。"""
 
     def __init__(self, db_path: Path) -> None:
-        self._db_path = db_path
-        self._schema_initialized = False
+        self._db_path = Path(db_path)
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
-    def create_conversation_session(
-        self,
-        *,
-        session_id: str,
-        agent_id: str,
-        cwd: str,
-        created_at: datetime | None = None,
-    ) -> None:
-        self._ensure_schema()
-        now = created_at or datetime.now(timezone.utc)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO sessions (
-                    session_id, agent_id, cwd, current_commit_sequence,
-                    created_at, updated_at, status, title
-                ) VALUES (?, ?, ?, 0, ?, ?, 'active', NULL)
-                """,
-                (session_id, agent_id, cwd, now.isoformat(), now.isoformat()),
-            )
+    # -- Workspace ---------------------------------------------------------
 
-    def load_current_commit_sequence(self, session_id: str) -> int:
+    def create_session(
+        self, *, workspace: Workspace, session: ConversationSession
+    ) -> None:
+        if not workspace.root_path.is_dir():
+            raise ValueError(f"Workspace 根目录不存在: {workspace.root_path}")
+        self._ensure_schema()
+        if session.workspace_id != workspace.workspace_id:
+            raise StorageIntegrityError("Session.workspace_id 与 Workspace 不匹配")
+        if any(
+            value is not None
+            for value in (
+                session.active_node_id,
+                session.active_operation_id,
+                session.title,
+                session.title_source,
+                session.archived_at,
+            )
+        ):
+            raise StorageIntegrityError("create_session 只能创建空 Session")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM workspaces WHERE workspace_id = ?",
+                    (workspace.workspace_id,),
+                ).fetchone()
+                if existing is None:
+                    self._insert_workspace(connection, workspace)
+                elif str(existing["root_path"]) != str(workspace.root_path):
+                    raise StorageIntegrityError("Workspace ID 已存在但内容不同")
+                connection.execute(
+                    """
+                    INSERT INTO conversation_sessions (
+                        session_id, agent_id, workspace_id, cwd,
+                        active_node_id, active_operation_id, title, title_source,
+                        created_at, updated_at, archived_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session.session_id,
+                        session.agent_id,
+                        session.workspace_id,
+                        str(session.cwd),
+                        session.active_node_id,
+                        session.active_operation_id,
+                        session.title,
+                        session.title_source,
+                        session.created_at.isoformat(),
+                        session.updated_at.isoformat(),
+                        _iso(session.archived_at),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StorageIntegrityError(
+                    "Workspace 或 ConversationSession 写入失败"
+                ) from exc
+
+    @staticmethod
+    def _insert_workspace(connection: sqlite3.Connection, workspace: Workspace) -> None:
+        try:
+            connection.execute(
+                "INSERT INTO workspaces VALUES (?, ?, ?)",
+                (
+                    workspace.workspace_id,
+                    str(workspace.root_path),
+                    workspace.created_at.isoformat(),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("Workspace 已存在或 root_path 重复") from exc
+
+    def load_workspace(self, workspace_id: str) -> Workspace | None:
         self._ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT current_commit_sequence FROM sessions WHERE session_id = ?",
-                (session_id,),
+                "SELECT * FROM workspaces WHERE workspace_id = ?", (workspace_id,)
             ).fetchone()
         if row is None:
-            raise LookupError(f"ConversationSession 不存在: {session_id}")
-        return int(row["current_commit_sequence"])
+            return None
+        return Workspace(
+            workspace_id=str(row["workspace_id"]),
+            root_path=Path(str(row["root_path"])),
+            created_at=_time(row["created_at"]),
+        )
+
+    def find_workspace_by_root(self, root_path: str | Path) -> Workspace | None:
+        normalized = Path(root_path).expanduser().resolve(strict=False)
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE root_path = ?", (str(normalized),)
+            ).fetchone()
+        if row is None:
+            return None
+        return Workspace(
+            workspace_id=str(row["workspace_id"]),
+            root_path=Path(str(row["root_path"])),
+            created_at=_time(row["created_at"]),
+        )
+
+    # -- Conversation ------------------------------------------------------
+
+    def load_session(self, session_id: str) -> ConversationSession | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return self._session_from_row(row) if row is not None else None
+
+    def list_sessions(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> tuple[ConversationSession, ...]:
+        if limit <= 0:
+            return ()
+        self._ensure_schema()
+        query = "SELECT * FROM conversation_sessions"
+        args: list[Any] = []
+        if cwd is not None:
+            query += " WHERE cwd = ?"
+            args.append(str(Path(cwd).expanduser().resolve(strict=False)))
+        query += " ORDER BY updated_at DESC, session_id ASC LIMIT ?"
+        args.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, args).fetchall()
+        return tuple(self._session_from_row(row) for row in rows)
+
+    def append_node(
+        self, *, node: ConversationNode, expected_node_id: str | None
+    ) -> bool:
+        """原子追加 Node，并同步移动 Session.active_node_id。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = self._require_session(connection, node.session_id)
+            if (
+                session["archived_at"] is not None
+                or session["active_operation_id"] is not None
+                or session["active_node_id"] != expected_node_id
+                or node.parent_node_id != expected_node_id
+            ):
+                connection.rollback()
+                return False
+            try:
+                self._validate_node_artifacts(connection, node)
+                connection.execute(
+                    """
+                    INSERT INTO conversation_nodes
+                        (node_id, session_id, parent_node_id, content_type,
+                         content_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node.node_id,
+                        node.session_id,
+                        node.parent_node_id,
+                        node.content_type,
+                        node.content_json(),
+                        node.created_at.isoformat(),
+                    ),
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET active_node_id = ?, updated_at = ?
+                    WHERE session_id = ? AND active_node_id IS ?
+                      AND archived_at IS NULL AND active_operation_id IS NULL
+                    """,
+                    (
+                        node.node_id,
+                        node.created_at.isoformat(),
+                        node.session_id,
+                        expected_node_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
+            except sqlite3.IntegrityError as exc:
+                raise StorageIntegrityError("ConversationNode 写入失败") from exc
+        return True
+
+    def load_node(self, node_id: str) -> ConversationNode | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM conversation_nodes WHERE node_id = ?", (node_id,)
+            ).fetchone()
+        return self._node_from_row(row) if row is not None else None
+
+    def list_branch_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]:
+        self._ensure_schema()
+        if leaf_node_id is None:
+            return ()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                WITH RECURSIVE branch(node_id, depth) AS (
+                    SELECT node_id, 0 FROM conversation_nodes
+                    WHERE node_id = ? AND session_id = ?
+                    UNION ALL
+                    SELECT parent.node_id, branch.depth + 1
+                    FROM conversation_nodes parent JOIN branch
+                      ON parent.node_id = (
+                          SELECT parent_node_id FROM conversation_nodes
+                          WHERE node_id = branch.node_id
+                      )
+                    WHERE parent.session_id = ?
+                )
+                SELECT n.* FROM conversation_nodes n JOIN branch b
+                  ON b.node_id = n.node_id ORDER BY b.depth DESC
+                """,
+                (leaf_node_id, session_id, session_id),
+            ).fetchall()
+        return tuple(self._node_from_row(row) for row in rows)
+
+    def move_active_node(
+        self,
+        *,
+        session_id: str,
+        expected_node_id: str | None,
+        new_node_id: str | None,
+        updated_at: datetime,
+    ) -> bool:
+        self._ensure_schema()
+        with self._connect() as connection:
+            if new_node_id is not None and not self._node_belongs(
+                connection, new_node_id, session_id
+            ):
+                raise StorageIntegrityError("new_node_id 不存在或属于其他 Session")
+            if expected_node_id is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET active_node_id = ?, updated_at = ?
+                    WHERE session_id = ? AND active_node_id IS NULL
+                      AND archived_at IS NULL AND active_operation_id IS NULL
+                    """,
+                    (new_node_id, updated_at.isoformat(), session_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET active_node_id = ?, updated_at = ?
+                    WHERE session_id = ? AND active_node_id = ?
+                      AND archived_at IS NULL AND active_operation_id IS NULL
+                    """,
+                    (new_node_id, updated_at.isoformat(), session_id, expected_node_id),
+                )
+        return cursor.rowcount == 1
+
+    def archive_session(self, *, session_id: str, archived_at: datetime) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            existing = self._require_session(connection, session_id)
+            if existing["archived_at"] is not None:
+                return
+            cursor = connection.execute(
+                """
+                UPDATE conversation_sessions
+                SET archived_at = ?, updated_at = ?
+                WHERE session_id = ? AND archived_at IS NULL
+                  AND active_operation_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_inbox_messages
+                      WHERE session_id = ? AND status = 'pending'
+                  )
+                """,
+                (
+                    archived_at.isoformat(),
+                    archived_at.isoformat(),
+                    session_id,
+                    session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self._require_session(connection, session_id)
+                raise StorageIntegrityError("归档要求 Session 空闲且没有 pending Inbox")
+
+    def unarchive_session(self, *, session_id: str, updated_at: datetime) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            existing = self._require_session(connection, session_id)
+            if existing["archived_at"] is None:
+                return
+            cursor = connection.execute(
+                "UPDATE conversation_sessions SET archived_at = NULL, updated_at = ? WHERE session_id = ?",
+                (updated_at.isoformat(), session_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"ConversationSession 不存在: {session_id}")
+
+    def delete_session(self, *, session_id: str) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            self._check_deletable(connection, {session_id})
+            if self._has_any_delegation(connection, {session_id}):
+                raise StorageIntegrityError(
+                    "公共 delete_session 要求不存在 AgentDelegation；请使用 delete_session_tree"
+                )
+            cursor = connection.execute(
+                "DELETE FROM conversation_sessions WHERE session_id = ?", (session_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"ConversationSession 不存在: {session_id}")
+
+    def delete_session_tree(self, *, session_id: str) -> None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                WITH RECURSIVE tree(session_id, depth) AS (
+                    SELECT ?, 0
+                    UNION
+                    SELECT d.child_session_id, tree.depth + 1
+                    FROM tree
+                    JOIN session_operations op ON op.session_id = tree.session_id
+                    JOIN agent_delegations d ON d.parent_operation_id = op.operation_id
+                )
+                SELECT session_id, MAX(depth) AS depth FROM tree GROUP BY session_id
+                """,
+                (session_id,),
+            ).fetchall()
+            ids = {str(row["session_id"]) for row in rows}
+            if session_id not in ids:
+                raise LookupError(f"ConversationSession 不存在: {session_id}")
+            marks = ",".join("?" for _ in ids)
+            external = connection.execute(
+                f"""
+                SELECT 1 FROM agent_delegations d
+                JOIN session_operations op ON op.operation_id = d.parent_operation_id
+                WHERE d.child_session_id IN ({marks}) AND op.session_id NOT IN ({marks})
+                LIMIT 1
+                """,
+                [*ids, *ids],
+            ).fetchone()
+            if external is not None:
+                raise StorageIntegrityError("子树根存在来自外部的 AgentDelegation")
+            self._check_deletable(connection, ids)
+            connection.execute(
+                f"""
+                DELETE FROM agent_delegations
+                WHERE child_session_id IN ({marks})
+                   OR parent_operation_id IN (
+                       SELECT operation_id FROM session_operations
+                       WHERE session_id IN ({marks})
+                   )
+                """,
+                [*ids, *ids],
+            )
+            for child_id, _depth in sorted(
+                ((str(row["session_id"]), int(row["depth"])) for row in rows),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                connection.execute(
+                    "DELETE FROM conversation_sessions WHERE session_id = ?",
+                    (child_id,),
+                )
+
+    # -- Inbox --------------------------------------------------------------
+
+    def send_message(
+        self,
+        *,
+        message_id: str,
+        session_id: str,
+        delivery: MessageDelivery,
+        message: UserMessage,
+        source: MessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_active_session(connection, session_id)
+                self._validate_message_artifacts(connection, message)
+                sequence = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_inbox_messages WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+                inbox_message = InboxMessage(
+                    message_id=message_id,
+                    session_id=session_id,
+                    sequence=sequence,
+                    delivery=delivery,
+                    message=message,
+                    source=source,
+                    created_at=created_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_inbox_messages (
+                        message_id, session_id, sequence, delivery, message_json,
+                        status, claimed_operation_id, claimed_step_id, outcome_reason,
+                        created_at, handled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        inbox_message.message_id,
+                        inbox_message.session_id,
+                        inbox_message.sequence,
+                        inbox_message.delivery,
+                        inbox_message.message_payload_json(),
+                        inbox_message.status,
+                        inbox_message.claimed_operation_id,
+                        inbox_message.claimed_step_id,
+                        inbox_message.outcome_reason,
+                        inbox_message.created_at.isoformat(),
+                        _iso(inbox_message.handled_at),
+                    ),
+                )
+                return inbox_message
+            except sqlite3.IntegrityError as exc:
+                raise StorageIntegrityError("InboxMessage 写入失败") from exc
+
+    def load_message(self, message_id: str) -> InboxMessage | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_inbox_messages WHERE message_id = ?", (message_id,)
+            ).fetchone()
+        return self._message_from_row(row) if row is not None else None
+
+    def list_pending(
+        self, *, session_id: str, delivery: str | None = None
+    ) -> tuple[InboxMessage, ...]:
+        self._ensure_schema()
+        query = "SELECT * FROM agent_inbox_messages WHERE session_id = ? AND status = 'pending'"
+        args: list[Any] = [session_id]
+        if delivery is not None:
+            query += " AND delivery = ?"
+            args.append(delivery)
+        query += " ORDER BY sequence ASC, message_id ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, args).fetchall()
+        return tuple(self._message_from_row(row) for row in rows)
+
+    def claim_message(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        step_id: str | None,
+        handled_at: datetime,
+    ) -> bool:
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_messages
+                SET status = 'claimed', claimed_operation_id = ?, claimed_step_id = ?,
+                    handled_at = ?
+                WHERE message_id = ? AND status = 'pending'
+                """,
+                (operation_id, step_id, handled_at.isoformat(), message_id),
+            )
+        return cursor.rowcount == 1
+
+    def discard_message(
+        self, *, message_id: str, reason: str, handled_at: datetime
+    ) -> bool:
+        if not reason:
+            raise ValueError("discard reason 不能为空")
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_messages
+                SET status = 'discarded', outcome_reason = ?, handled_at = ?
+                WHERE message_id = ? AND status = 'pending'
+                """,
+                (reason, handled_at.isoformat(), message_id),
+            )
+        return cursor.rowcount == 1
+
+    # -- Package / Artifact -------------------------------------------------
+
+    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
+        content = version.content_dict()
+        expected_id = package_version_id_for_content(content)
+        if version.package_version_id != expected_id:
+            raise StorageIntegrityError("AgentPackageVersion ID 校验失败")
+        self._ensure_schema()
+        encoded = _json(content)
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT * FROM agent_package_versions WHERE package_version_id = ?",
+                    (version.package_version_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        str(existing["content_json"]) == encoded
+                        and int(existing["format_version"]) == version.format_version
+                    ):
+                        return
+                    raise StorageIntegrityError("AgentPackageVersion 内容冲突")
+                connection.execute(
+                    "INSERT INTO agent_package_versions VALUES (?, ?, ?, ?, ?)",
+                    (
+                        version.package_version_id,
+                        version.agent_id,
+                        version.format_version,
+                        encoded,
+                        version.created_at.isoformat(),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("AgentPackageVersion 写入失败") from exc
+
+    def load_agent_package_version(
+        self, package_version_id: str
+    ) -> AgentPackageVersion | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_package_versions WHERE package_version_id = ?",
+                (package_version_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if not _PACKAGE_ID.fullmatch(package_version_id):
+            raise StorageIntegrityError("AgentPackageVersion ID 格式错误")
+        content = _object(row["content_json"])
+        if int(row["format_version"]) != content.get("format_version"):
+            raise StorageIntegrityError("AgentPackageVersion format_version 不一致")
+        if str(row["agent_id"]) != content.get("agent_id"):
+            raise StorageIntegrityError("AgentPackageVersion agent_id 不一致")
+        try:
+            return decode_agent_package_content(
+                package_version_id=package_version_id,
+                content=content,
+                created_at=_time(row["created_at"]),
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise StorageIntegrityError("AgentPackageVersion 内容损坏") from exc
 
     def insert_artifact(self, artifact: Artifact) -> None:
         self._ensure_schema()
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT * FROM artifacts WHERE artifact_id = ?",
-                (artifact.artifact_id,),
-            ).fetchone()
-            if existing is not None:
-                if self._artifact_from_row(existing) == artifact:
-                    return
-                raise StorageIntegrityError(
-                    f"Artifact ID 已存在但内容不同: {artifact.artifact_id}"
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT * FROM artifacts WHERE artifact_id = ?",
+                    (artifact.artifact_id,),
+                ).fetchone()
+                if existing is not None:
+                    if self._artifact_from_row(existing) == artifact:
+                        return
+                    raise StorageIntegrityError("Artifact ID 内容冲突")
+                connection.execute(
+                    "INSERT INTO artifacts VALUES (?, ?, ?)",
+                    (
+                        artifact.artifact_id,
+                        artifact.size_bytes,
+                        artifact.created_at.isoformat(),
+                    ),
                 )
-            connection.execute(
-                """
-                INSERT INTO artifacts (
-                    artifact_id, digest, media_type, size_bytes,
-                    blob_key, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    artifact.artifact_id,
-                    artifact.digest,
-                    artifact.media_type,
-                    artifact.size_bytes,
-                    artifact.blob_key,
-                    artifact.created_at.isoformat(),
-                ),
-            )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("Artifact 写入失败") from exc
 
     def load_artifact(self, artifact_id: str) -> Artifact | None:
         self._ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM artifacts WHERE artifact_id = ?",
-                (artifact_id,),
+                "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
             ).fetchone()
         return self._artifact_from_row(row) if row is not None else None
 
-    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
-        self._ensure_schema()
-        content = version.content_dict()
-        if agent_package_digest(content) != version.digest:
-            raise StorageIntegrityError(
-                f"AgentPackageVersion digest 校验失败: {version.package_version_id}"
-            )
-        with self._connect() as connection:
-            existing = connection.execute(
-                """
-                SELECT digest, content_json
-                FROM agent_package_versions
-                WHERE package_version_id = ?
-                """,
-                (version.package_version_id,),
-            ).fetchone()
-            content_json = json.dumps(
-                content,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            if existing is not None:
-                if (
-                    str(existing["digest"]) == version.digest
-                    and str(existing["content_json"]) == content_json
-                ):
-                    return
-                raise StorageIntegrityError(
-                    "AgentPackageVersion ID 已存在但内容不同: "
-                    f"{version.package_version_id}"
-                )
-            connection.execute(
-                """
-                INSERT INTO agent_package_versions (
-                    package_version_id, digest, agent_id, content_json, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    version.package_version_id,
-                    version.digest,
-                    version.agent_id,
-                    content_json,
-                    version.created_at.isoformat(),
-                ),
-            )
+    # -- Operation / RunState / Delegation --------------------------------
 
-    def load_agent_package_version(
-        self,
-        package_version_id: str,
-    ) -> AgentPackageVersion | None:
+    def load_operation(self, operation_id: str) -> SessionOperation | None:
         self._ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                """
-                SELECT package_version_id, digest, content_json, created_at
-                FROM agent_package_versions
-                WHERE package_version_id = ?
-                """,
-                (package_version_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        content = json.loads(str(row["content_json"]))
-        if not isinstance(content, dict):
-            raise StorageIntegrityError("AgentPackageVersion content 不是 JSON object")
-        try:
-            return agent_package_version_from_content(
-                package_version_id=str(row["package_version_id"]),
-                digest=str(row["digest"]),
-                content=content,
-                created_at=datetime.fromisoformat(str(row["created_at"])),
-            )
-        except (TypeError, ValueError, KeyError) as exc:
-            raise StorageIntegrityError(str(exc)) from exc
-
-    def load_session_operation(
-        self,
-        operation_id: str,
-    ) -> SessionOperation | None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM session_operations
-                WHERE operation_id = ?
-                """,
+                "SELECT * FROM session_operations WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
         return self._operation_from_row(row) if row is not None else None
 
-    def list_session_operations(
-        self,
-        *,
-        session_id: str,
-    ) -> list[SessionOperation]:
+    def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]:
         self._ensure_schema()
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM session_operations
-                WHERE session_id = ?
-                ORDER BY accepted_commit_sequence ASC, operation_id ASC
-                """,
+                "SELECT * FROM session_operations WHERE session_id = ? ORDER BY accepted_at, operation_id",
                 (session_id,),
             ).fetchall()
-        return [self._operation_from_row(row) for row in rows]
+        return tuple(self._operation_from_row(row) for row in rows)
 
-    def load_agent_delegation(
-        self,
-        delegation_id: str,
-    ) -> AgentDelegation | None:
+    def insert_operation(self, operation: SessionOperation) -> None:
         self._ensure_schema()
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM agent_delegations WHERE delegation_id = ?",
-                (delegation_id,),
-            ).fetchone()
-        return self._delegation_from_row(row) if row is not None else None
-
-    def find_delegation_by_child_operation(
-        self,
-        child_operation_id: str,
-    ) -> AgentDelegation | None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM agent_delegations
-                WHERE child_operation_id = ?
-                """,
-                (child_operation_id,),
-            ).fetchone()
-        return self._delegation_from_row(row) if row is not None else None
-
-    def list_agent_delegations(
-        self,
-        *,
-        parent_operation_id: str,
-    ) -> list[AgentDelegation]:
-        self._ensure_schema()
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM agent_delegations
-                WHERE parent_operation_id = ?
-                ORDER BY created_at ASC, delegation_id ASC
-                """,
-                (parent_operation_id,),
-            ).fetchall()
-        return [self._delegation_from_row(row) for row in rows]
-
-    def load_conversation_session(
-        self,
-        session_id: str,
-    ) -> ConversationSession | None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM sessions WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            reference_row = self._find_reference_row(
-                connection,
-                session_id=session_id,
-                reference_name="conversation/active",
-            )
-        return self._session_from_row(row, reference_row=reference_row)
-
-    def list_conversation_sessions(
-        self,
-        *,
-        limit: int = 20,
-        cwd: str | None = None,
-    ) -> list[ConversationSession]:
-        if limit <= 0:
-            return []
-        self._ensure_schema()
-        with self._connect() as connection:
-            if cwd is None:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM sessions
-                    ORDER BY updated_at DESC, session_id ASC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM sessions
-                    WHERE cwd = ?
-                    ORDER BY updated_at DESC, session_id ASC
-                    LIMIT ?
-                    """,
-                    (cwd, limit),
-                ).fetchall()
-            sessions: list[ConversationSession] = []
-            for row in rows:
-                reference_row = self._find_reference_row(
-                    connection,
-                    session_id=str(row["session_id"]),
-                    reference_name="conversation/active",
-                )
-                sessions.append(
-                    self._session_from_row(row, reference_row=reference_row)
-                )
-        return sessions
-
-    def archive_conversation_session(
-        self,
-        *,
-        session_id: str,
-        archived_at: datetime,
-    ) -> None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE sessions
-                SET status = 'archived', updated_at = ?
-                WHERE session_id = ?
-                """,
-                (archived_at.isoformat(), session_id),
-            )
-            if cursor.rowcount != 1:
-                raise LookupError(f"ConversationSession 不存在: {session_id}")
-
-    def delete_conversation_session(self, *, session_id: str) -> None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM sessions WHERE session_id = ?",
-                (session_id,),
-            )
-            if cursor.rowcount != 1:
-                raise LookupError(f"ConversationSession 不存在: {session_id}")
-
-    def begin_storage_transaction(
-        self,
-        *,
-        session_id: str,
-        expected_commit_sequence: int,
-    ) -> StorageTransaction:
-        self._ensure_schema()
-        return StorageTransaction(
-            store=self,
-            session_id=session_id,
-            expected_commit_sequence=expected_commit_sequence,
-        )
-
-    def load_immutable_object(self, object_id: str) -> ImmutableObject | None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM immutable_objects WHERE object_id = ?",
-                (object_id,),
-            ).fetchone()
-        return self._object_from_row(row) if row is not None else None
-
-    def find_named_reference(
-        self,
-        *,
-        session_id: str,
-        reference_name: str,
-    ) -> NamedReference | None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            row = self._find_reference_row(
-                connection,
-                session_id=session_id,
-                reference_name=reference_name,
-            )
-        return self._reference_from_row(row) if row is not None else None
-
-    def list_active_branch_entries(
-        self,
-        *,
-        session_id: str,
-        reference_name: str = "conversation/active",
-    ) -> list[ConversationEntry]:
-        self._ensure_schema()
-        reference = self.find_named_reference(
-            session_id=session_id,
-            reference_name=reference_name,
-        )
-        if reference is None:
-            return []
-        if reference.target_kind != "node":
-            raise StorageIntegrityError(
-                f"活动会话引用必须指向 node: {reference.reference_name}"
-            )
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                WITH RECURSIVE active_branch(
-                    node_id, session_id, parent_node_id, object_id,
-                    created_commit_sequence, created_at, depth
-                ) AS (
-                    SELECT node_id, session_id, parent_node_id, object_id,
-                           created_commit_sequence, created_at, 0
-                    FROM conversation_nodes
-                    WHERE node_id = ? AND session_id = ?
-                    UNION ALL
-                    SELECT parent.node_id, parent.session_id,
-                           parent.parent_node_id, parent.object_id,
-                           parent.created_commit_sequence, parent.created_at,
-                           child.depth + 1
-                    FROM conversation_nodes AS parent
-                    JOIN active_branch AS child
-                      ON parent.node_id = child.parent_node_id
-                    WHERE parent.session_id = ?
-                )
-                SELECT
-                    branch.node_id, branch.session_id, branch.parent_node_id,
-                    branch.object_id, branch.created_commit_sequence,
-                    branch.created_at,
-                    object.object_type, object.schema_version, object.digest,
-                    object.content_json, object.created_session_id,
-                    object.created_commit_sequence,
-                    object.created_at AS object_created_at
-                FROM active_branch AS branch
-                JOIN immutable_objects AS object
-                  ON object.object_id = branch.object_id
-                ORDER BY branch.depth DESC
-                """,
-                (reference.target_id, session_id, session_id),
-            ).fetchall()
-        if not rows:
-            raise StorageIntegrityError(
-                f"NamedReference 指向不存在的 ConversationNode: {reference.target_id}"
-            )
-        return [self._entry_from_row(row) for row in rows]
-
-    def _commit_storage_transaction(
-        self,
-        transaction: StorageTransaction,
-    ) -> StorageCommit:
-        self._ensure_schema()
-        committed_at = datetime.now(timezone.utc)
-        commit_id = str(uuid4())
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            session_row = connection.execute(
-                "SELECT current_commit_sequence FROM sessions WHERE session_id = ?",
-                (transaction.session_id,),
-            ).fetchone()
-            if session_row is None:
-                raise LookupError(
-                    f"ConversationSession 不存在: {transaction.session_id}"
-                )
-            current_commit_sequence = int(session_row["current_commit_sequence"])
-            if current_commit_sequence != transaction.expected_commit_sequence:
-                raise StorageConflictError(
-                    "ConversationSession commit_sequence 冲突: "
-                    f"expected={transaction.expected_commit_sequence}, "
-                    f"actual={current_commit_sequence}"
-                )
-            commit_sequence = current_commit_sequence + 1
-            self._validate_transaction(connection, transaction)
-            connection.execute(
-                """
-                INSERT INTO storage_commits (
-                    session_id, commit_sequence, commit_id, committed_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    transaction.session_id,
-                    commit_sequence,
-                    commit_id,
-                    committed_at.isoformat(),
-                ),
-            )
-            self._insert_objects(connection, transaction, commit_sequence, committed_at)
-            self._insert_nodes(connection, transaction, commit_sequence, committed_at)
-            self._insert_operations(
-                connection,
-                transaction,
-                commit_sequence,
-                committed_at,
-            )
-            self._insert_delegations(
-                connection,
-                transaction,
-                commit_sequence,
-                committed_at,
-            )
-            self._insert_references(connection, transaction, commit_sequence)
-            connection.execute(
-                """
-                UPDATE sessions
-                SET current_commit_sequence = ?, updated_at = ?
-                WHERE session_id = ?
-                """,
-                (
-                    commit_sequence,
-                    committed_at.isoformat(),
-                    transaction.session_id,
-                ),
-            )
-        return StorageCommit(
-            session_id=transaction.session_id,
-            commit_sequence=commit_sequence,
-            commit_id=commit_id,
-            committed_at=committed_at,
-        )
-
-    def _validate_transaction(
-        self,
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-    ) -> None:
-        if not (
-            transaction.object_inserts
-            or transaction.node_appends
-            or transaction.reference_moves
-            or transaction.operation_creates
-            or transaction.delegation_creates
-        ):
-            raise StorageIntegrityError("StorageTransaction 不能为空")
-        staged_object_ids = [
-            command.object_id for command in transaction.object_inserts
-        ]
-        staged_node_ids = [command.node_id for command in transaction.node_appends]
-        if len(staged_object_ids) != len(set(staged_object_ids)):
-            raise StorageIntegrityError("同一事务包含重复 object_id")
-        if len(staged_node_ids) != len(set(staged_node_ids)):
-            raise StorageIntegrityError("同一事务包含重复 node_id")
-        staged_operation_ids = [
-            command.operation_id for command in transaction.operation_creates
-        ]
-        if len(staged_operation_ids) != len(set(staged_operation_ids)):
-            raise StorageIntegrityError("同一事务包含重复 operation_id")
-        delegation_ids = [
-            command.delegation_id for command in transaction.delegation_creates
-        ]
-        if len(delegation_ids) != len(set(delegation_ids)):
-            raise StorageIntegrityError("同一事务包含重复 delegation_id")
-        child_operation_ids = [
-            command.child_operation_id for command in transaction.delegation_creates
-        ]
-        if len(child_operation_ids) != len(set(child_operation_ids)):
-            raise StorageIntegrityError("同一事务不能多次委派同一个 child_operation_id")
-        for command in transaction.operation_creates:
-            existing = connection.execute(
-                "SELECT 1 FROM session_operations WHERE operation_id = ?",
-                (command.operation_id,),
-            ).fetchone()
-            if existing is not None:
-                raise StorageIntegrityError(
-                    f"SessionOperation 已存在: {command.operation_id}"
-                )
-            package = connection.execute(
-                """
-                SELECT 1 FROM agent_package_versions
-                WHERE package_version_id = ?
-                """,
-                (command.agent_package_version_id,),
-            ).fetchone()
-            if package is None:
-                raise StorageIntegrityError(
-                    "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
-                )
-
-        for command in transaction.delegation_creates:
-            parent = connection.execute(
-                "SELECT 1 FROM session_operations WHERE operation_id = ?",
-                (command.parent_operation_id,),
-            ).fetchone()
-            if parent is None:
-                raise StorageIntegrityError(
-                    f"父 SessionOperation 不存在: {command.parent_operation_id}"
-                )
-            if command.child_operation_id not in staged_operation_ids:
-                raise StorageIntegrityError(
-                    "child SessionOperation 必须与 AgentDelegation 同事务创建: "
-                    f"{command.child_operation_id}"
-                )
-            existing = connection.execute(
-                """
-                SELECT 1 FROM agent_delegations
-                WHERE delegation_id = ? OR child_operation_id = ?
-                """,
-                (command.delegation_id, command.child_operation_id),
-            ).fetchone()
-            if existing is not None:
-                raise StorageIntegrityError(
-                    "AgentDelegation 或 child SessionOperation 已存在: "
-                    f"{command.delegation_id}"
-                )
-
-        for command in transaction.node_appends:
-            if command.object_id not in staged_object_ids and not self._object_exists(
-                connection,
-                command.object_id,
-            ):
-                raise StorageIntegrityError(
-                    f"ConversationNode 指向不存在的 Object: {command.object_id}"
-                )
-            if command.parent_node_id is not None:
-                if command.parent_node_id in staged_node_ids:
-                    parent = next(
-                        item
-                        for item in transaction.node_appends
-                        if item.node_id == command.parent_node_id
-                    )
-                    if parent is command:
-                        raise StorageIntegrityError("ConversationNode 不能指向自身")
-                elif not self._node_belongs_to_session(
-                    connection,
-                    node_id=command.parent_node_id,
-                    session_id=transaction.session_id,
-                ):
-                    raise StorageIntegrityError(
-                        "parent_node_id 不存在或属于其他 Session: "
-                        f"{command.parent_node_id}"
-                    )
-
-        moved_names: set[str] = set()
-        for command in transaction.reference_moves:
-            if command.reference_name in moved_names:
-                raise StorageIntegrityError(
-                    f"同一事务不能多次移动 Reference: {command.reference_name}"
-                )
-            moved_names.add(command.reference_name)
-            current = self._find_reference_row(
-                connection,
-                session_id=transaction.session_id,
-                reference_name=command.reference_name,
-            )
-            current_commit_sequence = (
-                int(current["commit_sequence"]) if current is not None else None
-            )
-            if current_commit_sequence != command.expected_current_commit_sequence:
-                raise StorageConflictError(
-                    f"NamedReference commit_sequence 冲突: {command.reference_name}; "
-                    f"expected={command.expected_current_commit_sequence}, "
-                    f"actual={current_commit_sequence}"
-                )
-            if command.target_kind == "object":
-                exists = command.target_id in staged_object_ids or self._object_exists(
-                    connection,
-                    command.target_id,
-                )
-            else:
-                exists = (
-                    command.target_id in staged_node_ids
-                    or self._node_belongs_to_session(
-                        connection,
-                        node_id=command.target_id,
-                        session_id=transaction.session_id,
-                    )
-                )
-            if not exists:
-                raise StorageIntegrityError(
-                    f"NamedReference 指向不存在的 {command.target_kind}: "
-                    f"{command.target_id}"
-                )
-
-    @staticmethod
-    def _insert_objects(
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-        commit_sequence: int,
-        created_at: datetime,
-    ) -> None:
-        for command in transaction.object_inserts:
-            digest = immutable_object_digest(
-                object_type=command.object_type,
-                schema_version=command.schema_version,
-                content=command.content,
-            )
+            self._validate_operation_refs(connection, operation)
             try:
                 connection.execute(
-                    """
-                    INSERT INTO immutable_objects (
-                        object_id, object_type, schema_version, digest,
-                        content_json, created_session_id,
-                        created_commit_sequence, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                    "INSERT INTO session_operations VALUES (?, ?, ?, ?, ?, ?)",
                     (
-                        command.object_id,
-                        command.object_type,
-                        command.schema_version,
-                        digest,
-                        json.dumps(command.content, ensure_ascii=False),
-                        transaction.session_id,
-                        commit_sequence,
-                        created_at.isoformat(),
+                        operation.operation_id,
+                        operation.session_id,
+                        operation.agent_package_version_id,
+                        self._binding_json(operation),
+                        operation.input_node_id,
+                        operation.accepted_at.isoformat(),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
-                raise StorageIntegrityError(
-                    f"ImmutableObject 写入失败: {command.object_id}"
-                ) from exc
+                raise StorageIntegrityError("SessionOperation 写入失败") from exc
 
-    @staticmethod
-    def _insert_nodes(
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-        commit_sequence: int,
-        created_at: datetime,
-    ) -> None:
-        pending = list(transaction.node_appends)
-        inserted: set[str] = set()
-        while pending:
-            progressed = False
-            for command in list(pending):
-                if (
-                    command.parent_node_id is not None
-                    and command.parent_node_id
-                    in {item.node_id for item in transaction.node_appends}
-                    and command.parent_node_id not in inserted
-                ):
-                    continue
+    def load_run_state(self, operation_id: str) -> AgentRunState | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_run_states WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+        return self._run_state_from_row(row) if row is not None else None
+
+    def insert_run_state(self, state: AgentRunState) -> None:
+        self._ensure_schema()
+        try:
+            with self._connect() as connection:
+                operation_row = connection.execute(
+                    "SELECT accepted_at FROM session_operations WHERE operation_id = ?",
+                    (state.operation_id,),
+                ).fetchone()
+                if operation_row is None:
+                    raise StorageIntegrityError("SessionOperation 不存在")
+                connection.execute(
+                    "INSERT INTO agent_run_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._run_state_values(
+                        state, updated_at=_time(operation_row["accepted_at"])
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("AgentRunState 写入失败") from exc
+
+    def commit_run_transition(
+        self,
+        *,
+        state: AgentRunState,
+        expected_revision: int,
+        node: ConversationNode | None,
+        updated_at: datetime,
+    ) -> bool:
+        """原子提交可选 Node、State CAS 与 Session 指针。"""
+        self._ensure_schema()
+        if state.revision != expected_revision + 1:
+            raise StorageIntegrityError(
+                "AgentRunState.revision 必须等于 expected_revision + 1"
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT session_id, active_node_id, active_operation_id
+                FROM conversation_sessions
+                WHERE session_id = (
+                    SELECT session_id FROM session_operations
+                    WHERE operation_id = ?
+                )
+                """,
+                (state.operation_id,),
+            ).fetchone()
+            if session is None or session["active_operation_id"] != state.operation_id:
+                connection.rollback()
+                return False
+            if node is not None:
+                if node.session_id != str(session["session_id"]):
+                    raise StorageIntegrityError(
+                        "ConversationNode 不属于 Operation Session"
+                    )
+                if node.parent_node_id != _optional(session["active_node_id"]):
+                    connection.rollback()
+                    return False
+                self._validate_node_artifacts(connection, node)
+                if node.node_id not in _state_node_ids(state):
+                    raise StorageIntegrityError(
+                        "新 ConversationNode 必须被 AgentRunState 引用"
+                    )
                 try:
                     connection.execute(
-                        """
-                        INSERT INTO conversation_nodes (
-                            node_id, session_id, parent_node_id,
-                            object_id, created_commit_sequence, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
+                        "INSERT INTO conversation_nodes VALUES (?, ?, ?, ?, ?, ?)",
                         (
-                            command.node_id,
-                            transaction.session_id,
-                            command.parent_node_id,
-                            command.object_id,
-                            commit_sequence,
-                            created_at.isoformat(),
+                            node.node_id,
+                            node.session_id,
+                            node.parent_node_id,
+                            node.content_type,
+                            node.content_json(),
+                            node.created_at.isoformat(),
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
                     raise StorageIntegrityError(
-                        f"ConversationNode 写入失败: {command.node_id}"
+                        f"ConversationNode 写入失败: {node.node_id}"
                     ) from exc
-                pending.remove(command)
-                inserted.add(command.node_id)
-                progressed = True
-            if not progressed:
-                raise StorageIntegrityError(
-                    "同一事务中的 ConversationNode 存在 parent 环"
+            for node_id in _state_node_ids(state):
+                if not self._node_belongs(
+                    connection, node_id, str(session["session_id"])
+                ):
+                    raise StorageIntegrityError(
+                        f"AgentRunState 引用的 Node 不属于 Operation Session: {node_id}"
+                    )
+            cursor = connection.execute(
+                """
+                UPDATE agent_run_states
+                SET revision = ?, status = ?, waiting_reason = ?,
+                    completed_step_count = ?, current_step_json = ?,
+                    final_assistant_node_id = ?, error_json = ?,
+                    cancellation_json = ?, updated_at = ?
+                WHERE operation_id = ? AND revision = ?
+                """,
+                (
+                    state.revision,
+                    state.status,
+                    state.waiting_reason,
+                    state.completed_step_count,
+                    _json(_step_to_dict(state.current_step)),
+                    state.final_assistant_node_id,
+                    _json(
+                        {
+                            "code": state.error.code,
+                            "message": state.error.message,
+                            "retryable": state.error.retryable,
+                        }
+                        if state.error is not None
+                        else None
+                    ),
+                    _json(
+                        {
+                            "cause": state.cancellation.cause,
+                            "requested_at": state.cancellation.requested_at.isoformat(),
+                        }
+                        if state.cancellation is not None
+                        else None
+                    ),
+                    updated_at.isoformat(),
+                    state.operation_id,
+                    expected_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.execute(
+                """
+                UPDATE conversation_sessions
+                SET active_node_id = COALESCE(?, active_node_id),
+                    active_operation_id = CASE WHEN ? THEN NULL ELSE active_operation_id END,
+                    updated_at = ?
+                WHERE session_id = ? AND active_operation_id = ?
+                """,
+                (
+                    node.node_id if node is not None else None,
+                    state.status in {"succeeded", "failed", "cancelled"},
+                    updated_at.isoformat(),
+                    session["session_id"],
+                    state.operation_id,
+                ),
+            )
+        return True
+
+    def load_delegation(self, child_session_id: str) -> AgentDelegation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_delegations WHERE child_session_id = ?",
+                (child_session_id,),
+            ).fetchone()
+        return self._delegation_from_row(row) if row is not None else None
+
+    def insert_delegation(self, delegation: AgentDelegation) -> None:
+        self._ensure_schema()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO agent_delegations VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        delegation.child_session_id,
+                        delegation.parent_operation_id,
+                        delegation.parent_step_id,
+                        delegation.parent_tool_call_id,
+                        delegation.initial_message_id,
+                        delegation.created_at.isoformat(),
+                    ),
                 )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("AgentDelegation 写入失败") from exc
 
-    @staticmethod
-    def _insert_references(
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-        commit_sequence: int,
-    ) -> None:
-        for command in transaction.reference_moves:
-            connection.execute(
-                """
-                INSERT INTO named_references (
-                    session_id, reference_name, commit_sequence,
-                    target_kind, target_id
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    transaction.session_id,
-                    command.reference_name,
-                    commit_sequence,
-                    command.target_kind,
-                    command.target_id,
-                ),
-            )
-
-    @staticmethod
-    def _insert_operations(
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-        commit_sequence: int,
-        created_at: datetime,
-    ) -> None:
-        for command in transaction.operation_creates:
-            connection.execute(
-                """
-                INSERT INTO session_operations (
-                    operation_id, session_id, operation_type,
-                    agent_package_version_id, accepted_commit_sequence,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    command.operation_id,
-                    transaction.session_id,
-                    command.operation_type,
-                    command.agent_package_version_id,
-                    commit_sequence,
-                    created_at.isoformat(),
-                ),
-            )
-
-    @staticmethod
-    def _insert_delegations(
-        connection: sqlite3.Connection,
-        transaction: StorageTransaction,
-        commit_sequence: int,
-        created_at: datetime,
-    ) -> None:
-        for command in transaction.delegation_creates:
-            connection.execute(
-                """
-                INSERT INTO agent_delegations (
-                    delegation_id, parent_operation_id, parent_step_id,
-                    parent_tool_call_id, child_operation_id, child_session_id,
-                    created_commit_sequence, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    command.delegation_id,
-                    command.parent_operation_id,
-                    command.parent_step_id,
-                    command.parent_tool_call_id,
-                    command.child_operation_id,
-                    transaction.session_id,
-                    commit_sequence,
-                    created_at.isoformat(),
-                ),
-            )
-
-    @staticmethod
-    def _find_reference_row(
-        connection: sqlite3.Connection,
-        *,
-        session_id: str,
-        reference_name: str,
-    ) -> sqlite3.Row | None:
-        return connection.execute(
-            """
-            SELECT session_id, reference_name, commit_sequence,
-                   target_kind, target_id
-            FROM named_references
-            WHERE session_id = ? AND reference_name = ?
-            ORDER BY commit_sequence DESC
-            LIMIT 1
-            """,
-            (session_id, reference_name),
-        ).fetchone()
-
-    @staticmethod
-    def _object_exists(connection: sqlite3.Connection, object_id: str) -> bool:
-        return (
-            connection.execute(
-                "SELECT 1 FROM immutable_objects WHERE object_id = ?",
-                (object_id,),
+    def find_delegation_by_parent_tool_call(
+        self, parent_tool_call_id: str
+    ) -> AgentDelegation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_delegations WHERE parent_tool_call_id = ?",
+                (parent_tool_call_id,),
             ).fetchone()
-            is not None
-        )
+        return self._delegation_from_row(row) if row is not None else None
 
-    @staticmethod
-    def _node_belongs_to_session(
-        connection: sqlite3.Connection,
+    def list_delegations(
+        self, *, parent_operation_id: str
+    ) -> tuple[AgentDelegation, ...]:
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM agent_delegations WHERE parent_operation_id = ? ORDER BY created_at, child_session_id",
+                (parent_operation_id,),
+            ).fetchall()
+        return tuple(self._delegation_from_row(row) for row in rows)
+
+    def accept_operation(
+        self,
         *,
-        node_id: str,
-        session_id: str,
+        operation: SessionOperation,
+        state: AgentRunState,
+        expected_node_id: str | None,
     ) -> bool:
-        return (
-            connection.execute(
-                """
-                SELECT 1 FROM conversation_nodes
-                WHERE node_id = ? AND session_id = ?
-                """,
-                (node_id, session_id),
+        """原子执行 11.3：claim Inbox、插入输入 Node、Operation 和 State。"""
+        self._ensure_schema()
+        session_id = operation.session_id
+        if state.operation_id != operation.operation_id:
+            raise StorageIntegrityError("Operation 与 State 身份不一致")
+        if state.revision != 1 or state.status != "queued":
+            raise StorageIntegrityError("接受 Operation 必须从 queued/revision=1 开始")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = self._require_session(connection, session_id)
+            if (
+                session["archived_at"] is not None
+                or session["active_operation_id"] is not None
+            ):
+                connection.rollback()
+                return False
+            if session["active_node_id"] != expected_node_id:
+                connection.rollback()
+                return False
+            message = connection.execute(
+                "SELECT * FROM agent_inbox_messages WHERE message_id = ? AND session_id = ? AND status = 'pending'",
+                (operation.input_node_id, session_id),
             ).fetchone()
-            is not None
-        )
+            if message is None:
+                connection.rollback()
+                return False
+            self._validate_operation_refs(connection, operation)
+            node = self._message_to_node(message, parent_node_id=expected_node_id)
+            self._validate_node_artifacts(connection, node)
+            connection.execute(
+                "INSERT INTO conversation_nodes VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    node.node_id,
+                    node.session_id,
+                    node.parent_node_id,
+                    node.content_type,
+                    node.content_json(),
+                    node.created_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO session_operations VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation.operation_id,
+                    operation.session_id,
+                    operation.agent_package_version_id,
+                    self._binding_json(operation),
+                    operation.input_node_id,
+                    operation.accepted_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO agent_run_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                self._run_state_values(state, updated_at=operation.accepted_at),
+            )
+            connection.execute(
+                "UPDATE conversation_sessions SET active_node_id = ?, active_operation_id = ?, updated_at = ? WHERE session_id = ?",
+                (
+                    node.node_id,
+                    operation.operation_id,
+                    operation.accepted_at.isoformat(),
+                    session_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE agent_inbox_messages SET status = 'claimed', claimed_operation_id = ?, handled_at = ? WHERE message_id = ?",
+                (
+                    operation.operation_id,
+                    operation.accepted_at.isoformat(),
+                    operation.input_node_id,
+                ),
+            )
+        return True
+
+    # -- Internal ----------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        if self._schema_initialized and self._db_path.exists():
-            return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, SCHEMA_VERSION}:
-                raise UnsupportedStorageSchemaError(
-                    f"不支持的 SQLite schema version: {version}; "
-                    f"需要 {SCHEMA_VERSION}"
-                )
             if version == 0:
-                connection.executescript(self._schema_sql())
-        self._schema_initialized = True
-
-    @staticmethod
-    def _schema_sql() -> str:
-        return """
-            PRAGMA user_version = 9;
-
-            CREATE TABLE sessions (
-                session_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                cwd TEXT NOT NULL,
-                current_commit_sequence INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                title TEXT
-            );
-
-            CREATE TABLE agent_package_versions (
-                package_version_id TEXT PRIMARY KEY,
-                digest TEXT NOT NULL UNIQUE,
-                agent_id TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX idx_agent_package_versions_agent
-            ON agent_package_versions(agent_id, created_at DESC);
-
-            CREATE TABLE artifacts (
-                artifact_id TEXT PRIMARY KEY,
-                digest TEXT NOT NULL,
-                media_type TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
-                blob_key TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX idx_artifacts_digest ON artifacts(digest);
-
-            CREATE TABLE session_operations (
-                operation_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                operation_type TEXT NOT NULL CHECK(operation_type IN ('agent_run')),
-                agent_package_version_id TEXT NOT NULL,
-                accepted_commit_sequence INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (session_id, accepted_commit_sequence)
-                    REFERENCES storage_commits(session_id, commit_sequence)
-                    ON DELETE CASCADE,
-                FOREIGN KEY (agent_package_version_id)
-                    REFERENCES agent_package_versions(package_version_id)
-            );
-
-            CREATE INDEX idx_session_operations_session_commit_sequence
-            ON session_operations(session_id, accepted_commit_sequence);
-
-            CREATE TABLE agent_delegations (
-                delegation_id TEXT PRIMARY KEY,
-                parent_operation_id TEXT NOT NULL,
-                parent_step_id TEXT NOT NULL,
-                parent_tool_call_id TEXT,
-                child_operation_id TEXT NOT NULL UNIQUE,
-                child_session_id TEXT NOT NULL,
-                created_commit_sequence INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (parent_operation_id)
-                    REFERENCES session_operations(operation_id),
-                FOREIGN KEY (child_operation_id)
-                    REFERENCES session_operations(operation_id)
-                    ON DELETE CASCADE,
-                FOREIGN KEY (child_session_id, created_commit_sequence)
-                    REFERENCES storage_commits(session_id, commit_sequence)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX idx_agent_delegations_parent
-            ON agent_delegations(parent_operation_id, created_at);
-
-            CREATE TABLE storage_commits (
-                session_id TEXT NOT NULL,
-                commit_sequence INTEGER NOT NULL,
-                commit_id TEXT NOT NULL UNIQUE,
-                committed_at TEXT NOT NULL,
-                PRIMARY KEY (session_id, commit_sequence),
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-                    ON DELETE CASCADE
-            );
-
-            CREATE TABLE immutable_objects (
-                object_id TEXT PRIMARY KEY,
-                object_type TEXT NOT NULL,
-                schema_version INTEGER NOT NULL,
-                digest TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                created_session_id TEXT NOT NULL,
-                created_commit_sequence INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (created_session_id, created_commit_sequence)
-                    REFERENCES storage_commits(session_id, commit_sequence)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX idx_immutable_objects_digest
-            ON immutable_objects(digest);
-
-            CREATE TABLE conversation_nodes (
-                node_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                parent_node_id TEXT,
-                object_id TEXT NOT NULL,
-                created_commit_sequence INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (session_id, created_commit_sequence)
-                    REFERENCES storage_commits(session_id, commit_sequence)
-                    ON DELETE CASCADE,
-                FOREIGN KEY (parent_node_id) REFERENCES conversation_nodes(node_id),
-                FOREIGN KEY (object_id) REFERENCES immutable_objects(object_id)
-            );
-
-            CREATE INDEX idx_conversation_nodes_session_parent
-            ON conversation_nodes(session_id, parent_node_id);
-
-            CREATE TABLE named_references (
-                session_id TEXT NOT NULL,
-                reference_name TEXT NOT NULL,
-                commit_sequence INTEGER NOT NULL,
-                target_kind TEXT NOT NULL CHECK(target_kind IN ('node', 'object')),
-                target_id TEXT NOT NULL,
-                PRIMARY KEY (session_id, reference_name, commit_sequence),
-                FOREIGN KEY (session_id, commit_sequence)
-                    REFERENCES storage_commits(session_id, commit_sequence)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX idx_named_references_current
-            ON named_references(
-                session_id, reference_name, commit_sequence DESC
-            );
-
-            CREATE INDEX idx_sessions_agent_updated
-            ON sessions(agent_id, updated_at DESC);
-
-            CREATE INDEX idx_sessions_cwd_updated
-            ON sessions(cwd, updated_at DESC);
-        """
+                create_schema(connection)
+            elif version == 9:
+                raise UnsupportedStorageSchemaError(
+                    "检测到 SQLite schema version 9；请先执行一次性 v9→v10 迁移"
+                )
+            elif version != SCHEMA_VERSION:
+                raise UnsupportedSchemaVersionError(
+                    f"不支持的 SQLite schema version: {version}"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self._db_path)
+        connection = sqlite3.connect(self._db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     @staticmethod
-    def _session_from_row(
-        row: sqlite3.Row,
-        *,
-        reference_row: sqlite3.Row | None,
-    ) -> ConversationSession:
-        active_node_id = None
-        if reference_row is not None:
-            if str(reference_row["target_kind"]) != "node":
-                raise StorageIntegrityError("conversation/active 必须指向 node")
-            active_node_id = str(reference_row["target_id"])
+    def _session_from_row(row: sqlite3.Row) -> ConversationSession:
         return ConversationSession(
             session_id=str(row["session_id"]),
             agent_id=str(row["agent_id"]),
-            cwd=str(row["cwd"]),
-            current_commit_sequence=int(row["current_commit_sequence"]),
-            active_node_id=active_node_id,
-            created_at=datetime.fromisoformat(str(row["created_at"])),
-            updated_at=datetime.fromisoformat(str(row["updated_at"])),
-            status=str(row["status"]),
-            title=str(row["title"]) if row["title"] is not None else None,
+            workspace_id=str(row["workspace_id"]),
+            cwd=Path(str(row["cwd"])),
+            active_node_id=_optional(row["active_node_id"]),
+            active_operation_id=_optional(row["active_operation_id"]),
+            title=_optional(row["title"]),
+            title_source=_optional(row["title_source"]),
+            created_at=_time(row["created_at"]),
+            updated_at=_time(row["updated_at"]),
+            archived_at=_optional_time(row["archived_at"]),
+        )
+
+    @staticmethod
+    def _node_from_row(row: sqlite3.Row) -> ConversationNode:
+        return ConversationNode.from_content_json(
+            node_id=str(row["node_id"]),
+            session_id=str(row["session_id"]),
+            parent_node_id=_optional(row["parent_node_id"]),
+            content_type=str(row["content_type"]),
+            content_json=str(row["content_json"]),
+            created_at=_time(row["created_at"]),
+        )  # type: ignore[arg-type]
+
+    @staticmethod
+    def _message_from_row(row: sqlite3.Row) -> InboxMessage:
+        payload = _object(row["message_json"])
+        value = {
+            "message_id": row["message_id"],
+            "session_id": row["session_id"],
+            "sequence": row["sequence"],
+            "delivery": row["delivery"],
+            "message": payload["message"],
+            "source": payload["source"],
+            "status": row["status"],
+            "claimed_operation_id": row["claimed_operation_id"],
+            "claimed_step_id": row["claimed_step_id"],
+            "outcome_reason": row["outcome_reason"],
+            "created_at": row["created_at"],
+            "handled_at": row["handled_at"],
+        }
+        return InboxMessage.from_json(_json(value) or "{}")
+
+    @staticmethod
+    def _operation_from_row(row: sqlite3.Row) -> SessionOperation:
+        from pickel.workspaces.workspace_binding import WorkspaceBinding
+
+        binding = _object(row["workspace_binding_json"])
+        return SessionOperation(
+            operation_id=str(row["operation_id"]),
+            session_id=str(row["session_id"]),
+            agent_package_version_id=str(row["agent_package_version_id"]),
+            workspace_binding=WorkspaceBinding(
+                workspace_id=str(binding["workspace_id"]),
+                working_directory=Path(str(binding["working_directory"])),
+                allowed_root=(
+                    Path(str(binding["allowed_root"]))
+                    if binding.get("allowed_root") is not None
+                    else None
+                ),
+            ),
+            input_node_id=str(row["input_node_id"]),
+            accepted_at=_time(row["accepted_at"]),
+        )
+
+    @staticmethod
+    def _run_state_from_row(row: sqlite3.Row) -> AgentRunState:
+        content = {
+            "operation_id": row["operation_id"],
+            "revision": row["revision"],
+            "status": row["status"],
+            "waiting_reason": row["waiting_reason"],
+            "completed_step_count": row["completed_step_count"],
+            "current_step": (
+                _object(row["current_step_json"])
+                if row["current_step_json"] is not None
+                else None
+            ),
+            "final_assistant_node_id": row["final_assistant_node_id"],
+            "error": _object(row["error_json"]) if row["error_json"] else None,
+            "cancellation": (
+                _object(row["cancellation_json"]) if row["cancellation_json"] else None
+            ),
+        }
+        return agent_run_state_from_content(content)
+
+    @staticmethod
+    def _delegation_from_row(row: sqlite3.Row) -> AgentDelegation:
+        return AgentDelegation(
+            child_session_id=str(row["child_session_id"]),
+            parent_operation_id=str(row["parent_operation_id"]),
+            parent_step_id=str(row["parent_step_id"]),
+            parent_tool_call_id=str(row["parent_tool_call_id"]),
+            initial_message_id=str(row["initial_message_id"]),
+            created_at=_time(row["created_at"]),
         )
 
     @staticmethod
     def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         return Artifact(
             artifact_id=str(row["artifact_id"]),
-            digest=str(row["digest"]),
-            media_type=str(row["media_type"]),
             size_bytes=int(row["size_bytes"]),
-            blob_key=str(row["blob_key"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
+            created_at=_time(row["created_at"]),
         )
 
     @staticmethod
-    def _object_from_row(row: sqlite3.Row) -> ImmutableObject:
-        content = json.loads(str(row["content_json"]))
-        if not isinstance(content, dict):
-            raise StorageIntegrityError("ImmutableObject content_json 不是 JSON object")
-        expected_digest = immutable_object_digest(
-            object_type=str(row["object_type"]),
-            schema_version=int(row["schema_version"]),
-            content=content,
+    def _node_belongs(
+        connection: sqlite3.Connection, node_id: str, session_id: str
+    ) -> bool:
+        return (
+            connection.execute(
+                "SELECT 1 FROM conversation_nodes WHERE node_id = ? AND session_id = ?",
+                (node_id, session_id),
+            ).fetchone()
+            is not None
         )
-        if expected_digest != str(row["digest"]):
+
+    @staticmethod
+    def _validate_node_artifacts(
+        connection: sqlite3.Connection, node: ConversationNode
+    ) -> None:
+        SQLiteRuntimeStore._validate_message_artifacts(connection, node.content)
+
+    @staticmethod
+    def _validate_message_artifacts(
+        connection: sqlite3.Connection, message: UserMessage
+    ) -> None:
+        for block in message.content:
+            if isinstance(block, ArtifactBlock):
+                exists = connection.execute(
+                    "SELECT 1 FROM artifacts WHERE artifact_id = ?",
+                    (block.artifact.artifact_id,),
+                ).fetchone()
+                if exists is None:
+                    raise StorageIntegrityError(
+                        "ConversationNode 引用不存在的 Artifact: "
+                        f"{block.artifact.artifact_id}"
+                    )
+
+    @staticmethod
+    def _require_session(
+        connection: sqlite3.Connection, session_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM conversation_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"ConversationSession 不存在: {session_id}")
+        return row
+
+    @classmethod
+    def _require_active_session(
+        cls, connection: sqlite3.Connection, session_id: str
+    ) -> sqlite3.Row:
+        row = cls._require_session(connection, session_id)
+        if row["archived_at"] is not None:
+            raise StorageIntegrityError("归档 Session 不能接受新的 InboxMessage")
+        return row
+
+    @classmethod
+    def _validate_operation_refs(
+        cls, connection: sqlite3.Connection, operation: SessionOperation
+    ) -> None:
+        session = cls._require_active_session(connection, operation.session_id)
+        package = connection.execute(
+            "SELECT agent_id FROM agent_package_versions WHERE package_version_id = ?",
+            (operation.agent_package_version_id,),
+        ).fetchone()
+        if package is None:
+            raise StorageIntegrityError("AgentPackageVersion 不存在")
+        if str(package["agent_id"]) != str(session["agent_id"]):
             raise StorageIntegrityError(
-                f"ImmutableObject digest 校验失败: {row['object_id']}"
+                "AgentPackageVersion.agent_id 与 Session 不匹配"
             )
-        return ImmutableObject(
-            object_id=str(row["object_id"]),
-            object_type=str(row["object_type"]),
-            schema_version=int(row["schema_version"]),
-            digest=str(row["digest"]),
-            content=content,
-            created_session_id=str(row["created_session_id"]),
-            created_commit_sequence=int(row["created_commit_sequence"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
+        if not cls._node_belongs(
+            connection, operation.input_node_id, operation.session_id
+        ):
+            pending = connection.execute(
+                "SELECT 1 FROM agent_inbox_messages WHERE message_id = ? AND session_id = ? AND status = 'pending'",
+                (operation.input_node_id, operation.session_id),
+            ).fetchone()
+            if pending is None:
+                raise StorageIntegrityError("input_node_id 不存在或不属于 Session")
+        if operation.workspace_binding.workspace_id != str(session["workspace_id"]):
+            raise StorageIntegrityError(
+                "WorkspaceBinding 与 Session.workspace_id 不匹配"
+            )
+
+    @staticmethod
+    def _binding_json(operation: SessionOperation) -> str:
+        binding = operation.workspace_binding
+        return (
+            _json(
+                {
+                    "workspace_id": binding.workspace_id,
+                    "working_directory": str(binding.working_directory),
+                    "allowed_root": (
+                        str(binding.allowed_root) if binding.allowed_root else None
+                    ),
+                }
+            )
+            or "{}"
         )
 
     @staticmethod
-    def _operation_from_row(row: sqlite3.Row) -> SessionOperation:
-        return SessionOperation(
-            operation_id=str(row["operation_id"]),
-            session_id=str(row["session_id"]),
-            operation_type=str(row["operation_type"]),  # type: ignore[arg-type]
-            agent_package_version_id=str(row["agent_package_version_id"]),
-            accepted_commit_sequence=int(row["accepted_commit_sequence"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
-        )
-
-    @staticmethod
-    def _delegation_from_row(row: sqlite3.Row) -> AgentDelegation:
-        return AgentDelegation(
-            delegation_id=str(row["delegation_id"]),
-            parent_operation_id=str(row["parent_operation_id"]),
-            parent_step_id=str(row["parent_step_id"]),
-            parent_tool_call_id=(
-                str(row["parent_tool_call_id"])
-                if row["parent_tool_call_id"] is not None
+    def _run_state_values(
+        state: AgentRunState, *, updated_at: datetime
+    ) -> tuple[Any, ...]:
+        return (
+            state.operation_id,
+            state.revision,
+            state.status,
+            state.waiting_reason,
+            state.completed_step_count,
+            _json(_step_to_dict(state.current_step)),
+            state.final_assistant_node_id,
+            _json(
+                {
+                    "code": state.error.code,
+                    "message": state.error.message,
+                    "retryable": state.error.retryable,
+                }
+                if state.error is not None
                 else None
             ),
-            child_operation_id=str(row["child_operation_id"]),
-            child_session_id=str(row["child_session_id"]),
-            created_commit_sequence=int(row["created_commit_sequence"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
+            _json(
+                {
+                    "cause": state.cancellation.cause,
+                    "requested_at": state.cancellation.requested_at.isoformat(),
+                }
+                if state.cancellation is not None
+                else None
+            ),
+            updated_at.isoformat(),
         )
 
     @staticmethod
-    def _reference_from_row(row: sqlite3.Row) -> NamedReference:
-        return NamedReference(
+    def _message_to_node(
+        row: sqlite3.Row, *, parent_node_id: str | None
+    ) -> ConversationNode:
+        payload = _object(row["message_json"])
+        return ConversationNode.from_content_json(
+            node_id=str(row["message_id"]),
             session_id=str(row["session_id"]),
-            reference_name=str(row["reference_name"]),
-            commit_sequence=int(row["commit_sequence"]),
-            target_kind=str(row["target_kind"]),  # type: ignore[arg-type]
-            target_id=str(row["target_id"]),
+            parent_node_id=parent_node_id,
+            content_type="agent_message",
+            content_json=_json(payload["message"]) or "{}",
+            created_at=_time(row["created_at"]),
+        )
+
+    @staticmethod
+    def _has_any_delegation(
+        connection: sqlite3.Connection, session_ids: set[str]
+    ) -> bool:
+        if not session_ids:
+            return False
+        marks = ",".join("?" for _ in session_ids)
+        return (
+            connection.execute(
+                f"""
+            SELECT 1 FROM agent_delegations d
+            LEFT JOIN session_operations op ON op.operation_id = d.parent_operation_id
+            WHERE d.child_session_id IN ({marks}) OR op.session_id IN ({marks}) LIMIT 1
+            """,
+                [*session_ids, *session_ids],
+            ).fetchone()
+            is not None
         )
 
     @classmethod
-    def _entry_from_row(cls, row: sqlite3.Row) -> ConversationEntry:
-        node = ConversationNode(
-            node_id=str(row["node_id"]),
-            session_id=str(row["session_id"]),
-            parent_node_id=(
-                str(row["parent_node_id"])
-                if row["parent_node_id"] is not None
-                else None
-            ),
-            object_id=str(row["object_id"]),
-            created_commit_sequence=int(row["created_commit_sequence"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
+    def _check_deletable(
+        cls, connection: sqlite3.Connection, session_ids: set[str]
+    ) -> None:
+        marks = ",".join("?" for _ in session_ids)
+        rows = connection.execute(
+            f"SELECT session_id, archived_at, active_operation_id FROM conversation_sessions WHERE session_id IN ({marks})",
+            list(session_ids),
+        ).fetchall()
+        if len(rows) != len(session_ids):
+            missing = session_ids - {str(row["session_id"]) for row in rows}
+            raise LookupError(f"ConversationSession 不存在: {sorted(missing)}")
+        pending = connection.execute(
+            f"SELECT 1 FROM agent_inbox_messages WHERE session_id IN ({marks}) AND status = 'pending' LIMIT 1",
+            list(session_ids),
+        ).fetchone()
+        if pending is not None:
+            raise StorageIntegrityError("删除要求无 pending InboxMessage")
+        for row in rows:
+            if row["archived_at"] is None:
+                raise StorageIntegrityError("删除要求 Session 已归档")
+            if row["active_operation_id"] is not None:
+                raise StorageIntegrityError("删除要求 Session 空闲")
+
+
+def _step_to_dict(step: Any) -> dict[str, Any] | None:
+    if step is None:
+        return None
+    return step.content_dict()
+
+
+def _json(value: Any) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _object(value: Any) -> dict[str, Any]:
+    try:
+        result = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageIntegrityError("数据库 JSON 不是合法 object") from exc
+    if not isinstance(result, dict):
+        raise StorageIntegrityError("数据库 JSON 必须是 object")
+    return result
+
+
+def _time(value: Any) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as exc:
+        raise StorageIntegrityError("数据库时间不是合法 ISO8601") from exc
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _optional(value: Any) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _optional_time(value: Any) -> datetime | None:
+    return _time(value) if value is not None else None
+
+
+def _state_node_ids(state: AgentRunState) -> set[str]:
+    """收集 State 对 ConversationNode 的全部强引用。"""
+    result: set[str] = set()
+    if state.final_assistant_node_id is not None:
+        result.add(state.final_assistant_node_id)
+    if state.current_step is not None:
+        if state.current_step.assistant_message_node_id is not None:
+            result.add(state.current_step.assistant_message_node_id)
+        result.update(
+            call.result_node_id
+            for call in state.current_step.tool_calls
+            if call.result_node_id is not None
         )
-        object_row: dict[str, Any] = {
-            "object_id": row["object_id"],
-            "object_type": row["object_type"],
-            "schema_version": row["schema_version"],
-            "digest": row["digest"],
-            "content_json": row["content_json"],
-            "created_session_id": row["created_session_id"],
-            "created_commit_sequence": row["created_commit_sequence"],
-            "created_at": row["object_created_at"],
-        }
-        immutable_object = cls._object_from_row(object_row)  # type: ignore[arg-type]
-        return ConversationEntry(node=node, object=immutable_object)
+    return result

@@ -45,10 +45,27 @@
 1. 用户在当前任务中的明确要求；
 2. 本 `AGENTS.md`；
 3. [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md)；
-4. 命中的领域设计文档；
-5. 历史实现计划和旧代码。
+4. 命中的当前领域合同；
+5. [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) 中已经确认的跨领域边界；
+6. [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md)；
+7. 历史实现计划和旧代码。
 
-2026-08-10 之前的 Runtime、Session、Context、Observability 实现稿均视为历史资料；其中的 `Run`、Strategy、`SessionService`、`ContextAssembler` 和旧表结构不得作为当前实现依据。
+### 当前 Runtime 文档集合
+
+只有下列文档共同构成当前 Runtime 重构依据：
+
+| 文档 | 唯一职责 |
+| --- | --- |
+| [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 唯一术语、组件职责、历史名称迁移 |
+| [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 已确认实体、值对象和跨领域关系的决策理由 |
+| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v10 表、字段、约束、事务和 v9 迁移 |
+| [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | AgentRunState、Intent、审批、取消和恢复语义 |
+| [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | Pickel 配置来源、合并、SecretRef 和 Package 构建输入 |
+| [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 批次顺序和验收门槛 |
+
+除上表明确列出的当前合同外，2026-08-10 之前的 Runtime、Session、Context、Observability 设计与实施计划均视为历史资料；其中的 `Run`、Strategy、`AgentRuntime`、`RuntimeBindings`、`SessionService`、`ContextAssembler`、`ConversationEntry`、通用 Commit/Reference 和旧表结构不得作为当前实现依据。
+
+旧文档只有在任务直接命中其独立领域（例如现有 Tool、Extension、MCP、Shell、Skill 或 Anthropic 协议）且当前合同没有覆盖该细节时才可作为实现历史参考。不得为了“了解全貌”批量读取 `docs/upgrade/`，也不得让旧文档反向覆盖上表合同。
 
 ### 第一层：何时读取命名合同
 
@@ -68,15 +85,18 @@
 
 | 任务范围 | 必读文档 | 用途 |
 | --- | --- | --- |
-| Session 树、消息持久化、Context 投影、Artifact、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 Runtime v9 的持久化事实、引用和原子提交 |
+| Session 树、消息持久化、Artifact、Inbox、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 SQLite v10 领域表、字段、CAS、原子事务和 v9 迁移 |
+| 实体是否持久化、跨领域所有权、过度抽象评审 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 查询已拍板理由；字段与状态以命中的窄领域合同为准 |
 | Tool Loop、Runtime/Host 边界、实体与方法命名 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 约束当前组件职责与唯一术语 |
-| Config、Settings、Agent Package Snapshot | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 只参考 Pickel 设置来源；Runtime 实体与数据库名称以三份当前合同为准 |
-| Operation、AgentRunState、Tool 恢复 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | 约束 Operation 接受事务、状态引用、Package 绑定和未知副作用恢复语义 |
+| Config、Settings、Environ、Agent Package 输入 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 约束 Pickel 设置来源、合并、SecretRef；Runtime 名称以命名合同为准 |
+| Operation、AgentRunState、Tool Approval/Intent、取消与恢复 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | 约束接受事务、revision CAS、Package 绑定和未知副作用恢复语义 |
+| 重构批次、迁移顺序和验收范围 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 只决定实施顺序，不重新定义实体 |
 | Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 只参考 Anthropic 协议语义；其中旧 Strategy/Run 描述已失效 |
 
 ### 使用要求
 
 - 开始实现前，在工作计划中写明本任务命中了哪些文档；未命中的文档不要为了“了解全貌”继续展开。
+- 搜索历史文档得到的结论必须先与当前文档集合核对；历史文件名日期更晚、内容更长或声称“已实施”都不自动获得更高优先级。
 - 领域文档与代码不一致时，先判断文档描述的是历史现状还是目标合同；不能静默选择其中一方。
 - 设计仍未对齐时只在对话中讨论，不把推测写成新的权威文档。
 - 实现验收后校对本任务命中的文档；更新原文，不另建同主题 v2/v3。

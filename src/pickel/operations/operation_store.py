@@ -1,39 +1,43 @@
-"""Operation 领域依赖的持久化窄接口。"""
+"""Operation 领域需要的最小持久化端口。"""
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
-from pickel.agents.agent_package_store import AgentPackageVersionStore
-from pickel.conversations.conversation_store import ConversationStore
-from pickel.operations.agent_delegation import AgentDelegation
+from pickel.conversations.conversation_node import ConversationNode
+from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
 
 
-class OperationStore(ConversationStore, AgentPackageVersionStore, Protocol):
-    def load_session_operation(
-        self,
-        operation_id: str,
-    ) -> SessionOperation | None: ...
+class OperationStore(Protocol):
+    """OperationService 的窄依赖。
 
-    def list_session_operations(
+    `accept_operation` 是唯一的创建入口：Inbox claim、输入 Node、Operation、
+    初始 State 和 Session active 指针必须由具体 Store 在一个事务内完成。
+    """
+
+    def accept_operation(
         self,
         *,
-        session_id: str,
-    ) -> list[SessionOperation]: ...
+        operation: SessionOperation,
+        state: AgentRunState,
+        expected_node_id: str | None,
+    ) -> bool: ...
 
-    def load_agent_delegation(
-        self,
-        delegation_id: str,
-    ) -> AgentDelegation | None: ...
+    def load_operation(self, operation_id: str) -> SessionOperation | None: ...
 
-    def find_delegation_by_child_operation(
-        self,
-        child_operation_id: str,
-    ) -> AgentDelegation | None: ...
+    def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]: ...
 
-    def list_agent_delegations(
+    def load_run_state(self, operation_id: str) -> AgentRunState | None: ...
+
+    def commit_run_transition(
         self,
         *,
-        parent_operation_id: str,
-    ) -> list[AgentDelegation]: ...
+        state: AgentRunState,
+        expected_revision: int,
+        node: ConversationNode | None,
+        updated_at: datetime,
+    ) -> bool:
+        """原子提交可选 ConversationNode 与 AgentRunState CAS。"""
+        ...

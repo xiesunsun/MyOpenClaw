@@ -1,109 +1,62 @@
-"""会话活动分支到模型可见消息的投影。"""
+"""Conversation Tree 固定 active leaf 到模型消息的投影。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Sequence
+from collections.abc import Sequence
 
-from pickel.conversations.agent_message import (
-    AgentMessage,
-    UserMessage,
-    agent_message_from_dict,
-)
+from pickel.conversations.agent_message import AgentMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
-from pickel.conversations.conversation_node import ConversationEntry
-
-_AGENT_MESSAGE = "agent_message"
-_HISTORY_COMPACTION = "history_compaction"
-
-
-@dataclass(frozen=True)
-class _ProjectionEntry:
-    node_id: str
-    object_type: str
-    content: dict[str, Any]
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 
 
 class ConversationProjector:
-    """把持久化会话事实投影为 Provider-neutral 消息。"""
+    """只消费 Store 已按 parent 链返回的 ConversationNode 路径。"""
 
     def project_conversation_messages(
-        self,
-        entries: Sequence[ConversationEntry],
+        self, nodes: Sequence[ConversationNode]
     ) -> list[AgentMessage]:
-        return _project(
-            [
-                _ProjectionEntry(
-                    node_id=entry.node.node_id,
-                    object_type=entry.object.object_type,
-                    content=entry.object.content,
-                )
-                for entry in entries
-            ]
+        if not nodes:
+            return []
+
+        # 从 leaf 向前查找最后一个合法压缩。后续节点可能属于新分支，
+        # 但输入路径本身已经由 Store 固定为单条 active leaf 链。
+        for index in range(len(nodes) - 1, -1, -1):
+            node = nodes[index]
+            if node.content_type != "history_compaction":
+                continue
+            result = self._project_with_compaction(nodes, index, node.content)
+            if result is not None:
+                return result
+        return [node.content for node in nodes if node.content_type == "agent_message"]
+
+    def _project_with_compaction(
+        self,
+        nodes: Sequence[ConversationNode],
+        compaction_index: int,
+        compaction: HistoryCompaction,
+    ) -> list[AgentMessage] | None:
+        first_kept_node_id = compaction.first_kept_node_id
+        if first_kept_node_id is None:
+            return None
+        first_kept_index = next(
+            (
+                index
+                for index, node in enumerate(nodes[:compaction_index])
+                if node.node_id == first_kept_node_id
+            ),
+            None,
         )
+        if first_kept_index is None:
+            return None
 
-
-def _project(entries: Sequence[_ProjectionEntry]) -> list[AgentMessage]:
-    """唯一投影算法；输入已经归一化为目标态语义。"""
-    if not entries:
-        return []
-
-    # 从路径尾部向前应用最后一个有效压缩；无效引用不掩盖更早的有效压缩。
-    for index in range(len(entries) - 1, -1, -1):
-        if entries[index].object_type != _HISTORY_COMPACTION:
-            continue
-        compacted = _project_with_compaction(entries, index)
-        if compacted is not None:
-            return compacted
-
-    return _project_message_entries(entries)
-
-
-def _resolve_first_kept_node_id(content: dict[str, Any]) -> str | None:
-    first_kept_node_id = content.get("first_kept_node_id")
-    if isinstance(first_kept_node_id, str) and first_kept_node_id:
-        return first_kept_node_id
-    return None
-
-
-def _project_with_compaction(
-    entries: Sequence[_ProjectionEntry],
-    compaction_index: int,
-) -> list[AgentMessage] | None:
-    compaction = entries[compaction_index]
-    first_kept_node_id = _resolve_first_kept_node_id(compaction.content)
-    summary = compaction.content.get("summary")
-    if first_kept_node_id is None:
-        return None
-    if not isinstance(summary, str):
-        summary = "" if summary is None else str(summary)
-
-    first_kept_index: int | None = None
-    for index, entry in enumerate(entries):
-        # first_kept 必须位于 compaction 插入点之前的祖先链上。
-        if entry.node_id == first_kept_node_id and index < compaction_index:
-            first_kept_index = index
-            break
-    if first_kept_index is None:
-        return None
-
-    messages: list[AgentMessage] = [
-        UserMessage(content=[TextBlock(text=f"[compaction]\n{summary}")]),
-    ]
-    messages.extend(_project_message_entries(entries[first_kept_index:]))
-    return messages
-
-
-def _project_message_entries(
-    entries: Sequence[_ProjectionEntry],
-) -> list[AgentMessage]:
-    messages: list[AgentMessage] = []
-    for entry in entries:
-        if entry.object_type != _AGENT_MESSAGE:
-            continue
-        try:
-            messages.append(agent_message_from_dict(entry.content))
-        except (TypeError, ValueError, KeyError):
-            # 损坏或未知 role 的消息事实不能阻断其余上下文投影。
-            continue
-    return messages
+        messages: list[AgentMessage] = [
+            UserMessage(
+                content=(TextBlock(text=f"[compaction]\n{compaction.summary}"),)
+            )
+        ]
+        messages.extend(
+            node.content
+            for node in nodes[first_kept_index:]
+            if node.content_type == "agent_message"
+        )
+        return messages

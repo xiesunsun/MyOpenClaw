@@ -1,41 +1,6 @@
-"""Application bootstrap."""
+"""Pickel 应用组合层。
 
-from pickel.app.application import RuntimeApplication
-from pickel.app.boot import Boot
-from pickel.app.conversation_runtime import ConversationRuntime
-from pickel.app.runtime_host import RuntimeHost
-from pickel.app.runtime_models import (
-    AgentInfo,
-    ContextInspection,
-    ConversationRequest,
-    McpInspection,
-    McpServerInfo,
-    ModelInfo,
-    PendingSkillInfo,
-    ReloadResult,
-    RuntimeSnapshot,
-    RuntimeLaunchRequest,
-    ToolInfo,
-    AgentRunRequest,
-    AgentRunResult,
-)
+具体类型从各自模块显式导入，避免导入任一子模块时连带构建完整 Runtime。
+"""
 
-__all__ = [
-    "AgentInfo",
-    "Boot",
-    "ContextInspection",
-    "ConversationRequest",
-    "McpInspection",
-    "McpServerInfo",
-    "ModelInfo",
-    "PendingSkillInfo",
-    "ReloadResult",
-    "RuntimeApplication",
-    "ConversationRuntime",
-    "RuntimeHost",
-    "RuntimeLaunchRequest",
-    "RuntimeSnapshot",
-    "ToolInfo",
-    "AgentRunRequest",
-    "AgentRunResult",
-]
+__all__: list[str] = []

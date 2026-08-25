@@ -5,11 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from pickel.agents.agent_package import (
-    agent_package_digest,
-    agent_package_version_from_content,
-)
 from pickel.agents.agent_package_builder import AgentPackageBuilder
+from pickel.agents.agent_package import ExtensionVersion, ImplementationRef
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
@@ -115,23 +112,20 @@ def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) ->
         app_config=config,
         tool_bus=bus,
         now=lambda: datetime(2026, 8, 11, tzinfo=timezone.utc),
-    ).build_loaded_agent_package()
+    ).build_agent_package_version()
     second = AgentPackageBuilder(
         app_config=config,
         tool_bus=bus,
         now=lambda: datetime(2027, 1, 1, tzinfo=timezone.utc),
-    ).build_loaded_agent_package()
+    ).build_agent_package_version()
 
-    assert first.version.package_version_id == second.version.package_version_id
-    assert first.version.digest == second.version.digest
-    assert first.version.behavior_instruction == "You are Pickle."
-    assert first.version.definition.tool_ids == ("echo",)
-    assert first.version.definition.extension_ids == ("openviking",)
-    assert [tool.name for tool in first.version.tools] == ["echo"]
-    assert first.version.tools[0].input_schema["properties"]["text"]["type"] == "string"
-    assert first.version.skills[0].name == "research"
-    assert "Use evidence." in first.version.skills[0].content
-    assert first.tool_snapshot.names == ("echo",)
+    assert first.package_version_id == second.package_version_id
+    assert first.behavior_instruction == "You are Pickle."
+    assert [tool.name for tool in first.tools] == ["echo"]
+    assert first.tools[0].input_schema["properties"]["text"]["type"] == "string"
+    assert first.extensions[0].extension_id == "openviking"
+    assert first.skills[0].name == "research"
+    assert "Use evidence." in first.skills[0].content
 
 
 def test_rejects_missing_agent_workspace_before_runtime_starts(tmp_path: Path) -> None:
@@ -142,47 +136,66 @@ def test_rejects_missing_agent_workspace_before_runtime_starts(tmp_path: Path) -
         AgentPackageBuilder(
             app_config=config,
             tool_bus=_tool_bus(),
-        ).build_loaded_agent_package()
+        ).build_agent_package_version()
 
 
 def test_snapshot_excludes_provider_secrets(tmp_path: Path) -> None:
     package = AgentPackageBuilder(
         app_config=_config(tmp_path),
         tool_bus=_tool_bus(),
-    ).build_loaded_agent_package()
+    ).build_agent_package_version()
 
-    serialized = str(package.version.content_dict())
+    serialized = str(package.content_dict())
     assert "secret-key" not in serialized
     assert "secret-token" not in serialized
-    assert "access_token" not in serialized
-    assert package.version.model.required_secrets == ("api_key",)
-    assert package.version.model.provider_options == {"thinking": "high"}
-    assert package.version.runtime.max_model_steps == 8
-    assert package.version.runtime.context_turn_window == 5
+    assert [ref.name for ref in package.model_policy.primary.required_secret_refs] == [
+        "providers.anthropic.options.access_token",
+        "providers.anthropic.api_key",
+    ]
+    assert package.model_policy.primary.provider_options == {"thinking": "high"}
+    assert package.runtime_policy.max_model_steps == 8
+    assert package.runtime_policy.context_turn_window == 5
+
+
+def test_builder_uses_loaded_extension_version_instead_of_config_guess(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    loaded = ExtensionVersion(
+        extension_id="openviking",
+        implementation_ref=ImplementationRef(
+            "extension", "openviking", version="9.1.0", digest="a" * 64
+        ),
+        version="9.1.0",
+        config={"enabled": True, "endpoint": "https://loaded.example"},
+    )
+
+    package = AgentPackageBuilder(
+        app_config=config,
+        tool_bus=_tool_bus(),
+        extension_versions={"openviking": loaded},
+    ).build_agent_package_version()
+
+    assert package.extensions == (loaded,)
 
 
 def test_behavior_change_creates_new_package_version(tmp_path: Path) -> None:
     config = _config(tmp_path)
     builder = AgentPackageBuilder(app_config=config, tool_bus=_tool_bus())
-    first = builder.build_loaded_agent_package()
+    first = builder.build_agent_package_version()
     behavior_file = tmp_path / "agents" / "Pickle" / "AGENT.md"
     behavior_file.write_text("You are Pickle v2.\n", encoding="utf-8")
 
-    second = builder.build_loaded_agent_package()
+    second = builder.build_agent_package_version()
 
-    assert first.version.package_version_id != second.version.package_version_id
-    assert first.version.digest != second.version.digest
+    assert first.package_version_id != second.package_version_id
 
 
 def test_agent_package_version_round_trips_through_sqlite(tmp_path: Path) -> None:
-    version = (
-        AgentPackageBuilder(
-            app_config=_config(tmp_path),
-            tool_bus=_tool_bus(),
-        )
-        .build_loaded_agent_package()
-        .version
-    )
+    version = AgentPackageBuilder(
+        app_config=_config(tmp_path),
+        tool_bus=_tool_bus(),
+    ).build_agent_package_version()
     store = SQLiteRuntimeStore(tmp_path / "packages.db")
 
     store.insert_agent_package_version(version)
@@ -194,40 +207,15 @@ def test_agent_package_version_round_trips_through_sqlite(tmp_path: Path) -> Non
     assert loaded.content_dict() == version.content_dict()
 
 
-def test_loads_schema_v2_package_with_renamed_turn_window(tmp_path: Path) -> None:
-    current = (
-        AgentPackageBuilder(
-            app_config=_config(tmp_path),
-            tool_bus=_tool_bus(),
-        )
-        .build_loaded_agent_package()
-        .version
-    )
-    legacy_content = current.content_dict()
-    legacy_content["schema_version"] = 2
-    legacy_runtime = legacy_content["runtime"]
-    legacy_runtime["context_unit_window"] = legacy_runtime.pop("context_turn_window")
-    digest = agent_package_digest(legacy_content)
-
-    loaded = agent_package_version_from_content(
-        package_version_id=f"agentpkg_{digest}",
-        digest=digest,
-        content=legacy_content,
-        created_at=current.created_at,
-    )
-
-    assert loaded.schema_version == 2
-    assert loaded.runtime.context_turn_window == 5
-    assert loaded.content_dict() == legacy_content
-
-
 def test_boot_resolves_a_single_loaded_agent_package(
     tmp_path: Path,
 ) -> None:
-    boot = Boot(_config(tmp_path), tool_bus=_tool_bus())
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
 
     loaded = boot.resolve_loaded_agent_package()
 
-    assert loaded.version.definition.agent_id == "Pickle"
+    assert loaded.version.agent_id == "Pickle"
     assert loaded.version.behavior_instruction == "You are Pickle."
-    assert loaded.version.definition.tool_ids == ("echo",)
+    assert loaded.tool_snapshot.names == ("echo",)

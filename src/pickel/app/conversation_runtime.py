@@ -1,4 +1,4 @@
-"""基于 AgentRuntime 与 ConversationSession 的应用控制面。"""
+"""ConversationSession 的 Host/UI 适配层。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
-from pickel.agents.agent_package import AgentDefinition, LoadedAgentPackage
+from pickel.agents.agent_package import LoadedAgentPackage
+from pickel.app.boot import CompositionStore
 from pickel.app.runtime_models import (
     ContextInspection,
     ConversationClosedError,
@@ -23,9 +24,11 @@ from pickel.app.runtime_models import (
 )
 from pickel.config.app_config import AppConfig
 from pickel.context.model_context_builder import ModelContextBuilder
+from pickel.context.projection import ConversationProjector
+from pickel.context.window import apply_window
 from pickel.context.context_usage import estimate_context_usage
 from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.runtime.conversation_output_bus import ConversationOutputBus
@@ -64,13 +67,8 @@ from pickel.providers.stream import (
     ThinkingDelta,
     ToolCallArgsDelta,
 )
-from pickel.runtime.agent_runtime import AgentRuntime
-from pickel.runtime.agent_run_progress import (
-    ModelStepStartedProgress,
-    ToolCallCompletedProgress,
-    ToolCallStartedProgress,
-)
-from pickel.persistence.runtime_store import RuntimeStore
+from pickel.app.runtime_generation import LoadedPackageHandle
+from pickel.runtime.agent import Agent
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.shared.conversation_output import (
@@ -88,28 +86,39 @@ class ConversationRuntime:
         self,
         *,
         loaded_agent_package: LoadedAgentPackage,
-        agent_runtime: AgentRuntime,
+        agent: Agent,
         session: ConversationSession,
         conversation_service: ConversationService,
-        runtime_store: RuntimeStore,
+        persistence_store: CompositionStore,
         persistence: str,
         app_config: AppConfig,
         mode: ConversationMode = "batch",
+        loaded_package_handle: LoadedPackageHandle | None = None,
+        skill_store: Any | None = None,
     ) -> None:
         self._loaded_agent_package = loaded_agent_package
-        self._agent_runtime = agent_runtime
+        self._agent = agent
         self._session = session
         self._conversation_service = conversation_service
-        self._runtime_store = runtime_store
+        self._persistence_store = persistence_store
+        self._skill_store = skill_store
         self._persistence = persistence
         self._app_config = app_config
         self._mode = mode
+        # 该 Handle 同时保持 LoadedAgentPackage 与所属 Generation 存活。
+        self._loaded_package_handle = loaded_package_handle
+        self._runtime_generation = (
+            loaded_package_handle.generation
+            if loaded_package_handle is not None
+            else None
+        )
         self._runtime_bus = RuntimeBus()
         self._events = self._runtime_bus.events
         self._outputs = ConversationOutputBus()
         self._active_operation_id: str | None = None
         self._active_task: asyncio.Task[Any] | None = None
         self._closed = False
+        self._release_package_after_task = False
         self._control_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._event_processors: list[tuple[EventProcessor, Callable[[], None]]] = []
@@ -118,12 +127,12 @@ class ConversationRuntime:
         self._open_trace()
 
     @property
-    def agent_definition(self) -> AgentDefinition:
-        return self._loaded_agent_package.version.definition
+    def agent_definition(self):
+        return self._loaded_agent_package.version
 
     @property
     def model_config(self):
-        return self._loaded_agent_package.model_config
+        return self._loaded_agent_package.version.model_policy.primary
 
     @property
     def session(self) -> ConversationSession:
@@ -142,9 +151,15 @@ class ConversationRuntime:
         return self._persistence
 
     @property
-    def runtime_store(self) -> RuntimeStore:
-        """供 RuntimeHost 在 reload 时保留 ephemeral 数据。"""
-        return self._runtime_store
+    def persistence_store(self) -> CompositionStore:
+        """供 Host reload 保留 ephemeral Store；不暴露通用 RuntimeStore。"""
+        return self._persistence_store
+
+    @property
+    def runtime_generation(self):
+        """该 Conversation 创建时所属的 Generation（不新增引用计数）。"""
+
+        return self._runtime_generation
 
     @property
     def event_bus(self) -> EventBus:
@@ -177,18 +192,9 @@ class ConversationRuntime:
                 raise OperationInProgressError(
                     "当前 Conversation 已有 Operation 正在执行"
                 )
-            accepted = await self._agent_runtime.accept_agent_run(
-                session_id=self._session.session_id,
-                user_message=request.message,
-            )
-            operation_id = accepted.operation.operation_id
-            self._active_operation_id = operation_id
             self._active_task = task
+            operation_id = self._session.active_operation_id or "pending"
         started = time.perf_counter()
-        envelope = EventEnvelope(
-            session_id=self._session.session_id,
-            operation_id=operation_id,
-        )
         timer = SpanTimer(
             "pickel.agent_run",
             ObservationIdentity(
@@ -196,11 +202,12 @@ class ConversationRuntime:
                 operation_id=operation_id,
             ),
         )
-        await self._events.emit(
-            AgentRunStarted(envelope=envelope, user_text=self._user_text(request))
-        )
 
         async def consume_delta(delta) -> None:
+            envelope = EventEnvelope(
+                session_id=self._session.session_id,
+                operation_id=self._active_operation_id or operation_id,
+            )
             if isinstance(delta, TextDelta):
                 await self._events.emit(
                     TextDeltaEvent(envelope=envelope, text=delta.text)
@@ -218,85 +225,63 @@ class ConversationRuntime:
                     )
                 )
 
-        async def consume_progress(progress) -> None:
-            progress_envelope = EventEnvelope(
-                session_id=self._session.session_id,
-                operation_id=progress.operation_id,
-                step_id=progress.step_id,
-                step_sequence=progress.step_sequence,
-            )
-            if isinstance(progress, ModelStepStartedProgress):
-                await self._events.emit(ModelStepStarted(envelope=progress_envelope))
-                return
-            tool_call = ToolCallSnapshot(
-                tool_call_id=progress.tool_call.tool_call_id,
-                tool_name=progress.tool_call.tool_name,
-                arguments=dict(progress.tool_call.arguments),
-            )
-            entry = self._agent_runtime.bindings.tool_snapshot.get(
-                progress.tool_call.tool_name
-            )
-            common = {
-                "envelope": progress_envelope,
-                "tool_call": tool_call,
-                "batch_id": progress.step_id,
-                "call_index": progress.call_index,
-                "total_calls": progress.total_calls,
-                "tool_source": entry.source.value if entry is not None else None,
-                "tool_origin": entry.origin if entry is not None else None,
-                "hook_action": progress.tool_call.execution_policy,
-                "confirmation": (
-                    "pending"
-                    if progress.tool_call.execution_policy == "confirm"
-                    else "not_requested"
-                ),
-            }
-            if isinstance(progress, ToolCallCompletedProgress):
-                await self._events.emit(
-                    ToolCallCompleted(
-                        **common,
-                        tool_result=progress.result,
-                    )
-                )
-            elif isinstance(progress, ToolCallStartedProgress):
-                await self._events.emit(ToolCallStarted(**common))
-
         try:
-            result = await self._agent_runtime.drive_operation(
-                operation_id,
+            await self._agent.followup(request.message)
+            result = await self._agent.when_idle(
                 host_calls=self._runtime_bus.host_calls.client,
                 consume_delta=consume_delta,
-                consume_progress=consume_progress,
+            )
+            if result.accepted is not None:
+                operation_id = result.accepted.operation.operation_id
+            elif self._session.active_operation_id is not None:
+                operation_id = self._session.active_operation_id
+            self._active_operation_id = operation_id
+            envelope = EventEnvelope(
+                session_id=self._session.session_id,
+                operation_id=operation_id,
+            )
+            await self._events.emit(
+                AgentRunStarted(envelope=envelope, user_text=self._user_text(request))
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000)
-            if result.assistant_message is not None:
+            operation_result = result.operation_result
+            message = (
+                operation_result.assistant_message
+                if operation_result is not None
+                else None
+            )
+            status = (
+                operation_result.status if operation_result is not None else "waiting"
+            )
+            if message is not None:
                 await self._events.emit(
                     AssistantMessageEvent(
                         envelope=envelope,
-                        text=self._assistant_text(result.assistant_message),
+                        text=self._assistant_text(message),
                     )
                 )
             await self._events.emit(
                 AgentRunCompleted(
                     envelope=envelope,
                     elapsed_ms=elapsed_ms,
-                    outcome=("blocked" if result.status == "waiting" else "completed"),
+                    outcome=("blocked" if status == "waiting" else "completed"),
                 )
             )
-            timer.finish(attributes={"outcome": result.status})
+            timer.finish(attributes={"outcome": status})
             self._refresh_session()
             return AgentRunResult(
-                status=("blocked" if result.status == "waiting" else "completed"),
+                status=("blocked" if status == "waiting" else "completed"),
                 session_id=self._session.session_id,
                 operation_id=operation_id,
-                message=result.assistant_message,
+                message=message,
                 usage=None,
                 elapsed_ms=elapsed_ms,
             )
         except asyncio.CancelledError:
-            cancel = getattr(self._agent_runtime, "cancel_operation", None)
-            if callable(cancel):
-                cancel(operation_id, reason="用户中断")
+            self._agent.cancel(reason="用户中断")
+            envelope = EventEnvelope(
+                session_id=self._session.session_id, operation_id=operation_id
+            )
             await self._events.emit(
                 AgentRunInterrupted(envelope=envelope, at_step=0, partial_text="")
             )
@@ -308,13 +293,9 @@ class ConversationRuntime:
             raise
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
-            fail = getattr(self._agent_runtime, "fail_operation", None)
-            if callable(fail):
-                fail(
-                    operation_id,
-                    error_type=type(exc).__name__,
-                    message=str(exc),
-                )
+            envelope = EventEnvelope(
+                session_id=self._session.session_id, operation_id=operation_id
+            )
             await self._events.emit(
                 AgentRunFailed(
                     envelope=envelope,
@@ -344,6 +325,9 @@ class ConversationRuntime:
                 if self._active_task is task:
                     self._active_task = None
                     self._active_operation_id = None
+                    if self._release_package_after_task:
+                        self._release_package_after_task = False
+                        self._close_loaded_package_handle()
 
     async def interrupt(self, *, expected_operation_id: str) -> None:
         async with self._control_lock:
@@ -371,7 +355,7 @@ class ConversationRuntime:
     def snapshot(self) -> RuntimeSnapshot:
         preview = self._conversation_service.build_conversation_preview(self._session)
         version = self._loaded_agent_package.version
-        thinking = version.model.provider_options.get("thinking")
+        thinking = version.model_policy.primary.provider_options.get("thinking")
         return RuntimeSnapshot(
             session_id=preview.session_id,
             agent_id=preview.agent_id,
@@ -379,7 +363,10 @@ class ConversationRuntime:
             message_count=preview.message_count,
             updated_at=preview.updated_at,
             last_message=preview.last_message,
-            model_id=f"{version.model.provider}/{version.model.model}",
+            model_id=(
+                f"{version.model_policy.primary.provider}/"
+                f"{version.model_policy.primary.model}"
+            ),
             thinking=str(thinking) if thinking is not None else None,
         )
 
@@ -391,29 +378,37 @@ class ConversationRuntime:
                 origin=entry.origin,
                 version=entry.version,
             )
-            for entry in self._agent_runtime.bindings.tool_snapshot.entries
+            for entry in self._loaded_agent_package.tool_snapshot.entries
         )
 
     async def inspect_context(self) -> ContextInspection:
-        entries = self._conversation_service.list_active_branch_entries(
+        nodes = self._conversation_service.list_active_branch_nodes(
             session_id=self._session.session_id
         )
+        messages = ConversationProjector().project_conversation_messages(nodes)
+        visible = apply_window(
+            messages,
+            turn_window=self._loaded_agent_package.version.runtime_policy.context_turn_window,
+        )
         context = ModelContextBuilder().build_model_context(
-            agent_package_version=self._loaded_agent_package.version,
-            conversation_entries=entries,
+            package=self._loaded_agent_package.version,
+            visible_messages=visible,
         )
         tool_calls = sum(
             1
             for message in context.messages
             for block in message.content
-            if getattr(block, "type", None) == "tool_call"
+            if isinstance(block, ToolCallBlock)
         )
         version = self._loaded_agent_package.version
         return ContextInspection(
             usage=estimate_context_usage(
                 context,
-                model_label=f"{version.model.provider} / {version.model.model}",
-                max_input_tokens=version.model.max_input_tokens,
+                model_label=(
+                    f"{version.model_policy.primary.provider} / "
+                    f"{version.model_policy.primary.model}"
+                ),
+                max_input_tokens=version.model_policy.primary.max_input_tokens,
             ),
             last_turn=None,
             session_total=None,
@@ -421,15 +416,13 @@ class ConversationRuntime:
             turns=sum(1 for message in context.messages if message.role == "user"),
             tool_calls=tool_calls,
             compactions=sum(
-                1
-                for entry in entries
-                if entry.object.object_type == "history_compaction"
+                1 for node in nodes if node.content_type == "history_compaction"
             ),
             tool_definitions=len(context.tools),
         )
 
     def list_pending_skills(self) -> tuple[PendingSkillInfo, ...]:
-        store = self._agent_runtime.bindings.tool_services.skill_store
+        store = self._skill_store
         if store is None:
             return ()
         return tuple(
@@ -443,7 +436,7 @@ class ConversationRuntime:
         )
 
     def apply_skill_action(self, action: str, pending_id: str) -> SkillActionResult:
-        store = self._agent_runtime.bindings.tool_services.skill_store
+        store = self._skill_store
         if store is None:
             raise SkillStoreError("当前 Agent 未配置 skills 目录")
         if action == "diff":
@@ -510,10 +503,23 @@ class ConversationRuntime:
             task.cancel()
         self._background_tasks.clear()
         self._outputs.clear()
+        if self._active_task is None:
+            self._close_loaded_package_handle()
+        else:
+            # detach 不得让仍在运行的 Operation 失去其 Generation；在终态
+            # finally 中释放精确 Package Handle。
+            self._release_package_after_task = True
         self._closed = True
 
     async def close(self) -> None:
         self.detach()
+
+    def _close_loaded_package_handle(self) -> None:
+        handle = self._loaded_package_handle
+        if handle is None:
+            return
+        self._loaded_package_handle = None
+        handle.close_sync()
 
     def set_model(self, model_id: str):
         raise ValueError("模型切换需要创建新的 AgentPackageVersion 并重装 Runtime")
@@ -530,8 +536,7 @@ class ConversationRuntime:
         )
 
     def _open_trace(self) -> None:
-        observability = getattr(self._app_config, "observability", None)
-        configured = getattr(observability, "trace", None)
+        configured = self._app_config.observability.trace
         if configured is None:
             return
         mode = trace_mode(configured.mode)

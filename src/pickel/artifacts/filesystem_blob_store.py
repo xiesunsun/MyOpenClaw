@@ -14,16 +14,15 @@ class FilesystemBlobStore:
     def __init__(self, root: Path) -> None:
         self._root = root.resolve()
 
-    def put_blob(self, *, digest: str, data: bytes) -> str:
-        if hashlib.sha256(data).hexdigest() != digest:
-            raise ValueError("Blob data 与 digest 不匹配")
-        key = self._blob_key(digest)
-        path = self._path(key)
+    def put_blob(self, *, artifact_id: str, data: bytes) -> None:
+        if artifact_id != f"artifact_{hashlib.sha256(data).hexdigest()}":
+            raise ValueError("Blob data 与 artifact_id 不匹配")
+        path = self._path(artifact_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             if path.read_bytes() != data:
-                raise ValueError(f"Blob digest 冲突: {digest}")
-            return key
+                raise ValueError(f"Blob 内容冲突: {artifact_id}")
+            return
         with NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
             temporary.write(data)
             temporary.flush()
@@ -33,31 +32,24 @@ class FilesystemBlobStore:
             os.replace(temporary_path, path)
         finally:
             temporary_path.unlink(missing_ok=True)
-        return key
 
-    def load_blob(self, blob_key: str) -> bytes:
-        path = self._path(blob_key)
+    def load_blob(self, artifact_id: str) -> bytes:
+        path = self._path(artifact_id)
         try:
             return path.read_bytes()
         except FileNotFoundError as exc:
-            raise BlobNotFoundError(f"Blob 不存在: {blob_key}") from exc
+            raise BlobNotFoundError(f"Blob 不存在: {artifact_id}") from exc
 
-    def delete_blob(self, blob_key: str) -> None:
-        self._path(blob_key).unlink(missing_ok=True)
+    def delete_blob(self, artifact_id: str) -> None:
+        self._path(artifact_id).unlink(missing_ok=True)
 
-    @staticmethod
-    def _blob_key(digest: str) -> str:
-        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise ValueError("Blob digest 必须是小写 SHA-256")
-        return f"sha256/{digest[:2]}/{digest[2:]}"
-
-    def _path(self, blob_key: str) -> Path:
-        relative = Path(blob_key)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"非法 blob_key: {blob_key}")
-        path = (self._root / relative).resolve()
-        try:
-            path.relative_to(self._root)
-        except ValueError as exc:
-            raise ValueError(f"非法 blob_key: {blob_key}") from exc
-        return path
+    def _path(self, artifact_id: str) -> Path:
+        prefix = "artifact_"
+        digest = artifact_id.removeprefix(prefix)
+        if (
+            not artifact_id.startswith(prefix)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError("artifact_id 必须是 artifact_<小写 SHA-256>")
+        return self._root / "sha256" / digest[:2] / digest[2:]

@@ -23,6 +23,7 @@ from pickel.conversations.content_blocks import (
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
+    thaw_json,
 )
 from pickel.providers.base import Provider
 from pickel.shared.model_config import ModelConfig
@@ -159,7 +160,7 @@ class GeminiProvider(Provider):
         return {
             "name": tool.name,
             "description": tool.description,
-            "parameters_json_schema": tool.input_schema,
+            "parameters_json_schema": thaw_json(tool.input_schema),
         }
 
     @staticmethod
@@ -279,7 +280,7 @@ class GeminiProvider(Provider):
                         function_call=types.FunctionCall(
                             id=block.id,
                             name=block.name,
-                            args=block.arguments,
+                            args=thaw_json(block.arguments),
                         ),
                         thought_signature=thought_signature,
                     )
@@ -303,7 +304,7 @@ class GeminiProvider(Provider):
                 content.append({"type": "text", "text": block.text})
         return {
             "content": content,
-            "structured_content": message.structured_content,
+            "structured_content": thaw_json(message.structured_content),
             "is_error": message.is_error,
         }
 

@@ -7,7 +7,7 @@ from typing import Any, Sequence
 
 from pickel.context.projection import ConversationProjector
 from pickel.context.window import group_conversation_turns
-from pickel.conversations.conversation_node import ConversationEntry
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_service import ConversationService
 
 
@@ -18,58 +18,33 @@ class HistoryCompactionPlan:
     details: dict[str, Any] | None = None
 
 
-def build_history_compaction_content(
-    plan: HistoryCompactionPlan,
-) -> dict[str, Any]:
-    content: dict[str, Any] = {
-        "summary": plan.summary,
-        "first_kept_node_id": plan.first_kept_node_id,
-    }
-    if plan.details:
-        content["details"] = dict(plan.details)
-    return content
-
-
 def plan_history_compaction(
-    entries: Sequence[ConversationEntry],
-    *,
-    keep_turns: int,
-    summary: str,
+    nodes: Sequence[ConversationNode], *, keep_turns: int, summary: str
 ) -> HistoryCompactionPlan | None:
-    """保留最近的完整用户轮次，返回可持久化的压缩计划。"""
+    """保留最近的完整用户轮次，返回可持久化的 typed 计划。"""
     if keep_turns <= 0:
         raise ValueError("keep_turns 必须大于 0")
-    if not entries:
+    if not nodes:
+        return None
+    # 已经存在压缩事实时，摘要本身没有对应的 ConversationNode 轮次；
+    # 本次只规划尚未压缩的固定 leaf，避免把合成摘要错配到真实 Node。
+    if any(node.content_type == "history_compaction" for node in nodes):
         return None
 
-    messages = ConversationProjector().project_conversation_messages(entries)
-    message_entries = [
-        entry for entry in entries if entry.object.object_type == "agent_message"
-    ]
-    if len(message_entries) != len(messages):
-        # 损坏消息会被 Projector 跳过，此时保守地按持久化节点尾部保留。
-        if len(message_entries) <= keep_turns:
-            return None
-        first_kept = message_entries[-keep_turns]
-        return HistoryCompactionPlan(
-            summary=summary,
-            first_kept_node_id=first_kept.node.node_id,
-        )
+    messages = ConversationProjector().project_conversation_messages(nodes)
+    message_nodes = [node for node in nodes if node.content_type == "agent_message"]
 
     turns = group_conversation_turns(messages)
     if len(turns) <= keep_turns:
         return None
     dropped_turns = len(turns) - keep_turns
     first_kept_message_index = sum(len(turn) for turn in turns[:dropped_turns])
-    if first_kept_message_index >= len(message_entries):
+    if first_kept_message_index >= len(message_nodes):
         return None
     return HistoryCompactionPlan(
         summary=summary,
-        first_kept_node_id=(message_entries[first_kept_message_index].node.node_id),
-        details={
-            "keep_turns": keep_turns,
-            "dropped_turns": dropped_turns,
-        },
+        first_kept_node_id=message_nodes[first_kept_message_index].node_id,
+        details={"keep_turns": keep_turns, "dropped_turns": dropped_turns},
     )
 
 
@@ -78,9 +53,12 @@ def commit_history_compaction(
     *,
     session_id: str,
     plan: HistoryCompactionPlan,
-) -> ConversationEntry:
-    """经 ConversationService 的原子写边界提交压缩事实。"""
+) -> ConversationNode:
+    """经 ConversationService 的唯一 Node/CAS 写边界提交压缩事实。"""
     return service.append_history_compaction(
         session_id=session_id,
-        content=build_history_compaction_content(plan),
+        content=HistoryCompaction(
+            summary=plan.summary,
+            first_kept_node_id=plan.first_kept_node_id,
+        ),
     )

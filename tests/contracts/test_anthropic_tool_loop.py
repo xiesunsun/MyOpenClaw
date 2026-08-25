@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from pickel.agents.agent_package import LoadedAgentPackage
-from pickel.agents.agent_package_builder import AgentPackageBuilder
-from pickel.config.app_config import AppConfig
+from pickel.agents.agent_package import (
+    AgentRuntimePolicy,
+    ImplementationRef,
+    ModelPolicy,
+    ModelVersion,
+    ToolVersion,
+    WorkspacePolicy,
+    AgentPackageVersion,
+    build_agent_package_version,
+)
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
@@ -16,9 +24,9 @@ from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.anthropic import AnthropicProvider
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted
-from pickel.runtime.agent_runtime import AgentRuntime
+from pickel.runtime.agent import Agent
+from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.operation_driver import OperationDriver
-from pickel.runtime.runtime_bindings import RuntimeBindings
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.tools.base import (
     BaseTool,
@@ -26,7 +34,8 @@ from pickel.tools.base import (
     ToolExecutionResult,
     ToolSpec,
 )
-from pickel.tools.bus import ToolActivation, ToolBus, ToolSource
+from pickel.tools.bus import ToolSource
+from pickel.workspaces.workspace_binding import WorkspaceBinding
 
 
 class _SimulatedProcessCrash(BaseException):
@@ -75,7 +84,7 @@ class _AnthropicContractProvider(Provider):
         raise AssertionError("合同测试直接注入 Provider")
 
     async def generate(self, context):
-        raise AssertionError("AgentRuntime 必须使用 Provider stream")
+        raise AssertionError("运行时合同必须使用 Provider stream")
 
     async def stream(self, context):
         messages = AnthropicProvider._build_messages(context.messages)
@@ -83,58 +92,106 @@ class _AnthropicContractProvider(Provider):
         yield StreamCompleted(message=self.replies.pop(0))
 
 
-def _config(tmp_path: Path) -> AppConfig:
-    agent_dir = tmp_path / "agents" / "Pickle"
-    agent_dir.mkdir(parents=True)
-    (agent_dir / "AGENT.md").write_text("You are Pickle.\n", encoding="utf-8")
-    return AppConfig.model_validate(
-        {
-            "root": tmp_path,
-            "default_agent": "Pickle",
-            "default_llm": {"provider": "anthropic", "model": "claude-test"},
-            "providers": {
-                "anthropic": {"models": {"claude-test": {}}},
-            },
-            "agents": {
-                "Pickle": {
-                    "workspace_path": ".",
-                    "behavior_path": "agents/Pickle",
-                    "tools": ["result"],
-                }
-            },
-        }
+def _package() -> AgentPackageVersion:
+    return build_agent_package_version(
+        agent_id="Pickle",
+        format_version=1,
+        behavior_instruction="You are Pickle.",
+        model_policy=ModelPolicy(
+            primary=ModelVersion(
+                provider="anthropic",
+                model="claude-test",
+                api_base=None,
+                temperature=None,
+                max_input_tokens=None,
+                max_output_tokens=1024,
+                provider_options={},
+                provider_implementation=ImplementationRef("provider", "anthropic"),
+                required_secret_refs=(),
+            )
+        ),
+        runtime_policy=AgentRuntimePolicy(max_model_steps=8, context_turn_window=5),
+        workspace_policy=WorkspacePolicy("workspace"),
+        skills=(),
+        tools=(
+            ToolVersion(
+                name="result",
+                source=ToolSource.BUILTIN,
+                implementation_ref=ImplementationRef("builtin", "result"),
+                version=None,
+                description="返回成功或失败结果",
+                input_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+                output_schema=None,
+                replay_policy="never",
+            ),
+        ),
+        extensions=(),
+        created_at=datetime.now(timezone.utc),
     )
 
 
-def _build_runtime(
+def _build_agent(
     *,
-    loaded: LoadedAgentPackage,
+    package,
     tool: BaseTool,
     provider: Provider,
     store: SQLiteRuntimeStore,
-) -> AgentRuntime:
-    tool_bus = ToolBus()
-    tool_bus.register(tool, source=ToolSource.BUILTIN)
-    bindings = RuntimeBindings(
-        agent_package_version=loaded.version,
+) -> Agent:
+    async def execute_tool(*, operation, state, tool_call_id, host_calls=None):
+        call = next(
+            item
+            for item in state.current_step.tool_calls
+            if item.tool_call_id == tool_call_id
+        )
+        context = ToolExecutionContext(
+            agent_id=package.agent_id,
+            session_id=operation.session_id,
+            workspace_path=operation.workspace_binding.working_directory,
+            operation_id=operation.operation_id,
+            step_id=state.current_step.step_id,
+            step_sequence=state.current_step.step_sequence,
+            tool_call_id=tool_call_id,
+        )
+        return await tool.execute(dict(call.arguments), context)
+
+    effects = RuntimeEffects(
         provider=provider,
-        tool_snapshot=tool_bus.snapshot(ToolActivation(allowed=frozenset({"result"}))),
+        execute_tool=execute_tool,
+        provider_name="anthropic",
+        model_name="claude-test",
     )
     operation_service = OperationService(store)
-    effects = RuntimeEffects(
-        bindings=bindings,
+    conversation_service = ConversationService(store)
+    operation_driver = OperationDriver(
         operation_service=operation_service,
+        conversation_service=conversation_service,
+        package_loader=lambda package_id: package,
+        effects_resolver=lambda package_id: effects,
     )
-    return AgentRuntime(
-        bindings=bindings,
+    agent_driver = AgentDriver(
+        conversation_store=store,
+        inbox_store=store,
         operation_service=operation_service,
-        operation_driver=OperationDriver(
-            bindings=bindings,
-            operation_service=operation_service,
-            conversation_service=ConversationService(store),
-            runtime_effects=effects,
+        operation_driver=operation_driver,
+        package_resolver=lambda session: (
+            package.package_version_id,
+            WorkspaceBinding(
+                workspace_id=session.workspace_id,
+                working_directory=session.cwd,
+                allowed_root=session.cwd,
+            ),
         ),
-        runtime_effects=effects,
+        cancel_operation=operation_service.request_cancellation,
+    )
+    session = conversation_service.load_conversation_session("session-1")
+    return Agent(
+        session_id=session.session_id,
+        inbox=build_agent_inbox(session_id=session.session_id, store=store),
+        driver=agent_driver,
     )
 
 
@@ -142,12 +199,7 @@ def test_anthropic_tool_results_survive_complete_runtime_and_sqlite(
     tmp_path: Path,
 ) -> None:
     tool = _ResultTool()
-    tool_bus = ToolBus()
-    tool_bus.register(tool, source=ToolSource.BUILTIN)
-    loaded = AgentPackageBuilder(
-        app_config=_config(tmp_path),
-        tool_bus=tool_bus,
-    ).build_loaded_agent_package()
+    package = _package()
     provider = _AnthropicContractProvider(
         [
             AssistantMessage(
@@ -169,25 +221,26 @@ def test_anthropic_tool_results_survive_complete_runtime_and_sqlite(
     )
     database_path = tmp_path / "runtime.db"
     store = SQLiteRuntimeStore(database_path)
-    store.create_conversation_session(
-        session_id="session-1",
-        agent_id="Pickle",
-        cwd=str(tmp_path),
+    conversation_service = ConversationService(
+        store, session_id_factory=lambda: "session-1"
     )
-    store.insert_agent_package_version(loaded.version)
-    runtime = _build_runtime(
-        loaded=loaded,
+    conversation_service.create_conversation_session(
+        agent_id="Pickle", cwd=str(tmp_path)
+    )
+    store.insert_agent_package_version(package)
+    agent = _build_agent(
+        package=package,
         tool=tool,
         provider=provider,
         store=store,
     )
 
-    result = asyncio.run(
-        runtime.start_agent_run(
-            session_id="session-1",
-            user_message=UserMessage(content=[TextBlock(text="run both tools")]),
-        )
+    asyncio.run(
+        agent.followup(UserMessage(content=(TextBlock(text="run both tools"),)))
     )
+    drive_result = asyncio.run(agent.when_idle())
+    result = drive_result.operation_result
+    assert result is not None
 
     assert result.status == "succeeded"
     assert tool.values == ["success", "failed"]
@@ -206,8 +259,10 @@ def test_anthropic_tool_results_survive_complete_runtime_and_sqlite(
     assert [block.get("is_error", False) for block in tool_results] == [False, True]
 
     reopened_store = SQLiteRuntimeStore(database_path)
-    entries = reopened_store.list_active_branch_entries(session_id="session-1")
-    assert [entry.object.content["role"] for entry in entries] == [
+    nodes = ConversationService(reopened_store).list_active_branch_nodes(
+        session_id="session-1"
+    )
+    assert [node.content.role for node in nodes] == [
         "user",
         "assistant",
         "tool",
@@ -224,20 +279,16 @@ def test_unknown_tool_effect_is_not_replayed_after_process_restart(
     tmp_path: Path,
 ) -> None:
     crashing_tool = _ResultTool(crash=True)
-    tool_bus = ToolBus()
-    tool_bus.register(crashing_tool, source=ToolSource.BUILTIN)
-    loaded = AgentPackageBuilder(
-        app_config=_config(tmp_path),
-        tool_bus=tool_bus,
-    ).build_loaded_agent_package()
+    package = _package()
     database_path = tmp_path / "runtime.db"
     store = SQLiteRuntimeStore(database_path)
-    store.create_conversation_session(
-        session_id="session-1",
-        agent_id="Pickle",
-        cwd=str(tmp_path),
+    conversation_service = ConversationService(
+        store, session_id_factory=lambda: "session-1"
     )
-    store.insert_agent_package_version(loaded.version)
+    conversation_service.create_conversation_session(
+        agent_id="Pickle", cwd=str(tmp_path)
+    )
+    store.insert_agent_package_version(package)
     provider = _AnthropicContractProvider(
         [
             AssistantMessage(
@@ -251,8 +302,8 @@ def test_unknown_tool_effect_is_not_replayed_after_process_restart(
             )
         ]
     )
-    runtime = _build_runtime(
-        loaded=loaded,
+    agent = _build_agent(
+        package=package,
         tool=crashing_tool,
         provider=provider,
         store=store,
@@ -260,35 +311,34 @@ def test_unknown_tool_effect_is_not_replayed_after_process_restart(
 
     with pytest.raises(_SimulatedProcessCrash):
         asyncio.run(
-            runtime.start_agent_run(
-                session_id="session-1",
-                user_message=UserMessage(
-                    content=[TextBlock(text="start external effect")]
-                ),
+            agent.followup(
+                UserMessage(content=(TextBlock(text="start external effect"),))
             )
         )
+        asyncio.run(agent.when_idle())
 
-    operation, crashed_state = OperationService(store).list_unfinished_agent_runs(
-        session_id="session-1"
-    )[0]
+    operation_service = OperationService(store)
+    operation = operation_service.list_operations(session_id="session-1")[0]
+    crashed_state = operation_service.load_agent_run_state(operation.operation_id)
     assert crashed_state.current_step is not None
-    assert crashed_state.current_step.tool_calls[0].execution_state == "intent_recorded"
+    assert crashed_state.current_step.tool_calls[0].status == "intent_recorded"
 
     replacement_tool = _ResultTool()
     replacement_provider = _AnthropicContractProvider(
         [AssistantMessage(content=[TextBlock(text="must not be requested")])]
     )
     reopened_store = SQLiteRuntimeStore(database_path)
-    recovered_runtime = _build_runtime(
-        loaded=loaded,
+    recovered_agent = _build_agent(
+        package=package,
         tool=replacement_tool,
         provider=replacement_provider,
         store=reopened_store,
     )
 
-    result = asyncio.run(recovered_runtime.resume_operation(operation.operation_id))
+    result = asyncio.run(recovered_agent.when_idle())
 
-    assert result.status == "waiting"
-    assert result.state.status == "waiting"
+    assert result.operation_result is not None
+    assert result.operation_result.status == "waiting"
+    assert result.operation_result.state.status == "waiting"
     assert replacement_tool.values == []
     assert replacement_provider.request_messages == []

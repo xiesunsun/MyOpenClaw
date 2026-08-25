@@ -1,57 +1,431 @@
-"""进程内 ConversationStore；与 SQLite 适配器遵循相同事务合同。"""
+"""v10 Runtime 领域实体的进程内存储适配器。
+
+该实现故意只保存 v10 实体；锁就是内存适配器的事务边界。所有涉及多个
+实体的操作先在锁内完成完整前置条件校验，再一次性更新字典，因此失败时
+不会留下半个 Operation 或半条 InboxMessage。
+"""
 
 from __future__ import annotations
 
-import json
+from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from threading import RLock
-from uuid import uuid4
 
-from pickel.artifacts.artifact import Artifact
 from pickel.agents.agent_package import (
     AgentPackageVersion,
-    agent_package_digest,
-    agent_package_version_from_content,
+    decode_agent_package_content,
+    package_version_id_for_content,
 )
-from pickel.conversations.conversation_node import ConversationEntry, ConversationNode
+from pickel.artifacts.artifact import Artifact
+from pickel.conversations.agent_message import AgentMessage, UserMessage
+from pickel.conversations.content_blocks import ArtifactBlock
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.inbox.message import InboxMessage, MessageDelivery, MessageSource
 from pickel.operations.agent_delegation import AgentDelegation
+from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.immutable_object import (
-    ImmutableObject,
-    immutable_object_digest,
-)
-from pickel.persistence.named_reference import NamedReference
-from pickel.persistence.storage_transaction import (
-    StorageCommit,
-    StorageConflictError,
-    StorageIntegrityError,
-    StorageTransaction,
-)
+from pickel.persistence.errors import StorageIntegrityError
+from pickel.workspaces.workspace import Workspace
 
 
 class InMemoryRuntimeStore:
-    """用于非持久 Runtime；与 SQLite 实现遵循相同领域合同。"""
+    """与 SQLite v10 遵循同一实体、CAS 和原子操作合同。"""
 
     def __init__(self) -> None:
+        self._workspaces: dict[str, Workspace] = {}
         self._sessions: dict[str, ConversationSession] = {}
-        self._agent_package_versions: dict[str, tuple[str, dict, datetime]] = {}
-        self._artifacts: dict[str, Artifact] = {}
-        self._operations: dict[str, SessionOperation] = {}
-        self._delegations: dict[str, AgentDelegation] = {}
-        self._commits: dict[tuple[str, int], StorageCommit] = {}
-        self._objects: dict[str, ImmutableObject] = {}
         self._nodes: dict[str, ConversationNode] = {}
-        self._references: dict[tuple[str, str], list[NamedReference]] = {}
+        self._inbox: dict[str, InboxMessage] = {}
+        self._packages: dict[str, AgentPackageVersion] = {}
+        self._operations: dict[str, SessionOperation] = {}
+        self._run_states: dict[str, AgentRunState] = {}
+        self._delegations: dict[str, AgentDelegation] = {}
+        self._artifacts: dict[str, Artifact] = {}
         self._lock = RLock()
+
+    # Workspace ---------------------------------------------------------
+    def create_session(
+        self, *, workspace: Workspace, session: ConversationSession
+    ) -> None:
+        with self._lock:
+            if not workspace.root_path.is_dir():
+                raise StorageIntegrityError(
+                    f"Workspace root_path 必须是现有目录: {workspace.root_path}"
+                )
+            if session.workspace_id != workspace.workspace_id:
+                raise StorageIntegrityError("Session.workspace_id 与 Workspace 不匹配")
+            if any(
+                value is not None
+                for value in (
+                    session.active_node_id,
+                    session.active_operation_id,
+                    session.title,
+                    session.title_source,
+                    session.archived_at,
+                )
+            ):
+                raise StorageIntegrityError("新 Session 必须是空的未归档 Session")
+            existing_session = self._sessions.get(session.session_id)
+            existing_workspace = self._workspaces.get(workspace.workspace_id)
+            if existing_session is not None:
+                if (
+                    existing_session == session
+                    and existing_workspace is not None
+                    and existing_workspace.root_path == workspace.root_path
+                ):
+                    return
+                raise StorageIntegrityError(
+                    f"ConversationSession 已存在: {session.session_id}"
+                )
+            if (
+                existing_workspace is not None
+                and existing_workspace.root_path != workspace.root_path
+            ):
+                raise StorageIntegrityError(
+                    f"Workspace ID 已存在但内容不同: {workspace.workspace_id}"
+                )
+            by_root = next(
+                (
+                    item
+                    for item in self._workspaces.values()
+                    if item.root_path == workspace.root_path
+                ),
+                None,
+            )
+            if by_root is not None and by_root.workspace_id != workspace.workspace_id:
+                raise StorageIntegrityError(
+                    f"Workspace root_path 已存在: {workspace.root_path}"
+                )
+            if existing_workspace is None:
+                self._workspaces[workspace.workspace_id] = workspace
+            self._sessions[session.session_id] = session
+
+    def load_workspace(self, workspace_id: str) -> Workspace | None:
+        with self._lock:
+            return self._workspaces.get(workspace_id)
+
+    def find_workspace_by_root(self, root_path: str | Path) -> Workspace | None:
+        root = Path(root_path).expanduser().resolve(strict=False)
+        with self._lock:
+            return next(
+                (item for item in self._workspaces.values() if item.root_path == root),
+                None,
+            )
+
+    # Conversation ------------------------------------------------------
+    def load_session(self, session_id: str) -> ConversationSession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def list_sessions(
+        self, *, limit: int = 20, cwd: str | None = None
+    ) -> tuple[ConversationSession, ...]:
+        if limit <= 0:
+            return ()
+        normalized = Path(cwd).expanduser().resolve(strict=False) if cwd else None
+        with self._lock:
+            values = [
+                session
+                for session in self._sessions.values()
+                if normalized is None or session.cwd == normalized
+            ]
+            values.sort(
+                key=lambda item: (-item.updated_at.timestamp(), item.session_id)
+            )
+            return tuple(values[:limit])
+
+    def append_node(
+        self, *, node: ConversationNode, expected_node_id: str | None
+    ) -> bool:
+        with self._lock:
+            session = self._require_session_unlocked(node.session_id)
+            if (
+                session.archived_at is not None
+                or session.active_operation_id is not None
+                or session.active_node_id != expected_node_id
+                or node.parent_node_id != expected_node_id
+            ):
+                return False
+            self._validate_node_unlocked(node)
+            self._validate_content_artifacts_unlocked(node.content)
+            existing = self._nodes.get(node.node_id)
+            if existing is not None:
+                if existing == node:
+                    return False
+                raise StorageIntegrityError(
+                    f"ConversationNode ID 已存在: {node.node_id}"
+                )
+            self._nodes[node.node_id] = node
+            self._sessions[node.session_id] = replace(
+                session, active_node_id=node.node_id, updated_at=node.created_at
+            )
+            return True
+
+    def load_node(self, node_id: str) -> ConversationNode | None:
+        with self._lock:
+            return self._nodes.get(node_id)
+
+    def list_branch_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]:
+        with self._lock:
+            self._require_session_unlocked(session_id)
+            if leaf_node_id is None:
+                return ()
+            leaf = leaf_node_id
+            result: list[ConversationNode] = []
+            seen: set[str] = set()
+            while leaf is not None:
+                if leaf in seen:
+                    raise StorageIntegrityError("ConversationNode parent 链存在环")
+                seen.add(leaf)
+                node = self._nodes.get(leaf)
+                if node is None or node.session_id != session_id:
+                    raise StorageIntegrityError(
+                        f"ConversationNode 不存在或 Session 不匹配: {leaf}"
+                    )
+                result.append(node)
+                leaf = node.parent_node_id
+            result.reverse()
+            return tuple(result)
+
+    def move_active_node(
+        self,
+        *,
+        session_id: str,
+        expected_node_id: str | None,
+        new_node_id: str | None,
+        updated_at: datetime,
+    ) -> bool:
+        with self._lock:
+            session = self._require_session_unlocked(session_id)
+            if (
+                session.archived_at is not None
+                or session.active_operation_id is not None
+            ):
+                return False
+            if session.active_node_id != expected_node_id:
+                return False
+            if new_node_id is not None:
+                node = self._nodes.get(new_node_id)
+                if node is None or node.session_id != session_id:
+                    raise StorageIntegrityError("new_node_id 不属于 Session")
+            self._sessions[session_id] = replace(
+                session, active_node_id=new_node_id, updated_at=updated_at
+            )
+            return True
+
+    def archive_session(self, *, session_id: str, archived_at: datetime) -> None:
+        with self._lock:
+            session = self._require_session_unlocked(session_id)
+            if session.archived_at is not None:
+                return
+            self._assert_idle_unlocked(session_id)
+            if any(
+                item.session_id == session_id and item.status == "pending"
+                for item in self._inbox.values()
+            ):
+                raise StorageIntegrityError(
+                    "存在 pending InboxMessage，不能归档 Session"
+                )
+            self._sessions[session_id] = replace(
+                session, archived_at=archived_at, updated_at=archived_at
+            )
+
+    def unarchive_session(self, *, session_id: str, updated_at: datetime) -> None:
+        with self._lock:
+            session = self._require_session_unlocked(session_id)
+            if session.archived_at is None:
+                return
+            self._sessions[session_id] = replace(
+                session, archived_at=None, updated_at=updated_at
+            )
+
+    def delete_session(self, *, session_id: str) -> None:
+        with self._lock:
+            self._assert_deletable_unlocked(session_id)
+            if any(
+                item.child_session_id == session_id
+                for item in self._delegations.values()
+            ):
+                raise StorageIntegrityError(
+                    "存在 AgentDelegation，不能单独删除 Session"
+                )
+            if any(
+                self._operation_has_session_unlocked(item, session_id)
+                for item in self._delegations.values()
+            ):
+                raise StorageIntegrityError("Session 是父 Operation，不能单独删除")
+            self._delete_sessions_unlocked({session_id})
+
+    def delete_session_tree(self, *, session_id: str) -> None:
+        with self._lock:
+            self._require_session_unlocked(session_id)
+            targets = self._descendant_sessions_unlocked(session_id)
+            parent = next(
+                (
+                    item
+                    for item in self._delegations.values()
+                    if item.child_session_id == session_id
+                ),
+                None,
+            )
+            if parent is not None and parent.parent_operation_id in self._operations:
+                parent_operation = self._operations[parent.parent_operation_id]
+                if parent_operation.session_id not in targets:
+                    raise StorageIntegrityError(
+                        "根 Session 有子树外部 parent Delegation"
+                    )
+            for target in targets:
+                self._assert_deletable_unlocked(target)
+            self._delete_sessions_unlocked(targets)
+
+    # Inbox -------------------------------------------------------------
+    def send_message(
+        self,
+        *,
+        message_id: str,
+        session_id: str,
+        delivery: MessageDelivery,
+        message: UserMessage,
+        source: MessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        with self._lock:
+            session = self._require_session_unlocked(session_id)
+            if session.archived_at is not None:
+                raise StorageIntegrityError("归档 Session 不能接收 InboxMessage")
+            if message_id in self._inbox:
+                raise StorageIntegrityError(f"InboxMessage ID 已存在: {message_id}")
+            self._validate_content_artifacts_unlocked(message)
+            sequence = (
+                max(
+                    (
+                        item.sequence
+                        for item in self._inbox.values()
+                        if item.session_id == session_id
+                    ),
+                    default=0,
+                )
+                + 1
+            )
+            stored = InboxMessage(
+                message_id=message_id,
+                session_id=session_id,
+                sequence=sequence,
+                delivery=delivery,
+                message=message,
+                source=source,
+                created_at=created_at,
+            )
+            self._inbox[message_id] = stored
+            return stored
+
+    def list_pending(
+        self, *, session_id: str, delivery: str | None = None
+    ) -> tuple[InboxMessage, ...]:
+        with self._lock:
+            values = [
+                item
+                for item in self._inbox.values()
+                if item.session_id == session_id
+                and item.status == "pending"
+                and (delivery is None or item.delivery == delivery)
+            ]
+            return tuple(
+                sorted(values, key=lambda item: (item.sequence, item.message_id))
+            )
+
+    def load_message(self, message_id: str) -> InboxMessage | None:
+        with self._lock:
+            return self._inbox.get(message_id)
+
+    def claim_message(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        step_id: str | None,
+        handled_at: datetime,
+    ) -> bool:
+        with self._lock:
+            message = self._inbox.get(message_id)
+            if message is None or message.status != "pending":
+                return False
+            if operation_id not in self._operations:
+                raise StorageIntegrityError(f"SessionOperation 不存在: {operation_id}")
+            if self._operations[operation_id].session_id != message.session_id:
+                raise StorageIntegrityError(
+                    "InboxMessage 与 Operation 不属于同一 Session"
+                )
+            self._inbox[message_id] = replace(
+                message,
+                status="claimed",
+                claimed_operation_id=operation_id,
+                claimed_step_id=step_id,
+                handled_at=handled_at,
+            )
+            return True
+
+    def discard_message(
+        self, *, message_id: str, reason: str, handled_at: datetime
+    ) -> bool:
+        with self._lock:
+            message = self._inbox.get(message_id)
+            if message is None or message.status != "pending":
+                return False
+            if not reason:
+                raise ValueError("discard reason 不能为空")
+            self._inbox[message_id] = replace(
+                message,
+                status="discarded",
+                outcome_reason=reason,
+                handled_at=handled_at,
+            )
+            return True
+
+    # Package and Artifact ---------------------------------------------
+    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
+        content = deepcopy(version.content_dict())
+        expected_id = package_version_id_for_content(content)
+        if version.package_version_id != expected_id:
+            raise StorageIntegrityError(
+                f"AgentPackageVersion content-address 校验失败: {version.package_version_id}"
+            )
+        with self._lock:
+            existing = self._packages.get(version.package_version_id)
+            if existing is not None:
+                if existing.content_dict() == content:
+                    return
+                raise StorageIntegrityError(
+                    f"AgentPackageVersion ID 已存在但内容不同: {version.package_version_id}"
+                )
+            self._packages[version.package_version_id] = decode_agent_package_content(
+                package_version_id=version.package_version_id,
+                content=deepcopy(content),
+                created_at=version.created_at,
+            )
+
+    def load_agent_package_version(
+        self, package_version_id: str
+    ) -> AgentPackageVersion | None:
+        with self._lock:
+            version = self._packages.get(package_version_id)
+            if version is None:
+                return None
+            return decode_agent_package_content(
+                package_version_id=version.package_version_id,
+                content=deepcopy(version.content_dict()),
+                created_at=version.created_at,
+            )
 
     def insert_artifact(self, artifact: Artifact) -> None:
         with self._lock:
             existing = self._artifacts.get(artifact.artifact_id)
-            if existing is not None:
-                if existing == artifact:
-                    return
+            if existing is not None and existing != artifact:
                 raise StorageIntegrityError(
                     f"Artifact ID 已存在但内容不同: {artifact.artifact_id}"
                 )
@@ -61,573 +435,383 @@ class InMemoryRuntimeStore:
         with self._lock:
             return self._artifacts.get(artifact_id)
 
-    def create_conversation_session(
-        self,
-        *,
-        session_id: str,
-        agent_id: str,
-        cwd: str,
-        created_at: datetime | None = None,
-    ) -> None:
-        now = created_at or datetime.now(timezone.utc)
-        with self._lock:
-            if session_id in self._sessions:
-                raise StorageIntegrityError(f"ConversationSession 已存在: {session_id}")
-            self._sessions[session_id] = ConversationSession(
-                session_id=session_id,
-                agent_id=agent_id,
-                cwd=cwd,
-                current_commit_sequence=0,
-                active_node_id=None,
-                created_at=now,
-                updated_at=now,
-            )
-
-    def load_current_commit_sequence(self, session_id: str) -> int:
-        session = self.load_conversation_session(session_id)
-        if session is None:
-            raise LookupError(f"ConversationSession 不存在: {session_id}")
-        return session.current_commit_sequence
-
-    def load_conversation_session(
-        self,
-        session_id: str,
-    ) -> ConversationSession | None:
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                return None
-            reference = self._find_named_reference_unlocked(
-                session_id=session_id,
-                reference_name="conversation/active",
-            )
-            active_node_id = None
-            if reference is not None:
-                if reference.target_kind != "node":
-                    raise StorageIntegrityError("conversation/active 必须指向 node")
-                active_node_id = reference.target_id
-            return replace(session, active_node_id=active_node_id)
-
-    def list_conversation_sessions(
-        self,
-        *,
-        limit: int = 20,
-        cwd: str | None = None,
-    ) -> list[ConversationSession]:
-        if limit <= 0:
-            return []
-        with self._lock:
-            session_ids = [
-                session.session_id
-                for session in sorted(
-                    self._sessions.values(),
-                    key=lambda item: (-item.updated_at.timestamp(), item.session_id),
-                )
-                if cwd is None or session.cwd == cwd
-            ][:limit]
-        return [
-            session
-            for session_id in session_ids
-            if (session := self.load_conversation_session(session_id)) is not None
-        ]
-
-    def archive_conversation_session(
-        self,
-        *,
-        session_id: str,
-        archived_at: datetime,
-    ) -> None:
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                raise LookupError(f"ConversationSession 不存在: {session_id}")
-            self._sessions[session_id] = replace(
-                session,
-                status="archived",
-                updated_at=archived_at,
-            )
-
-    def delete_conversation_session(self, *, session_id: str) -> None:
-        with self._lock:
-            if session_id not in self._sessions:
-                raise LookupError(f"ConversationSession 不存在: {session_id}")
-            del self._sessions[session_id]
-            self._commits = {
-                key: value
-                for key, value in self._commits.items()
-                if key[0] != session_id
-            }
-            object_ids = {
-                object_id
-                for object_id, value in self._objects.items()
-                if value.created_session_id == session_id
-            }
-            self._objects = {
-                key: value
-                for key, value in self._objects.items()
-                if key not in object_ids
-            }
-            self._nodes = {
-                key: value
-                for key, value in self._nodes.items()
-                if value.session_id != session_id
-            }
-            self._references = {
-                key: value
-                for key, value in self._references.items()
-                if key[0] != session_id
-            }
-            self._operations = {
-                key: value
-                for key, value in self._operations.items()
-                if value.session_id != session_id
-            }
-
-    def insert_agent_package_version(self, version: AgentPackageVersion) -> None:
-        content = version.content_dict()
-        if agent_package_digest(content) != version.digest:
-            raise StorageIntegrityError(
-                f"AgentPackageVersion digest 校验失败: {version.package_version_id}"
-            )
-        copied = self._copy_content(content)
-        with self._lock:
-            existing = self._agent_package_versions.get(version.package_version_id)
-            if existing is not None:
-                if existing[0] == version.digest and existing[1] == copied:
-                    return
-                raise StorageIntegrityError(
-                    "AgentPackageVersion ID 已存在但内容不同: "
-                    f"{version.package_version_id}"
-                )
-            self._agent_package_versions[version.package_version_id] = (
-                version.digest,
-                copied,
-                version.created_at,
-            )
-
-    def load_agent_package_version(
-        self,
-        package_version_id: str,
-    ) -> AgentPackageVersion | None:
-        with self._lock:
-            stored = self._agent_package_versions.get(package_version_id)
-            if stored is None:
-                return None
-            digest, content, created_at = stored
-            return agent_package_version_from_content(
-                package_version_id=package_version_id,
-                digest=digest,
-                content=self._copy_content(content),
-                created_at=created_at,
-            )
-
-    def load_session_operation(
-        self,
-        operation_id: str,
-    ) -> SessionOperation | None:
+    # Operation ---------------------------------------------------------
+    def load_operation(self, operation_id: str) -> SessionOperation | None:
         with self._lock:
             return self._operations.get(operation_id)
 
-    def list_session_operations(
+    def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]:
+        with self._lock:
+            values = [
+                item
+                for item in self._operations.values()
+                if item.session_id == session_id
+            ]
+            values.sort(
+                key=lambda item: (item.accepted_at.timestamp(), item.operation_id)
+            )
+            return tuple(values)
+
+    def insert_operation(self, operation: SessionOperation) -> None:
+        with self._lock:
+            self._validate_operation_unlocked(operation)
+            if operation.operation_id in self._operations:
+                if self._operations[operation.operation_id] == operation:
+                    return
+                raise StorageIntegrityError(
+                    f"SessionOperation 已存在: {operation.operation_id}"
+                )
+            self._operations[operation.operation_id] = operation
+
+    def load_run_state(self, operation_id: str) -> AgentRunState | None:
+        with self._lock:
+            return self._run_states.get(operation_id)
+
+    def insert_run_state(self, state: AgentRunState) -> None:
+        with self._lock:
+            if state.operation_id not in self._operations:
+                raise StorageIntegrityError(
+                    f"SessionOperation 不存在: {state.operation_id}"
+                )
+            if state.operation_id in self._run_states:
+                if self._run_states[state.operation_id] == state:
+                    return
+                raise StorageIntegrityError(
+                    f"AgentRunState 已存在: {state.operation_id}"
+                )
+            self._validate_state_nodes_unlocked(state)
+            self._run_states[state.operation_id] = state
+
+    def commit_run_transition(
         self,
         *,
-        session_id: str,
-    ) -> list[SessionOperation]:
+        state: AgentRunState,
+        expected_revision: int,
+        node: ConversationNode | None,
+        updated_at: datetime,
+    ) -> bool:
+        """原子提交可选 Node、State 和 Session 指针。"""
         with self._lock:
-            return sorted(
-                (
-                    operation
-                    for operation in self._operations.values()
-                    if operation.session_id == session_id
+            current = self._run_states.get(state.operation_id)
+            if current is None or current.revision != expected_revision:
+                return False
+            if state.revision != expected_revision + 1:
+                raise StorageIntegrityError("AgentRunState revision 必须恰好递增 1")
+            operation = self._operations[state.operation_id]
+            session = self._require_session_unlocked(operation.session_id)
+            if session.active_operation_id != state.operation_id:
+                return False
+            if node is not None:
+                if node.node_id in self._nodes:
+                    raise StorageIntegrityError(
+                        f"ConversationNode 已存在: {node.node_id}"
+                    )
+                if node.session_id != operation.session_id:
+                    raise StorageIntegrityError(
+                        "ConversationNode 不属于 Operation Session"
+                    )
+                if node.parent_node_id != session.active_node_id:
+                    return False
+                self._validate_content_artifacts_unlocked(node.content)
+            self._validate_state_references_unlocked(state, pending_node=node)
+            if node is not None and node.node_id not in self._state_node_ids(state):
+                raise StorageIntegrityError(
+                    "新 ConversationNode 必须被 AgentRunState 引用"
+                )
+
+            if node is not None:
+                self._nodes[node.node_id] = node
+            self._run_states[state.operation_id] = state
+            self._sessions[session.session_id] = replace(
+                session,
+                active_node_id=(
+                    node.node_id if node is not None else session.active_node_id
                 ),
-                key=lambda item: (item.accepted_commit_sequence, item.operation_id),
+                active_operation_id=(
+                    None
+                    if state.status in {"succeeded", "failed", "cancelled"}
+                    else session.active_operation_id
+                ),
+                updated_at=updated_at,
             )
+            return True
 
-    def load_agent_delegation(
-        self,
-        delegation_id: str,
-    ) -> AgentDelegation | None:
+    def load_delegation(self, child_session_id: str) -> AgentDelegation | None:
         with self._lock:
-            return self._delegations.get(delegation_id)
+            return self._delegations.get(child_session_id)
 
-    def find_delegation_by_child_operation(
-        self,
-        child_operation_id: str,
+    def insert_delegation(self, delegation: AgentDelegation) -> None:
+        with self._lock:
+            self._validate_delegation_unlocked(delegation)
+            if delegation.child_session_id in self._delegations:
+                if self._delegations[delegation.child_session_id] == delegation:
+                    return
+                raise StorageIntegrityError("child Session 已有 AgentDelegation")
+            if any(
+                item.parent_tool_call_id == delegation.parent_tool_call_id
+                for item in self._delegations.values()
+            ):
+                raise StorageIntegrityError("parent_tool_call_id 已经委派")
+            if any(
+                item.initial_message_id == delegation.initial_message_id
+                for item in self._delegations.values()
+            ):
+                raise StorageIntegrityError("initial_message_id 已经委派")
+            self._delegations[delegation.child_session_id] = delegation
+
+    def find_delegation_by_parent_tool_call(
+        self, parent_tool_call_id: str
     ) -> AgentDelegation | None:
         with self._lock:
             return next(
                 (
-                    delegation
-                    for delegation in self._delegations.values()
-                    if delegation.child_operation_id == child_operation_id
+                    item
+                    for item in self._delegations.values()
+                    if item.parent_tool_call_id == parent_tool_call_id
                 ),
                 None,
             )
 
-    def list_agent_delegations(
-        self,
-        *,
-        parent_operation_id: str,
-    ) -> list[AgentDelegation]:
+    def list_delegations(
+        self, *, parent_operation_id: str
+    ) -> tuple[AgentDelegation, ...]:
         with self._lock:
-            return sorted(
-                (
-                    delegation
-                    for delegation in self._delegations.values()
-                    if delegation.parent_operation_id == parent_operation_id
-                ),
-                key=lambda item: (item.created_at, item.delegation_id),
-            )
-
-    def begin_storage_transaction(
-        self,
-        *,
-        session_id: str,
-        expected_commit_sequence: int,
-    ) -> StorageTransaction:
-        return StorageTransaction(
-            store=self,
-            session_id=session_id,
-            expected_commit_sequence=expected_commit_sequence,
-        )
-
-    def load_immutable_object(self, object_id: str) -> ImmutableObject | None:
-        with self._lock:
-            value = self._objects.get(object_id)
-            return self._copy_object(value) if value is not None else None
-
-    def find_named_reference(
-        self,
-        *,
-        session_id: str,
-        reference_name: str,
-    ) -> NamedReference | None:
-        with self._lock:
-            return self._find_named_reference_unlocked(
-                session_id=session_id,
-                reference_name=reference_name,
-            )
-
-    def list_active_branch_entries(
-        self,
-        *,
-        session_id: str,
-        reference_name: str = "conversation/active",
-    ) -> list[ConversationEntry]:
-        with self._lock:
-            if session_id not in self._sessions:
-                raise LookupError(f"ConversationSession 不存在: {session_id}")
-            reference = self._find_named_reference_unlocked(
-                session_id=session_id,
-                reference_name=reference_name,
-            )
-            if reference is None:
-                return []
-            if reference.target_kind != "node":
-                raise StorageIntegrityError(
-                    f"活动会话引用必须指向 node: {reference.reference_name}"
-                )
-
-            reversed_entries: list[ConversationEntry] = []
-            visited: set[str] = set()
-            node_id: str | None = reference.target_id
-            while node_id is not None:
-                if node_id in visited:
-                    raise StorageIntegrityError("ConversationNode parent 链存在环")
-                visited.add(node_id)
-                node = self._nodes.get(node_id)
-                if node is None or node.session_id != session_id:
-                    raise StorageIntegrityError(
-                        f"NamedReference 指向不存在的 ConversationNode: {node_id}"
-                    )
-                immutable_object = self._objects.get(node.object_id)
-                if immutable_object is None:
-                    raise StorageIntegrityError(
-                        f"ConversationNode 指向不存在的 Object: {node.object_id}"
-                    )
-                reversed_entries.append(
-                    ConversationEntry(
-                        node=node,
-                        object=self._copy_object(immutable_object),
-                    )
-                )
-                node_id = node.parent_node_id
-            return list(reversed(reversed_entries))
-
-    def _commit_storage_transaction(
-        self,
-        transaction: StorageTransaction,
-    ) -> StorageCommit:
-        committed_at = datetime.now(timezone.utc)
-        with self._lock:
-            session = self._sessions.get(transaction.session_id)
-            if session is None:
-                raise LookupError(
-                    f"ConversationSession 不存在: {transaction.session_id}"
-                )
-            if session.current_commit_sequence != transaction.expected_commit_sequence:
-                raise StorageConflictError(
-                    "ConversationSession commit_sequence 冲突: "
-                    f"expected={transaction.expected_commit_sequence}, "
-                    f"actual={session.current_commit_sequence}"
-                )
-            self._validate_transaction(transaction)
-            commit_sequence = session.current_commit_sequence + 1
-            commit = StorageCommit(
-                session_id=transaction.session_id,
-                commit_sequence=commit_sequence,
-                commit_id=str(uuid4()),
-                committed_at=committed_at,
-            )
-
-            staged_objects = {
-                command.object_id: ImmutableObject(
-                    object_id=command.object_id,
-                    object_type=command.object_type,
-                    schema_version=command.schema_version,
-                    digest=immutable_object_digest(
-                        object_type=command.object_type,
-                        schema_version=command.schema_version,
-                        content=command.content,
-                    ),
-                    content=self._copy_content(command.content),
-                    created_session_id=transaction.session_id,
-                    created_commit_sequence=commit_sequence,
-                    created_at=committed_at,
-                )
-                for command in transaction.object_inserts
-            }
-            staged_nodes = {
-                command.node_id: ConversationNode(
-                    node_id=command.node_id,
-                    session_id=transaction.session_id,
-                    parent_node_id=command.parent_node_id,
-                    object_id=command.object_id,
-                    created_commit_sequence=commit_sequence,
-                    created_at=committed_at,
-                )
-                for command in transaction.node_appends
-            }
-            staged_references = [
-                NamedReference(
-                    session_id=transaction.session_id,
-                    reference_name=command.reference_name,
-                    commit_sequence=commit_sequence,
-                    target_kind=command.target_kind,
-                    target_id=command.target_id,
-                )
-                for command in transaction.reference_moves
+            values = [
+                item
+                for item in self._delegations.values()
+                if item.parent_operation_id == parent_operation_id
             ]
-            staged_operations = {
-                command.operation_id: SessionOperation(
-                    operation_id=command.operation_id,
-                    session_id=transaction.session_id,
-                    operation_type=command.operation_type,  # type: ignore[arg-type]
-                    agent_package_version_id=command.agent_package_version_id,
-                    accepted_commit_sequence=commit_sequence,
-                    created_at=committed_at,
-                )
-                for command in transaction.operation_creates
-            }
-            staged_delegations = {
-                command.delegation_id: AgentDelegation(
-                    delegation_id=command.delegation_id,
-                    parent_operation_id=command.parent_operation_id,
-                    parent_step_id=command.parent_step_id,
-                    parent_tool_call_id=command.parent_tool_call_id,
-                    child_operation_id=command.child_operation_id,
-                    child_session_id=transaction.session_id,
-                    created_commit_sequence=commit_sequence,
-                    created_at=committed_at,
-                )
-                for command in transaction.delegation_creates
-            }
-
-            self._commits[(transaction.session_id, commit_sequence)] = commit
-            self._objects.update(staged_objects)
-            self._nodes.update(staged_nodes)
-            self._operations.update(staged_operations)
-            self._delegations.update(staged_delegations)
-            for reference in staged_references:
-                self._references.setdefault(
-                    (reference.session_id, reference.reference_name), []
-                ).append(reference)
-            self._sessions[transaction.session_id] = replace(
-                session,
-                current_commit_sequence=commit_sequence,
-                updated_at=committed_at,
+            values.sort(
+                key=lambda item: (item.created_at.timestamp(), item.child_session_id)
             )
-            return commit
+            return tuple(values)
 
-    def _validate_transaction(self, transaction: StorageTransaction) -> None:
-        if not (
-            transaction.object_inserts
-            or transaction.node_appends
-            or transaction.reference_moves
-            or transaction.operation_creates
-            or transaction.delegation_creates
-        ):
-            raise StorageIntegrityError("StorageTransaction 不能为空")
-
-        object_ids = [command.object_id for command in transaction.object_inserts]
-        node_ids = [command.node_id for command in transaction.node_appends]
-        if len(object_ids) != len(set(object_ids)):
-            raise StorageIntegrityError("同一事务包含重复 object_id")
-        if len(node_ids) != len(set(node_ids)):
-            raise StorageIntegrityError("同一事务包含重复 node_id")
-        operation_ids = [
-            command.operation_id for command in transaction.operation_creates
-        ]
-        if len(operation_ids) != len(set(operation_ids)):
-            raise StorageIntegrityError("同一事务包含重复 operation_id")
-        delegation_ids = [
-            command.delegation_id for command in transaction.delegation_creates
-        ]
-        if len(delegation_ids) != len(set(delegation_ids)):
-            raise StorageIntegrityError("同一事务包含重复 delegation_id")
-        child_operation_ids = [
-            command.child_operation_id for command in transaction.delegation_creates
-        ]
-        if len(child_operation_ids) != len(set(child_operation_ids)):
-            raise StorageIntegrityError("同一事务不能多次委派同一个 child_operation_id")
-        duplicate_object = next(
-            (object_id for object_id in object_ids if object_id in self._objects),
-            None,
-        )
-        if duplicate_object is not None:
-            raise StorageIntegrityError(f"ImmutableObject 写入失败: {duplicate_object}")
-        duplicate_node = next(
-            (node_id for node_id in node_ids if node_id in self._nodes),
-            None,
-        )
-        if duplicate_node is not None:
-            raise StorageIntegrityError(f"ConversationNode 写入失败: {duplicate_node}")
-        for command in transaction.operation_creates:
-            if command.operation_id in self._operations:
-                raise StorageIntegrityError(
-                    f"SessionOperation 已存在: {command.operation_id}"
-                )
-            if command.agent_package_version_id not in self._agent_package_versions:
-                raise StorageIntegrityError(
-                    "AgentPackageVersion 不存在: " f"{command.agent_package_version_id}"
-                )
-        for command in transaction.delegation_creates:
-            if command.delegation_id in self._delegations:
-                raise StorageIntegrityError(
-                    f"AgentDelegation 已存在: {command.delegation_id}"
-                )
-            if command.parent_operation_id not in self._operations:
-                raise StorageIntegrityError(
-                    f"父 SessionOperation 不存在: {command.parent_operation_id}"
-                )
-            if command.child_operation_id not in operation_ids:
-                raise StorageIntegrityError(
-                    "child SessionOperation 必须与 AgentDelegation 同事务创建: "
-                    f"{command.child_operation_id}"
-                )
-            if any(
-                delegation.child_operation_id == command.child_operation_id
-                for delegation in self._delegations.values()
-            ):
-                raise StorageIntegrityError(
-                    f"child SessionOperation 已被委派: {command.child_operation_id}"
-                )
-
-        staged_object_ids = set(object_ids)
-        staged_node_ids = set(node_ids)
-        parent_by_node = {
-            command.node_id: command.parent_node_id
-            for command in transaction.node_appends
-        }
-        for command in transaction.node_appends:
-            if (
-                command.object_id not in staged_object_ids
-                and command.object_id not in self._objects
-            ):
-                raise StorageIntegrityError(
-                    f"ConversationNode 指向不存在的 Object: {command.object_id}"
-                )
-            parent_id = command.parent_node_id
-            if parent_id is None:
-                continue
-            if parent_id in staged_node_ids:
-                self._ensure_acyclic_parent_chain(
-                    node_id=command.node_id,
-                    parent_by_node=parent_by_node,
-                )
-                continue
-            parent = self._nodes.get(parent_id)
-            if parent is None or parent.session_id != transaction.session_id:
-                raise StorageIntegrityError(
-                    "parent_node_id 不存在或属于其他 Session: " f"{parent_id}"
-                )
-
-        moved_names: set[str] = set()
-        for command in transaction.reference_moves:
-            if command.reference_name in moved_names:
-                raise StorageIntegrityError(
-                    f"同一事务不能多次移动 Reference: {command.reference_name}"
-                )
-            moved_names.add(command.reference_name)
-            current = self._find_named_reference_unlocked(
-                session_id=transaction.session_id,
-                reference_name=command.reference_name,
-            )
-            current_commit_sequence = (
-                current.commit_sequence if current is not None else None
-            )
-            if current_commit_sequence != command.expected_current_commit_sequence:
-                raise StorageConflictError(
-                    f"NamedReference commit_sequence 冲突: {command.reference_name}; "
-                    f"expected={command.expected_current_commit_sequence}, "
-                    f"actual={current_commit_sequence}"
-                )
-            if command.target_kind == "object":
-                exists = (
-                    command.target_id in staged_object_ids
-                    or command.target_id in self._objects
-                )
-            else:
-                existing_node = self._nodes.get(command.target_id)
-                exists = command.target_id in staged_node_ids or (
-                    existing_node is not None
-                    and existing_node.session_id == transaction.session_id
-                )
-            if not exists:
-                raise StorageIntegrityError(
-                    f"NamedReference 指向不存在的 {command.target_kind}: "
-                    f"{command.target_id}"
-                )
-
-    @staticmethod
-    def _ensure_acyclic_parent_chain(
-        *,
-        node_id: str,
-        parent_by_node: dict[str, str | None],
-    ) -> None:
-        visited = {node_id}
-        parent_id = parent_by_node[node_id]
-        while parent_id is not None and parent_id in parent_by_node:
-            if parent_id in visited:
-                raise StorageIntegrityError(
-                    "同一事务中的 ConversationNode 存在 parent 环"
-                )
-            visited.add(parent_id)
-            parent_id = parent_by_node[parent_id]
-
-    def _find_named_reference_unlocked(
+    def accept_operation(
         self,
         *,
-        session_id: str,
-        reference_name: str,
-    ) -> NamedReference | None:
-        versions = self._references.get((session_id, reference_name), [])
-        return versions[-1] if versions else None
+        operation: SessionOperation,
+        state: AgentRunState,
+        expected_node_id: str | None,
+    ) -> bool:
+        """原子 claim Inbox、写入输入 Node/Operation/State 并移动 active node。"""
+        with self._lock:
+            session_id = operation.session_id
+            session = self._require_session_unlocked(session_id)
+            if state.operation_id != operation.operation_id:
+                raise StorageIntegrityError("Operation 与 State 不匹配")
+            if (
+                session.archived_at is not None
+                or session.active_operation_id is not None
+            ):
+                return False
+            if session.active_node_id != expected_node_id:
+                return False
+            message = self._inbox.get(operation.input_node_id)
+            if (
+                message is None
+                or message.session_id != session_id
+                or message.status != "pending"
+            ):
+                return False
+            self._validate_operation_unlocked(operation, allow_pending_input=True)
+            if operation.input_node_id in self._nodes:
+                raise StorageIntegrityError(
+                    "Operation input_node_id 已存在为 ConversationNode"
+                )
+            if state.revision != 1 or state.status != "queued":
+                raise StorageIntegrityError(
+                    "新 Operation 必须从 revision=1、queued 开始"
+                )
+            # SessionOperation 的 package agent_id 必须与 Session agent_id 相同。
+            package = self._packages[operation.agent_package_version_id]
+            if package.agent_id != session.agent_id:
+                raise StorageIntegrityError(
+                    "AgentPackageVersion.agent_id 与 Session 不匹配"
+                )
+            self._validate_state_nodes_unlocked(state)
+            self._validate_content_artifacts_unlocked(message.message)
+            node = ConversationNode(
+                node_id=message.message_id,
+                session_id=session_id,
+                parent_node_id=expected_node_id,
+                content_type="agent_message",
+                content=message.message,
+                created_at=message.created_at,
+            )
+            self._nodes[node.node_id] = node
+            self._operations[operation.operation_id] = operation
+            self._run_states[state.operation_id] = state
+            self._inbox[message.message_id] = replace(
+                message,
+                status="claimed",
+                claimed_operation_id=operation.operation_id,
+                handled_at=operation.accepted_at,
+            )
+            self._sessions[session_id] = replace(
+                session,
+                active_node_id=node.node_id,
+                active_operation_id=operation.operation_id,
+                updated_at=operation.accepted_at,
+            )
+            return True
+
+    # Validation/deletion helpers --------------------------------------
+    def _require_session_unlocked(self, session_id: str) -> ConversationSession:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise LookupError(f"ConversationSession 不存在: {session_id}")
+        return session
+
+    def _validate_node_unlocked(self, node: ConversationNode) -> None:
+        self._require_session_unlocked(node.session_id)
+        if node.parent_node_id is not None:
+            parent = self._nodes.get(node.parent_node_id)
+            if parent is None or parent.session_id != node.session_id:
+                raise StorageIntegrityError("ConversationNode parent 不属于 Session")
+
+    def _validate_content_artifacts_unlocked(
+        self, content: AgentMessage | HistoryCompaction
+    ) -> None:
+        if isinstance(content, HistoryCompaction):
+            return
+        for block in content.content:
+            if (
+                isinstance(block, ArtifactBlock)
+                and block.artifact.artifact_id not in self._artifacts
+            ):
+                raise StorageIntegrityError(
+                    f"Artifact 不存在: {block.artifact.artifact_id}"
+                )
+
+    def _validate_operation_unlocked(
+        self, operation: SessionOperation, *, allow_pending_input: bool = False
+    ) -> None:
+        session = self._require_session_unlocked(operation.session_id)
+        if operation.agent_package_version_id not in self._packages:
+            raise StorageIntegrityError("AgentPackageVersion 不存在")
+        package = self._packages[operation.agent_package_version_id]
+        if package.agent_id != session.agent_id:
+            raise StorageIntegrityError(
+                "AgentPackageVersion.agent_id 与 Session 不匹配"
+            )
+        if operation.workspace_binding.workspace_id != session.workspace_id:
+            raise StorageIntegrityError("WorkspaceBinding 与 Session 不匹配")
+        node = self._nodes.get(operation.input_node_id)
+        if node is not None:
+            if node.session_id != operation.session_id:
+                raise StorageIntegrityError("input_node_id 不属于 Operation Session")
+            return
+        if allow_pending_input:
+            message = self._inbox.get(operation.input_node_id)
+            if message is None or message.session_id != operation.session_id:
+                raise StorageIntegrityError("input_node_id 不属于 Operation Session")
+            return
+        raise StorageIntegrityError("input_node_id 不属于 Operation Session")
+
+    def _validate_state_nodes_unlocked(self, state: AgentRunState) -> None:
+        self._validate_state_references_unlocked(state, pending_node=None)
 
     @staticmethod
-    def _copy_content(content: dict) -> dict:
-        return json.loads(json.dumps(content, ensure_ascii=False))
+    def _state_node_ids(state: AgentRunState) -> set[str]:
+        result: set[str] = set()
+        if state.final_assistant_node_id is not None:
+            result.add(state.final_assistant_node_id)
+        if state.current_step is not None:
+            if state.current_step.assistant_message_node_id is not None:
+                result.add(state.current_step.assistant_message_node_id)
+            result.update(
+                call.result_node_id
+                for call in state.current_step.tool_calls
+                if call.result_node_id is not None
+            )
+        return result
 
-    @classmethod
-    def _copy_object(cls, value: ImmutableObject) -> ImmutableObject:
-        return replace(value, content=cls._copy_content(value.content))
+    def _validate_state_references_unlocked(
+        self,
+        state: AgentRunState,
+        *,
+        pending_node: ConversationNode | None,
+    ) -> None:
+        operation = self._operations.get(state.operation_id)
+        if operation is None:
+            return
+        for node_id in self._state_node_ids(state):
+            node = (
+                pending_node
+                if pending_node is not None and pending_node.node_id == node_id
+                else self._nodes.get(node_id)
+            )
+            if node is None or node.session_id != operation.session_id:
+                raise StorageIntegrityError(
+                    f"AgentRunState 引用的 Node 不属于 Operation Session: {node_id}"
+                )
+
+    def _validate_delegation_unlocked(self, delegation: AgentDelegation) -> None:
+        if delegation.child_session_id not in self._sessions:
+            raise StorageIntegrityError("child Session 不存在")
+        if delegation.parent_operation_id not in self._operations:
+            raise StorageIntegrityError("parent Operation 不存在")
+        message = self._inbox.get(delegation.initial_message_id)
+        if message is None or message.session_id != delegation.child_session_id:
+            raise StorageIntegrityError("initial_message_id 不属于 child Session")
+
+    def _assert_idle_unlocked(self, session_id: str) -> None:
+        session = self._require_session_unlocked(session_id)
+        if session.active_operation_id is not None:
+            raise StorageIntegrityError("Session 仍有 active Operation")
+
+    def _assert_deletable_unlocked(self, session_id: str) -> None:
+        session = self._require_session_unlocked(session_id)
+        if session.archived_at is None:
+            raise StorageIntegrityError("删除 Session 前必须先归档")
+        self._assert_idle_unlocked(session_id)
+        if any(
+            item.session_id == session_id and item.status == "pending"
+            for item in self._inbox.values()
+        ):
+            raise StorageIntegrityError("存在 pending InboxMessage，不能删除 Session")
+
+    def _descendant_sessions_unlocked(self, root: str) -> set[str]:
+        result = {root}
+        changed = True
+        while changed:
+            changed = False
+            for delegation in self._delegations.values():
+                parent = self._operations.get(delegation.parent_operation_id)
+                if (
+                    parent is not None
+                    and parent.session_id in result
+                    and delegation.child_session_id not in result
+                ):
+                    result.add(delegation.child_session_id)
+                    changed = True
+        return result
+
+    def _operation_has_session_unlocked(
+        self, delegation: AgentDelegation, session_id: str
+    ) -> bool:
+        operation = self._operations.get(delegation.parent_operation_id)
+        return operation is not None and operation.session_id == session_id
+
+    def _delete_sessions_unlocked(self, session_ids: set[str]) -> None:
+        for child_session_id, delegation in list(self._delegations.items()):
+            parent = self._operations.get(delegation.parent_operation_id)
+            if delegation.child_session_id in session_ids or (
+                parent is not None and parent.session_id in session_ids
+            ):
+                del self._delegations[child_session_id]
+        for operation_id, operation in list(self._operations.items()):
+            if operation.session_id in session_ids:
+                self._operations.pop(operation_id)
+                self._run_states.pop(operation_id, None)
+        for node_id, node in list(self._nodes.items()):
+            if node.session_id in session_ids:
+                del self._nodes[node_id]
+        for message_id, message in list(self._inbox.items()):
+            if message.session_id in session_ids:
+                del self._inbox[message_id]
+        for target in session_ids:
+            self._sessions.pop(target, None)
+
+
+__all__ = ["InMemoryRuntimeStore"]

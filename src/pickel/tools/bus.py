@@ -37,6 +37,36 @@ class ToolEntry:
     enabled: bool = True
 
 
+class ToolLease:
+    """指向一次具体工具注册的幂等 lease。
+
+    Lease 捕获注册时的 ``ToolEntry`` 对象。后续同名重注册会替换字典里的
+    对象，旧 lease 因而不会误删新工具。
+    """
+
+    def __init__(self, bus: "ToolBus", entry: ToolEntry) -> None:
+        self._bus = bus
+        self._entry = entry
+        self._closed = False
+
+    @property
+    def name(self) -> str:
+        return self._entry.name
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._bus._remove_entry(self._entry)
+
+    def close_sync(self) -> None:
+        """供同步兼容入口使用；异步生命周期统一调用 close()。"""
+        if self._closed:
+            return
+        self._closed = True
+        self._bus._remove_entry(self._entry)
+
+
 @dataclass(frozen=True)
 class ToolActivation:
     """一次 turn 的激活集计算输入。
@@ -144,6 +174,30 @@ class ToolBus:
             enabled=existing.enabled if existing is not None else True,
         )
         return name
+
+    def register_lease(
+        self,
+        tool: BaseTool,
+        *,
+        source: ToolSource,
+        version: str | None = None,
+        origin: str | None = None,
+    ) -> ToolLease:
+        """注册工具并返回只对应本次注册的精确 lease。"""
+        name = self.register(
+            tool,
+            source=source,
+            version=version,
+            origin=origin,
+        )
+        return ToolLease(self, self._entries[name])
+
+    def _remove_entry(self, captured: ToolEntry) -> bool:
+        """仅在总线仍持有捕获对象时删除它。"""
+        if self._entries.get(captured.name) is not captured:
+            return False
+        del self._entries[captured.name]
+        return True
 
     def unregister(self, name: str) -> None:
         self._entries.pop(name, None)

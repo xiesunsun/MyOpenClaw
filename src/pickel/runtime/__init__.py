@@ -1,1 +1,3 @@
-"""Agent Runtime 驱动、状态机、绑定与副作用边界。"""
+"""Agent Runtime 执行层；具体类型从所属模块显式导入。"""
+
+__all__: list[str] = []
