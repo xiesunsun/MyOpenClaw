@@ -169,6 +169,12 @@ Provider Request Mapper
 
 删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`PreparedContext` 和 Provider 周围的二次组装。`prepare()` 统一为 `build_model_context()`；generate、stream、count_tokens 和 RequestSnapshot 复用同一 Provider Mapper。
 
+`Provider.request_snapshot(ModelContext)` 只返回实际 generate/stream 使用的 wire
+request，不混入 provider、model 或 cache order 包装。RuntimeEffects 使用 Provider
+声明的 `request_cache_order` 组装 RequestSnapshotRecord；不得靠字典字段猜测快照
+类型。Hook 不得返回另一份完整 ModelContext 覆盖 Builder 结果，只能在 Intent
+提交前提供受限 ContextContributions。
+
 ## 7. Tool、Approval 与 HostCall
 
 | 名称 | 语义 |

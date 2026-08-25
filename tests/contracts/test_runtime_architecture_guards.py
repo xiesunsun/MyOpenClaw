@@ -44,6 +44,7 @@ from pickel.workspaces.workspace_binding import WorkspaceBinding
 
 class _Provider(Provider):
     artifact_service = None
+    request_cache_order = ("tools", "system", "messages")
 
     def __init__(self, *, snapshot: bool = False) -> None:
         self.snapshot_enabled = snapshot
@@ -221,6 +222,7 @@ def test_model_request_exposes_actual_context_and_full_request_snapshot() -> Non
     assert snapshot.provider == "anthropic"
     assert snapshot.model == "claude-test"
     assert snapshot.request == {"system": "system contract", "message_count": 1}
+    assert snapshot.cache_order == ("tools", "system", "messages")
     assert snapshot.identity.session_id == "session-1"
     assert snapshot.identity.operation_id == "operation-1"
     assert snapshot.identity.step_id == "step-1"

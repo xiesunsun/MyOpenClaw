@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
 
 class Provider(ABC):
+    # Provider 实际缓存匹配的语义顺序；仅用于 full trace 诊断。
+    request_cache_order: tuple[str, ...] = ()
+
     @classmethod
     @abstractmethod
     def from_config(cls, config: "ModelConfig") -> "Provider":
@@ -36,5 +39,5 @@ class Provider(ABC):
         return None
 
     def request_snapshot(self, context: ModelContext) -> dict[str, Any] | None:
-        """返回实际 Provider 请求的可观测快照；不支持时返回 None。"""
+        """返回实际 Provider wire request；不支持时返回 None。"""
         return None

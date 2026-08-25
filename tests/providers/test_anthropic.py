@@ -479,14 +479,14 @@ class AnthropicProviderTests(unittest.TestCase):
 
         snapshot = provider.request_snapshot(context)
 
-        self.assertEqual(["tools", "system", "messages"], snapshot["cache_order"])
-        self.assertEqual(provider._build_create_params(context), snapshot["request"])
+        self.assertEqual(("tools", "system", "messages"), provider.request_cache_order)
+        self.assertEqual(provider._build_create_params(context), snapshot)
         self.assertEqual(
             "full user message",
-            snapshot["request"]["messages"][0]["content"][0]["text"],
+            snapshot["messages"][0]["content"][0]["text"],
         )
-        self.assertEqual("stable system", snapshot["request"]["system"][0]["text"])
-        self.assertEqual("echo", snapshot["request"]["tools"][0]["name"])
+        self.assertEqual("stable system", snapshot["system"][0]["text"])
+        self.assertEqual("echo", snapshot["tools"][0]["name"])
 
     def test_cache_control_is_absent_by_default(self) -> None:
         provider = AnthropicProvider(model="claude-test")

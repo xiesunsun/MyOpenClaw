@@ -162,17 +162,19 @@ class RuntimeEffects:
         if not observation_requested("request_snapshot"):
             return
         try:
-            request = self.provider.request_snapshot(model_context)
+            snapshot = self.provider.request_snapshot(model_context)
         except Exception:
             return
-        if request is None:
+        if snapshot is None:
             return
+
         step = state.current_step
         record_request_snapshot(
             RequestSnapshotRecord(
                 provider=self.provider_name,
                 model=self.model_name,
-                request=request,
+                request=snapshot,
+                cache_order=tuple(self.provider.request_cache_order),
                 identity=ObservationIdentity(
                     session_id=operation.session_id,
                     operation_id=operation.operation_id,
