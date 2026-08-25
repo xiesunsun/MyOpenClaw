@@ -7,6 +7,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from pickel.shared.execution_identity import ExecutionIdentity
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -25,13 +27,15 @@ class EventIdentity:
 
 
 @dataclass(frozen=True)
-class EventEnvelope(EventIdentity):
-    """runtime 事件的信封：身份 + 全序序号。
+class EventEnvelope:
+    """Runtime 事件元数据；执行位置只由 ExecutionIdentity 表达。
 
     event_sequence 由 EventBus 统一分配；-1 表示尚未进入 bus。
-    hook 事件不经过 bus，故只用 EventIdentity，不背这个字段。
     """
 
+    event_id: str = field(default_factory=lambda: str(uuid4()))
+    identity: ExecutionIdentity = field(default_factory=ExecutionIdentity)
+    occurred_at: datetime = field(default_factory=_now)
     event_sequence: int = -1
 
     def with_event_sequence(self, event_sequence: int) -> "EventEnvelope":

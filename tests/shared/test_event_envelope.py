@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from pickel.hooks.events import PreToolUseEvent
 from pickel.shared.event_envelope import EventEnvelope, EventIdentity
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 def test_identity_字段齐全且有默认值():
@@ -26,6 +27,21 @@ def test_每个_identity_的_event_id_唯一():
 
 def test_envelope_默认_event_sequence_为未分配():
     assert EventEnvelope().event_sequence == -1
+
+
+def test_envelope_组合统一执行身份():
+    identity = ExecutionIdentity(
+        session_id="s1",
+        operation_id="o1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        message_id="message-1",
+    )
+
+    envelope = EventEnvelope(identity=identity)
+
+    assert envelope.identity is identity
+    assert not hasattr(envelope, "session_id")
 
 
 def test_with_event_sequence_返回新实例且不改原件():

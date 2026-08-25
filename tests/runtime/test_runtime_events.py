@@ -19,14 +19,17 @@ from pickel.runtime.runtime_events import (
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 
 
 def _envelope() -> EventEnvelope:
     return EventEnvelope(
-        session_id="s1",
-        operation_id="t1",
-        step_sequence=1,
+        identity=ExecutionIdentity(
+            session_id="s1",
+            operation_id="t1",
+            step_sequence=1,
+        ),
         event_sequence=3,
     )
 

@@ -20,6 +20,7 @@ from pickel.runtime.runtime_events import (
     AgentRunInterrupted,
 )
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 class _Synthesizer:
@@ -35,7 +36,9 @@ class _Synthesizer:
 
 
 def _envelope(operation_id: str = "turn-1") -> EventEnvelope:
-    return EventEnvelope(session_id="session-1", operation_id=operation_id)
+    return EventEnvelope(
+        identity=ExecutionIdentity(session_id="session-1", operation_id=operation_id)
+    )
 
 
 class PrepareSpeechTextTests(unittest.TestCase):

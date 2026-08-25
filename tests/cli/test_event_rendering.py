@@ -18,6 +18,7 @@ from pickel.runtime.runtime_events import (
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 
 
@@ -40,7 +41,11 @@ def _cached_usage() -> AgentRunUsage:
 
 def test_model_step_started_不再上屏():
     """无边框排版下 `Step N` 行是噪音（E3 分派表：ModelStepStarted 只收尾流式行）。"""
-    text = _render(ModelStepStarted(envelope=EventEnvelope(step_sequence=2)))
+    text = _render(
+        ModelStepStarted(
+            envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=2))
+        )
+    )
 
     assert text.strip() == ""
 

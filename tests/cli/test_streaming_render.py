@@ -20,6 +20,7 @@ from pickel.runtime.runtime_events import (
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 def _render(events) -> str:
@@ -85,10 +86,15 @@ def test_工具参数增量不上屏():
     [
         # 有流式预览时 settle 只补 footer，不再重打正文
         (AssistantMessageEvent(text="最终回复"), None),
-        (ModelStepStarted(envelope=EventEnvelope(step_sequence=1)), None),
+        (
+            ModelStepStarted(
+                envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=1))
+            ),
+            None,
+        ),
         (
             ToolCallStarted(
-                envelope=EventEnvelope(step_sequence=1),
+                envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=1)),
                 batch_id="batch-1",
                 call_index=0,
                 total_calls=1,

@@ -59,7 +59,7 @@ class XiaomiTtsProcessor:
         self._closed = False
 
     async def handle_event(self, event: RuntimeEventBase) -> None:
-        operation_id = event.envelope.operation_id
+        operation_id = event.envelope.identity.operation_id or ""
         if isinstance(event, AssistantMessageEvent):
             self._pending_text[operation_id] = event.text
             return
@@ -74,7 +74,7 @@ class XiaomiTtsProcessor:
         self._pending_text.clear()
 
     def _handle_agent_run_completed(self, event: AgentRunCompleted) -> None:
-        text = self._pending_text.pop(event.envelope.operation_id, "")
+        text = self._pending_text.pop(event.envelope.identity.operation_id or "", "")
         if self._closed or event.outcome != "completed":
             return
         text = prepare_speech_text(text, max_chars=self._config.max_text_chars)
@@ -88,7 +88,7 @@ class XiaomiTtsProcessor:
                 pass
         self._jobs.put_nowait(
             (
-                event.envelope.operation_id,
+                event.envelope.identity.operation_id or "",
                 SpeechSynthesisRequest(
                     text=text,
                     style=self._config.style,

@@ -63,10 +63,10 @@ class EventBus:
                     DiagnosticRecord(
                         name="event_handler_error",
                         identity=ObservationIdentity(
-                            session_id=stamped.envelope.session_id,
-                            operation_id=stamped.envelope.operation_id,
-                            step_id=stamped.envelope.step_id,
-                            step_sequence=stamped.envelope.step_sequence,
+                            session_id=stamped.envelope.identity.session_id,
+                            operation_id=stamped.envelope.identity.operation_id or "",
+                            step_id=stamped.envelope.identity.step_id,
+                            step_sequence=stamped.envelope.identity.step_sequence,
                         ),
                         attributes={"handler": identifier},
                         error=ErrorInfo.from_exception(exc, kind="event_handler"),

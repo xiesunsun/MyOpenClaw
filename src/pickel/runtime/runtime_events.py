@@ -76,10 +76,12 @@ class RuntimeEventBase:
         base = {
             "event_type": self.EVENT_TYPE,
             "event_id": envelope.event_id,
-            "session_id": envelope.session_id,
-            "operation_id": envelope.operation_id,
-            "step_id": envelope.step_id,
-            "step_sequence": envelope.step_sequence,
+            "session_id": envelope.identity.session_id,
+            "operation_id": envelope.identity.operation_id,
+            "step_id": envelope.identity.step_id,
+            "step_sequence": envelope.identity.step_sequence,
+            "tool_call_id": envelope.identity.tool_call_id,
+            "message_id": envelope.identity.message_id,
             "event_sequence": envelope.event_sequence,
             "occurred_at": envelope.occurred_at.isoformat(),
         }

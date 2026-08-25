@@ -30,6 +30,7 @@ from pickel.observe.jsonl_trace_sink import (
     trace_path,
 )
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 def test_默认开启_standard():
@@ -101,10 +102,17 @@ def test_flush_等待已入队记录落盘且不关闭_sink(tmp_path: Path):
 
 async def _emit(bus: EventBus) -> None:
     await bus.emit(
-        AgentRunStarted(envelope=EventEnvelope(session_id="s1"), user_text="hi")
+        AgentRunStarted(
+            envelope=EventEnvelope(identity=ExecutionIdentity(session_id="s1")),
+            user_text="hi",
+        )
     )
     await bus.emit(
-        ModelStepStarted(envelope=EventEnvelope(session_id="s1", step_sequence=1))
+        ModelStepStarted(
+            envelope=EventEnvelope(
+                identity=ExecutionIdentity(session_id="s1", step_sequence=1)
+            )
+        )
     )
 
 
@@ -231,7 +239,9 @@ def test_超过文件上限后轮转(tmp_path: Path):
 
 
 async def _emit_deltas(bus: EventBus) -> None:
-    envelope = EventEnvelope(session_id="s1", step_sequence=1)
+    envelope = EventEnvelope(
+        identity=ExecutionIdentity(session_id="s1", step_sequence=1)
+    )
     await bus.emit(ThinkingDeltaEvent(envelope=envelope, text="想"))
     await bus.emit(TextDeltaEvent(envelope=envelope, text="你"))
     await bus.emit(

@@ -77,6 +77,7 @@ from pickel.shared.conversation_output import (
     ConversationOutputHandler,
 )
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.skills.store import SkillStoreError
 
 
@@ -208,8 +209,15 @@ class ConversationRuntime:
 
         async def consume_delta(delta) -> None:
             envelope = EventEnvelope(
-                session_id=self._session.session_id,
-                operation_id=self._active_operation_id or operation_id,
+                identity=ExecutionIdentity(
+                    session_id=self._session.session_id,
+                    operation_id=self._active_operation_id or operation_id,
+                    tool_call_id=(
+                        delta.tool_call_id
+                        if isinstance(delta, ToolCallArgsDelta)
+                        else None
+                    ),
+                )
             )
             if isinstance(delta, TextDelta):
                 await self._events.emit(
@@ -240,8 +248,10 @@ class ConversationRuntime:
                 operation_id = self._session.active_operation_id
             self._active_operation_id = operation_id
             envelope = EventEnvelope(
-                session_id=self._session.session_id,
-                operation_id=operation_id,
+                identity=ExecutionIdentity(
+                    session_id=self._session.session_id,
+                    operation_id=operation_id,
+                )
             )
             await self._events.emit(
                 AgentRunStarted(envelope=envelope, user_text=self._user_text(request))
@@ -283,7 +293,10 @@ class ConversationRuntime:
         except asyncio.CancelledError:
             self._agent.cancel(reason="用户中断")
             envelope = EventEnvelope(
-                session_id=self._session.session_id, operation_id=operation_id
+                identity=ExecutionIdentity(
+                    session_id=self._session.session_id,
+                    operation_id=operation_id,
+                )
             )
             await self._events.emit(
                 AgentRunInterrupted(envelope=envelope, at_step=0, partial_text="")
@@ -297,7 +310,10 @@ class ConversationRuntime:
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             envelope = EventEnvelope(
-                session_id=self._session.session_id, operation_id=operation_id
+                identity=ExecutionIdentity(
+                    session_id=self._session.session_id,
+                    operation_id=operation_id,
+                )
             )
             await self._events.emit(
                 AgentRunFailed(

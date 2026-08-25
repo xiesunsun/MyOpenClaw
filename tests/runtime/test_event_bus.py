@@ -7,6 +7,7 @@ import asyncio
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_events import ModelStepStarted, AgentRunStarted
 from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 def test_seq_从_0_起严格递增():
@@ -21,12 +22,18 @@ def test_seq_从_0_起严格递增():
 
 async def _emit_many(bus: EventBus, count: int) -> None:
     for _ in range(count):
-        await bus.emit(ModelStepStarted(envelope=EventEnvelope(session_id="s1")))
+        await bus.emit(
+            ModelStepStarted(
+                envelope=EventEnvelope(identity=ExecutionIdentity(session_id="s1"))
+            )
+        )
 
 
 def test_emit_返回带_seq_的事件且不改原件():
     bus = EventBus()
-    original = ModelStepStarted(envelope=EventEnvelope(session_id="s1"))
+    original = ModelStepStarted(
+        envelope=EventEnvelope(identity=ExecutionIdentity(session_id="s1"))
+    )
 
     emitted = asyncio.run(bus.emit(original))
 
