@@ -8,6 +8,7 @@ from typing import Protocol
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.inbox.message import InboxMessage
 from pickel.operations.agent_run_state import AgentRunState
+from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.session_operation import SessionOperation
 
 
@@ -29,6 +30,8 @@ class OperationStore(Protocol):
     def load_operation(self, operation_id: str) -> SessionOperation | None: ...
 
     def list_operations(self, *, session_id: str) -> tuple[SessionOperation, ...]: ...
+
+    def load_delegation(self, child_session_id: str) -> AgentDelegation | None: ...
 
     def list_pending_step_messages(
         self, *, session_id: str

@@ -30,10 +30,13 @@ from pickel.extensions_host.loader import (
 )
 from pickel.app.runtime_generation import (
     ExtensionInstance,
+    LoadedPackageHandle,
     RuntimeGeneration,
 )
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.operations.operation_service import OperationService
+from pickel.operations.agent_run_state import DelegateAgentIntent
+from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.tools.bus import ToolBus
@@ -56,6 +59,7 @@ class RuntimeHost:
         self._conversations: set[ConversationRuntime] = set()
         self._retired_generations: set[RuntimeGeneration] = set()
         self._agent_registry = AgentRegistry()
+        self._headless_agents: dict[str, tuple[Agent, LoadedPackageHandle]] = {}
 
     @property
     def agent_registry(self) -> AgentRegistry:
@@ -109,6 +113,95 @@ class RuntimeHost:
     @property
     def active_generation(self) -> RuntimeGeneration:
         return self._active_generation
+
+    async def activate_agent(self, session_id: str, store: CompositionStore) -> Agent:
+        """为 durable Session 装配 headless Agent 并幂等唤醒。"""
+        existing = self._headless_agents.get(session_id)
+        if existing is not None:
+            return existing[0]
+        registered = self._agent_registry.get(session_id)
+        if registered is not None:
+            return registered
+        session = store.load_session(session_id)
+        if session is None:
+            raise LookupError(f"ConversationSession 不存在: {session_id}")
+        if session.archived_at is not None:
+            raise ValueError("归档 Session 不能激活 Agent")
+        boot = self._active_generation_boot()
+        package_id: str | None = None
+        if session.active_operation_id is not None:
+            operation = store.load_operation(session.active_operation_id)
+            if operation is None or operation.session_id != session_id:
+                raise ValueError("Session.active_operation_id 指向无效 Operation")
+            package_id = operation.agent_package_version_id
+        else:
+            delegation = store.load_delegation(session_id)
+            if delegation is not None:
+                parent_operation = store.load_operation(delegation.parent_operation_id)
+                parent_state = store.load_run_state(delegation.parent_operation_id)
+                if parent_operation is None or parent_state is None:
+                    raise ValueError("Delegation parent Operation/State 不存在")
+                step = parent_state.current_step
+                call = (
+                    next(
+                        (
+                            item
+                            for item in step.tool_calls
+                            if item.tool_call_id == delegation.parent_tool_call_id
+                        ),
+                        None,
+                    )
+                    if step is not None
+                    else None
+                )
+                if (
+                    step is None
+                    or step.step_id != delegation.parent_step_id
+                    or call is None
+                    or not isinstance(call.execution_intent, DelegateAgentIntent)
+                ):
+                    raise ValueError(
+                        "Delegation parent ToolCall 缺少 DelegateAgentIntent"
+                    )
+                package_id = call.execution_intent.child_package_version_id
+        if package_id is None:
+            loaded = boot.resolve_loaded_agent_package(session.agent_id, store=store)
+        else:
+            loaded = boot.load_agent_package(
+                package_id,
+                store=store,
+                expected_agent_id=session.agent_id,
+            )
+        if loaded.version.agent_id != session.agent_id:
+            raise ValueError("LoadedAgentPackage.agent_id 与 Session 不匹配")
+        generation = self._active_generation
+        loaded = generation.cache_loaded_package(
+            loaded.version.package_version_id, loaded
+        )
+        handle = generation.acquire_loaded_package(loaded.version.package_version_id)
+        agent: Agent | None = None
+        registered = False
+        try:
+            agent = boot.build_agent(
+                store=store,
+                session_id=session_id,
+                loaded_agent_package=loaded,
+                session_cwd=session.cwd,
+                operation_service=OperationService(store),
+                wake_callback=self._agent_registry.wake,
+            )
+            self._agent_registry.register(agent)
+            registered = True
+            store.insert_agent_package_version(loaded.version)
+            self._headless_agents[session_id] = (agent, handle)
+            self._agent_registry.wake(session_id)
+            return agent
+        except BaseException:
+            self._headless_agents.pop(session_id, None)
+            if registered and agent is not None:
+                self._agent_registry.unregister(session_id, agent)
+            await handle.close()
+            raise
 
     def list_agents(self) -> tuple[AgentInfo, ...]:
         return tuple(
@@ -418,6 +511,10 @@ class RuntimeHost:
             conversation.add_event_processor(resolved.processor, resolved.event_types)
 
     async def shutdown(self) -> None:
+        await self._agent_registry.shutdown()
+        for _session_id, (_agent, handle) in tuple(self._headless_agents.items()):
+            await handle.close()
+        self._headless_agents.clear()
         for conversation in tuple(self._conversations):
             conversation.detach()
         self._conversations.clear()

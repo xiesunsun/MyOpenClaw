@@ -68,6 +68,18 @@ class AgentRegistry:
             task.cancel()
         return True
 
+    async def shutdown(self) -> None:
+        """停止并等待全部后台 wake task，避免资源先于驱动退出。"""
+        tasks = tuple(self._tasks.values())
+        self._agents.clear()
+        self._tasks.clear()
+        self._wake_pending.clear()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _drive(self, session_id: str, agent: Agent) -> None:
         while True:
             self._wake_pending.discard(session_id)

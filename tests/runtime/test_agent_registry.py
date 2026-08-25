@@ -24,11 +24,13 @@ class _Agent:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         self.started.set()
-        if self.calls == 1:
-            await self.release.wait()
-        else:
-            self.second_call.set()
-        self.active -= 1
+        try:
+            if self.calls == 1:
+                await self.release.wait()
+            else:
+                self.second_call.set()
+        finally:
+            self.active -= 1
 
 
 def test_register_rejects_two_live_agents_for_one_session() -> None:
@@ -73,5 +75,21 @@ def test_wake_coalesces_running_task_and_preserves_followup_wake() -> None:
         assert agent.calls == 2
         assert agent.max_active == 1
         assert registry.unregister("session-1", agent)
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_waits_for_running_wake_task() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        agent = _Agent("session-1")
+        registry.register(agent)
+        registry.wake("session-1")
+        await agent.started.wait()
+
+        await registry.shutdown()
+
+        assert registry.get("session-1") is None
+        assert agent.active == 0
 
     asyncio.run(scenario())

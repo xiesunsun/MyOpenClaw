@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import textwrap
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from pickel.agents.agent_package_loader import PackageLoadError
+from pickel.agents.agent_package import package_version_id_for_content
 from pickel.app.boot import Boot
 from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import ConversationRequest
@@ -15,6 +21,8 @@ from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.inbox.message import UserMessageSource
 from pickel.operations.operation_service import OperationService
+from pickel.operations.agent_run_state import DelegateAgentIntent
+from pickel.runtime.agent_registry import AgentRegistry
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
@@ -49,6 +57,88 @@ def _boot(root: Path) -> Boot:
     return Boot.from_config(app_config_from_yaml_file(config_path))
 
 
+def _headless_fixture(host: RuntimeHost, root: Path, *, active_operation: bool = False):
+    conversation = host.open_conversation(
+        ConversationRequest(agent_id="Pickle", cwd=root)
+    )
+    parent_loaded = host.active_generation.loaded_packages[
+        conversation.agent_definition.package_version_id
+    ]
+    child_content = parent_loaded.version.content_dict()
+    child_content["behavior_instruction"] = "child package"
+    child_package_id = package_version_id_for_content(child_content)
+    child_loaded = replace(
+        parent_loaded,
+        version=replace(
+            parent_loaded.version,
+            package_version_id=child_package_id,
+            behavior_instruction="child package",
+        ),
+    )
+    intent_package_id = "agentpkg_" + "d" * 64 if active_operation else child_package_id
+    child_session = replace(
+        conversation.session,
+        session_id="child-session-1",
+        active_operation_id="child-operation-1" if active_operation else None,
+    )
+    parent_operation = SimpleNamespace(
+        operation_id="parent-operation-1",
+        session_id=conversation.session.session_id,
+        agent_package_version_id=conversation.agent_definition.package_version_id,
+    )
+    parent_state = SimpleNamespace(
+        current_step=SimpleNamespace(
+            step_id="parent-step-1",
+            tool_calls=(
+                SimpleNamespace(
+                    tool_call_id="parent-tool-1",
+                    execution_intent=DelegateAgentIntent(intent_package_id),
+                ),
+            ),
+        )
+    )
+    child_operation = SimpleNamespace(
+        operation_id="child-operation-1",
+        session_id=child_session.session_id,
+        agent_package_version_id=child_package_id,
+    )
+
+    class Store:
+        def __init__(self):
+            self.sessions = {child_session.session_id: child_session}
+            self.inserted = []
+
+        def load_session(self, session_id):
+            return self.sessions.get(session_id)
+
+        def load_delegation(self, session_id):
+            if active_operation:
+                return None
+            return SimpleNamespace(
+                child_session_id=session_id,
+                parent_operation_id=parent_operation.operation_id,
+                parent_step_id="parent-step-1",
+                parent_tool_call_id="parent-tool-1",
+            )
+
+        def load_operation(self, operation_id):
+            if operation_id == parent_operation.operation_id:
+                return parent_operation
+            if operation_id == child_operation.operation_id:
+                return child_operation
+            return None
+
+        def load_run_state(self, operation_id):
+            if operation_id == parent_operation.operation_id:
+                return parent_state
+            return None
+
+        def insert_agent_package_version(self, package):
+            self.inserted.append(package.package_version_id)
+
+    return conversation, Store(), child_loaded, child_package_id
+
+
 def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -68,6 +158,179 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
         assert host.agent_registry.get(session_id) is live_agent
         assert live_agent._driver._wake_callback == host.agent_registry.wake
         assert (root / "home" / "runtime.db").exists()
+
+
+def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            # UI Conversation 已占用 Registry 时，activation 仍保持同一 Agent 身份。
+            first = asyncio.run(
+                host.activate_agent(
+                    conversation.session.session_id, conversation.persistence_store
+                )
+            )
+            generation = host.active_generation
+            refs = generation.operation_ref_count
+            second = asyncio.run(
+                host.activate_agent(
+                    conversation.session.session_id, conversation.persistence_store
+                )
+            )
+            assert first is second
+            assert refs == generation.operation_ref_count
+            asyncio.run(host.shutdown())
+            assert generation.operation_ref_count == 0
+            assert generation.closed
+
+
+def test_headless_delegation_uses_intent_package_registers_before_wake() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, child_loaded, child_package_id = _headless_fixture(
+                host, root
+            )
+            events: list[str] = []
+            built = SimpleNamespace(session_id="child-session-1")
+            with (
+                patch.object(
+                    host.boot,
+                    "load_agent_package",
+                    return_value=child_loaded,
+                ) as load_package,
+                patch.object(
+                    host.boot,
+                    "resolve_loaded_agent_package",
+                    side_effect=AssertionError("delegated child 不能 resolve 当前配置"),
+                ),
+                patch.object(host.boot, "build_agent", return_value=built),
+                patch.object(
+                    host.agent_registry,
+                    "register",
+                    side_effect=lambda agent: (
+                        events.append("register"),
+                        AgentRegistry.register(host.agent_registry, agent),
+                    )[1],
+                ),
+                patch.object(
+                    host.agent_registry,
+                    "wake",
+                    side_effect=lambda session_id: events.append(f"wake:{session_id}"),
+                ),
+            ):
+                baseline = host.active_generation.operation_ref_count
+                first = asyncio.run(host.activate_agent("child-session-1", store))
+                refs = host.active_generation.operation_ref_count
+                second = asyncio.run(host.activate_agent("child-session-1", store))
+
+            assert first is built is second
+            load_package.assert_called_once_with(
+                child_package_id,
+                store=store,
+                expected_agent_id="Pickle",
+            )
+            assert events == ["register", "wake:child-session-1"]
+            assert refs == baseline + 1
+            assert host.active_generation.operation_ref_count == refs
+            conversation.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_headless_active_operation_package_wins_over_parent_intent() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, child_loaded, child_package_id = _headless_fixture(
+                host, root, active_operation=True
+            )
+            built = SimpleNamespace(session_id="child-session-1")
+            with (
+                patch.object(
+                    host.boot, "load_agent_package", return_value=child_loaded
+                ) as load_package,
+                patch.object(host.boot, "build_agent", return_value=built),
+                patch.object(host.agent_registry, "wake"),
+            ):
+                asyncio.run(host.activate_agent("child-session-1", store))
+            load_package.assert_called_once_with(
+                child_package_id,
+                store=store,
+                expected_agent_id="Pickle",
+            )
+            conversation.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_headless_build_failure_releases_handle_without_touching_durable_child() -> (
+    None
+):
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, child_loaded, _child_package_id = _headless_fixture(
+                host, root
+            )
+            baseline = host.active_generation.operation_ref_count
+            with (
+                patch.object(
+                    host.boot, "load_agent_package", return_value=child_loaded
+                ),
+                patch.object(
+                    host.boot,
+                    "build_agent",
+                    side_effect=RuntimeError("build failed"),
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="build failed"):
+                    asyncio.run(host.activate_agent("child-session-1", store))
+            assert host.active_generation.operation_ref_count == baseline
+            assert host.agent_registry.get("child-session-1") is None
+            assert "child-session-1" not in host._headless_agents
+            assert store.load_session("child-session-1") is not None
+            conversation.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_headless_registry_failure_releases_handle_without_registration() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, child_loaded, _child_package_id = _headless_fixture(
+                host, root
+            )
+            baseline = host.active_generation.operation_ref_count
+            with (
+                patch.object(
+                    host.boot, "load_agent_package", return_value=child_loaded
+                ),
+                patch.object(
+                    host.boot,
+                    "build_agent",
+                    return_value=SimpleNamespace(session_id="child-session-1"),
+                ),
+                patch.object(
+                    host.agent_registry,
+                    "register",
+                    side_effect=RuntimeError("register failed"),
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="register failed"):
+                    asyncio.run(host.activate_agent("child-session-1", store))
+            assert host.active_generation.operation_ref_count == baseline
+            assert host.agent_registry.get("child-session-1") is None
+            assert "child-session-1" not in host._headless_agents
+            assert store.load_session("child-session-1") is not None
+            conversation.detach()
+            asyncio.run(host.shutdown())
 
 
 def test_runtime_host_keeps_ephemeral_conversation_off_disk() -> None:
