@@ -175,6 +175,11 @@ request，不混入 provider、model 或 cache order 包装。RuntimeEffects 使
 类型。Hook 不得返回另一份完整 ModelContext 覆盖 Builder 结果，只能在 Intent
 提交前提供受限 ContextContributions。
 
+`/context` 是只读视图：当前 Step 有 ModelRequestIntent 时直接展示其中已提交的
+精确 ModelContext，source 为 `model_request_intent`；没有 Intent 时才执行不含
+Recall/Hook/draft input 的纯 preview，source 为 `preview`。preview 不能伪装成
+实际请求，也不能为了检查而触发外部副作用。
+
 ## 7. Tool、Approval 与 HostCall
 
 | 名称 | 语义 |

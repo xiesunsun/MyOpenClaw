@@ -33,6 +33,7 @@ from pickel.app.runtime_generation import (
     RuntimeGeneration,
 )
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.operations.operation_service import OperationService
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -287,9 +288,15 @@ class RuntimeHost:
         persistence: str,
         mode: ConversationMode,
     ) -> ConversationRuntime:
+        # 同一个 OperationService 同时服务 AgentDriver 与 UI Adapter，避免
+        # ConversationRuntime 绕过窄服务直接读取 Operation 状态。
+        operation_service = OperationService(store)
         if session.active_operation_id is not None:
-            operation = store.load_operation(session.active_operation_id)
-            if operation is None:
+            try:
+                operation = operation_service.load_operation(
+                    session.active_operation_id
+                )
+            except LookupError:
                 raise ValueError(
                     "Session.active_operation_id 指向不存在的 Operation: "
                     f"{session.active_operation_id}"
@@ -323,6 +330,7 @@ class RuntimeHost:
                 session_id=session.session_id,
                 loaded_agent_package=loaded,
                 session_cwd=session.cwd,
+                operation_service=operation_service,
             )
             conversation = ConversationRuntime(
                 loaded_agent_package=loaded,
@@ -330,6 +338,7 @@ class RuntimeHost:
                 agent=agent,
                 session=session,
                 conversation_service=service,
+                operation_service=operation_service,
                 persistence_store=store,
                 persistence=persistence,
                 app_config=boot.app_config,

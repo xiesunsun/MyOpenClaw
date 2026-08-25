@@ -634,7 +634,11 @@ class ChatLoop:
             session_total=inspection.session_total,
             note=inspection.note,
             source_line=(
-                "Source: context preview · hooks skipped · recall skipped · no draft input"
+                (
+                    "Source: committed ModelRequestIntent · exact Provider-neutral context"
+                )
+                if inspection.source == "model_request_intent"
+                else "Source: context preview · hooks skipped · recall skipped · no draft input"
             ),
             turns=inspection.turns,
             tool_calls=inspection.tool_calls,

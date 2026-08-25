@@ -31,6 +31,7 @@ from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.operations.operation_service import OperationService
 from pickel.runtime.conversation_output_bus import ConversationOutputBus
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_bus import RuntimeBus
@@ -89,6 +90,7 @@ class ConversationRuntime:
         agent: Agent,
         session: ConversationSession,
         conversation_service: ConversationService,
+        operation_service: OperationService,
         persistence_store: CompositionStore,
         persistence: str,
         app_config: AppConfig,
@@ -100,6 +102,7 @@ class ConversationRuntime:
         self._agent = agent
         self._session = session
         self._conversation_service = conversation_service
+        self._operation_service = operation_service
         self._persistence_store = persistence_store
         self._skill_store = skill_store
         self._persistence = persistence
@@ -382,18 +385,33 @@ class ConversationRuntime:
         )
 
     async def inspect_context(self) -> ContextInspection:
+        # Session 可能在后台 AgentDriver 推进期间发生变化，因此以最新持久化
+        # 指针查找当前 Operation；request_ready 时直接使用已提交 Intent，
+        # 不重新执行 Context、Recall 或 Hook 管道。
+        self._refresh_session()
         nodes = self._conversation_service.list_active_branch_nodes(
             session_id=self._session.session_id
         )
-        messages = ConversationProjector().project_conversation_messages(nodes)
-        visible = apply_window(
-            messages,
-            turn_window=self._loaded_agent_package.version.runtime_policy.context_turn_window,
-        )
-        context = ModelContextBuilder().build_model_context(
-            package=self._loaded_agent_package.version,
-            visible_messages=visible,
-        )
+        source = "preview"
+        context = None
+        operation_id = self._session.active_operation_id
+        if operation_id is not None:
+            state = self._operation_service.load_agent_run_state(operation_id)
+            step = state.current_step
+            if step is not None and step.request_intent is not None:
+                context = step.request_intent.model_context
+                source = "model_request_intent"
+
+        if context is None:
+            messages = ConversationProjector().project_conversation_messages(nodes)
+            visible = apply_window(
+                messages,
+                turn_window=self._loaded_agent_package.version.runtime_policy.context_turn_window,
+            )
+            context = ModelContextBuilder().build_model_context(
+                package=self._loaded_agent_package.version,
+                visible_messages=visible,
+            )
         tool_calls = sum(
             1
             for message in context.messages
@@ -419,6 +437,7 @@ class ConversationRuntime:
                 1 for node in nodes if node.content_type == "history_compaction"
             ),
             tool_definitions=len(context.tools),
+            source=source,
         )
 
     def list_pending_skills(self) -> tuple[PendingSkillInfo, ...]:

@@ -253,11 +253,12 @@ class Boot:
         session_id: str,
         loaded_agent_package: LoadedAgentPackage,
         session_cwd: Path,
+        operation_service: OperationService | None = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
         inbox_store = store
-        operation_service = OperationService(store)
+        operation_service = operation_service or OperationService(store)
         effects = self._build_effects(
             store=store,
             loaded_agent_package=loaded_agent_package,
