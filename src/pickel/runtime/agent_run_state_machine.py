@@ -33,7 +33,9 @@ class AgentRunStateMachine:
         "running": {"running", "waiting", "cancelling", "succeeded", "failed"},
         # 一个 Step 可以包含多个审批；逐个决定时仍保持 waiting。
         "waiting": {"waiting", "running", "cancelling", "failed"},
-        "cancelling": {"cancelled"},
+        # Tool reconciliation 可以先把已发生的结果节点写入当前 Step，再由
+        # Driver 用下一次 CAS 清空 Step 并进入 cancelled。
+        "cancelling": {"cancelling", "cancelled"},
         "succeeded": set(),
         "failed": set(),
         "cancelled": set(),

@@ -93,6 +93,7 @@ stateDiagram-v2
     running --> cancelling
     waiting --> failed
     waiting --> cancelling
+    cancelling --> cancelling: 提交已核对的 ToolResult
     cancelling --> cancelled
 ```
 
@@ -240,7 +241,21 @@ flowchart TD
     P -->|never| W
 ```
 
-Host reconcile 必须带 expected revision。确认结果时，ToolResult、ToolCall completed、AgentRun running 和 waiting_reason 清空在一致事务中提交；无法确认则保持 waiting。`outcome_unknown` 不作为 ToolCallStatus。
+Host 通过唯一入口
+`ToolReconciliationService.reconcile_tool_call(operation_id, step_id,
+tool_call_id, *, outcome, expected_revision, result=None)` 提交核对结果：
+
+| outcome | waiting / tool_reconciliation | cancelling |
+| --- | --- | --- |
+| `completed` | 原子提交 ToolResult + completed，转 `running` 并 wake | 原子提交 ToolResult + completed，保持 `cancelling` 并 wake；Driver 下一次 CAS 转 `cancelled` |
+| `not_started` | `safe` 转 `running` 并 wake；`never` 保持 waiting | 不伪造 ToolResult，直接转 `cancelled` |
+| `unknown` | 保持原状态 | 保持原状态 |
+
+入口必须匹配 expected revision、当前 step、Provider 顺序的第一个未完成
+`intent_recorded` ToolCall；CAS 只尝试一次。`completed` 的 ToolResult 和 State
+在同一事务提交。取消中的已完成结果不能丢弃，也不能为了单次转入终态而放宽
+Store 的“新节点必须被新状态引用”约束，因此使用可恢复的两次 CAS。
+`unknown` 不增加 ToolCallStatus。
 
 ## 7. Tool Approval
 
@@ -281,6 +296,11 @@ CAS AgentRunState → cancelling + Cancellation
 ```
 
 Provider stream 可以中止；intent_recorded ToolCall 必须先 reconcile，不能直接假设未执行。waiting approval 在 cancelling 后失效，迟到决定因 status/revision 不匹配被拒绝。
+
+取消中 reconcile 到 `completed` 时，第一次 CAS 保留 current_step 对 ToolResult
+的引用并保持 `cancelling`；显式 wake 后，OperationDriver 看到已无未知 `never`
+intent，再用第二次 CAS 清空 Step 并进入 `cancelled`。任一时刻崩溃都可从持久化
+状态继续。
 
 Parent Operation 取消必须沿 AgentDelegation 图递归处理全部非终态后代：
 

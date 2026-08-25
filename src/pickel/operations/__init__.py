@@ -14,6 +14,10 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.session_operation import SessionOperation
+from pickel.operations.tool_reconciliation_service import (
+    ToolReconciliationOutcome,
+    ToolReconciliationService,
+)
 
 __all__ = [
     "ApprovalService",
@@ -29,4 +33,6 @@ __all__ = [
     "ToolApproval",
     "ToolApprovalDecision",
     "ToolCallState",
+    "ToolReconciliationOutcome",
+    "ToolReconciliationService",
 ]

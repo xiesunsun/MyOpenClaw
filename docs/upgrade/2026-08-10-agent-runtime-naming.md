@@ -178,10 +178,11 @@ Provider Request Mapper
 | `ToolReplayPolicy` | `safe / never` 自动重放策略 |
 | `ToolApproval` | 嵌入 ToolCallState 的持久化审批请求和决定 |
 | `ApprovalService` | 通过 revision CAS 接受批准或拒绝 |
+| `ToolReconciliationService` | 通过 revision CAS 接受 Host 对已提交 Tool Intent 的核对结果 |
 | `HostCallSpec` | 瞬时、类型化 Host 能力定义 |
 | `HostCallRouter` | 进程内 Host 请求—响应路由，不负责恢复 |
 
-`HostCall` 不等于可恢复外部等待。需要重启后继续等待的交互必须由所属业务状态机持久化；当前只实现 ToolApproval。
+`HostCall` 不等于可恢复外部等待。需要重启后继续等待的交互必须由所属业务状态机持久化；当前 ToolApproval 和 Tool reconciliation 都直接修改 AgentRunState，不新增独立队列或 Manager。
 
 ## 8. 多模态与多 Agent
 

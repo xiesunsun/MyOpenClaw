@@ -311,6 +311,12 @@ CAS AgentRunState.revision
 
 ModelRequestIntent 必须在 Provider 调用前 CAS 写入 current_step_json。ToolExecutionIntent 必须在真实 Tool 副作用前 CAS 写入。完整 AssistantMessage、ToolResult ConversationNode、active_node_id 和对应 State 转换在各自同一事务提交。
 
+Host 对 `intent_recorded` 的核对结果直接通过 AgentRunState revision CAS 提交，
+不新增 reconciliation 表、队列或状态。`completed` 同事务写 ToolResult；
+`not_started` 只在策略允许时恢复执行；`unknown` 保持 waiting。若 Operation 已在
+`cancelling`，已完成结果先以 `cancelling → cancelling` 保存并被 current_step
+引用，再由 Driver 清空 Step 转入 `cancelled`。
+
 ### 11.6 Operation 终态
 
 ```text
