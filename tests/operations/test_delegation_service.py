@@ -26,7 +26,11 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
-from pickel.inbox.message import AgentMessageSource
+from pickel.inbox.message import (
+    AgentMessageSource,
+    HookMessageSource,
+    UserMessageSource,
+)
 from pickel.operations.agent_run_state import (
     AgentRunState,
     AgentRunError,
@@ -460,6 +464,182 @@ def _switch_parent_call_to_list_agents(
                 ),
                 operation_id,
             ),
+        )
+
+
+def _switch_parent_call_to_cancel_delegation(
+    store: Store,
+    child_session_id: str,
+    *,
+    operation_id: str = "operation-1",
+    step_id: str = "step-cancel",
+    tool_call_id: str = "tool-cancel",
+) -> None:
+    current = store.load_run_state(operation_id)
+    assert current is not None and current.current_step is not None
+    call = ToolCallState(
+        tool_call_id=tool_call_id,
+        tool_name="cancel_delegation",
+        arguments={"child_session_id": child_session_id},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    switched = replace(
+        current,
+        current_step=replace(current.current_step, step_id=step_id, tool_calls=(call,)),
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, current_step_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                switched.revision,
+                switched.status,
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                operation_id,
+            ),
+        )
+
+
+def test_prepare_cancel_delegation_discards_only_parent_messages(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    store.send_message(
+        message_id="parent-followup",
+        session_id=delegation.child_session_id,
+        delivery="followup",
+        message=UserMessage((TextBlock("followup"),)),
+        source=AgentMessageSource("session-1", "operation-1", "followup"),
+        created_at=NOW,
+    )
+    store.send_message(
+        message_id="user-message",
+        session_id=delegation.child_session_id,
+        delivery="followup",
+        message=UserMessage((TextBlock("user"),)),
+        source=UserMessageSource(),
+        created_at=NOW,
+    )
+    store.send_message(
+        message_id="hook-message",
+        session_id=delegation.child_session_id,
+        delivery="steer",
+        message=UserMessage((TextBlock("hook"),)),
+        source=HookMessageSource("hook-1"),
+        created_at=NOW,
+    )
+    _switch_parent_call_to_cancel_delegation(store, delegation.child_session_id)
+
+    active_operation_id = DelegationService(
+        store=store, now=lambda: NOW
+    ).prepare_cancel_delegation(
+        "operation-1", "step-cancel", "tool-cancel", delegation.child_session_id
+    )
+
+    assert active_operation_id is None
+    assert store.load_message(delegation.initial_message_id).status == "discarded"
+    assert store.load_message("parent-followup").status == "discarded"
+    assert store.load_message("user-message").status == "pending"
+    assert store.load_message("hook-message").status == "pending"
+    assert (
+        DelegationService(store=store, now=lambda: NOW).prepare_cancel_delegation(
+            "operation-1", "step-cancel", "tool-cancel", delegation.child_session_id
+        )
+        is None
+    )
+
+
+def test_prepare_cancel_delegation_returns_active_operation(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    _switch_parent_call_to_cancel_delegation(store, delegation.child_session_id)
+    store.send_message(
+        message_id="claimed-message",
+        session_id=delegation.child_session_id,
+        delivery="followup",
+        message=UserMessage((TextBlock("claimed"),)),
+        source=AgentMessageSource("session-1", "operation-1", "followup"),
+        created_at=NOW,
+    )
+    store.send_message(
+        message_id="discarded-message",
+        session_id=delegation.child_session_id,
+        delivery="followup",
+        message=UserMessage((TextBlock("discarded"),)),
+        source=AgentMessageSource("session-1", "operation-1", "followup"),
+        created_at=NOW,
+    )
+    assert store.claim_message(
+        message_id="claimed-message",
+        operation_id="child-operation",
+        step_id=None,
+        handled_at=NOW,
+    )
+    assert store.discard_message(
+        message_id="discarded-message", reason="test", handled_at=NOW
+    )
+
+    active_operation_id = DelegationService(
+        store=store, now=lambda: NOW
+    ).prepare_cancel_delegation(
+        "operation-1", "step-cancel", "tool-cancel", delegation.child_session_id
+    )
+
+    assert active_operation_id == "child-operation"
+    assert store.load_session(delegation.child_session_id).active_operation_id == (
+        "child-operation"
+    )
+    assert store.load_message("claimed-message").status == "claimed"
+    assert store.load_message("discarded-message").status == "discarded"
+
+
+def test_prepare_cancel_delegation_rejects_non_child_and_wrong_call(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_cancel_delegation(store, delegation.child_session_id)
+    service = DelegationService(store=store, now=lambda: NOW)
+
+    with pytest.raises(StorageConflictError):
+        service.prepare_cancel_delegation(
+            "operation-1", "step-cancel", "tool-cancel", "not-a-child"
+        )
+    with pytest.raises(StorageConflictError):
+        service.prepare_cancel_delegation(
+            "operation-1", "wrong-step", "tool-cancel", delegation.child_session_id
         )
 
 

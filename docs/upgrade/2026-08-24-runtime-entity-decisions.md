@@ -2207,6 +2207,15 @@ Operation 只由自身 Driver 收敛，进入 `cancelled` 后唤醒 direct paren
 通过 Registry 合并 wake，未激活 child 由启动恢复发现。User、Hook、Host、Runtime
 消息以及 child 向 parent 的 report 不属于清理范围。
 
+`cancel_delegation` 只允许当前 sender Session 的 active
+`cancel_delegation` ToolCall 取消其 direct child。Store 在同一事务中验证冻结
+arguments，丢弃该 sender Session 发往目标 child 的 pending AgentMessage，并返回
+child 当时的 `active_operation_id`；有 active Operation 时再由
+RuntimeHost 的 DelegationControl 调用普通 OperationService cancellation；若取消
+CAS 发生竞争则按同一持久化 Operation 重读并重试或报告冲突。无 active Operation
+时只返回成功，不激活空 child。该入口不归档/删除 Session，也不保存 Delegation
+状态。
+
 ### 13.8 wake、退休与 when_idle
 
 ```text

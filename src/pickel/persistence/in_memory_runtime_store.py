@@ -462,6 +462,95 @@ class InMemoryRuntimeStore:
             self._inbox[message_id] = stored
             return stored
 
+    def prepare_cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        handled_at: datetime,
+    ) -> str | None:
+        """原子校验取消 ToolCall、清理 child 消息并返回 active Operation。"""
+        with self._lock:
+            operation = self._operations.get(sender_operation_id)
+            if operation is None:
+                raise StorageIntegrityError("sender Operation 不存在")
+            sender = self._sessions.get(operation.session_id)
+            target = self._sessions.get(target_child_session_id)
+            delegation = self._delegations.get(target_child_session_id)
+            if sender is None:
+                raise StorageIntegrityError("sender Session 不存在")
+            if target is None:
+                raise StorageConflictError("target child Session 不存在")
+            parent_operation = (
+                self._operations.get(delegation.parent_operation_id)
+                if delegation is not None
+                else None
+            )
+            if (
+                delegation is None
+                or parent_operation is None
+                or parent_operation.session_id != operation.session_id
+            ):
+                raise StorageConflictError("target 不是 sender Session 的 direct child")
+            if sender.active_operation_id != sender_operation_id:
+                raise StorageConflictError(
+                    "sender Operation 不是 Session 的 active Operation"
+                )
+            state = self._run_states.get(sender_operation_id)
+            step = state.current_step if state is not None else None
+            call = (
+                next(
+                    (
+                        item
+                        for item in step.tool_calls
+                        if item.tool_call_id == sender_tool_call_id
+                    ),
+                    None,
+                )
+                if step is not None
+                else None
+            )
+            if (
+                state is None
+                or state.status != "running"
+                or step is None
+                or step.step_id != sender_step_id
+                or step.phase != "awaiting_tools"
+                or call is None
+                or call.tool_name != "cancel_delegation"
+                or call.status != "intent_recorded"
+                or call.execution_intent is not None
+                or call.arguments != {"child_session_id": target_child_session_id}
+            ):
+                raise StorageConflictError(
+                    "sender ToolCall 不是当前 cancel_delegation intent_recorded"
+                )
+            for message in tuple(self._inbox.values()):
+                source = message.source
+                source_operation = (
+                    self._operations.get(source.sender_operation_id)
+                    if isinstance(source, AgentMessageSource)
+                    else None
+                )
+                if (
+                    message.session_id == target_child_session_id
+                    and message.status == "pending"
+                    and isinstance(source, AgentMessageSource)
+                    and source.sender_session_id == operation.session_id
+                    and source.form == message.delivery
+                    and source_operation is not None
+                    and source_operation.session_id == operation.session_id
+                ):
+                    self._inbox[message.message_id] = replace(
+                        message,
+                        status="discarded",
+                        outcome_reason="direct child 已被取消",
+                        handled_at=handled_at,
+                    )
+            return target.active_operation_id
+
     def send_child_report(
         self,
         *,

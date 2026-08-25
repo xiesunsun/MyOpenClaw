@@ -680,6 +680,140 @@ class SQLiteRuntimeStore:
                 connection.rollback()
                 raise
 
+    def prepare_cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        handled_at: datetime,
+    ) -> str | None:
+        """原子校验取消 ToolCall、清理 child 消息并返回 active Operation。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                operation_row = connection.execute(
+                    "SELECT * FROM session_operations WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                sender_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (
+                        (operation_row["session_id"],)
+                        if operation_row is not None
+                        else ("",)
+                    ),
+                ).fetchone()
+                target_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (target_child_session_id,),
+                ).fetchone()
+                parent_row = connection.execute(
+                    """
+                    SELECT op.* FROM agent_delegations AS d
+                    JOIN session_operations AS op
+                      ON op.operation_id = d.parent_operation_id
+                    WHERE d.child_session_id = ?
+                    """,
+                    (target_child_session_id,),
+                ).fetchone()
+                if operation_row is None or sender_row is None:
+                    raise StorageIntegrityError("sender Operation 或 Session 不存在")
+                if target_row is None:
+                    raise StorageConflictError("target child Session 不存在")
+                if (
+                    parent_row is None
+                    or parent_row["session_id"] != operation_row["session_id"]
+                ):
+                    raise StorageConflictError(
+                        "target 不是 sender Session 的 direct child"
+                    )
+                if sender_row["active_operation_id"] != sender_operation_id:
+                    raise StorageConflictError(
+                        "sender Operation 不是 Session 的 active Operation"
+                    )
+                state_row = connection.execute(
+                    "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                state = self._run_state_from_row(state_row) if state_row else None
+                step = state.current_step if state is not None else None
+                call = (
+                    next(
+                        (
+                            item
+                            for item in step.tool_calls
+                            if item.tool_call_id == sender_tool_call_id
+                        ),
+                        None,
+                    )
+                    if step is not None
+                    else None
+                )
+                if (
+                    state is None
+                    or state.status != "running"
+                    or step is None
+                    or step.step_id != sender_step_id
+                    or step.phase != "awaiting_tools"
+                    or call is None
+                    or call.tool_name != "cancel_delegation"
+                    or call.status != "intent_recorded"
+                    or call.execution_intent is not None
+                    or call.arguments != {"child_session_id": target_child_session_id}
+                ):
+                    raise StorageConflictError(
+                        "sender ToolCall 不是当前 cancel_delegation intent_recorded"
+                    )
+                rows = connection.execute(
+                    "SELECT * FROM agent_inbox_messages WHERE session_id = ? AND status = 'pending'",
+                    (target_child_session_id,),
+                ).fetchall()
+                for row in rows:
+                    message = self._message_from_row(row)
+                    source = message.source
+                    source_operation = None
+                    if isinstance(source, AgentMessageSource):
+                        source_operation = connection.execute(
+                            "SELECT session_id FROM session_operations WHERE operation_id = ?",
+                            (source.sender_operation_id,),
+                        ).fetchone()
+                    if (
+                        isinstance(source, AgentMessageSource)
+                        and source.sender_session_id == operation_row["session_id"]
+                        and source.form == message.delivery
+                        and source_operation is not None
+                        and source_operation["session_id"]
+                        == operation_row["session_id"]
+                    ):
+                        connection.execute(
+                            """
+                            UPDATE agent_inbox_messages
+                            SET status = 'discarded', outcome_reason = ?, handled_at = ?
+                            WHERE message_id = ? AND status = 'pending'
+                            """,
+                            (
+                                "direct child 已被取消",
+                                handled_at.isoformat(),
+                                message.message_id,
+                            ),
+                        )
+                active_operation_id = target_row["active_operation_id"]
+                connection.commit()
+                return (
+                    str(active_operation_id)
+                    if active_operation_id is not None
+                    else None
+                )
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise StorageIntegrityError("取消 child 消息写入失败") from exc
+            except (StorageConflictError, StorageIntegrityError, ValueError, TypeError):
+                connection.rollback()
+                raise
+
     def send_child_report(
         self,
         *,

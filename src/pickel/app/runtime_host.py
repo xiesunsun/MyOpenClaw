@@ -37,6 +37,7 @@ from pickel.app.runtime_generation import (
 )
 from pickel.inbox.message import InboxMessage
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.persistence.errors import StorageConflictError
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
@@ -140,6 +141,59 @@ class _RuntimeDelegationControl:
                 stored.session_id,
             )
         return stored
+
+    async def cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+    ) -> str | None:
+        operation_id = DelegationService(
+            store=self._store,
+        ).prepare_cancel_delegation(
+            sender_operation_id,
+            sender_step_id,
+            sender_tool_call_id,
+            target_child_session_id,
+        )
+        if operation_id is None:
+            return None
+        reason = f"parent_operation:{sender_operation_id}"
+        operation_service = OperationService(self._store)
+        accepted = operation_service.request_cancellation(operation_id, reason=reason)
+        child = self._store.load_session(target_child_session_id)
+        state = self._store.load_run_state(operation_id)
+        if state is None:
+            raise StorageConflictError("child Operation 状态在取消竞争中消失")
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            return None
+        if not accepted and state.status != "cancelling":
+            accepted = operation_service.request_cancellation(
+                operation_id, reason=reason
+            )
+            state = self._store.load_run_state(operation_id)
+            if state is None:
+                raise StorageConflictError("child Operation 状态在重试取消中消失")
+            if state.status in {"succeeded", "failed", "cancelled"}:
+                return None
+            if not accepted and state.status != "cancelling":
+                raise StorageConflictError("child Operation 取消 CAS 冲突")
+        if (
+            child is not None
+            and child.active_operation_id == operation_id
+            and state is not None
+            and state.status == "cancelling"
+        ):
+            try:
+                await self._activate_session(target_child_session_id)
+            except Exception:
+                logger.exception(
+                    "Child Session 取消后激活失败，将由下次启动恢复兜底: session_id=%s",
+                    target_child_session_id,
+                )
+        return operation_id
 
     async def _activate_session(self, session_id: str) -> None:
         await self._host.activate_agent(session_id, self._store)

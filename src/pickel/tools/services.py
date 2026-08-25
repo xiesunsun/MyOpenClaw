@@ -78,6 +78,15 @@ class DelegationControl(Protocol):
         output: str,
     ) -> "InboxMessage": ...
 
+    async def cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+    ) -> str | None: ...
+
 
 @dataclass(frozen=True)
 class ToolServices:
