@@ -1,11 +1,13 @@
 from pathlib import Path
 import unittest
+from dataclasses import fields
 
 from pickel.tools.base import (
     ToolExecutionContext,
     ToolExecutionResult,
     tool,
 )
+from pickel.shared.execution_identity import ExecutionIdentity
 
 
 class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
@@ -28,7 +30,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
             {"name": "pickle"},
             ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path("/tmp/pickle"),
             ),
         )
@@ -64,7 +66,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
             {"value": "ping"},
             ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path("/tmp/pickle"),
             ),
         )
@@ -74,12 +76,37 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ToolServicesTests(unittest.TestCase):
+    def test_context_keeps_execution_identity_as_single_identity_field(self) -> None:
+        context = ToolExecutionContext(
+            agent_id="Pickle",
+            identity=ExecutionIdentity(
+                session_id="session-1",
+                operation_id="operation-1",
+                step_id="step-1",
+                step_sequence=2,
+                tool_call_id="tool-call-1",
+            ),
+            workspace_path=Path("/tmp/pickle"),
+        )
+
+        self.assertEqual(
+            {"agent_id", "identity", "workspace_path", "services"},
+            {item.name for item in fields(ToolExecutionContext)},
+        )
+        self.assertEqual("operation-1", context.identity.operation_id)
+        self.assertEqual("tool-call-1", context.identity.tool_call_id)
+        self.assertFalse(hasattr(context, "session_id"))
+        self.assertFalse(hasattr(context, "operation_id"))
+        self.assertFalse(hasattr(context, "step_id"))
+        self.assertFalse(hasattr(context, "step_sequence"))
+        self.assertFalse(hasattr(context, "tool_call_id"))
+
     def test_context_defaults_to_empty_services(self) -> None:
         from pickel.tools.services import ToolServices
 
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
         )
 
@@ -93,7 +120,7 @@ class ToolServicesTests(unittest.TestCase):
         services = ToolServices(workspace_files="fake-files", bash="fake-bash")
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
             services=services,
         )

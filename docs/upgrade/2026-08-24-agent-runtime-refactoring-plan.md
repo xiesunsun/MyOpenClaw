@@ -100,8 +100,9 @@ OperationDriver
 | 2.4 Host 控制面 | 完成 | `Agent.resume_operation(operation_id)` 精确身份恢复；cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`；`ToolReconciliationService` 对 `completed/not_started/unknown` 做单次 revision CAS，取消中的已完成结果经可恢复的两步 CAS 收敛 | 完整交互界面和 AgentRegistry 调度不在本批次 |
 | 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 与 Gemini 的 generate/stream、full trace snapshot 分别复用同一 request builder；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
 | 4.1 EventEnvelope 执行身份 | 完成 | 新增唯一 `ExecutionIdentity` 值对象；`EventEnvelope` 改为组合该身份，不再复制执行字段；Runtime Event、EventBus、Trace、CLI 与 Extension 调用方已迁移，扁平 JSON 增加 `tool_call_id/message_id` | Tool、Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
+| 4.2 Tool execution 执行身份 | 完成 | `ToolExecutionContext` 只组合 `ExecutionIdentity`，删除五个重复执行字段；Boot 在工具执行边界一次性组装完整身份，Shell 与 MCP Proxy 调用方已迁移；`tool_call_id` 继续作为默认幂等身份 | Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 
-第九轮验收基线：`768 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference` 和 `HookFeedback` 生产路径已删除。
+第十轮验收基线：`769 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference` 和 `HookFeedback` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

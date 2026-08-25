@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from pickel.skills.store import SkillStore
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.services import ToolServices
 from pickel.tools.skill_manage import SkillManageTool
@@ -19,7 +20,7 @@ def _context(tmp: Path, **kwargs) -> ToolExecutionContext:
     )
     return ToolExecutionContext(
         agent_id="Pickle",
-        session_id="s",
+        identity=ExecutionIdentity(session_id="s"),
         workspace_path=tmp,
         services=ToolServices(skill_store=store),
     )
@@ -91,7 +92,7 @@ class SkillManageToolTests(unittest.IsolatedAsyncioTestCase):
             tmp = Path(tmpdir)
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="s",
+                identity=ExecutionIdentity(session_id="s"),
                 workspace_path=tmp,
                 services=ToolServices(),
             )

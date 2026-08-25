@@ -736,7 +736,7 @@ class BashTool(BaseTool):
         timeout = arguments.get("timeout")
         try:
             result = await bash.exec(
-                session_id=context.session_id,
+                session_id=context.identity.session_id,
                 workspace_path=context.workspace_path,
                 command=str(arguments["command"]),
                 timeout=float(timeout) if timeout is not None else None,

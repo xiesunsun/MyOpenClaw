@@ -51,11 +51,11 @@ class McpProxyTool(BaseTool):
                     arguments,
                     host_calls=host_calls,
                     call_context=HostCallContext(
-                        session_id=context.session_id,
-                        operation_id=context.operation_id,
-                        step_id=context.step_id,
-                        step_sequence=context.step_sequence,
-                        tool_call_id=context.tool_call_id,
+                        session_id=context.identity.session_id,
+                        operation_id=context.identity.operation_id or "",
+                        step_id=context.identity.step_id or "",
+                        step_sequence=context.identity.step_sequence,
+                        tool_call_id=context.identity.tool_call_id,
                     ),
                 )
         except asyncio.TimeoutError:

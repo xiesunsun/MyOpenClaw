@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pickel.tools.base import ToolExecutionContext
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.services import ToolServices
@@ -62,7 +63,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         bash = _RecordingBash()
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/workspace"),
             services=ToolServices(bash=bash),
         )
@@ -87,7 +88,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             (workspace / "nested").mkdir()
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=workspace,
                 services=ToolServices(bash=bash),
             )
@@ -95,7 +96,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 first = await tool.execute({"command": "cd nested"}, context)
                 second = await tool.execute({"command": "pwd"}, context)
             finally:
-                bash.close(context.session_id)
+                bash.close(context.identity.session_id)
 
         self.assertFalse(first.is_error)
         self.assertEqual(str((workspace / "nested").resolve()), second.content.strip())
@@ -112,7 +113,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=bash),
             )
@@ -121,7 +122,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                     {"command": "exit_code=7; (exit $exit_code)"}, context
                 )
             finally:
-                bash.close(context.session_id)
+                bash.close(context.identity.session_id)
 
         self.assertFalse(result.is_error)
         self.assertEqual(7, result.structured_content["exit_code"])
@@ -134,7 +135,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=bash),
             )
@@ -144,7 +145,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 )
                 after = await tool.execute({"command": "echo alive"}, context)
             finally:
-                bash.close(context.session_id)
+                bash.close(context.identity.session_id)
 
         self.assertFalse(timed_out.is_error)
         self.assertTrue(timed_out.structured_content["timed_out"])
@@ -291,7 +292,7 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=manager),
             )
@@ -300,7 +301,7 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
                     {"command": "echo ok; echo bad >&2"}, context
                 )
             finally:
-                manager.close(context.session_id)
+                manager.close(context.identity.session_id)
 
         self.assertIn("ok", result.content)
         self.assertIn("--- stderr ---", result.content)
@@ -348,7 +349,7 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=manager),
             )
@@ -358,7 +359,7 @@ class EventLoopNotBlockedTests(unittest.IsolatedAsyncioTestCase):
                 ticks_during = ticks
             finally:
                 ticker_task.cancel()
-                manager.close(context.session_id)
+                manager.close(context.identity.session_id)
 
         self.assertGreaterEqual(ticks_during, 8)
 
@@ -405,7 +406,7 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=FailingBash()),
             )
@@ -420,7 +421,7 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as tmpdir:
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="session-1",
+                identity=ExecutionIdentity(session_id="session-1"),
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=manager),
             )
@@ -428,6 +429,6 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
                 await tool.execute({"command": "mkdir -p ./build"}, context)
                 result = await tool.execute({"command": "rm -rf ./build"}, context)
             finally:
-                manager.close(context.session_id)
+                manager.close(context.identity.session_id)
 
         self.assertFalse(result.is_error)

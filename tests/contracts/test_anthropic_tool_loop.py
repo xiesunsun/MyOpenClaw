@@ -26,6 +26,7 @@ from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.tools.base import (
@@ -149,12 +150,14 @@ def _build_agent(
         )
         context = ToolExecutionContext(
             agent_id=package.agent_id,
-            session_id=operation.session_id,
+            identity=ExecutionIdentity(
+                session_id=operation.session_id,
+                operation_id=operation.operation_id,
+                step_id=state.current_step.step_id,
+                step_sequence=state.current_step.step_sequence,
+                tool_call_id=tool_call_id,
+            ),
             workspace_path=operation.workspace_binding.working_directory,
-            operation_id=operation.operation_id,
-            step_id=state.current_step.step_id,
-            step_sequence=state.current_step.step_sequence,
-            tool_call_id=tool_call_id,
         )
         return await tool.execute(dict(call.arguments), context)
 

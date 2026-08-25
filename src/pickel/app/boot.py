@@ -43,6 +43,7 @@ from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
 from pickel.tools.base import ToolExecutionContext, ToolExecutionResult
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
@@ -392,7 +393,13 @@ class Boot:
                 )
             context = ToolExecutionContext(
                 agent_id=agent_id,
-                session_id=operation.session_id,
+                identity=ExecutionIdentity(
+                    session_id=operation.session_id,
+                    operation_id=operation.operation_id,
+                    step_id=state.current_step.step_id,
+                    step_sequence=state.current_step.step_sequence,
+                    tool_call_id=tool_call_id,
+                ),
                 workspace_path=workspace_root,
                 services=ToolServices(
                     workspace_files=services.workspace_files,
@@ -401,10 +408,6 @@ class Boot:
                     host_calls=host_calls,
                     artifact_service=artifact_service,
                 ),
-                operation_id=operation.operation_id,
-                step_id=state.current_step.step_id,
-                step_sequence=state.current_step.step_sequence,
-                tool_call_id=tool_call_id,
             )
             try:
                 return await entry.tool.execute(dict(call.arguments), context)

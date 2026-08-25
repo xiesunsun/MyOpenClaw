@@ -12,6 +12,7 @@ from pickel.extensions.mcp.runtime import McpServerRuntime
 from pickel.extensions.mcp.connection import McpConnectionError
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionContext
 from pickel.tools.bus import ToolBus, ToolSource
 from pickel.tools.services import ToolServices
@@ -38,16 +39,18 @@ def _host(bus: ToolBus) -> ExtensionHost:
 def _context(*, host_calls=None, artifact_service=None) -> ToolExecutionContext:
     return ToolExecutionContext(
         agent_id="Pickle",
-        session_id="s",
+        identity=ExecutionIdentity(
+            session_id="s",
+            operation_id="operation-1",
+            step_id="step-1",
+            step_sequence=1,
+            tool_call_id="tool-call-1",
+        ),
         workspace_path=Path("/tmp"),
         services=ToolServices(
             host_calls=host_calls,
             artifact_service=artifact_service,
         ),
-        operation_id="operation-1",
-        step_id="step-1",
-        step_sequence=1,
-        tool_call_id="tool-call-1",
     )
 
 

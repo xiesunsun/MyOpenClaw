@@ -7,6 +7,7 @@ from unittest import mock
 from uuid import uuid4
 
 from pickel.tools.base import ToolExecutionContext
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.sandbox import SandboxPolicy, SandboxSettings
 from pickel.tools.services import ToolServices
 from pickel.tools.shell import (
@@ -180,7 +181,7 @@ class SandboxMetadataTests(unittest.IsolatedAsyncioTestCase):
             manager = LocalBashOperations(sandbox=_policy(tmp))
             context = ToolExecutionContext(
                 agent_id="Pickle",
-                session_id="s",
+                identity=ExecutionIdentity(session_id="s"),
                 workspace_path=tmp,
                 services=ToolServices(bash=manager),
             )
@@ -189,4 +190,4 @@ class SandboxMetadataTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(HAS_OS_SANDBOX, result.metadata["sandboxed"])
             finally:
-                manager.close(context.session_id)
+                manager.close(context.identity.session_id)

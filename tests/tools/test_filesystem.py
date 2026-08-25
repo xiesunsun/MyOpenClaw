@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pickel.tools.base import ToolExecutionContext
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.file_tools import (
@@ -25,7 +26,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
     ) -> ToolExecutionContext:
         return ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=workspace,
             services=ToolServices(
                 workspace_files=workspace_files
@@ -46,7 +47,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"path": "note.txt"},
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(
@@ -77,7 +78,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 },
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(
@@ -314,7 +315,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"path": "../secret.txt"},
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(
@@ -346,7 +347,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 },
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(workspace_files=workspace_files),
                 ),
@@ -359,7 +360,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 },
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(workspace_files=workspace_files),
                 ),
@@ -388,7 +389,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 },
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(
@@ -418,7 +419,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"path": str(external_file)},
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(

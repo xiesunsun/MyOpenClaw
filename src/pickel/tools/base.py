@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Optional, Union
 
 from pickel.observe.records import ErrorInfo
 from pickel.conversations.content_blocks import ToolResultContent
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.services import ToolServices
 
 ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
@@ -24,13 +25,9 @@ class ToolSpec:
 @dataclass(frozen=True)
 class ToolExecutionContext:
     agent_id: str
-    session_id: str
+    identity: ExecutionIdentity
     workspace_path: Path
     services: ToolServices = field(default_factory=ToolServices)
-    operation_id: str = ""
-    step_id: str = ""
-    step_sequence: int | None = None
-    tool_call_id: str = ""
 
 
 @dataclass

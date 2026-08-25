@@ -7,6 +7,7 @@ from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import builtin_tools, install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import WorkspacePathAccessPolicy
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.services import ToolServices
 
 
@@ -91,7 +92,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 {"path": "note.txt"},
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
                     services=ToolServices(
                         workspace_files=WorkspaceFileService(
@@ -129,7 +130,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
         control = _FakeActivationControl(allowed={"read_file", "bash"})
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
             services=ToolServices(activation_control=control),
         )
@@ -146,7 +147,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
         control = _FakeActivationControl(allowed={"read_file"}, disabled={"read_file"})
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
             services=ToolServices(activation_control=control),
         )
@@ -162,7 +163,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
         control = _FakeActivationControl(allowed={"read_file"})
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
             services=ToolServices(activation_control=control),
         )
@@ -178,7 +179,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
 
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
         )
 
@@ -192,7 +193,7 @@ class ToolSetActiveTests(unittest.IsolatedAsyncioTestCase):
         control = _FakeActivationControl(allowed={"read_file"})
         context = ToolExecutionContext(
             agent_id="Pickle",
-            session_id="session-1",
+            identity=ExecutionIdentity(session_id="session-1"),
             workspace_path=Path("/tmp/pickle"),
             services=ToolServices(activation_control=control),
         )
