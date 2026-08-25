@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.runtime.agent_driver import AgentDriveResult, AgentDriver
+from pickel.runtime.operation_driver import OperationDriveResult
 from pickel.runtime.agent_inbox import AgentInbox
 
 
@@ -52,6 +53,17 @@ class Agent:
     ) -> AgentDriveResult:
         return await self._driver.when_idle(
             session_id=self._session_id,
+            consume_delta=consume_delta,
+            host_calls=host_calls,
+        )
+
+    async def resume_operation(
+        self, operation_id: str, *, consume_delta=None, host_calls=None
+    ) -> OperationDriveResult:
+        """恢复当前 Session 的指定 Operation；不绕过 AgentDriver 校验。"""
+        return await self._driver.resume_operation(
+            session_id=self._session_id,
+            operation_id=operation_id,
             consume_delta=consume_delta,
             host_calls=host_calls,
         )

@@ -327,6 +327,13 @@ Driver 在提交 succeeded 前执行 stopping check：若存在 pending steer/in
 
 ## 10. 启动恢复
 
+Host 的显式恢复入口为 `Agent.resume_operation(operation_id)`，薄代理到
+`AgentDriver.resume_operation(session_id=..., operation_id=...)`。入口只读取并
+校验 Session 未归档且 `active_operation_id == operation_id`，随后直接调用现有
+OperationDriver；它不写 revision、不新增锁，也不接受其他 pending InboxMessage。
+waiting 原样返回，不能借 resume 绕过 Approval 或 reconciliation；实际状态变化
+仍由 OperationDriver 内的 revision CAS 负责。
+
 Host 启动时扫描：
 
 ```text

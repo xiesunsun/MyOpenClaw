@@ -207,6 +207,7 @@ Agent.followup()
 Agent.steer()
 Agent.inject()
 Agent.cancel()
+Agent.resume_operation(operation_id)
 Agent.when_idle()
 
 start_delegation() -> child_session_id

@@ -10,6 +10,7 @@ from pickel.conversations.conversation_session import ConversationSession
 from pickel.conversations.conversation_store import ConversationStore
 from pickel.inbox.store import InboxStore
 from pickel.operations.operation_service import AcceptedOperation, OperationService
+from pickel.persistence.errors import StorageConflictError
 from pickel.runtime.agent_inbox import AgentInbox
 from pickel.runtime.operation_driver import OperationDriveResult, OperationDriver
 from pickel.workspaces.workspace_binding import WorkspaceBinding
@@ -100,6 +101,32 @@ class AgentDriver:
         """推进一次，直到 OperationDriver 返回等待点或终态。"""
         return await self.drive_once(
             session_id=session_id,
+            consume_delta=consume_delta,
+            host_calls=host_calls,
+        )
+
+    async def resume_operation(
+        self,
+        *,
+        session_id: str,
+        operation_id: str,
+        consume_delta=None,
+        host_calls=None,
+    ) -> OperationDriveResult:
+        """按显式身份恢复 Session 当前接受的 Operation。
+
+        这是 Host 的窄恢复入口：先校验 Session 指针和归档状态，再把控制权
+        原样交给 OperationDriver。尤其不能把 waiting 状态转换成新的执行。
+        """
+        session = self._load_session(session_id)
+        if session.archived_at is not None:
+            raise StorageConflictError("已归档 Session 不能恢复 Operation")
+        if session.active_operation_id != operation_id:
+            raise StorageConflictError(
+                "Session.active_operation_id 与 operation_id 不匹配"
+            )
+        return await self._operation_driver.drive_operation(
+            operation_id,
             consume_delta=consume_delta,
             host_calls=host_calls,
         )
