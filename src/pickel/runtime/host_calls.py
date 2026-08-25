@@ -87,23 +87,6 @@ class HostCallClient(Protocol):
     ) -> HostCallOutcome[ResponseT]: ...
 
 
-class HostCallRecorder(Protocol):
-    def record_started(
-        self,
-        spec: HostCallSpec[Any, Any],
-        request: Any,
-        context: HostCallContext,
-    ) -> None | Awaitable[None]: ...
-
-    def record_finished(
-        self,
-        spec: HostCallSpec[Any, Any],
-        request: Any,
-        context: HostCallContext,
-        outcome: HostCallOutcome[Any],
-    ) -> None | Awaitable[None]: ...
-
-
 HostCallHandler: TypeAlias = Callable[
     [RequestT, HostCallContext], ResponseT | Awaitable[ResponseT]
 ]
@@ -171,8 +154,7 @@ class _HostCallClientView:
 class HostCallRouter:
     """单进程定向调用路由；不认识 UI、MCP、Session 或重试策略。"""
 
-    def __init__(self, recorder: HostCallRecorder | None = None) -> None:
-        self._recorder = recorder
+    def __init__(self) -> None:
         self._registrations: dict[tuple[str, int], _Registration] = {}
         self._pending: dict[str, _PendingCall] = {}
         self._next_registration_id = 0
@@ -239,12 +221,9 @@ class HostCallRouter:
                 message=f"重复的 Host call id: {context.call_id}",
             )
 
-        await self._record_started(spec, request, context)
         registration = self._registrations.get(spec.key)
         if registration is None:
-            outcome: HostCallOutcome[ResponseT] = HostCallUnavailable("no_handler")
-            await self._record_finished(spec, request, context, outcome)
-            return outcome
+            return HostCallUnavailable("no_handler")
 
         # 外部 handler 在独立 task 中执行；Router 不持锁跨越 await。
         task = asyncio.create_task(
@@ -267,10 +246,6 @@ class HostCallRouter:
             except asyncio.CancelledError:
                 if pending.cancel_reason is None:
                     task.cancel()
-                    outcome = HostCallCancelled("caller_cancelled")
-                    await asyncio.shield(
-                        self._record_finished(spec, request, context, outcome)
-                    )
                     raise
                 outcome = HostCallCancelled(pending.cancel_reason)
             except Exception as exc:  # noqa: BLE001 — handler 失败转成显式 outcome
@@ -284,7 +259,6 @@ class HostCallRouter:
                 else:
                     outcome = HostCallCompleted(response)
 
-            await self._record_finished(spec, request, context, outcome)
             return outcome
         finally:
             current = self._pending.get(context.call_id)
@@ -323,28 +297,3 @@ class HostCallRouter:
         if inspect.isawaitable(response):
             return await response
         return response
-
-    async def _record_started(
-        self,
-        spec: HostCallSpec[Any, Any],
-        request: Any,
-        context: HostCallContext,
-    ) -> None:
-        if self._recorder is None:
-            return
-        result = self._recorder.record_started(spec, request, context)
-        if inspect.isawaitable(result):
-            await result
-
-    async def _record_finished(
-        self,
-        spec: HostCallSpec[Any, Any],
-        request: Any,
-        context: HostCallContext,
-        outcome: HostCallOutcome[Any],
-    ) -> None:
-        if self._recorder is None:
-            return
-        result = self._recorder.record_finished(spec, request, context, outcome)
-        if inspect.isawaitable(result):
-            await result

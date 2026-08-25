@@ -34,17 +34,6 @@ SPEC = HostCallSpec(
 )
 
 
-class _Recorder:
-    def __init__(self) -> None:
-        self.records = []
-
-    def record_started(self, spec, request, context) -> None:
-        self.records.append(("started", spec.name, context.call_id))
-
-    def record_finished(self, spec, request, context, outcome) -> None:
-        self.records.append(("finished", spec.name, type(outcome).__name__))
-
-
 class HostCallRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_distinct_host_calls_share_tool_identity_but_have_unique_call_ids(
         self,
@@ -74,26 +63,6 @@ class HostCallRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(seen[0].call_id, seen[1].call_id)
         self.assertIs(seen[0].identity, identity)
         self.assertIs(seen[1].identity, identity)
-
-    async def test_routes_one_handler_and_records_before_return(self) -> None:
-        recorder = _Recorder()
-        router = HostCallRouter(recorder)
-        router.register(SPEC, lambda request, _ctx: _Response(request.value.upper()))
-
-        outcome = await router.client.call(
-            SPEC,
-            _Request("hello"),
-            HostCallContext(call_id="call-1"),
-        )
-
-        self.assertEqual(HostCallCompleted(_Response("HELLO")), outcome)
-        self.assertEqual(
-            [
-                ("started", "test.echo", "call-1"),
-                ("finished", "test.echo", "HostCallCompleted"),
-            ],
-            recorder.records,
-        )
 
     async def test_missing_handler_is_explicit(self) -> None:
         outcome = await HostCallRouter().client.call(

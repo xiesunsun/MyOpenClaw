@@ -120,7 +120,7 @@ OperationDriver
 | 6.3c-e `cancel_delegation` direct-child cancel | 完成 | SQLite/InMemory 原子验证当前 `cancel_delegation` intent、丢弃 sender Session 发往目标 child 的 pending AgentMessage，并返回 child 当时 active Operation；RuntimeHost 的 DelegationControl 复用 OperationService cancellation，active child 由 Host activate/wake，idle child 不激活 | 不归档/删除 Session，不新增 Delegation 状态或取消实体 |
 | 6.3d Parent Operation 后代级联取消 | 完成 | OperationService 在 parent CAS 进入 `cancelling` 后沿 AgentDelegation 图幂等 CAS 所有非终态后代；双 Store 在 `cancelling → cancelled` 事务内检查后代终态及祖先来源 pending child 消息；只 discard 真实后代的 AgentMessage，child 收敛后唤醒 direct parent，重启继续 reconciliation | 不新增取消实体、Manager 或通用图缓存 |
 
-第二十九轮验收基线：`912 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start、6.3c-b `send_message` direct-child followup、6.3c-c `list_agents` child snapshot、6.3c-d `report` child-to-parent report、6.3c-e `cancel_delegation`、6.3d 后代级联取消已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`，实际请求统一由 `RequestSnapshotRecord` 记录。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第三十轮验收基线：`911 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start、6.3c-b `send_message` direct-child followup、6.3c-c `list_agents` child snapshot、6.3c-d `report` child-to-parent report、6.3c-e `cancel_delegation`、6.3d 后代级联取消已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`，并移出无真实观测路径的 `HostCallRecorder`；实际请求统一由 `RequestSnapshotRecord` 记录。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 
@@ -393,7 +393,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 | 能力 | 处理原则 |
 | --- | --- |
 | RequestDigestEvent | 已删除；实际请求统一由 RequestSnapshotRecord 记录 |
-| HostCallRecorder | 接通真实调用，否则移出公共 API |
+| HostCallRecorder | 已移出公共 API；未接入真实观测路径 |
 | ActivationControl | 接入 RuntimeHost 启动路径，否则删除 |
 | AgentRunUsage | Provider 能提供则接通，否则暂不公开 |
 | `/model`、`/thinking` | 实现 Package 切换语义，否则隐藏 |
