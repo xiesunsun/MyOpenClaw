@@ -28,6 +28,7 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.sqlite_runtime_store import (
+    _LIST_BRANCH_NODES_SQL,
     SQLiteRuntimeStore,
     StorageIntegrityError,
     UnsupportedStorageSchemaError,
@@ -97,6 +98,101 @@ def _message(message_id: str = "message-1") -> InboxMessage:
         UserMessageSource(),
         now,
     )
+
+
+@pytest.mark.parametrize("node_count", (1_000, 10_000))
+def test_list_branch_nodes_handles_long_branches_and_session_isolation(
+    tmp_path: Path, node_count: int
+) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    _session(store, tmp_path)
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    store.create_session(
+        workspace=Workspace("workspace-2", second_root, now),
+        session=ConversationSession(
+            "session-2",
+            "agent-1",
+            "workspace-2",
+            second_root,
+            None,
+            None,
+            None,
+            None,
+            now,
+            now,
+            None,
+        ),
+    )
+    content_json = (
+        '{"content":[{"text":"branch","type":"text"}],'
+        '"payload_version":3,"role":"user"}'
+    )
+    rows = [
+        (
+            f"long-{index:05d}",
+            "session-1",
+            None if index == 0 else f"long-{index - 1:05d}",
+            "agent_message",
+            content_json,
+            now.isoformat(),
+        )
+        for index in range(node_count)
+    ]
+    with sqlite3.connect(store.db_path) as connection:
+        connection.executemany(
+            "INSERT INTO conversation_nodes "
+            "(node_id, session_id, parent_node_id, content_type, content_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        connection.execute(
+            "INSERT INTO conversation_nodes "
+            "(node_id, session_id, parent_node_id, content_type, content_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "other-0",
+                "session-2",
+                None,
+                "agent_message",
+                content_json,
+                now.isoformat(),
+            ),
+        )
+
+    leaf_id = f"long-{node_count - 1:05d}"
+    branch = store.list_branch_nodes("session-1", leaf_id)
+    assert len(branch) == node_count
+    assert branch[0].node_id == "long-00000"
+    assert branch[-1].node_id == leaf_id
+    assert [node.node_id for node in branch] == [
+        f"long-{index:05d}" for index in range(node_count)
+    ]
+    assert {node.session_id for node in branch} == {"session-1"}
+    assert [
+        node.node_id for node in store.list_branch_nodes("session-2", "other-0")
+    ] == ["other-0"]
+    assert store.list_branch_nodes("session-2", leaf_id) == ()
+
+
+def test_list_branch_nodes_query_uses_node_lookup_index(tmp_path: Path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    _session(store, tmp_path)
+    with sqlite3.connect(store.db_path) as connection:
+        details = [
+            str(row[3]).lower()
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN " + _LIST_BRANCH_NODES_SQL,
+                ("missing", "session-1", "session-1"),
+            )
+        ]
+    assert any(
+        "search parent" in detail
+        and ("node_id" in detail or "primary key" in detail or "autoindex" in detail)
+        for detail in details
+    ), details
+    assert not any("scan parent" in detail for detail in details), details
 
 
 def test_store_creates_only_v10_and_rejects_v9(tmp_path: Path) -> None:
@@ -341,6 +437,12 @@ def test_accept_operation_is_one_transaction_and_terminal_update_clears_pointer(
     assert store.load_node("message-1") is not None
     assert store.load_message("message-1").status == "claimed"  # type: ignore[union-attr]
     assert store.load_session("session-1").active_operation_id == "operation-1"  # type: ignore[union-attr]
+    with sqlite3.connect(store.db_path) as connection:
+        row = connection.execute(
+            "SELECT updated_at FROM agent_run_states WHERE operation_id = ?",
+            (operation.operation_id,),
+        ).fetchone()
+    assert row == (operation.accepted_at.isoformat(),)
 
     running = AgentRunState(
         "operation-1", 2, "running", None, 0, None, None, None, None
@@ -374,42 +476,6 @@ def test_accept_operation_is_one_transaction_and_terminal_update_clears_pointer(
             "SELECT updated_at FROM agent_run_states WHERE operation_id = 'operation-1'"
         ).fetchone()
     assert row == (finished_at.isoformat(),)
-
-
-def test_insert_run_state_reads_operation_accept_time(tmp_path: Path) -> None:
-    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
-    _session(store, tmp_path)
-    now = datetime(2026, 8, 25, 4, 5, 6, tzinfo=UTC)
-    node = ConversationNode(
-        "node-1",
-        "session-1",
-        None,
-        "agent_message",
-        UserMessage((TextBlock("input"),)),
-        now,
-    )
-    assert store.append_node(node=node, expected_node_id=None)
-    package = _package()
-    store.insert_agent_package_version(package)
-    operation = SessionOperation(
-        "operation-standalone",
-        "session-1",
-        package.package_version_id,
-        WorkspaceBinding("workspace-1", tmp_path, None),
-        "node-1",
-        now,
-    )
-    store.insert_operation(operation)
-    state = AgentRunState(
-        operation.operation_id, 1, "queued", None, 0, None, None, None, None
-    )
-    store.insert_run_state(state)
-    with sqlite3.connect(store.db_path) as connection:
-        row = connection.execute(
-            "SELECT updated_at FROM agent_run_states WHERE operation_id = ?",
-            (operation.operation_id,),
-        ).fetchone()
-    assert row == (now.isoformat(),)
 
 
 @pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])

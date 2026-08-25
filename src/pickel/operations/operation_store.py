@@ -39,5 +39,5 @@ class OperationStore(Protocol):
         node: ConversationNode | None,
         updated_at: datetime,
     ) -> bool:
-        """原子提交可选 ConversationNode 与 AgentRunState CAS。"""
+        """唯一 State CAS、可选 ConversationNode 与 Session 指针原子入口。"""
         ...

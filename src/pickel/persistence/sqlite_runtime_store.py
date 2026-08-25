@@ -44,6 +44,23 @@ class UnsupportedStorageSchemaError(RuntimeError):
 
 _PACKAGE_ID = re.compile(r"^agentpkg_[0-9a-f]{64}$")
 
+_LIST_BRANCH_NODES_SQL = """
+    WITH RECURSIVE branch(node_id, parent_node_id, depth) AS (
+        SELECT node_id, parent_node_id, 0
+        FROM conversation_nodes
+        WHERE node_id = ? AND session_id = ?
+        UNION ALL
+        SELECT parent.node_id, parent.parent_node_id, branch.depth + 1
+        FROM conversation_nodes AS parent
+        JOIN branch ON parent.node_id = branch.parent_node_id
+        WHERE parent.session_id = ?
+    )
+    SELECT n.*
+    FROM conversation_nodes AS n
+    JOIN branch AS b ON b.node_id = n.node_id
+    ORDER BY b.depth DESC
+"""
+
 
 class SQLiteRuntimeStore:
     """Conversation、Inbox、Operation 等 v10 实体的直接 SQLite 适配器。"""
@@ -256,22 +273,7 @@ class SQLiteRuntimeStore:
             return ()
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                WITH RECURSIVE branch(node_id, depth) AS (
-                    SELECT node_id, 0 FROM conversation_nodes
-                    WHERE node_id = ? AND session_id = ?
-                    UNION ALL
-                    SELECT parent.node_id, branch.depth + 1
-                    FROM conversation_nodes parent JOIN branch
-                      ON parent.node_id = (
-                          SELECT parent_node_id FROM conversation_nodes
-                          WHERE node_id = branch.node_id
-                      )
-                    WHERE parent.session_id = ?
-                )
-                SELECT n.* FROM conversation_nodes n JOIN branch b
-                  ON b.node_id = n.node_id ORDER BY b.depth DESC
-                """,
+                _LIST_BRANCH_NODES_SQL,
                 (leaf_node_id, session_id, session_id),
             ).fetchall()
         return tuple(self._node_from_row(row) for row in rows)
@@ -653,25 +655,6 @@ class SQLiteRuntimeStore:
             ).fetchall()
         return tuple(self._operation_from_row(row) for row in rows)
 
-    def insert_operation(self, operation: SessionOperation) -> None:
-        self._ensure_schema()
-        with self._connect() as connection:
-            self._validate_operation_refs(connection, operation)
-            try:
-                connection.execute(
-                    "INSERT INTO session_operations VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        operation.operation_id,
-                        operation.session_id,
-                        operation.agent_package_version_id,
-                        self._binding_json(operation),
-                        operation.input_node_id,
-                        operation.accepted_at.isoformat(),
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise StorageIntegrityError("SessionOperation 写入失败") from exc
-
     def load_run_state(self, operation_id: str) -> AgentRunState | None:
         self._ensure_schema()
         with self._connect() as connection:
@@ -679,25 +662,6 @@ class SQLiteRuntimeStore:
                 "SELECT * FROM agent_run_states WHERE operation_id = ?", (operation_id,)
             ).fetchone()
         return self._run_state_from_row(row) if row is not None else None
-
-    def insert_run_state(self, state: AgentRunState) -> None:
-        self._ensure_schema()
-        try:
-            with self._connect() as connection:
-                operation_row = connection.execute(
-                    "SELECT accepted_at FROM session_operations WHERE operation_id = ?",
-                    (state.operation_id,),
-                ).fetchone()
-                if operation_row is None:
-                    raise StorageIntegrityError("SessionOperation 不存在")
-                connection.execute(
-                    "INSERT INTO agent_run_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    self._run_state_values(
-                        state, updated_at=_time(operation_row["accepted_at"])
-                    ),
-                )
-        except sqlite3.IntegrityError as exc:
-            raise StorageIntegrityError("AgentRunState 写入失败") from exc
 
     def commit_run_transition(
         self,
@@ -707,7 +671,7 @@ class SQLiteRuntimeStore:
         node: ConversationNode | None,
         updated_at: datetime,
     ) -> bool:
-        """原子提交可选 Node、State CAS 与 Session 指针。"""
+        """唯一 State CAS、可选 Node 与 Session 指针原子提交入口。"""
         self._ensure_schema()
         if state.revision != expected_revision + 1:
             raise StorageIntegrityError(

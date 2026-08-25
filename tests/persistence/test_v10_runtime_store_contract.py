@@ -377,8 +377,11 @@ def test_cross_session_operation_and_artifact_references_are_rejected(
     cross_session = _operation(
         "operation-2", "session-2", package, "node-1", "workspace-2", tmp_path / "two"
     )
-    with pytest.raises(StorageIntegrityError):
-        store.insert_operation(cross_session)
+    assert not store.accept_operation(
+        operation=cross_session,
+        state=_queued("operation-2"),
+        expected_node_id=None,
+    )
 
     artifact_id = "artifact_" + "a" * 64
     artifact_message = UserMessage(
@@ -472,3 +475,14 @@ def test_delete_and_delete_tree_enforce_delegation_preconditions(
     assert store.load_session("parent") is None
     assert store.load_session("child") is None
     assert store.load_delegation("child") is None
+
+
+def test_startup_and_recovery_paths_do_not_query_operation_history() -> None:
+    import inspect
+
+    from pickel.app.runtime_host import RuntimeHost
+    from pickel.runtime.agent_driver import AgentDriver
+    from pickel.runtime.operation_driver import OperationDriver
+
+    for owner in (AgentDriver, OperationDriver, RuntimeHost):
+        assert "list_operations(" not in inspect.getsource(owner)

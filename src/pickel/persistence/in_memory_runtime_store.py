@@ -452,35 +452,9 @@ class InMemoryRuntimeStore:
             )
             return tuple(values)
 
-    def insert_operation(self, operation: SessionOperation) -> None:
-        with self._lock:
-            self._validate_operation_unlocked(operation)
-            if operation.operation_id in self._operations:
-                if self._operations[operation.operation_id] == operation:
-                    return
-                raise StorageIntegrityError(
-                    f"SessionOperation 已存在: {operation.operation_id}"
-                )
-            self._operations[operation.operation_id] = operation
-
     def load_run_state(self, operation_id: str) -> AgentRunState | None:
         with self._lock:
             return self._run_states.get(operation_id)
-
-    def insert_run_state(self, state: AgentRunState) -> None:
-        with self._lock:
-            if state.operation_id not in self._operations:
-                raise StorageIntegrityError(
-                    f"SessionOperation 不存在: {state.operation_id}"
-                )
-            if state.operation_id in self._run_states:
-                if self._run_states[state.operation_id] == state:
-                    return
-                raise StorageIntegrityError(
-                    f"AgentRunState 已存在: {state.operation_id}"
-                )
-            self._validate_state_nodes_unlocked(state)
-            self._run_states[state.operation_id] = state
 
     def commit_run_transition(
         self,
@@ -490,7 +464,7 @@ class InMemoryRuntimeStore:
         node: ConversationNode | None,
         updated_at: datetime,
     ) -> bool:
-        """原子提交可选 Node、State 和 Session 指针。"""
+        """唯一 State CAS、可选 Node 与 Session 指针原子提交入口。"""
         with self._lock:
             current = self._run_states.get(state.operation_id)
             if current is None or current.revision != expected_revision:
