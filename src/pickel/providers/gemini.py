@@ -62,13 +62,18 @@ class GeminiProvider(Provider):
         )
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
-        config = self._build_generate_config(context)
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=self._build_contents(context.messages),
-            config=config,
-        )
+        request = self._build_generate_request(context)
+        response = await self.client.aio.models.generate_content(**request)
         return self._response_to_assistant_message(response)
+
+    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
+        """返回 generate_content 实际请求的 JSON-safe 快照。"""
+        request = self._build_generate_request(context)
+        return {
+            "model": request["model"],
+            "contents": self._dump_models(request["contents"]),
+            "config": self._dump_model(request["config"]),
+        }
 
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         request_dict = self._build_count_tokens_request(context)
@@ -95,6 +100,14 @@ class GeminiProvider(Provider):
     @classmethod
     def _count_tokens_retry_delay(cls, attempt: int) -> float:
         return cls.COUNT_TOKENS_RETRY_BASE_DELAY_S * (2**attempt)
+
+    def _build_generate_request(self, context: ModelContext) -> dict[str, Any]:
+        """构造 generate_content 使用的唯一请求参数。"""
+        return {
+            "model": self.model,
+            "contents": self._build_contents(context.messages),
+            "config": self._build_generate_config(context),
+        }
 
     def _build_generate_config(
         self,
