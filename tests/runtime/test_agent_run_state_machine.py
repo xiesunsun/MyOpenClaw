@@ -352,6 +352,56 @@ def test_waiting_requires_matching_recovery_reason_and_tool_state() -> None:
         )
 
 
+def test_multiple_approvals_can_be_decided_one_at_a_time() -> None:
+    machine = AgentRunStateMachine()
+    timestamp = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    approval = ToolApproval(timestamp, "tool_policy", "needs approval", None)
+    first = _awaiting_tools(status="waiting_approval", approval=approval).tool_calls[0]
+    second = ToolCallState(
+        "tool-2",
+        "echo",
+        {},
+        "waiting_approval",
+        approval,
+        "safe",
+        None,
+        None,
+        None,
+        None,
+    )
+    current_step = ModelStepState(
+        "step-1", 1, "awaiting_tools", 0, None, "assistant-1", (first, second)
+    )
+    current = AgentRunState(
+        "operation-1", 2, "waiting", "tool_approval", 0, current_step, None, None, None
+    )
+    approved = ToolApproval(
+        approval.requested_at,
+        approval.requested_by,
+        approval.reason,
+        ToolApprovalDecision("approved", timestamp, "user-1", None),
+    )
+    next_step = ModelStepState(
+        "step-1",
+        1,
+        "awaiting_tools",
+        0,
+        None,
+        "assistant-1",
+        (
+            ToolCallState(
+                "tool-1", "echo", {}, "ready", approved, "safe", None, None, None, None
+            ),
+            second,
+        ),
+    )
+    next_state = AgentRunState(
+        "operation-1", 3, "waiting", "tool_approval", 0, next_step, None, None, None
+    )
+
+    machine.validate_transition(current=current, next_state=next_state)
+
+
 @pytest.mark.parametrize(
     "old_status,new_status",
     [

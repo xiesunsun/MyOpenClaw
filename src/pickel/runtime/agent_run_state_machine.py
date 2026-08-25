@@ -31,7 +31,8 @@ class AgentRunStateMachine:
     _RUN_TRANSITIONS = {
         "queued": {"running", "cancelling", "failed"},
         "running": {"running", "waiting", "cancelling", "succeeded", "failed"},
-        "waiting": {"running", "cancelling", "failed"},
+        # 一个 Step 可以包含多个审批；逐个决定时仍保持 waiting。
+        "waiting": {"waiting", "running", "cancelling", "failed"},
         "cancelling": {"cancelled"},
         "succeeded": set(),
         "failed": set(),

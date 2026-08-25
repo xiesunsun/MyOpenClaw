@@ -90,16 +90,16 @@ OperationDriver
 | 批次 | 状态 | 已完成 | 尚未进入 |
 | --- | --- | --- | --- |
 | 0.1 测试入口 | 完成 | `pytest`、`pytest-cov`、Coverage、Black 纳入 dev 依赖；新环境可直接执行测试 | — |
-| 0.2 架构护栏 | 部分完成 | Extension setup 回滚、冻结 Package 身份拒绝替换、实际 ModelContext/请求快照一致性、Session tree 删除 | Approval 并发 CAS、后代级联取消随对应实现批次补齐 |
+| 0.2 架构护栏 | 部分完成 | Extension setup 回滚、冻结 Package 身份拒绝替换、实际 ModelContext/请求快照一致性、Session tree 删除、多 Approval 与 cancel 竞争使用 revision CAS | 后代级联取消随对应实现批次补齐 |
 | 1.1 Extension 隔离贡献集 | 完成 | setup 写入 draft，成功后统一发布；失败执行 LIFO disposer；Tool、Hook、Recall、Event Processor、Provider 和 MCP status 不残留半激活状态 | Registry Lease、ExtensionInstance 和 RuntimeGeneration 属于 1.2，不由本批次提前实现 |
 | 1.2 RuntimeGeneration reload | 完成 | 精确 Contribution Lease、ExtensionInstance、独立 ToolBus/Registry、原子切换、旧代引用保留与延迟关闭；MCP 删除模块级装载状态 | 跨进程恢复仍按阶段 2 使用冻结 Package 重建，不持久化 `generation_id` |
 | 1.3a SQLite v10 最小垂直切片 | 完成 | v10 schema、v9 一次性迁移、双 Store 领域合同、Session/Node、Inbox、Operation/AgentRunState、Package、Artifact、App 调用方切换 | v9 解析仅保留在一次性迁移模块 |
 | 1.3b Session 删除语义 | 完成 | 单 Session 与显式子树删除前置条件、双 Store 一致性；旧 Object/Reference 生产模块与测试已删除 | 后代取消属于阶段 6 |
 | 2.0 Agent Package v10 | Loader 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 当前 Config 仅能构建 primary，worker/utility 的配置来源归入配置升级批次 |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
-| 2.4 Host 控制面 | 部分完成 | cancel 持久化入口与 Agent Inbox 唤醒链 | `resume_operation` / `reconcile_tool_call` 显式入口 |
+| 2.4 Host 控制面 | 部分完成 | cancel 持久化入口；`ApprovalService` 的待审批投影、完整 Step/Tool 身份、单次 revision CAS、幂等决定与最后审批唤醒；Driver 按原始顺序生成 denied ToolResult | Tool Policy/Hook 产生 `waiting_approval` 的入口，以及 `resume_operation` / `reconcile_tool_call` 显式入口 |
 
-第三轮验收基线：`725 passed, 4 skipped`，最近一次整体覆盖率 76%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject` 和 `NamedReference` 生产路径已删除。
+第三轮验收基线：`738 passed, 4 skipped`，整体覆盖率 77%，Black 与 `git diff --check` 通过。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject` 和 `NamedReference` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 

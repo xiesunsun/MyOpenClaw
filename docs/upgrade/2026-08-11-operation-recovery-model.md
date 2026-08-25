@@ -2,7 +2,7 @@
 
 **日期**：2026-08-11  
 **更新日期**：2026-08-25
-**状态**：目标合同；v10 恢复主链已实施，Approval 与 Host reconcile 控制面待完成
+**状态**：目标合同；v10 恢复主链与 Approval CAS 已实施，Host reconcile 控制面待完成
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
@@ -254,6 +254,13 @@ Driver CAS → waiting_approval
 多个审批可以逐个决定，但存在任意 waiting_approval 时 Driver 不执行 Tool。全部决定后，Driver 按 Provider ToolCall 原始顺序执行 ready 调用并为 denied 调用生成错误 ToolResult。
 
 相同决定可幂等成功；过期 revision、冲突决定、已取消 Operation 必须拒绝。不使用 per-session Lock 替代 CAS，不做忽略调用方前置条件的指数退避盲重试。
+
+当前 `ApprovalService.submit_tool_approval(operation_id, step_id, tool_call_id, ...)`
+以完整执行位置和 `expected_revision` 定位未决审批。相同
+`outcome + actor_id + reason` 的重复提交只返回已提交 State，不再次写入或唤醒；
+不同决定、旧 Step、未决状态上的旧 revision、取消中和终态 Operation 均返回冲突。
+一次 Step 的多个审批通过合法的 `waiting → waiting` 转换逐个提交，最后一个决定
+才原子恢复 `running` 并唤醒所属 Session。
 
 ## 8. Cancel 与级联取消
 

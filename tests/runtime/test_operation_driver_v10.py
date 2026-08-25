@@ -15,6 +15,8 @@ from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.operations.agent_run_state import (
     AgentRunState,
     ModelStepState,
+    ToolApproval,
+    ToolApprovalDecision,
     ToolCallState,
 )
 from pickel.operations.session_operation import SessionOperation
@@ -234,6 +236,79 @@ async def test_safe_and_never_tool_intent_recovery_have_different_outcomes():
             replay_policy=replay_policy,
         ).drive_operation("operation-1")
         assert ("executed" if executed else result.status) == expected
+
+
+@_run_async
+async def test_denied_tool_call_becomes_error_result_in_provider_order():
+    denied = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="run",
+        arguments={},
+        status="denied",
+        approval=ToolApproval(
+            requested_at=datetime.now(timezone.utc),
+            requested_by="tool_policy",
+            reason="需要用户确认",
+            decision=ToolApprovalDecision(
+                outcome="denied",
+                decided_at=datetime.now(timezone.utc),
+                actor_id="user-1",
+                reason="风险过高",
+            ),
+        ),
+        replay_policy="never",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    ready = replace(
+        denied,
+        tool_call_id="tool-2",
+        status="ready",
+        approval=None,
+        replay_policy="safe",
+    )
+    state = replace(
+        _queued_state(),
+        status="running",
+        current_step=ModelStepState(
+            step_id="step-1",
+            step_sequence=1,
+            phase="awaiting_tools",
+            request_attempt=1,
+            request_intent=None,
+            assistant_message_node_id="assistant-1",
+            tool_calls=(denied, ready),
+        ),
+    )
+    executed = []
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        executed.append(tool_call_id)
+        return SimpleNamespace(
+            content="ok", content_blocks=[], is_error=False, structured_content=None
+        )
+
+    operations = _Operations(state)
+    result = await _driver(
+        operations,
+        _Provider([AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert executed == ["tool-2"]
+    tool_results = [
+        node.content
+        for _, node in operations.transition_calls
+        if node is not None
+        and node.content_type == "agent_message"
+        and hasattr(node.content, "tool_call_id")
+    ]
+    assert [message.tool_call_id for message in tool_results] == ["tool-1", "tool-2"]
+    assert tool_results[0].is_error is True
+    assert tool_results[0].content[0].text == "工具调用未获批准：风险过高"
 
 
 @_run_async

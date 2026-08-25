@@ -266,8 +266,42 @@ class OperationDriver:
                     last_assistant,
                 )
 
-            ready = next(
-                (call for call in step.tool_calls if call.status == "ready"), None
+            pending = next(
+                (call for call in step.tool_calls if call.status != "completed"), None
+            )
+            if pending is not None and pending.status == "denied":
+                result_node_id = self._node_id()
+                completed = replace(
+                    pending,
+                    status="completed",
+                    result_node_id=result_node_id,
+                    is_error=True,
+                )
+                calls = tuple(
+                    (completed if call.tool_call_id == pending.tool_call_id else call)
+                    for call in step.tool_calls
+                )
+                decision = pending.approval.decision if pending.approval else None
+                reason = decision.reason if decision is not None else None
+                content = "工具调用未获批准"
+                if reason:
+                    content = f"{content}：{reason}"
+                state = self._commit(
+                    replace(
+                        state,
+                        current_step=replace(step, tool_calls=calls),
+                    ),
+                    state,
+                    message=_tool_result_message(
+                        pending,
+                        ToolExecutionResult(content=content, is_error=True),
+                    ),
+                    node_id=result_node_id,
+                )
+                continue
+
+            ready = (
+                pending if pending is not None and pending.status == "ready" else None
             )
             executable: ToolCallState | None = None
             if ready is not None:
@@ -291,13 +325,10 @@ class OperationDriver:
                     if call.tool_call_id == ready.tool_call_id
                 )
             else:
-                recorded = next(
-                    (
-                        call
-                        for call in step.tool_calls
-                        if call.status == "intent_recorded"
-                    ),
-                    None,
+                recorded = (
+                    pending
+                    if pending is not None and pending.status == "intent_recorded"
+                    else None
                 )
                 if recorded is not None and recorded.replay_policy == "never":
                     state = self._commit(
