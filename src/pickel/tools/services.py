@@ -69,6 +69,15 @@ class DelegationControl(Protocol):
         sender_tool_call_id: str,
     ) -> tuple["ChildAgentSnapshot", ...]: ...
 
+    async def send_child_report(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        output: str,
+    ) -> "InboxMessage": ...
+
 
 @dataclass(frozen=True)
 class ToolServices:

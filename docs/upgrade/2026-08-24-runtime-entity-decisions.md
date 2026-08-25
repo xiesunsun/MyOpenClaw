@@ -2061,6 +2061,8 @@ parent 后续任务使用 child `followup/steer`；child 报告使用 parent `st
 
 父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照不新增持久化字段；`wait_delegation` 保留为未来真正等待接口，不在本批伪装实现。
 
+child 的 `report` Tool 只接收必填 `output` 字符串，报告以 `Background subagent <child_session_id> reported:` 前缀包装为 parent 的 `steer` InboxMessage；不接收 parent、delivery 或终态参数，不结束 child 当前 Turn，也不代表 child 已完成。Store 从 sender Operation 得到 child Session，再沿该 Session 唯一 AgentDelegation 找到 direct parent；后续 child Operation 仍沿同一关系发送，不能越过一层。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生，重复请求在 target、delivery、message、source 一致时返回 existing，即使消息已处理或 parent 已归档；新消息写入归档 parent 被拒绝。首个接受事务校验当前 `report` ToolCall 的冻结 `output`，但 report 不绑定 child 终态，不新增 result/settlement 实体。durable append 后由 RuntimeHost activate 并显式 wake parent，激活失败保留已接受 Inbox，交由启动恢复兜底。
+
 child 的有效权限只能收窄：Parent 执行边界、child AgentPackage WorkspacePolicy 和 ToolPolicy 取交集；delegated child 第一阶段不允许通过交互式 approval 扩大权限。
 
 Delegation 深度从不可变父子图递归推导，并受 AgentRuntimePolicy.max_delegation_depth 约束，不在 Session 或 Delegation 重复保存 depth。

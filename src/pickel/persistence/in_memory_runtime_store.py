@@ -462,6 +462,128 @@ class InMemoryRuntimeStore:
             self._inbox[message_id] = stored
             return stored
 
+    def send_child_report(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        parent_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        """原子校验 child 直系父关系并追加 steer report。"""
+        with self._lock:
+            operation = self._operations.get(sender_operation_id)
+            if operation is None:
+                raise StorageIntegrityError("sender Operation 不存在")
+            sender = self._sessions.get(operation.session_id)
+            if sender is None:
+                raise StorageIntegrityError("sender Session 不存在")
+            delegation = self._delegations.get(operation.session_id)
+            if delegation is None:
+                raise StorageConflictError("只有 delegated child 才能 report")
+            parent_operation = self._operations.get(delegation.parent_operation_id)
+            parent = (
+                self._sessions.get(parent_operation.session_id)
+                if parent_operation is not None
+                else None
+            )
+            if parent_operation is None or parent is None:
+                raise StorageIntegrityError("report 的 parent Operation/Session 不存在")
+            if parent.session_id != parent_session_id:
+                raise StorageIntegrityError("report parent Session 路由不匹配")
+            expected_source = AgentMessageSource(
+                sender_session_id=operation.session_id,
+                sender_operation_id=sender_operation_id,
+                form="steer",
+            )
+            if source != expected_source:
+                raise StorageIntegrityError("report source 不匹配")
+            existing = self._inbox.get(message_id)
+            if existing is not None:
+                if (
+                    existing.session_id != parent_session_id
+                    or existing.delivery != "steer"
+                    or existing.message != message
+                    or existing.source != source
+                ):
+                    raise StorageConflictError("report 的稳定 ID 语义冲突")
+                return existing
+            if sender.active_operation_id != sender_operation_id:
+                raise StorageConflictError("sender Session 未指向 sender Operation")
+            state = self._run_states.get(sender_operation_id)
+            if state is None:
+                raise StorageIntegrityError("sender AgentRunState 不存在")
+            step = state.current_step
+            call = (
+                next(
+                    (
+                        item
+                        for item in step.tool_calls
+                        if item.tool_call_id == sender_tool_call_id
+                    ),
+                    None,
+                )
+                if step is not None
+                else None
+            )
+            expected_output = call.arguments.get("output") if call else None
+            expected_message = (
+                UserMessage(
+                    (
+                        TextBlock(
+                            f"Background subagent {operation.session_id} reported:\n"
+                            f"{expected_output}"
+                        ),
+                    )
+                )
+                if isinstance(expected_output, str)
+                else None
+            )
+            if (
+                step is None
+                or step.step_id != sender_step_id
+                or step.phase != "awaiting_tools"
+                or state.status != "running"
+                or call is None
+                or call.tool_name != "report"
+                or call.status != "intent_recorded"
+                or call.execution_intent is not None
+                or call.arguments != {"output": expected_output}
+                or expected_message != message
+            ):
+                raise StorageConflictError(
+                    "sender ToolCall 不是当前 report intent_recorded"
+                )
+            if parent.archived_at is not None:
+                raise StorageConflictError("归档 parent Session 不能接收新的 report")
+            self._validate_content_artifacts_unlocked(message)
+            sequence = (
+                max(
+                    (
+                        item.sequence
+                        for item in self._inbox.values()
+                        if item.session_id == parent_session_id
+                    ),
+                    default=0,
+                )
+                + 1
+            )
+            stored = InboxMessage(
+                message_id=message_id,
+                session_id=parent_session_id,
+                sequence=sequence,
+                delivery="steer",
+                message=message,
+                source=source,
+                created_at=created_at,
+            )
+            self._inbox[message_id] = stored
+            return stored
+
     def list_pending(
         self, *, session_id: str, delivery: str | None = None
     ) -> tuple[InboxMessage, ...]:

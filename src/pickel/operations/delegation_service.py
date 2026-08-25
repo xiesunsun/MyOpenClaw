@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pickel.agents.agent_package import AgentPackageVersion
 from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import AgentMessageSource, InboxMessage
 from pickel.operations.agent_delegation import AgentDelegation
@@ -75,6 +76,19 @@ class DelegationStore(Protocol):
         sender_step_id: str,
         sender_tool_call_id: str,
         target_child_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage: ...
+
+    def send_child_report(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        parent_session_id: str,
         message_id: str,
         message: UserMessage,
         source: AgentMessageSource,
@@ -246,6 +260,56 @@ class DelegationService:
             sender_step_id=sender_step_id,
             sender_tool_call_id=sender_tool_call_id,
             target_child_session_id=target_child_session_id,
+            message_id=message_id,
+            message=message,
+            source=source,
+            created_at=self._now(),
+        )
+
+    def send_child_report(
+        self,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        output: str,
+    ) -> InboxMessage:
+        """把 child 的自包含报告以 steer 投递给唯一 direct parent。"""
+        if not sender_operation_id or not sender_step_id or not sender_tool_call_id:
+            raise ValueError("sender Operation、Step 和 ToolCall 身份不能为空")
+        if not isinstance(output, str) or not output.strip():
+            raise ValueError("report output 不能为空")
+        operation = self._store.load_operation(sender_operation_id)
+        if operation is None:
+            raise StorageIntegrityError("sender Operation 不存在")
+        delegation = self._store.load_delegation(operation.session_id)
+        if delegation is None:
+            raise StorageConflictError("只有 delegated child 才能 report")
+        parent_operation = self._store.load_operation(delegation.parent_operation_id)
+        if parent_operation is None:
+            raise StorageIntegrityError("report 的 parent Operation 不存在")
+        parent_session = self._store.load_session(parent_operation.session_id)
+        if parent_session is None:
+            raise StorageIntegrityError("report 的 parent Session 不存在")
+        message_id = _agent_message_id(
+            sender_operation_id, sender_step_id, sender_tool_call_id
+        )
+        message = UserMessage(
+            (
+                TextBlock(
+                    f"Background subagent {operation.session_id} reported:\n{output}"
+                ),
+            )
+        )
+        source = AgentMessageSource(
+            sender_session_id=operation.session_id,
+            sender_operation_id=sender_operation_id,
+            form="steer",
+        )
+        return self._store.send_child_report(
+            sender_operation_id=sender_operation_id,
+            sender_step_id=sender_step_id,
+            sender_tool_call_id=sender_tool_call_id,
+            parent_session_id=parent_session.session_id,
             message_id=message_id,
             message=message,
             source=source,
@@ -447,6 +511,16 @@ class ChildAgentSnapshot:
 
 
 def _followup_message_id(
+    sender_operation_id: str, sender_step_id: str, sender_tool_call_id: str
+) -> str:
+    return _agent_message_id(
+        sender_operation_id,
+        sender_step_id,
+        sender_tool_call_id,
+    )
+
+
+def _agent_message_id(
     sender_operation_id: str, sender_step_id: str, sender_tool_call_id: str
 ) -> str:
     payload = json.dumps(

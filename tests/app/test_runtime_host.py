@@ -20,7 +20,7 @@ from pickel.app.runtime_models import ConversationRequest
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.extensions_host.loader import LoadResult
-from pickel.inbox.message import UserMessageSource
+from pickel.inbox.message import AgentMessageSource, InboxMessage, UserMessageSource
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import DelegateAgentIntent
@@ -298,6 +298,78 @@ def test_runtime_delegation_control_lists_children_without_activation() -> None:
     service_type.assert_called_once_with(store=store)
     host.activate_agent.assert_not_awaited()
     registry.wake.assert_not_called()
+
+
+def test_runtime_delegation_control_reports_to_parent_and_wakes() -> None:
+    store = object()
+    registry = SimpleNamespace(wake=Mock())
+    host = SimpleNamespace(activate_agent=AsyncMock(), agent_registry=registry)
+    stored = InboxMessage(
+        message_id="message-report",
+        session_id="parent-session",
+        sequence=2,
+        delivery="steer",
+        message=UserMessage((TextBlock("report"),)),
+        source=AgentMessageSource(
+            sender_session_id="child-session",
+            sender_operation_id="child-operation",
+            form="steer",
+        ),
+        created_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    service = SimpleNamespace(send_child_report=lambda *_args: stored)
+
+    with patch("pickel.app.runtime_host.DelegationService", return_value=service):
+        result = asyncio.run(
+            _RuntimeDelegationControl(host, store).send_child_report(
+                sender_operation_id="child-operation",
+                sender_step_id="report-step",
+                sender_tool_call_id="report-tool",
+                output="report",
+            )
+        )
+
+    assert result == stored
+    host.activate_agent.assert_awaited_once_with("parent-session", store)
+    registry.wake.assert_called_once_with("parent-session")
+
+
+def test_runtime_delegation_control_keeps_report_when_parent_activation_fails(
+    caplog,
+) -> None:
+    store = object()
+    host = SimpleNamespace(
+        activate_agent=AsyncMock(side_effect=RuntimeError("package unavailable")),
+        agent_registry=SimpleNamespace(wake=Mock()),
+    )
+    stored = InboxMessage(
+        message_id="message-report",
+        session_id="parent-session",
+        sequence=2,
+        delivery="steer",
+        message=UserMessage((TextBlock("report"),)),
+        source=AgentMessageSource(
+            sender_session_id="child-session",
+            sender_operation_id="child-operation",
+            form="steer",
+        ),
+        created_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    service = SimpleNamespace(send_child_report=lambda *_args: stored)
+
+    with patch("pickel.app.runtime_host.DelegationService", return_value=service):
+        result = asyncio.run(
+            _RuntimeDelegationControl(host, store).send_child_report(
+                sender_operation_id="child-operation",
+                sender_step_id="report-step",
+                sender_tool_call_id="report-tool",
+                output="report",
+            )
+        )
+
+    assert result == stored
+    assert "Parent Session 激活失败" in caplog.text
+    host.agent_registry.wake.assert_not_called()
 
 
 def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> None:

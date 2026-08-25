@@ -680,6 +680,180 @@ class SQLiteRuntimeStore:
                 connection.rollback()
                 raise
 
+    def send_child_report(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        parent_session_id: str,
+        message_id: str,
+        message: UserMessage,
+        source: AgentMessageSource,
+        created_at: datetime,
+    ) -> InboxMessage:
+        """原子校验 child 直系父关系并追加 steer report。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                operation_row = connection.execute(
+                    "SELECT * FROM session_operations WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                if operation_row is None:
+                    raise StorageIntegrityError("sender Operation 不存在")
+                sender_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (operation_row["session_id"],),
+                ).fetchone()
+                if sender_row is None:
+                    raise StorageIntegrityError("sender Session 不存在")
+                parent_row = connection.execute(
+                    """
+                    SELECT op.* FROM agent_delegations AS d
+                    JOIN session_operations AS op
+                      ON op.operation_id = d.parent_operation_id
+                    WHERE d.child_session_id = ?
+                    """,
+                    (operation_row["session_id"],),
+                ).fetchone()
+                if parent_row is None:
+                    raise StorageConflictError("只有 delegated child 才能 report")
+                if parent_row["session_id"] != parent_session_id:
+                    raise StorageIntegrityError("report parent Session 路由不匹配")
+                parent_session_row = connection.execute(
+                    "SELECT * FROM conversation_sessions WHERE session_id = ?",
+                    (parent_session_id,),
+                ).fetchone()
+                if parent_session_row is None:
+                    raise StorageIntegrityError("report 的 parent Session 不存在")
+                expected_source = AgentMessageSource(
+                    sender_session_id=str(operation_row["session_id"]),
+                    sender_operation_id=sender_operation_id,
+                    form="steer",
+                )
+                if source != expected_source:
+                    raise StorageIntegrityError("report source 不匹配")
+                existing_row = connection.execute(
+                    "SELECT * FROM agent_inbox_messages WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._message_from_row(existing_row)
+                    if (
+                        existing.session_id != parent_session_id
+                        or existing.delivery != "steer"
+                        or existing.message != message
+                        or existing.source != source
+                    ):
+                        raise StorageConflictError("report 的稳定 ID 语义冲突")
+                    connection.commit()
+                    return existing
+                if sender_row["active_operation_id"] != sender_operation_id:
+                    raise StorageConflictError("sender Session 未指向 sender Operation")
+                state_row = connection.execute(
+                    "SELECT * FROM agent_run_states WHERE operation_id = ?",
+                    (sender_operation_id,),
+                ).fetchone()
+                if state_row is None:
+                    raise StorageIntegrityError("sender AgentRunState 不存在")
+                state = self._run_state_from_row(state_row)
+                step = state.current_step
+                call = (
+                    next(
+                        (
+                            item
+                            for item in step.tool_calls
+                            if item.tool_call_id == sender_tool_call_id
+                        ),
+                        None,
+                    )
+                    if step is not None
+                    else None
+                )
+                expected_output = call.arguments.get("output") if call else None
+                expected_message = (
+                    UserMessage(
+                        (
+                            TextBlock(
+                                f"Background subagent {operation_row['session_id']} reported:\n"
+                                f"{expected_output}"
+                            ),
+                        )
+                    )
+                    if isinstance(expected_output, str)
+                    else None
+                )
+                if (
+                    step is None
+                    or step.step_id != sender_step_id
+                    or step.phase != "awaiting_tools"
+                    or state.status != "running"
+                    or call is None
+                    or call.tool_name != "report"
+                    or call.status != "intent_recorded"
+                    or call.execution_intent is not None
+                    or call.arguments != {"output": expected_output}
+                    or expected_message != message
+                ):
+                    raise StorageConflictError(
+                        "sender ToolCall 不是当前 report intent_recorded"
+                    )
+                if parent_session_row["archived_at"] is not None:
+                    raise StorageConflictError(
+                        "归档 parent Session 不能接收新的 report"
+                    )
+                self._validate_message_artifacts(connection, message)
+                sequence = int(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence), 0) + 1
+                        FROM agent_inbox_messages WHERE session_id = ?
+                        """,
+                        (parent_session_id,),
+                    ).fetchone()[0]
+                )
+                stored = InboxMessage(
+                    message_id=message_id,
+                    session_id=parent_session_id,
+                    sequence=sequence,
+                    delivery="steer",
+                    message=message,
+                    source=source,
+                    created_at=created_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_inbox_messages (
+                        message_id, session_id, sequence, delivery, message_json,
+                        status, claimed_operation_id, claimed_step_id, outcome_reason,
+                        created_at, handled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stored.message_id,
+                        stored.session_id,
+                        stored.sequence,
+                        stored.delivery,
+                        stored.message_payload_json(),
+                        stored.status,
+                        stored.claimed_operation_id,
+                        stored.claimed_step_id,
+                        stored.outcome_reason,
+                        stored.created_at.isoformat(),
+                        None,
+                    ),
+                )
+                connection.commit()
+                return stored
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise StorageIntegrityError("report 写入失败") from exc
+            except (StorageConflictError, StorageIntegrityError, ValueError, TypeError):
+                connection.rollback()
+                raise
+
     def load_message(self, message_id: str) -> InboxMessage | None:
         self._ensure_schema()
         with self._connect() as connection:

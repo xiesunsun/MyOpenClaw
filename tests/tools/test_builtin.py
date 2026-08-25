@@ -31,6 +31,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "delegate_agent",
                 "send_message",
                 "list_agents",
+                "report",
             },
             set(definitions),
         )

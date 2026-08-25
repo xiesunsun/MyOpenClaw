@@ -506,14 +506,16 @@ def _accept_child_operation(
     delegation_child_session_id: str,
     child_package_id: str,
     root: Path,
+    *,
+    operation_id: str = "child-operation",
+    input_node_id: str = "initial-message-1",
 ) -> str:
-    operation_id = "child-operation"
     operation = SessionOperation(
         operation_id=operation_id,
         session_id=delegation_child_session_id,
         agent_package_version_id=child_package_id,
         workspace_binding=WorkspaceBinding("workspace-1", root, root),
-        input_node_id="initial-message-1",
+        input_node_id=input_node_id,
         accepted_at=NOW,
     )
     state = AgentRunState(
@@ -539,12 +541,13 @@ def _set_child_state(
     state: AgentRunState,
     *,
     active: bool,
+    session_id: str = "child-session-1",
 ) -> None:
     if isinstance(store, InMemoryRuntimeStore):
         store._run_states[operation_id] = state
-        session = store.load_session("child-session-1")
+        session = store.load_session(session_id)
         assert session is not None
-        store._sessions["child-session-1"] = replace(
+        store._sessions[session_id] = replace(
             session, active_operation_id=operation_id if active else None
         )
         return
@@ -585,8 +588,301 @@ def _set_child_state(
         )
         connection.execute(
             "UPDATE conversation_sessions SET active_operation_id = ? WHERE session_id = ?",
-            (operation_id if active else None, "child-session-1"),
+            (operation_id if active else None, session_id),
         )
+
+
+def _switch_child_call_to_report(
+    store: Store,
+    output: str = "finding",
+    *,
+    operation_id: str = "child-operation",
+) -> None:
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    call = ToolCallState(
+        tool_call_id="report-tool",
+        tool_name="report",
+        arguments={"output": output},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    switched = replace(
+        current,
+        revision=current.revision + 1,
+        status="running",
+        current_step=ModelStepState(
+            step_id="report-step",
+            step_sequence=1,
+            phase="awaiting_tools",
+            request_attempt=0,
+            request_intent=None,
+            assistant_message_node_id="child-assistant",
+            tool_calls=(call,),
+        ),
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, current_step_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                switched.revision,
+                switched.status,
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                operation_id,
+            ),
+        )
+
+
+def _switch_child_call_to_delegate(
+    store: Store,
+    child_package_id: str,
+    *,
+    operation_id: str = "child-operation",
+    step_id: str = "delegate-step",
+    tool_call_id: str = "delegate-tool",
+) -> None:
+    current = store.load_run_state(operation_id)
+    assert current is not None
+    call = ToolCallState(
+        tool_call_id=tool_call_id,
+        tool_name="delegate_agent",
+        arguments={},
+        status="intent_recorded",
+        approval=None,
+        replay_policy="safe",
+        execution_intent=DelegateAgentIntent(child_package_id),
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    switched = replace(
+        current,
+        revision=current.revision + 1,
+        status="running",
+        current_step=ModelStepState(
+            step_id=step_id,
+            step_sequence=1,
+            phase="awaiting_tools",
+            request_attempt=0,
+            request_intent=None,
+            assistant_message_node_id="child-assistant",
+            tool_calls=(call,),
+        ),
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states[operation_id] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_run_states
+            SET revision = ?, status = ?, current_step_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                switched.revision,
+                switched.status,
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                operation_id,
+            ),
+        )
+
+
+def _clear_active_operation(store: Store, session_id: str) -> None:
+    session = store.load_session(session_id)
+    assert session is not None
+    if isinstance(store, InMemoryRuntimeStore):
+        store._sessions[session_id] = replace(session, active_operation_id=None)
+        return
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE conversation_sessions SET active_operation_id = NULL WHERE session_id = ?",
+            (session_id,),
+        )
+
+
+def test_send_child_report_is_steer_and_idempotent(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    _switch_child_call_to_report(store)
+
+    service = DelegationService(store=store, now=lambda: NOW)
+    first = service.send_child_report(
+        "child-operation", "report-step", "report-tool", "finding"
+    )
+    assert first.session_id == "session-1"
+    assert first.delivery == "steer"
+    assert first.sequence == 2
+    assert first.source == AgentMessageSource(
+        sender_session_id=delegation.child_session_id,
+        sender_operation_id="child-operation",
+        form="steer",
+    )
+    assert first.message == UserMessage(
+        (TextBlock("Background subagent child-session-1 reported:\nfinding"),)
+    )
+    with pytest.raises(StorageConflictError):
+        service.send_child_report(
+            "child-operation", "report-step", "report-tool", "different"
+        )
+    assert (
+        service.send_child_report(
+            "child-operation", "report-step", "report-tool", "finding"
+        )
+        == first
+    )
+
+
+def test_send_child_report_replays_after_claim_and_parent_archive(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    _switch_child_call_to_report(store)
+    service = DelegationService(store=store, now=lambda: NOW)
+    first = service.send_child_report(
+        "child-operation", "report-step", "report-tool", "finding"
+    )
+    assert store.claim_message(
+        message_id=first.message_id,
+        operation_id="operation-1",
+        step_id="step-1",
+        handled_at=NOW,
+    )
+    retry = service.send_child_report(
+        "child-operation", "report-step", "report-tool", "finding"
+    )
+    assert retry == store.load_message(first.message_id)
+    _clear_active_operation(store, "session-1")
+    store.archive_session(session_id="session-1", archived_at=NOW)
+    archived_retry = service.send_child_report(
+        "child-operation", "report-step", "report-tool", "finding"
+    )
+    assert archived_retry == store.load_message(first.message_id)
+
+
+def test_send_child_report_rejects_root_sender(store: Store, tmp_path: Path) -> None:
+    _setup(store, tmp_path / "workspace")
+    with pytest.raises(StorageConflictError):
+        DelegationService(store=store).send_child_report(
+            "operation-1", "step-1", "tool-1", "finding"
+        )
+
+
+def test_send_child_report_rejects_new_report_to_archived_parent(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _accept_child_operation(
+        store,
+        delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    _switch_child_call_to_report(store)
+    _clear_active_operation(store, "session-1")
+    store.archive_session(session_id="session-1", archived_at=NOW)
+    with pytest.raises(StorageConflictError):
+        DelegationService(store=store).send_child_report(
+            "child-operation", "report-step", "report-tool", "finding"
+        )
+
+
+def test_send_child_report_reaches_only_the_direct_parent(
+    store: Store, tmp_path: Path
+) -> None:
+    _, child_package = _setup(store, tmp_path / "workspace")
+    first_delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _accept_child_operation(
+        store,
+        first_delegation.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+    )
+    _switch_child_call_to_delegate(
+        store,
+        child_package.package_version_id,
+    )
+    grandchild = DelegationService(
+        store=store,
+        child_session_id_factory=lambda: "grandchild-session",
+        message_id_factory=lambda: "grandchild-message",
+        now=lambda: NOW,
+    ).start_delegation(
+        "child-operation",
+        "delegate-step",
+        "delegate-tool",
+        UserMessage((TextBlock("grandchild"),)),
+    )
+    _accept_child_operation(
+        store,
+        grandchild.child_session_id,
+        child_package.package_version_id,
+        tmp_path / "workspace",
+        operation_id="grandchild-operation",
+        input_node_id="grandchild-message",
+    )
+    _switch_child_call_to_report(
+        store,
+        "nested finding",
+        operation_id="grandchild-operation",
+    )
+
+    report_message = DelegationService(store=store, now=lambda: NOW).send_child_report(
+        "grandchild-operation", "report-step", "report-tool", "nested finding"
+    )
+    assert report_message.session_id == first_delegation.child_session_id
+    assert report_message.source == AgentMessageSource(
+        sender_session_id="grandchild-session",
+        sender_operation_id="grandchild-operation",
+        form="steer",
+    )
+    assert store.list_pending(session_id="session-1") == ()
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "waiting", "cancelling"])

@@ -72,7 +72,7 @@ class _RuntimeDelegationControl:
             message,
         )
         try:
-            await self._activate_child(delegation.child_session_id)
+            await self._activate_session(delegation.child_session_id)
         except Exception:
             logger.exception(
                 "Child Session 激活失败，将由下次启动恢复兜底: session_id=%s",
@@ -97,7 +97,7 @@ class _RuntimeDelegationControl:
             message,
         )
         try:
-            await self._activate_child(target_child_session_id)
+            await self._activate_session(target_child_session_id)
         except Exception:
             logger.exception(
                 "Child Session 激活失败，将由下次启动恢复兜底: session_id=%s",
@@ -118,7 +118,30 @@ class _RuntimeDelegationControl:
             sender_tool_call_id,
         )
 
-    async def _activate_child(self, session_id: str) -> None:
+    async def send_child_report(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        output: str,
+    ) -> InboxMessage:
+        stored = DelegationService(store=self._store).send_child_report(
+            sender_operation_id,
+            sender_step_id,
+            sender_tool_call_id,
+            output,
+        )
+        try:
+            await self._activate_session(stored.session_id)
+        except Exception:
+            logger.exception(
+                "Parent Session 激活失败，将由下次启动恢复兜底: session_id=%s",
+                stored.session_id,
+            )
+        return stored
+
+    async def _activate_session(self, session_id: str) -> None:
         await self._host.activate_agent(session_id, self._store)
         self._host.agent_registry.wake(session_id)
 

@@ -511,6 +511,38 @@ async def test_list_agents_is_safe_replay_without_a_new_intent_type():
 
 
 @_run_async
+async def test_report_is_safe_replay_without_a_new_intent_type():
+    tool_message = AssistantMessage(
+        content=(
+            ToolCallBlock(id="tool-1", name="report", arguments={"output": "finding"}),
+        )
+    )
+    seen = []
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        call = next(
+            item
+            for item in state.current_step.tool_calls
+            if item.tool_call_id == tool_call_id
+        )
+        seen.append((call.status, call.replay_policy, call.execution_intent))
+        return SimpleNamespace(
+            content="accepted", content_blocks=[], is_error=False, structured_content={}
+        )
+
+    result = await _driver(
+        _Operations(_queued_state()),
+        _Provider([tool_message, AssistantMessage(content=(TextBlock("done"),))]),
+        tool=execute_tool,
+        tool_name="report",
+        replay_policy="safe",
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert seen == [("intent_recorded", "safe", None)]
+
+
+@_run_async
 async def test_pre_tool_ask_freezes_updated_arguments_and_waits_for_approval():
     tool_message = AssistantMessage(
         content=(ToolCallBlock(id="tool-1", name="run", arguments={"old": True}),)
