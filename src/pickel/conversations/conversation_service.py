@@ -88,6 +88,17 @@ class ConversationService:
             )
         )
 
+    def list_branch_nodes(
+        self, *, session_id: str, leaf_node_id: str | None
+    ) -> list[ConversationNode]:
+        """按显式 leaf 投影单条分支；完整性错误交给 Store 向上报告。"""
+        self.load_conversation_session(session_id)
+        return list(
+            self._store.list_branch_nodes(
+                session_id=session_id, leaf_node_id=leaf_node_id
+            )
+        )
+
     def list_conversation_previews(
         self,
         *,

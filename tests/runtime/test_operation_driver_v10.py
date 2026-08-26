@@ -14,9 +14,16 @@ from pickel.context.model_context_builder import (
     ContextContributions,
     ModelContextBuilder,
 )
-from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ModelResponseMetadata,
+    ModelUsage,
+    UserMessage,
+)
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.operations.agent_run_state import (
+    AgentRunError,
     AgentRunState,
     DelegateAgentIntent,
     ModelStepState,
@@ -47,6 +54,91 @@ class _Conversation:
 
     def load_conversation_session(self, session_id):
         return SimpleNamespace(active_node_id=None)
+
+    def list_branch_nodes(self, *, session_id, leaf_node_id):
+        if leaf_node_id is None:
+            return ()
+        return [
+            ConversationNode(
+                node_id="node-1",
+                session_id=session_id,
+                parent_node_id=None,
+                content_type="agent_message",
+                content=UserMessage(),
+                created_at=datetime.now(timezone.utc),
+            ),
+            ConversationNode(
+                node_id=leaf_node_id,
+                session_id=session_id,
+                parent_node_id="node-1",
+                content_type="agent_message",
+                content=AssistantMessage(content=(TextBlock(text="done"),)),
+                created_at=datetime.now(timezone.utc),
+            ),
+        ]
+
+
+class _UsageConversation:
+    def __init__(self, nodes, *, active_leaf):
+        self.nodes = {node.node_id: node for node in nodes}
+        self.active_leaf = active_leaf
+        self.branch_calls = []
+
+    def load_conversation_session(self, session_id):
+        return SimpleNamespace(active_node_id=self.active_leaf)
+
+    def list_active_branch_nodes(self, *, session_id):
+        return self.list_branch_nodes(
+            session_id=session_id, leaf_node_id=self.active_leaf
+        )
+
+    def list_branch_nodes(self, *, session_id, leaf_node_id):
+        self.branch_calls.append(leaf_node_id)
+        if leaf_node_id is None:
+            return []
+        branch = []
+        current = leaf_node_id
+        while current is not None:
+            node = self.nodes[current]
+            branch.append(node)
+            current = node.parent_node_id
+        branch.reverse()
+        return branch
+
+
+def _usage_nodes():
+    metadata = ModelResponseMetadata(
+        provider="test",
+        model="model",
+        usage=ModelUsage(input_tokens=10, output_tokens=4),
+        elapsed_ms=12,
+    )
+    return (
+        ConversationNode(
+            node_id="node-1",
+            session_id="session-1",
+            parent_node_id=None,
+            content_type="agent_message",
+            content=UserMessage(),
+            created_at=datetime.now(timezone.utc),
+        ),
+        ConversationNode(
+            node_id="assistant-1",
+            session_id="session-1",
+            parent_node_id="node-1",
+            content_type="agent_message",
+            content=AssistantMessage(metadata=metadata),
+            created_at=datetime.now(timezone.utc),
+        ),
+        ConversationNode(
+            node_id="assistant-next-operation",
+            session_id="session-1",
+            parent_node_id="assistant-1",
+            content_type="agent_message",
+            content=AssistantMessage(metadata=metadata),
+            created_at=datetime.now(timezone.utc),
+        ),
+    )
 
 
 class _ContextBuilder:
@@ -161,6 +253,196 @@ async def test_recovered_cancelled_child_wakes_direct_parent():
 
     assert result.status == "cancelled"
     assert woken == ["parent-session"]
+
+
+@_run_async
+async def test_succeeded_recovery_projects_final_node_only():
+    conversation = _UsageConversation(
+        _usage_nodes(), active_leaf="assistant-next-operation"
+    )
+    state = replace(
+        _queued_state(), status="succeeded", final_assistant_node_id="assistant-1"
+    )
+    operations = _Operations(state)
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: pytest.fail("终态恢复不应加载 Package"),
+        effects_resolver=lambda _: pytest.fail("终态恢复不应解析 Effects"),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.usage is not None
+    assert result.usage.steps == 1
+    assert result.usage.input_tokens == 10
+    assert conversation.branch_calls == ["assistant-1"]
+
+
+@_run_async
+async def test_waiting_projects_current_active_leaf_as_partial_usage():
+    call = ToolCallState(
+        tool_call_id="tool-1",
+        tool_name="run",
+        arguments={},
+        status="waiting_approval",
+        approval=ToolApproval(
+            requested_at=datetime.now(timezone.utc),
+            requested_by="hook",
+            reason=None,
+            decision=None,
+        ),
+        replay_policy="safe",
+        execution_intent=None,
+        decision_reason=None,
+        result_node_id=None,
+        is_error=None,
+    )
+    state = replace(
+        _queued_state(),
+        status="waiting",
+        waiting_reason="tool_approval",
+        current_step=ModelStepState(
+            "step-1", 1, "awaiting_tools", 1, None, "assistant-1", (call,)
+        ),
+    )
+    conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
+    operations = _Operations(state)
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: _loaded_package().version,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=_Provider([AssistantMessage(content=(TextBlock("unused"),))])
+        ),
+        model_context_builder=_ContextBuilder(),
+    )
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "waiting"
+    assert result.usage is not None
+    assert result.usage.steps == 1
+    assert conversation.branch_calls == ["assistant-1"]
+
+
+@_run_async
+async def test_current_package_failure_captures_leaf_before_terminal_commit():
+    conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
+    operations = _Operations(_queued_state())
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: (_ for _ in ()).throw(
+            PackageLoadError(
+                "tool_unavailable", _operation().agent_package_version_id, "missing"
+            )
+        ),
+        effects_resolver=lambda _: pytest.fail("Package 失败后不能解析 Effects"),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.usage is not None
+    assert result.usage.steps == 1
+    assert conversation.branch_calls == ["assistant-1"]
+
+
+@_run_async
+async def test_current_max_steps_failure_captures_leaf_before_terminal_commit():
+    package = _loaded_package().version
+    package.runtime_policy = SimpleNamespace(max_model_steps=1, context_turn_window=8)
+    conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
+    operations = _Operations(
+        replace(_queued_state(), status="running", completed_step_count=1)
+    )
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=_Provider([AssistantMessage(content=(TextBlock("unused"),))])
+        ),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.usage is not None
+    assert result.usage.steps == 1
+    assert conversation.branch_calls == ["assistant-1"]
+
+
+class _CancellationOperations(_Operations):
+    def reconcile_cancellation(self, operation_id, *, reason):
+        return ()
+
+    def cancellation_ready(self, operation_id):
+        return True
+
+    def commit_transition(self, *, state, expected_revision, node, updated_at=None):
+        return super().commit_transition(
+            state=state, expected_revision=expected_revision, node=node
+        )
+
+
+@_run_async
+async def test_current_cancellation_captures_leaf_before_terminal_commit():
+    conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
+    state = replace(
+        _queued_state(),
+        status="cancelling",
+        cancellation=SimpleNamespace(cause="user requested"),
+    )
+    operations = _CancellationOperations(state)
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: _loaded_package().version,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=_Provider([AssistantMessage(content=(TextBlock("unused"),))])
+        ),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "cancelled"
+    assert result.usage is not None
+    assert result.usage.steps == 1
+    assert conversation.branch_calls == ["assistant-1"]
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+@_run_async
+async def test_historical_failure_or_cancellation_has_no_usage_endpoint(status):
+    conversation = _UsageConversation(
+        _usage_nodes(), active_leaf="assistant-next-operation"
+    )
+    state = replace(
+        _queued_state(),
+        status=status,
+        error=(
+            AgentRunError(code="test", message="test", retryable=False)
+            if status == "failed"
+            else None
+        ),
+        cancellation=(SimpleNamespace(cause="test") if status == "cancelled" else None),
+    )
+    operations = _Operations(state)
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: pytest.fail("历史终态不应加载 Package"),
+        effects_resolver=lambda _: pytest.fail("历史终态不应解析 Effects"),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.usage is None
+    assert conversation.branch_calls == []
 
 
 def _loaded_package(*, replay_policy="safe", input_schema=None, tool_name="run"):

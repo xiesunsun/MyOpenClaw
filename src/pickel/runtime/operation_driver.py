@@ -46,6 +46,7 @@ from pickel.operations.agent_run_state import (
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_service import OperationService
 from pickel.providers.stream import StreamDelta
+from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.shared.frozen_json import freeze_json_object
@@ -62,6 +63,10 @@ class OperationDriveResult:
     status: str
     state: AgentRunState
     assistant_message: AssistantMessage | None = None
+    usage: AgentRunUsage | None = None
+
+
+_AUTO_USAGE_LEAF = object()
 
 
 class OperationDriver:
@@ -106,11 +111,16 @@ class OperationDriver:
                 # Tool reconciliation 可能已经提交 child 终态；恢复 Driver 时仍要
                 # 推动 direct parent 重新检查后代门槛。
                 self._wake_parent(operation_id)
-            return OperationDriveResult(operation_id, state.status, state, None)
+            return self._result(
+                operation,
+                state,
+                usage_leaf=(_AUTO_USAGE_LEAF if state.status == "succeeded" else None),
+            )
         try:
             package = self._package_loader(operation.agent_package_version_id)
             effects = self._effects_resolver(operation.agent_package_version_id)
         except PackageLoadError as exc:
+            usage_leaf = self._current_reliable_leaf(operation)
             failed = replace(
                 state,
                 status="failed",
@@ -122,7 +132,11 @@ class OperationDriver:
                 ),
             )
             state = self._commit(failed, state)
-            return OperationDriveResult(operation_id, "failed", state, None)
+            return self._result(
+                operation,
+                state,
+                usage_leaf=usage_leaf,
+            )
         if package.package_version_id != operation.agent_package_version_id:
             raise RuntimeError("Package Loader 返回了错误的 AgentPackageVersion")
         last_assistant: AssistantMessage | None = None
@@ -131,13 +145,9 @@ class OperationDriver:
             if state.status in {"succeeded", "failed", "cancelled"}:
                 if state.status == "cancelled":
                     self._wake_parent(operation_id)
-                return OperationDriveResult(
-                    operation_id, state.status, state, last_assistant
-                )
+                return self._result(operation, state, last_assistant)
             if state.status == "waiting":
-                return OperationDriveResult(
-                    operation_id, "waiting", state, last_assistant
-                )
+                return self._result(operation, state, last_assistant)
 
             if state.status == "cancelling":
                 wake_sessions = self._operations.reconcile_cancellation(
@@ -158,13 +168,10 @@ class OperationDriver:
                     call.status == "intent_recorded" and call.replay_policy == "never"
                     for call in step.tool_calls
                 ):
-                    return OperationDriveResult(
-                        operation_id, "cancelling", state, last_assistant
-                    )
+                    return self._result(operation, state, last_assistant)
                 if not self._operations.cancellation_ready(operation_id):
-                    return OperationDriveResult(
-                        operation_id, "cancelling", state, last_assistant
-                    )
+                    return self._result(operation, state, last_assistant)
+                usage_leaf = self._current_reliable_leaf(operation)
                 cancelled = replace(state, status="cancelled", current_step=None)
                 if not self._operations.commit_transition(
                     state=replace(cancelled, revision=state.revision + 1),
@@ -176,13 +183,14 @@ class OperationDriver:
                     if refreshed.revision != state.revision:
                         state = refreshed
                         continue
-                    return OperationDriveResult(
-                        operation_id, "cancelling", state, last_assistant
-                    )
+                    return self._result(operation, state, last_assistant)
                 state = replace(cancelled, revision=state.revision + 1)
                 self._wake_parent(operation_id)
-                return OperationDriveResult(
-                    operation_id, "cancelled", state, last_assistant
+                return self._result(
+                    operation,
+                    state,
+                    last_assistant,
+                    usage_leaf=usage_leaf,
                 )
 
             if state.status == "queued":
@@ -192,6 +200,7 @@ class OperationDriver:
             step = state.current_step
             if step is None:
                 if state.completed_step_count >= package.runtime_policy.max_model_steps:
+                    usage_leaf = self._current_reliable_leaf(operation)
                     state = self._commit(
                         replace(
                             state,
@@ -204,8 +213,11 @@ class OperationDriver:
                         ),
                         state,
                     )
-                    return OperationDriveResult(
-                        operation_id, "failed", state, last_assistant
+                    return self._result(
+                        operation,
+                        state,
+                        last_assistant,
+                        usage_leaf=usage_leaf,
                     )
                 step = ModelStepState(
                     step_id=self._step_id(),
@@ -388,9 +400,7 @@ class OperationDriver:
                     node=None,
                 ):
                     state = next_state
-                    return OperationDriveResult(
-                        operation_id, "succeeded", state, last_assistant
-                    )
+                    return self._result(operation, state, last_assistant)
                 refreshed = self._operations.load_agent_run_state(
                     operation.operation_id
                 )
@@ -501,9 +511,7 @@ class OperationDriver:
                         ),
                         state,
                     )
-                    return OperationDriveResult(
-                        operation_id, "waiting", state, last_assistant
-                    )
+                    return self._result(operation, state, last_assistant)
                 executable = recorded
 
             if executable is not None:
@@ -729,6 +737,44 @@ class OperationDriver:
 
     def _pending_step_messages(self, session_id: str) -> tuple[InboxMessage, ...]:
         return self._operations.list_pending_step_messages(session_id=session_id)
+
+    def _result(
+        self,
+        operation: SessionOperation,
+        state: AgentRunState,
+        assistant_message: AssistantMessage | None = None,
+        *,
+        usage_leaf: str | None | object = _AUTO_USAGE_LEAF,
+    ) -> OperationDriveResult:
+        """统一构造结果，并从明确终点投影本次 Operation 的用量。"""
+        if usage_leaf is _AUTO_USAGE_LEAF:
+            if state.status == "succeeded":
+                usage_leaf = state.final_assistant_node_id
+            elif state.status in {"waiting", "cancelling"}:
+                usage_leaf = self._current_reliable_leaf(operation)
+            else:
+                usage_leaf = None
+
+        usage = None
+        if usage_leaf is not None:
+            nodes = self._conversations.list_branch_nodes(
+                session_id=operation.session_id,
+                leaf_node_id=usage_leaf,
+            )
+            usage = project_agent_run_usage(nodes, operation.input_node_id)
+        return OperationDriveResult(
+            operation_id=operation.operation_id,
+            status=state.status,
+            state=state,
+            assistant_message=assistant_message,
+            usage=usage,
+        )
+
+    def _current_reliable_leaf(self, operation: SessionOperation) -> str | None:
+        """读取当前 Session 活动位置作为 waiting/本次失败的可靠 leaf。"""
+        return self._conversations.load_conversation_session(
+            operation.session_id
+        ).active_node_id
 
     def _wake_sessions(self, session_ids: tuple[str, ...]) -> None:
         if self._wake_callback is None:
