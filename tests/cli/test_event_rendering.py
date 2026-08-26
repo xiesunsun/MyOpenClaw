@@ -7,19 +7,12 @@ import asyncio
 from rich.console import Console
 
 from pickel.cli.event_renderer import ChatEventRenderer
-from pickel.runtime.runtime_events import ToolCallSnapshot
 from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    ModelStepStarted,
-    ToolCallCompleted,
-    ToolCallStarted,
     AgentRunCompleted,
     AgentRunStarted,
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
-from pickel.shared.event_envelope import EventEnvelope
-from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionResult
 
 
 def _render(event) -> str:
@@ -37,62 +30,6 @@ def _cached_usage() -> AgentRunUsage:
         elapsed_ms=1500,
         model_label="anthropic / claude-jupiter-v1-p",
     )
-
-
-def test_model_step_started_不再上屏():
-    """无边框排版下 `Step N` 行是噪音（E3 分派表：ModelStepStarted 只收尾流式行）。"""
-    text = _render(
-        ModelStepStarted(
-            envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=2))
-        )
-    )
-
-    assert text.strip() == ""
-
-
-def test_tool_call_started_显示_tool_行与_running():
-    text = _render(
-        ToolCallStarted(
-            tool_call=ToolCallSnapshot(
-                tool_call_id="c1", tool_name="echo", arguments={"text": "hi"}
-            ),
-            batch_id="b1",
-            call_index=0,
-            total_calls=1,
-        )
-    )
-
-    assert "⏺ echo" in text
-    assert "text='hi'" in text
-    assert "running" in text
-    assert "╭" not in text
-
-
-def test_tool_call_completed_成功显示_ok():
-    text = _render(
-        ToolCallCompleted(
-            tool_call=ToolCallSnapshot(
-                tool_call_id="c1", tool_name="echo", arguments={}
-            ),
-            tool_result=ToolExecutionResult(content="done"),
-        )
-    )
-
-    assert "ok" in text
-    assert "failed" not in text
-
-
-def test_tool_call_completed_失败显示_failed():
-    text = _render(
-        ToolCallCompleted(
-            tool_call=ToolCallSnapshot(
-                tool_call_id="c1", tool_name="missing", arguments={}
-            ),
-            tool_result=ToolExecutionResult(content="not found", is_error=True),
-        )
-    )
-
-    assert "failed" in text
 
 
 def test_assistant_message_显示正文与用量_footer():

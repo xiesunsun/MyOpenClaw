@@ -8,14 +8,11 @@ import pytest
 from rich.console import Console
 
 from pickel.cli.event_renderer import ChatEventRenderer
-from pickel.runtime.runtime_events import ToolCallSnapshot
 from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
-    ModelStepStarted,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
-    ToolCallStarted,
     AgentRunInterrupted,
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
@@ -93,26 +90,8 @@ def test_工具参数增量不上屏():
     [
         # 有流式预览时 settle 只补 footer，不再重打正文
         (AssistantMessageEvent(text="最终回复"), None),
-        (
-            ModelStepStarted(
-                envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=1))
-            ),
-            None,
-        ),
-        (
-            ToolCallStarted(
-                envelope=EventEnvelope(identity=ExecutionIdentity(step_sequence=1)),
-                batch_id="batch-1",
-                call_index=0,
-                total_calls=1,
-                tool_call=ToolCallSnapshot(
-                    tool_call_id="c1", tool_name="echo", arguments={"text": "hi"}
-                ),
-            ),
-            "⏺ echo",
-        ),
     ],
-    ids=["assistant_message", "step_started", "tool_call_started"],
+    ids=["assistant_message"],
 )
 def test_渲染事件前流式输出必须收尾换行(event, next_line_marker):
     """流式行须先收尾换行，不得与后续工具行粘在同一行。"""
@@ -123,7 +102,7 @@ def test_渲染事件前流式输出必须收尾换行(event, next_line_marker):
     assert lines[idx].strip() == "流式预览"
     assert "⏺" not in lines[idx]
     if next_line_marker is None:
-        assert "最终回复" not in text or isinstance(event, ModelStepStarted)
+        assert "最终回复" not in text
         # 流式正文只一份
         assert text.count("流式预览") == 1
     else:

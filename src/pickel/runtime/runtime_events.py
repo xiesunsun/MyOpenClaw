@@ -12,43 +12,11 @@ dataclass）必须是拷贝，不得与执行路径共享引用。发射点自�
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, TypeAlias
 
-from pickel.conversations.agent_message import (
-    ToolResultMessage,
-    agent_message_to_dict,
-)
-from pickel.conversations.content_blocks import content_blocks_to_list
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
-from pickel.tools.base import ToolExecutionResult
-
-
-@dataclass(frozen=True)
-class ToolCallSnapshot:
-    tool_call_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-
-
-def _tool_call_to_dict(tool_call: ToolCallSnapshot) -> dict[str, Any]:
-    return {
-        "id": tool_call.tool_call_id,
-        "name": tool_call.tool_name,
-        "arguments": tool_call.arguments,
-    }
-
-
-def _tool_result_to_dict(result: ToolExecutionResult) -> dict[str, Any]:
-    return {
-        "content": result.content,
-        "content_blocks": content_blocks_to_list(result.content_blocks),
-        "structured_content": result.structured_content,
-        "is_error": result.is_error,
-        "metadata": result.metadata,
-        "error": asdict(result.error) if result.error is not None else None,
-    }
 
 
 def _usage_to_dict(usage: AgentRunUsage) -> dict[str, Any]:
@@ -100,79 +68,6 @@ class AgentRunStarted(RuntimeEventBase):
 
     def _payload(self) -> dict[str, Any]:
         return {"user_text": self.user_text}
-
-
-@dataclass(frozen=True)
-class ModelStepStarted(RuntimeEventBase):
-    EVENT_TYPE: ClassVar[str] = "model_step_started"
-
-
-@dataclass(frozen=True)
-class ToolCallStarted(RuntimeEventBase):
-    EVENT_TYPE: ClassVar[str] = "tool_call_started"
-
-    tool_call: ToolCallSnapshot | None = None
-    batch_id: str = ""
-    call_index: int = 0
-    total_calls: int = 0
-    tool_source: str | None = None
-    tool_origin: str | None = None
-    validation: str = "passed"
-    hook_action: str | None = None
-    confirmation: str = "not_requested"
-
-    def _payload(self) -> dict[str, Any]:
-        return {
-            "tool_call": _tool_call_to_dict(self.tool_call) if self.tool_call else None,
-            "batch_id": self.batch_id,
-            "call_index": self.call_index,
-            "total_calls": self.total_calls,
-            "tool_source": self.tool_source,
-            "tool_origin": self.tool_origin,
-            "validation": self.validation,
-            "hook_action": self.hook_action,
-            "confirmation": self.confirmation,
-        }
-
-
-@dataclass(frozen=True)
-class ToolCallCompleted(RuntimeEventBase):
-    """成功与失败共用；失败读 tool_result.is_error。"""
-
-    EVENT_TYPE: ClassVar[str] = "tool_call_completed"
-
-    tool_call: ToolCallSnapshot | None = None
-    tool_result: ToolExecutionResult | None = None
-    tool_result_message: ToolResultMessage | None = None
-    batch_id: str = ""
-    call_index: int = 0
-    total_calls: int = 0
-    tool_source: str | None = None
-    tool_origin: str | None = None
-    validation: str = "passed"
-    hook_action: str | None = None
-    confirmation: str = "not_requested"
-
-    def _payload(self) -> dict[str, Any]:
-        return {
-            "tool_call": _tool_call_to_dict(self.tool_call) if self.tool_call else None,
-            "tool_result": (
-                _tool_result_to_dict(self.tool_result) if self.tool_result else None
-            ),
-            "tool_result_message": (
-                agent_message_to_dict(self.tool_result_message)
-                if self.tool_result_message
-                else None
-            ),
-            "batch_id": self.batch_id,
-            "call_index": self.call_index,
-            "total_calls": self.total_calls,
-            "tool_source": self.tool_source,
-            "tool_origin": self.tool_origin,
-            "validation": self.validation,
-            "hook_action": self.hook_action,
-            "confirmation": self.confirmation,
-        }
 
 
 @dataclass(frozen=True)

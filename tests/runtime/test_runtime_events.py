@@ -4,23 +4,16 @@ from __future__ import annotations
 
 import json
 
-from pickel.conversations.agent_message import ToolResultMessage
-from pickel.conversations.content_blocks import TextBlock
 from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
-    ModelStepStarted,
-    ToolCallCompleted,
-    ToolCallStarted,
     AgentRunCompleted,
     AgentRunFailed,
     AgentRunStarted,
-    ToolCallSnapshot,
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionResult
 
 
 def _envelope(*, tool_call_id: str | None = None) -> EventEnvelope:
@@ -38,9 +31,6 @@ def _envelope(*, tool_call_id: str | None = None) -> EventEnvelope:
 def test_每个事件类型有唯一的_event_type():
     types = [
         AgentRunStarted,
-        ModelStepStarted,
-        ToolCallStarted,
-        ToolCallCompleted,
         AssistantMessageEvent,
         AgentRunCompleted,
         AgentRunFailed,
@@ -52,10 +42,10 @@ def test_每个事件类型有唯一的_event_type():
 
 
 def test_to_dict_含信封与_event_type():
-    event = ModelStepStarted(envelope=_envelope())
+    event = AgentRunStarted(envelope=_envelope(), user_text="hi")
     data = event.to_dict()
 
-    assert data["event_type"] == "model_step_started"
+    assert data["event_type"] == "agent_run_started"
     assert data["event_sequence"] == 3
     assert data["session_id"] == "s1"
     assert data["operation_id"] == "t1"
@@ -65,7 +55,7 @@ def test_to_dict_含信封与_event_type():
 
 
 def test_occurred_at_序列化为_iso_字符串():
-    data = ModelStepStarted(envelope=_envelope()).to_dict()
+    data = AgentRunStarted(envelope=_envelope()).to_dict()
 
     assert isinstance(data["occurred_at"], str)
     assert "T" in data["occurred_at"]
@@ -74,32 +64,6 @@ def test_occurred_at_序列化为_iso_字符串():
 def test_所有事件都能_json_序列化():
     events: list[RuntimeEventBase] = [
         AgentRunStarted(envelope=_envelope(), user_text="hi"),
-        ModelStepStarted(envelope=_envelope()),
-        ToolCallStarted(
-            envelope=_envelope(),
-            tool_call=ToolCallSnapshot(
-                tool_call_id="c1", tool_name="echo", arguments={"text": "x"}
-            ),
-            batch_id="b1",
-            call_index=0,
-            total_calls=2,
-        ),
-        ToolCallCompleted(
-            envelope=_envelope(),
-            tool_call=ToolCallSnapshot(
-                tool_call_id="c1", tool_name="echo", arguments={"text": "x"}
-            ),
-            tool_result=ToolExecutionResult(content="x"),
-            tool_result_message=ToolResultMessage(
-                tool_call_id="c1",
-                tool_name="echo",
-                content=[TextBlock(text="x")],
-                structured_content={"value": "x"},
-            ),
-            batch_id="b1",
-            call_index=0,
-            total_calls=2,
-        ),
         AssistantMessageEvent(envelope=_envelope(), text="done"),
         AgentRunCompleted(
             envelope=_envelope(), usage=AgentRunUsage(steps=1), elapsed_ms=120
@@ -109,39 +73,6 @@ def test_所有事件都能_json_序列化():
 
     for event in events:
         json.dumps(event.to_dict())  # 不抛异常即通过
-
-
-def test_tool_call_completed_携带失败信息():
-    """失败不再是独立事件类型，读 is_error 即可。"""
-    event = ToolCallCompleted(
-        envelope=_envelope(),
-        tool_call=ToolCallSnapshot(
-            tool_call_id="c1", tool_name="missing", arguments={}
-        ),
-        tool_result=ToolExecutionResult(content="not found", is_error=True),
-        batch_id="b1",
-        call_index=0,
-        total_calls=1,
-    )
-
-    assert event.to_dict()["tool_result"]["is_error"] is True
-
-
-def test_tool_call_completed_携带模型实际看到的结果消息():
-    event = ToolCallCompleted(
-        envelope=_envelope(),
-        tool_result=ToolExecutionResult(content="ok", metadata={"runtime": True}),
-        tool_result_message=ToolResultMessage(
-            tool_call_id="c1",
-            tool_name="lookup",
-            content=[TextBlock(text="ok")],
-            structured_content={"id": 7},
-        ),
-    )
-
-    payload = event.to_dict()
-    assert payload["tool_result"]["metadata"] == {"runtime": True}
-    assert payload["tool_result_message"]["structured_content"] == {"id": 7}
 
 
 def test_agent_run_completed_携带_usage_合计():
@@ -185,9 +116,6 @@ def test_delta_事件的_event_type_唯一且不与既有冲突():
     ]
     old_types = [
         AgentRunStarted,
-        ModelStepStarted,
-        ToolCallStarted,
-        ToolCallCompleted,
         AssistantMessageEvent,
         AgentRunCompleted,
         AgentRunFailed,

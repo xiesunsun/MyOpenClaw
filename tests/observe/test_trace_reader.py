@@ -17,32 +17,8 @@ def _write_trace(path: Path) -> None:
             "user_text": "SECRET",
         },
         {
-            "event_type": "tool_call_started",
-            "event_sequence": 1,
-            "occurred_at": "2026-07-26T00:00:01+00:00",
-            "tool_call": {
-                "id": "c1",
-                "name": "shell_exec",
-                "arguments": {"cmd": "SECRET2"},
-            },
-        },
-        {
-            "event_type": "tool_call_completed",
-            "event_sequence": 2,
-            "occurred_at": "2026-07-26T00:00:02.500000+00:00",
-            "tool_call": {
-                "id": "c1",
-                "name": "shell_exec",
-                "arguments": {"cmd": "SECRET2"},
-            },
-            "tool_result": {
-                "content": [{"type": "text", "text": "SECRET3"}],
-                "is_error": False,
-            },
-        },
-        {
             "event_type": "agent_run_failed",
-            "event_sequence": 3,
+            "event_sequence": 1,
             "occurred_at": "2026-07-26T00:00:03+00:00",
             "error_type": "RuntimeError",
             "message": "boom",
@@ -54,17 +30,13 @@ def _write_trace(path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_read_trace_timings_and_markers(tmp_path):
+def test_read_trace_markers(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     _write_trace(trace_file)
 
     enhancement = read_trace(trace_file)
 
     assert enhancement is not None
-    timing = enhancement.tool_timings["c1"]
-    assert timing.started_at == "2026-07-26T00:00:01+00:00"
-    assert timing.completed_at == "2026-07-26T00:00:02.500000+00:00"
-    assert timing.duration_ms == 1500
     assert len(enhancement.agent_run_markers) == 1
     marker = enhancement.agent_run_markers[0]
     assert marker.started_at == "2026-07-26T00:00:00+00:00"

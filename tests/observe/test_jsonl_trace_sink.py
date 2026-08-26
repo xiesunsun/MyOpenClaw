@@ -18,7 +18,7 @@ from pickel.observe.records import (
 )
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_events import (
-    ModelStepStarted,
+    AssistantMessageEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
@@ -83,7 +83,7 @@ def test_写出的每行都是合法_json(tmp_path: Path):
     assert len(records) == 2
     assert [record["event_type"] for record in records] == [
         "agent_run_started",
-        "model_step_started",
+        "assistant_message",
     ]
     assert all(record["record_type"] == "runtime_event" for record in records)
     assert [record["trace_seq"] for record in records] == [0, 1]
@@ -111,7 +111,7 @@ async def _emit(bus: EventBus) -> None:
         )
     )
     await bus.emit(
-        ModelStepStarted(
+        AssistantMessageEvent(
             envelope=EventEnvelope(
                 identity=ExecutionIdentity(session_id="s1", step_sequence=1)
             )
@@ -403,7 +403,7 @@ def test_slow_diagnostic_callback不阻塞_enqueue(tmp_path: Path):
 def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
     path = tmp_path / "s1.jsonl"
     sink = JsonlTraceSink(path)
-    sink(ModelStepStarted())
+    sink(AssistantMessageEvent())
     sink.record(
         SpanRecord(
             name="pickel.provider.request",
@@ -497,7 +497,7 @@ async def _emit_deltas(bus: EventBus) -> None:
 def test_父目录不存在时自动创建(tmp_path: Path):
     path = tmp_path / "nested" / "deep" / "s1.jsonl"
     sink = JsonlTraceSink(path)
-    sink(ModelStepStarted())
+    sink(AssistantMessageEvent())
     sink.close()
 
     assert path.is_file()
@@ -506,12 +506,12 @@ def test_父目录不存在时自动创建(tmp_path: Path):
 def test_close_后不再写入(tmp_path: Path):
     path = tmp_path / "s1.jsonl"
     sink = JsonlTraceSink(path)
-    sink(ModelStepStarted())
+    sink(AssistantMessageEvent())
     sink.close()
 
     before = path.read_text(encoding="utf-8")
     try:
-        sink(ModelStepStarted())
+        sink(AssistantMessageEvent())
     except ValueError:
         pass  # 写已关闭的文件句柄
 

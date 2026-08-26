@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from pickel.runtime.event_bus import EventBus
-from pickel.runtime.runtime_events import ModelStepStarted, AgentRunStarted
+from pickel.runtime.runtime_events import AssistantMessageEvent, AgentRunStarted
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
 
@@ -23,7 +23,7 @@ def test_seq_从_0_起严格递增():
 async def _emit_many(bus: EventBus, count: int) -> None:
     for _ in range(count):
         await bus.emit(
-            ModelStepStarted(
+            AssistantMessageEvent(
                 envelope=EventEnvelope(identity=ExecutionIdentity(session_id="s1"))
             )
         )
@@ -31,7 +31,7 @@ async def _emit_many(bus: EventBus, count: int) -> None:
 
 def test_emit_返回带_seq_的事件且不改原件():
     bus = EventBus()
-    original = ModelStepStarted(
+    original = AssistantMessageEvent(
         envelope=EventEnvelope(identity=ExecutionIdentity(session_id="s1"))
     )
 
@@ -63,7 +63,7 @@ def test_订阅者抛异常不影响其余订阅者():
     bus.subscribe(explode)
     bus.subscribe(lambda e: survivors.append(e))
 
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert len(survivors) == 1
 
@@ -77,7 +77,7 @@ def test_唯一订阅者抛异常时_emit_仍正常返回():
 
     bus.subscribe(explode)
 
-    emitted = asyncio.run(bus.emit(ModelStepStarted()))
+    emitted = asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert emitted.envelope.event_sequence == 0
 
@@ -91,7 +91,7 @@ def test_异步订阅者被_await():
         seen.append(event)
 
     bus.subscribe(handler)
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert len(seen) == 1
 
@@ -108,7 +108,7 @@ def test_异步订阅者抛异常同样被隔离():
 
     bus.subscribe(explode)
     bus.subscribe(keep)
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert len(survivors) == 1
 
@@ -118,9 +118,9 @@ def test_退订后不再收到事件():
     seen = []
     unsubscribe = bus.subscribe(lambda e: seen.append(e))
 
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
     unsubscribe()
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert len(seen) == 1
 
@@ -128,8 +128,8 @@ def test_退订后不再收到事件():
 def test_无订阅者时_emit_仍分配_seq():
     bus = EventBus()
 
-    first = asyncio.run(bus.emit(ModelStepStarted()))
-    second = asyncio.run(bus.emit(ModelStepStarted()))
+    first = asyncio.run(bus.emit(AssistantMessageEvent()))
+    second = asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert (
         first.envelope.event_sequence,
@@ -159,6 +159,6 @@ def test_退订同一绑定方法的其中一次订阅不影响顺序与另一�
     unsubscribe_second_renderer_sub = bus.subscribe(renderer.handle)
 
     unsubscribe_second_renderer_sub()
-    asyncio.run(bus.emit(ModelStepStarted()))
+    asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert call_order == ["renderer", "other"]

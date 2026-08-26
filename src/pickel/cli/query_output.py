@@ -14,9 +14,6 @@ SCHEMA_VERSION = 1
 
 _PUBLIC_EVENT_TYPES = {
     "agent_run_started": "agent_run.started",
-    "model_step_started": "model_step.started",
-    "tool_call_started": "tool.started",
-    "tool_call_completed": "tool.completed",
     "assistant_message": "message.completed",
     "agent_run_completed": "agent_run.completed",
     "agent_run_failed": "agent_run.failed",

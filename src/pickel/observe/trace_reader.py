@@ -9,15 +9,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-
-
-@dataclass(frozen=True)
-class ToolTiming:
-    started_at: str | None
-    completed_at: str | None
-    duration_ms: int | None
 
 
 @dataclass(frozen=True)
@@ -31,7 +23,6 @@ class AgentRunMarker:
 
 @dataclass(frozen=True)
 class TraceEnhancement:
-    tool_timings: dict[str, ToolTiming] = field(default_factory=dict)
     agent_run_markers: list[AgentRunMarker] = field(default_factory=list)
     request_snapshots: list[list[dict]] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
@@ -42,8 +33,6 @@ def read_trace(path: Path) -> TraceEnhancement | None:
     if not files:
         return None
 
-    started: dict[str, str] = {}
-    timings: dict[str, ToolTiming] = {}
     markers: list[_MarkerBuilder] = []
     spans: list[dict] = []
 
@@ -89,19 +78,6 @@ def read_trace(path: Path) -> TraceEnhancement | None:
                     operation_id=str(event.get("operation_id") or ""),
                 )
             )
-        elif event_type == "tool_call_started":
-            call_id = _call_id(event)
-            if call_id and occurred_at:
-                started[call_id] = occurred_at
-        elif event_type == "tool_call_completed":
-            call_id = _call_id(event)
-            if call_id:
-                begin = started.get(call_id)
-                timings[call_id] = ToolTiming(
-                    started_at=begin,
-                    completed_at=occurred_at,
-                    duration_ms=_duration_ms(begin, occurred_at),
-                )
         elif event_type == "agent_run_failed" and markers:
             markers[-1].failed = {
                 "error_type": str(event.get("error_type") or ""),
@@ -125,24 +101,7 @@ def read_trace(path: Path) -> TraceEnhancement | None:
             if isinstance(attributes, dict):
                 marker.outcome = str(attributes.get("outcome") or "") or None
 
-    for span in spans:
-        if span.get("name") != "pickel.tool.execute":
-            continue
-        attributes = span.get("attributes")
-        duration = span.get("duration_ms")
-        if not isinstance(attributes, dict) or not isinstance(duration, (int, float)):
-            continue
-        call_id = attributes.get("tool_call_id")
-        if isinstance(call_id, str) and call_id in timings:
-            timing = timings[call_id]
-            timings[call_id] = ToolTiming(
-                started_at=timing.started_at,
-                completed_at=timing.completed_at,
-                duration_ms=round(float(duration)),
-            )
-
     return TraceEnhancement(
-        tool_timings=timings,
         agent_run_markers=[builder.freeze() for builder in markers],
         request_snapshots=[builder.snapshots for builder in markers],
         metrics=_build_metrics(spans),
@@ -255,22 +214,3 @@ class _MarkerBuilder:
             duration_ms=self.duration_ms,
             outcome=self.outcome,
         )
-
-
-def _call_id(event: dict) -> str | None:
-    tool_call = event.get("tool_call")
-    if isinstance(tool_call, dict):
-        call_id = tool_call.get("id")
-        if isinstance(call_id, str):
-            return call_id
-    return None
-
-
-def _duration_ms(begin: str | None, end: str | None) -> int | None:
-    if not begin or not end:
-        return None
-    try:
-        delta = datetime.fromisoformat(end) - datetime.fromisoformat(begin)
-    except ValueError:
-        return None
-    return int(delta.total_seconds() * 1000)
