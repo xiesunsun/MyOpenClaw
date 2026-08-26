@@ -28,6 +28,7 @@ from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_store import ConversationStore
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.shared.frozen_json import thaw_json
+from pickel.shared.model_config import ModelConfig
 from pickel.inbox.store import InboxStore
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
@@ -36,6 +37,7 @@ from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.openai import OpenAIProvider
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
@@ -128,18 +130,12 @@ class Boot:
         """先冻结 Package，再解析当前 Generation 的可执行实现。"""
         version = self._agent_package_builder.build_agent_package_version(agent_id)
         resolved_id = agent_id or self.app_config.default_agent
-        if version.model_policy.primary.provider != "anthropic":
-            raise PackageLoadError(
-                "provider_unsupported",
-                version.package_version_id,
-                "当前 Runtime 只支持 Anthropic Provider: "
-                f"{version.model_policy.primary.provider}",
-            )
         model_config = self.app_config.resolve_model_config(
             self.app_config.get_agent_config(resolved_id).llm
         )
-        provider = AnthropicProvider.from_config(
+        provider = self._provider_from_config(
             model_config,
+            package_version_id=version.package_version_id,
             artifact_service=artifact_service,
         )
         snapshot = self.tool_bus.snapshot(
@@ -176,15 +172,14 @@ class Boot:
         """
 
         def load_provider(model: ModelVersion) -> Any | None:
-            if model.provider != "anthropic":
-                raise PackageLoadError(
-                    "provider_unsupported",
-                    package_version_id,
-                    f"当前 Runtime 只支持 Anthropic Provider: {model.provider}",
-                )
+            self._require_supported_provider(
+                model.provider, package_version_id=package_version_id
+            )
             config = self._model_config_from_version(model)
-            return AnthropicProvider.from_config(
-                config, artifact_service=artifact_service
+            return self._provider_from_config(
+                config,
+                package_version_id=package_version_id,
+                artifact_service=artifact_service,
             )
 
         resolved_agent_id = expected_agent_id or self.app_config.default_agent
@@ -202,6 +197,33 @@ class Boot:
             provider_loader=load_provider,
             extension_loader=load_extension,
         ).load(package_version_id, expected_agent_id=expected_agent_id)
+
+    @staticmethod
+    def _provider_from_config(
+        config: ModelConfig,
+        *,
+        package_version_id: str,
+        artifact_service: ArtifactService,
+    ):
+        Boot._require_supported_provider(
+            config.provider, package_version_id=package_version_id
+        )
+        if config.provider == "anthropic":
+            return AnthropicProvider.from_config(
+                config, artifact_service=artifact_service
+            )
+        if config.provider == "openai":
+            return OpenAIProvider.from_config(config, artifact_service=artifact_service)
+
+    @staticmethod
+    def _require_supported_provider(provider: str, *, package_version_id: str) -> None:
+        if provider in {"anthropic", "openai"}:
+            return
+        raise PackageLoadError(
+            "provider_unsupported",
+            package_version_id,
+            f"当前 Runtime 不支持 Provider: {provider}",
+        )
 
     def _extension_contributions(
         self,
@@ -496,8 +518,6 @@ class Boot:
         ]
         if missing:
             raise ValueError(f"缺少 Package 所需 SecretRef: {', '.join(missing)}")
-        from pickel.shared.model_config import ModelConfig
-
         return ModelConfig(
             provider=model.provider,
             model=model.model,

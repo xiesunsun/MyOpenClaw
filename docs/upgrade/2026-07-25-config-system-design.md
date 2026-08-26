@@ -204,7 +204,10 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 - `api_key`、token、password、authorization 等秘密不得进入 AgentPackageVersion；只记录所需 SecretRef。
 - 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。
 - Environ、Settings 或 Agent 文件变化只影响未来接受的 Operation；已有 Operation 继续使用其 package_version_id 和 workspace_binding。
-- 当前新 Runtime 的验收 Provider 为 Anthropic；已有其他 Provider 设置不扩展新能力。
+- Runtime Boot 支持 Anthropic Messages 与 OpenAI Responses 两条明确 Provider
+  wire 映射；OpenAI 第一版固定 `store: false`，不使用
+  `previous_response_id` 或服务端 Conversation 作为恢复权威。Gemini 仍只保留
+  Provider 直接调用测试，不接入 Boot。
 
 ### 4.4 废弃 / 禁止的命名
 
@@ -270,6 +273,30 @@ flowchart LR
 无密钥；结构沿用现有 `providers` → models 能力字段。  
 项目文件按 provider/model **覆盖合并**全局。打开模型列表时重读。
 
+CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
+
+```json
+{
+  "providers": {
+    "openai": {
+      "models": {
+        "gpt-5.6-luna": {
+          "max_output_tokens": 65536,
+          "provider_options": {
+            "reasoning_effort": "low",
+            "parallel_tool_calls": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`provider_options.reasoning_effort` 映射到 Responses 的
+`reasoning.effort`。当前不配置 Chat Completions、协议自动降级或
+`previous_response_id`。
+
 ### 5.3 `auth.json`
 
 ```json
@@ -278,6 +305,10 @@ flowchart LR
     "anthropic": {
       "api_key": "${ANTHROPIC_API_KEY_PICKLE}",
       "api_base": "https://api.anthropic.com"
+    },
+    "openai": {
+      "api_key": "${CPA_API_KEY}",
+      "api_base": "${CPA_BASE_URL}"
     }
   },
   "openviking": {
@@ -290,6 +321,11 @@ flowchart LR
 ```
 
 权限 `0600`；`${ENV}` 展开；不进 git。
+
+`CPA_BASE_URL` 必须指向 OpenAI-compatible API base（通常以 `/v1` 结尾）；
+Provider 在其下只调用 `/responses`。密钥仍以逻辑
+`providers.openai.api_key` SecretRef 绑定 Package，不进入
+AgentPackageVersion。
 
 ### 5.4 `agents/<id>/agent.yaml`
 

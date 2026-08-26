@@ -18,6 +18,7 @@ from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.config.app_config import ModelSelection
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
+from pickel.providers.openai import OpenAIProvider
 from pickel.tools.bus import ToolSource
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
@@ -109,6 +110,34 @@ def test_new_package_with_unsupported_provider_has_stable_failure_code(
 
     assert caught.value.code == "provider_unsupported"
     assert caught.value.package_version_id.startswith("agentpkg_")
+
+
+def test_new_and_frozen_packages_load_openai_responses_provider(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    config.providers["openai"] = type(config.providers["anthropic"])(
+        models={"gpt-5.6-luna": config.providers["anthropic"].models["claude-test"]}
+    )
+    config.agents["Pickle"].llm = ModelSelection(
+        provider="openai", model="gpt-5.6-luna"
+    )
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    )
+    store.insert_agent_package_version(current.version)
+    restored = boot.load_agent_package(
+        current.version.package_version_id,
+        store=store,
+        artifact_service=_artifact_service(store),
+    )
+
+    assert isinstance(current.model_clients["primary"], OpenAIProvider)
+    assert isinstance(restored.model_clients["primary"], OpenAIProvider)
+    assert current.model_clients["primary"].model == "gpt-5.6-luna"
+    assert restored.version.package_version_id == current.version.package_version_id
 
 
 def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
