@@ -7,6 +7,7 @@ RuntimeEffects；不依赖旧的运行时资源袋。
 from __future__ import annotations
 
 import asyncio
+import importlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +41,12 @@ from pickel.providers.stream import StreamCompleted
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.workspaces.workspace_binding import WorkspaceBinding
+
+
+def test_unwired_agent_run_progress_is_not_a_public_runtime_api() -> None:
+    """未接线的 AgentRun 进度通知不能继续作为 Runtime 公共模块存在。"""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("pickel.runtime.agent_run_progress")
 
 
 class _Provider(Provider):
