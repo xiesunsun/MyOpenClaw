@@ -174,6 +174,17 @@ preparing_request
 | stream 中断 | 丢弃内存 buffer，从持久化 Intent 重发完整请求 |
 | AssistantMessage 已提交 | 不重发 Provider；按 awaiting_tools 或 Step 完成继续 |
 
+模型请求重试由 `AgentRuntimePolicy` 冻结。默认最多 3 次真实调用（包含首次），
+以 1 秒为初始延迟做指数退避，单次延迟最多 4 秒。每次真实调用前都先以 revision
+CAS 递增 `request_attempt`；退避只存在于内存，不增加 `retry_at`、等待状态或定时
+任务实体。
+
+只有连接失败、超时、HTTP `408/409/425/429/5xx` 可自动重试。鉴权、参数、权限、
+模型不存在和 Provider 响应协议错误不得盲目重试。用尽次数后提交稳定
+`AgentRunError(code, message, retryable=true)` 并进入 `failed`；不可重试错误立即以
+`retryable=false` 失败。任何 Provider、解析或消费异常都必须收敛业务 State，不能
+只让前台或 AgentRegistry task 抛错并留下 `running` Operation。
+
 逐 Chunk 不进入业务数据库；full Trace 的副本不可用于恢复。
 
 ## 5. ToolCallState

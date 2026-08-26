@@ -95,6 +95,10 @@ class AppConfig(BaseModel):
     default_skills_path: Path | None = None
     react_max_steps: int = 8
     context_cli_turn_window: int = 5
+    model_request_max_attempts: int = Field(default=3, ge=1)
+    model_request_retry_initial_delay_ms: int = Field(default=1000, ge=0)
+    model_request_retry_max_delay_ms: int = Field(default=4000, ge=0)
+    max_parallel_model_requests: int = Field(default=2, ge=1)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]
@@ -127,6 +131,11 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def resolve_agent_paths(self) -> "AppConfig":
+        if (
+            self.model_request_retry_max_delay_ms
+            < self.model_request_retry_initial_delay_ms
+        ):
+            raise ValueError("模型请求重试上限不能小于初始延迟")
         if self.default_skills_path is not None:
             self.default_skills_path = self._resolve_path(self.default_skills_path)
         for agent_config in self.agents.values():

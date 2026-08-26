@@ -252,6 +252,10 @@ flowchart LR
   "default_skills_path": ".agent/skills",
   "react_max_steps": 100,
   "context_cli_turn_window": 5,
+  "model_request_max_attempts": 3,
+  "model_request_retry_initial_delay_ms": 1000,
+  "model_request_retry_max_delay_ms": 4000,
+  "max_parallel_model_requests": 2,
   "openviking": {
     "enabled": false,
     "timeout_seconds": 30,
@@ -266,6 +270,7 @@ flowchart LR
 | 字段 | 原 config.yaml |
 |------|----------------|
 | `default_*` / `react_*` / `context_*` | 同名 |
+| `model_request_*` / `max_parallel_model_requests` | 冻结进 AgentRuntimePolicy 的模型请求可靠性与资源边界 |
 | `openviking.*` 策略 | 同名（密钥除外） |
 
 **Settings 第一批可写字段**：`default_llm`、`default_agent`、`react_max_steps`

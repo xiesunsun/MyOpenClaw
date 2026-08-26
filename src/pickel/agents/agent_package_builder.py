@@ -177,6 +177,14 @@ class AgentPackageBuilder:
             max_model_steps=self._app_config.react_max_steps,
             context_turn_window=self._app_config.context_cli_turn_window,
             max_delegation_depth=3,
+            model_request_max_attempts=self._app_config.model_request_max_attempts,
+            model_request_retry_initial_delay_ms=(
+                self._app_config.model_request_retry_initial_delay_ms
+            ),
+            model_request_retry_max_delay_ms=(
+                self._app_config.model_request_retry_max_delay_ms
+            ),
+            max_parallel_model_requests=(self._app_config.max_parallel_model_requests),
         )
         return AgentDefinition(
             agent_id=agent_id,
@@ -211,7 +219,7 @@ class AgentPackageBuilder:
         )
         return build_agent_package_version(
             agent_id=definition.agent_id,
-            format_version=1,
+            format_version=2,
             behavior_instruction=behavior_instruction,
             model_policy=definition.model_policy,
             runtime_policy=definition.runtime_policy,

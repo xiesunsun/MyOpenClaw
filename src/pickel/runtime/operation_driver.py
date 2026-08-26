@@ -6,6 +6,7 @@ Operation，并严格执行 ``intent commit -> 外部副作用 -> 结果 commit`
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import logging
@@ -48,6 +49,7 @@ from pickel.operations.agent_run_state import (
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_service import OperationService
 from pickel.providers.stream import StreamDelta
+from pickel.providers.errors import classify_provider_error
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -110,6 +112,7 @@ class OperationDriver:
         node_id_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] | None = None,
         wake_callback: Callable[[str], None] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
@@ -122,6 +125,7 @@ class OperationDriver:
         self._node_id = node_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._wake_callback = wake_callback
+        self._sleep = sleep or asyncio.sleep
 
     async def drive_operation(
         self,
@@ -376,13 +380,61 @@ class OperationDriver:
                 )
                 step = state.current_step
                 assert step is not None and step.request_intent is not None
-                result = await effects.execute_model_request(
-                    operation=operation,
-                    state=state,
-                    model_context=step.request_intent.model_context,
-                    consume_delta=consume_delta,
-                    context_fingerprint=step.request_intent.context_fingerprint,
-                )
+                try:
+                    result = await effects.execute_model_request(
+                        operation=operation,
+                        state=state,
+                        model_context=step.request_intent.model_context,
+                        consume_delta=consume_delta,
+                        context_fingerprint=step.request_intent.context_fingerprint,
+                    )
+                except Exception as exc:
+                    error = classify_provider_error(exc)
+                    attempts = step.request_attempt
+                    max_attempts = getattr(
+                        package.runtime_policy, "model_request_max_attempts", 3
+                    )
+                    if error.retryable and attempts < max_attempts:
+                        delay_ms = min(
+                            getattr(
+                                package.runtime_policy,
+                                "model_request_retry_initial_delay_ms",
+                                1000,
+                            )
+                            * (2 ** (attempts - 1)),
+                            getattr(
+                                package.runtime_policy,
+                                "model_request_retry_max_delay_ms",
+                                4000,
+                            ),
+                        )
+                        logger.warning(
+                            "模型请求失败，将重试: operation_id=%s "
+                            "attempt=%s/%s delay_ms=%s code=%s",
+                            operation_id,
+                            attempts,
+                            max_attempts,
+                            delay_ms,
+                            error.code,
+                        )
+                        await self._sleep(delay_ms / 1000)
+                        continue
+                    failed = replace(
+                        state,
+                        status="failed",
+                        current_step=None,
+                        error=AgentRunError(
+                            code=error.code,
+                            message=str(error),
+                            retryable=error.retryable,
+                        ),
+                    )
+                    state = self._commit(failed, state)
+                    return self._result(
+                        operation,
+                        state,
+                        usage_leaf=self._current_reliable_leaf(operation),
+                    )
                 assistant_node_id = self._node_id()
                 tool_calls = await self._prepare_tool_calls(
                     result.assistant_message,

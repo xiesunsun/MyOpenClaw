@@ -129,6 +129,18 @@ def test_target_codec_requires_canonical_id() -> None:
         )
 
 
+def test_v1_codec_keeps_legacy_hash_shape_and_uses_policy_defaults() -> None:
+    content = _content()
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert loaded.content_dict() == content
+    assert loaded.runtime_policy.model_request_max_attempts == 3
+    assert loaded.runtime_policy.max_parallel_model_requests == 2
+
+
 def test_legacy_codec_is_explicit_and_produces_target_shape() -> None:
     legacy = {
         "schema_version": 3,
@@ -194,6 +206,9 @@ def test_builder_freezes_existing_app_config_without_role_fallback(
     package = AgentPackageBuilder(
         app_config=config, tool_bus=ToolBus()
     ).build_agent_package_version()
+    assert package.format_version == 2
+    assert package.runtime_policy.model_request_max_attempts == 3
+    assert package.runtime_policy.max_parallel_model_requests == 2
     assert package.model_policy.worker is None
     assert package.model_policy.utility is None
     assert package.model_policy.primary.required_secret_refs == (

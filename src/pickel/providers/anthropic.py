@@ -439,9 +439,8 @@ class AnthropicMessagesProvider(Provider):
         if timeout_seconds is not None:
             kwargs["timeout"] = timeout_seconds
 
-        max_retries = self.provider_options.get("max_retries")
-        if max_retries is not None:
-            kwargs["max_retries"] = max_retries
+        # 重试必须由 Runtime 逐次记录 request_attempt；禁止 SDK 隐式重试。
+        kwargs["max_retries"] = 0
 
         return AsyncAnthropic(**kwargs)
 

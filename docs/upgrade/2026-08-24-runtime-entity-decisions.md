@@ -1029,6 +1029,13 @@ Provider、Model 和请求设置来自 Operation 绑定的 AgentPackageVersion�
 
 恢复和重试复用同一个 ModelRequestIntent，不重跑 Recall、Hook 和 Context 准备。短退避由 Runtime 内存处理；只有未来需要跨进程定时重试时才增加 `retry_at`。
 
+`AgentRuntimePolicy` 冻结 `model_request_max_attempts=3`、
+`model_request_retry_initial_delay_ms=1000` 和
+`model_request_retry_max_delay_ms=4000`。退避按 `initial * 2^(attempt-1)` 计算并受
+上限约束。只重试连接失败、超时和 HTTP `408/409/425/429/5xx`；其他 Provider
+错误立即失败。用尽次数后必须以 `retryable=true` 的稳定 AgentRunError 进入终态，
+不能依赖下一次偶然 wake 继续一个假 `running` Operation。
+
 ### 6.8 模型响应事务
 
 返回最终回答时，一个事务完成：
@@ -1587,9 +1594,16 @@ class AgentRuntimePolicy:
     max_model_steps: int
     context_turn_window: int
     max_delegation_depth: int
+    model_request_max_attempts: int
+    model_request_retry_initial_delay_ms: int
+    model_request_retry_max_delay_ms: int
+    max_parallel_model_requests: int
 ```
 
-`max_delegation_depth` 限制 AgentDelegation 链深度，建议默认 3；深度从不可变 Delegation 图推导，不重复保存到 Session。只保存影响执行、Context 和委派安全边界的设置。UI 样式、日志级别和 CLI 展示设置不进入 Package。
+`max_delegation_depth` 默认 3。模型请求默认最多 3 次，退避为 1 秒起、4 秒封顶；
+同一 LoadedAgentPackage 默认最多并行执行 2 个模型请求。并发限制是 Generation 内
+资源门槛，不产生 Lane、Scheduler 或持久化排队实体。这里只保存影响执行、Context
+和委派安全边界的设置；UI 样式、日志级别和 CLI 展示设置不进入 Package。
 
 ### 8.13 LoadedAgentPackage
 
@@ -2049,7 +2063,14 @@ agent_delegations
 
 ### 12.2 创建与运行
 
-父 ToolCall 的执行 intent 先冻结目标 `child_package_version_id`。随后一个数据库事务创建 child Session、AgentDelegation 和初始 pending followup InboxMessage；child Session 继承 parent 的 `workspace_id` 和 Session `cwd`。提交成功即表示 child 已可靠接受委派，AgentDriver 再异步触发 OperationService claim；接受 child Operation 时根据 parent WorkspaceBinding 与 child WorkspacePolicy 的交集冻结 child WorkspaceBinding。
+父 ToolCall 的执行 intent 先冻结目标 `child_package_version_id`。当前
+`delegate_agent` 只创建同 Package 的平等 Agent，因此该值必须等于不可变
+`parent_operation.agent_package_version_id`；Delegation 后续重新激活直接从 parent
+Operation 读取这项稳定绑定，不再依赖终态后已清空的 parent current Step。只有未来
+允许选择不同 child Package 时，才给 AgentDelegation 增加
+`child_package_version_id`。随后一个数据库事务创建 child Session、AgentDelegation
+和初始 pending followup InboxMessage；child Session 继承 parent 的 `workspace_id`
+和 Session `cwd`。
 
 Root 与 Child 使用相同 Agent、Inbox、Operation 和 Conversation Tree。多个 child 各自拥有隔离 Session，可以并行运行，不需要 Lane。
 
@@ -2059,7 +2080,12 @@ parent 后续任务使用 child `followup/steer`；child 报告使用 parent `st
 
 父 Operation 的 `send_message` Tool 只向 sender Session 的 direct child 追加 `followup`，不等待 child 回答。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生；ToolCall 的冻结 arguments 与 `intent_recorded` 状态已经是完整决定，不新增 `SendAgentMessageIntent`。Store 在同一事务中校验 sender Operation/Session、当前 ToolCall、AgentDelegation 直接父关系、目标 Session 和 `AgentMessageSource`，再分配目标 Session FIFO sequence。相同 message ID 且 target、delivery、message、source 完全一致时，即使消息已 claim 或 child 已归档，也返回已有 InboxMessage；新消息禁止写入归档 child。
 
-父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照不新增持久化字段；`wait_delegation` 保留为未来真正等待接口，不在本批伪装实现。
+父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照补充 `updated_at`、当前 Step phase、request attempt 和 pending message count，避免把失去驱动的 `running` 或尚未处理的 `ready` 误报为正常完成。
+
+`wait_delegation` 是显式、有界等待接口：校验 direct child，等待目标进入终态或达到
+timeout，并从 `final_assistant_node_id` 返回已持久化的最终 AssistantMessage。它不
+改变 child 状态、不把 Registry task 当 Future，也不要求 child 必须调用 `report`。
+`report` 继续承担 child 主动向 parent 发送中间或自包含 steer 的职责。
 
 child 的 `report` Tool 只接收必填 `output` 字符串，报告以 `Background subagent <child_session_id> reported:` 前缀包装为 parent 的 `steer` InboxMessage；不接收 parent、delivery 或终态参数，不结束 child 当前 Turn，也不代表 child 已完成。Store 从 sender Operation 得到 child Session，再沿该 Session 唯一 AgentDelegation 找到 direct parent；后续 child Operation 仍沿同一关系发送，不能越过一层。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生，重复请求在 target、delivery、message、source 一致时返回 existing，即使消息已处理或 parent 已归档；新消息写入归档 parent 被拒绝。首个接受事务校验当前 `report` ToolCall 的冻结 `output`，但 report 不绑定 child 终态，不新增 result/settlement 实体。durable append 后由 RuntimeHost activate 并显式 wake parent，激活失败保留已接受 Inbox，交由启动恢复兜底。
 
@@ -2125,6 +2151,10 @@ while True:
 ```
 
 每个 Operation 边界都重新读取数据库，不在 Driver 中缓存长期运行状态。一个 Driver task 连续 drain FIFO，可以跨越多个 Operation，期间 Agent 对外保持 `running`；Session 仍最多只有一个非终态 Operation。不同 child Session 拥有各自 Driver，因此可以并行，不需要 Lane。
+
+实现必须与上述循环一致：Operation 进入终态后立即重新读取 Session 并继续接受已经
+pending 的 followup/steer，不能把“一次 drive”误当成 `when_idle`，也不能先注销
+headless Agent 再把 runnable Inbox 留在数据库。
 
 ### 13.4 什么会唤醒 Agent
 

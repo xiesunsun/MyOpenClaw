@@ -158,7 +158,10 @@ class _Provider:
     async def stream(self, context):
         self.calls += 1
         self.contexts.append(context)
-        yield StreamCompleted(self.messages.pop(0))
+        item = self.messages.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        yield StreamCompleted(item)
 
 
 class _Operations:
@@ -601,6 +604,72 @@ async def test_request_intent_and_assistant_are_committed_as_separate_atomic_fac
     assert assistant_commits[0][1].node_id == "node-result"
     # Intent 先以 attempt=0 冻结；发起 Provider 前再单独 CAS 到 attempt=1。
     assert [item.current_step.request_attempt for item in request_states] == [0, 1]
+
+
+@_run_async
+async def test_retryable_provider_failure_reuses_intent_and_counts_real_attempts():
+    provider = _Provider(
+        [
+            TimeoutError("first"),
+            TimeoutError("second"),
+            AssistantMessage(content=(TextBlock(text="done"),)),
+        ]
+    )
+    operations = _Operations(_queued_state())
+    delays: list[float] = []
+    driver = _driver(operations, provider)
+    driver._sleep = lambda delay: _record_delay(delays, delay)
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert provider.calls == 3
+    assert delays == [1.0, 2.0]
+    attempts = [
+        state.current_step.request_attempt
+        for state, _ in operations.transition_calls
+        if state.current_step is not None
+        and state.current_step.phase == "request_ready"
+    ]
+    assert attempts == [0, 1, 2, 3]
+    assert provider.contexts[0] is provider.contexts[1] is provider.contexts[2]
+
+
+@_run_async
+async def test_provider_failure_exhaustion_commits_failed_terminal_state():
+    provider = _Provider([TimeoutError("1"), TimeoutError("2"), TimeoutError("3")])
+    operations = _Operations(_queued_state())
+    driver = _driver(operations, provider)
+    driver._sleep = lambda delay: _record_delay([], delay)
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.current_step is None
+    assert result.state.error == AgentRunError(
+        code="provider_timeout",
+        message="模型请求超时",
+        retryable=True,
+    )
+    assert provider.calls == 3
+
+
+@_run_async
+async def test_invalid_provider_response_fails_without_retry():
+    provider = _Provider([ValueError("bad wire")])
+    operations = _Operations(_queued_state())
+
+    result = await _driver(operations, provider).drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error is not None
+    assert result.state.error.code == "provider_response_invalid"
+    assert result.state.error.retryable is False
+    assert provider.calls == 1
+
+
+async def _record_delay(target: list[float], delay: float) -> None:
+    target.append(delay)
 
 
 @_run_async

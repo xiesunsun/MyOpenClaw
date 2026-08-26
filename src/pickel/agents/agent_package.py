@@ -62,6 +62,10 @@ class AgentRuntimePolicy:
     max_model_steps: int
     context_turn_window: int
     max_delegation_depth: int = 3
+    model_request_max_attempts: int = 3
+    model_request_retry_initial_delay_ms: int = 1000
+    model_request_retry_max_delay_ms: int = 4000
+    max_parallel_model_requests: int = 2
 
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
@@ -70,6 +74,19 @@ class AgentRuntimePolicy:
             raise ValueError("context_turn_window 必须大于 0")
         if self.max_delegation_depth < 0:
             raise ValueError("max_delegation_depth 不能小于 0")
+        if self.model_request_max_attempts < 1:
+            raise ValueError("model_request_max_attempts 必须大于 0")
+        if self.model_request_retry_initial_delay_ms < 0:
+            raise ValueError("model_request_retry_initial_delay_ms 不能小于 0")
+        if self.model_request_retry_max_delay_ms < 0:
+            raise ValueError("model_request_retry_max_delay_ms 不能小于 0")
+        if (
+            self.model_request_retry_max_delay_ms
+            < self.model_request_retry_initial_delay_ms
+        ):
+            raise ValueError("模型请求重试上限不能小于初始延迟")
+        if self.max_parallel_model_requests < 1:
+            raise ValueError("max_parallel_model_requests 必须大于 0")
 
 
 @dataclass(frozen=True)
@@ -300,8 +317,8 @@ def decode_agent_package_content(
     *, package_version_id: str, content: Mapping[str, Any], created_at: datetime
 ) -> AgentPackageVersion:
     """解码当前格式；旧格式必须经过显式 ``decode_legacy_agent_package``。"""
-    if int(content.get("format_version", 0)) != 1:
-        raise ValueError("只支持 AgentPackageVersion.format_version=1")
+    if int(content.get("format_version", 0)) not in {1, 2}:
+        raise ValueError("只支持 AgentPackageVersion.format_version=1/2")
     return _version_from_target_content(content, created_at, package_version_id)
 
 
@@ -409,7 +426,7 @@ def _content_dict(
         "agent_id": agent_id,
         "behavior_instruction": behavior_instruction,
         "model_policy": _model_policy_dict(model_policy),
-        "runtime_policy": _runtime_policy_dict(runtime_policy),
+        "runtime_policy": _runtime_policy_dict(runtime_policy, format_version),
         "workspace_policy": {"file_scope": workspace_policy.file_scope},
         "skills": [_skill_dict(item) for item in skills],
         "tools": [_tool_dict(item) for item in tools],
@@ -455,12 +472,28 @@ def _model_policy_dict(policy: ModelPolicy) -> dict[str, Any]:
     }
 
 
-def _runtime_policy_dict(policy: AgentRuntimePolicy) -> dict[str, Any]:
-    return {
+def _runtime_policy_dict(
+    policy: AgentRuntimePolicy, format_version: int
+) -> dict[str, Any]:
+    content = {
         "max_model_steps": policy.max_model_steps,
         "context_turn_window": policy.context_turn_window,
         "max_delegation_depth": policy.max_delegation_depth,
     }
+    if format_version >= 2:
+        content.update(
+            {
+                "model_request_max_attempts": policy.model_request_max_attempts,
+                "model_request_retry_initial_delay_ms": (
+                    policy.model_request_retry_initial_delay_ms
+                ),
+                "model_request_retry_max_delay_ms": (
+                    policy.model_request_retry_max_delay_ms
+                ),
+                "max_parallel_model_requests": policy.max_parallel_model_requests,
+            }
+        )
+    return content
 
 
 def _skill_dict(skill: SkillVersion) -> dict[str, Any]:
