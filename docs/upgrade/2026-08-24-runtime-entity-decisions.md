@@ -1842,13 +1842,7 @@ class Agent:
 
 ### 10.3 状态与 Package
 
-AgentStatus 只描述内存 Driver 活动：
-
-```text
-idle ↔ running
-```
-
-Operation 的完整生命周期状态属于 AgentRunState。允许 `Agent.status=idle` 且当前 Operation 正在持久化等待批准。
+第一版不增加 `AgentStatus`。live Agent 是否正在驱动只由进程内 drive lock 和 Registry task 表达，不对外形成第二套状态机。Operation 的完整生命周期状态属于 AgentRunState；当前 Operation 持久化等待批准时，可以没有任何 live 驱动 task。
 
 Agent 不永久绑定 LoadedAgentPackage。新 Operation 在 claim 时解析并冻结当前 Package Version；恢复已有 Operation 时按其 `agent_package_version_id` 加载旧版本。RuntimeGeneration 继续管理 LoadedAgentPackage 生命周期。
 
@@ -1861,7 +1855,7 @@ flowchart LR
     D --> O[OperationDriver<br/>推进 Operation]
 ```
 
-`ConversationRuntime._active_task` 和执行控制锁收敛到 AgentDriver；ConversationRuntime 只保留 Host/UI 控制与观察。现有 AgentRuntime 的接受、调度职责拆入 AgentDriver，已有 Operation 的可靠推进仍由 OperationDriver 负责。
+`ConversationRuntime` 不再持有 `_active_task` 或执行互斥锁，只保留 Host/UI 控制与观察。每个 live `Agent` 用一个进程内锁串行化 `followup_and_wait()`、`when_idle()` 和 `resume_operation()`；其中 `followup_and_wait()` 必须在写入 Inbox 前判断忙碌，使“接受前台消息并开始驱动”成为不可交错的入口。`AgentDriver` 不保存调用方 task 或锁，只负责判断 runnable、接受或恢复 Operation；已有 Operation 的可靠推进仍由 `OperationDriver` 负责。
 
 这项决策有意修正当前命名合同中“运行时 Agent 已删除”的结论；全部实体对齐后统一更新命名合同，不保留两套并行术语。
 
@@ -2102,23 +2096,16 @@ flowchart LR
     OD --> E[Runtime Effects]
 ```
 
-### 13.2 内存状态
+### 13.2 内存执行控制
 
-公开状态只有 `idle | running`；内部状态保存当前 task、abort handle 和一次性唤醒标记：
+第一版不增加 `Idle / Running` 状态对象。进程内执行控制只有两处：
 
-```python
-@dataclass
-class Idle:
-    pass
+| 所有者 | 内存字段 | 作用 |
+| --- | --- | --- |
+| `Agent` | 一个 drive lock | 串行化同一 live Agent 的前台、后台和恢复驱动入口 |
+| `AgentRegistry` | `session_id → task` 与 `wake_pending` | 保存后台 wake task，并在运行期间合并一次待重试唤醒 |
 
-@dataclass
-class Running:
-    task: asyncio.Task[None]
-    abort: AbortHandle
-    wake_requested: bool = False
-```
-
-这些字段进程重启后全部丢弃，不是业务事实。`wake_requested` 解决 live 进程中的 lost wakeup：Driver 正准备退出时到达的新消息会设置该标记，使当前 task 在退休前再检查一次。持久化 Inbox 负责崩溃恢复，标记只负责实时响应。
+这些字段进程重启后全部丢弃，不是业务事实。`wake_pending` 解决 live 进程中的 lost wakeup：后台驱动正准备退出时到达的新消息会留下标记，使 Registry 在 task 退休前再驱动一次。持久化 Inbox 负责崩溃恢复，标记只负责实时响应。取消事实仍写入 AgentRunState；不在内存中增加第二套 abort 状态机。
 
 ### 13.3 驱动循环
 
@@ -2225,16 +2212,16 @@ CAS 发生竞争则按同一持久化 Operation 重读并重试或报告冲突�
 ### 13.8 wake、退休与 when_idle
 
 ```text
-wake()：
-  idle    → 原子安装一个 Driver task，Agent 变为 running
-  running → wake_requested = true
+AgentRegistry.wake()：
+  无后台 task → 安装一个 task，调用 Agent.when_idle()
+  task 运行中 → wake_pending 加入 session_id
 
 task 退休：
-  wake_requested=true 或数据库仍有 runnable work → 清标记并继续
-  否则在确认 task 身份后切换为 idle
+  wake_pending 包含 session_id → 清标记并再驱动一次
+  否则确认 task 身份并移除
 ```
 
-`when_idle()` 等待的是“Agent 确实没有 active task 和 runnable work”，而不是某个旧 task 完成。它在被唤醒后重新检查当前 task 身份，避免旧 task 结束与替代 task 启动之间提前返回。需要等待特定结果的调用方使用 `message_id` 或 `operation_id` 查询，不把 `when_idle()` 当作请求 Future。
+当前 `Agent.when_idle()` 是一次串行驱动入口：推进当前或刚接受的一个 Operation，直到 `OperationDriver` 返回 waiting 或终态；它不创建 task，也不声明 Session 此后永久无 runnable work。后台 drain 由 `AgentRegistry` 根据 `wake_pending` 重试，前台调用方从本次 `AgentDriveResult` 取得确定结果。需要跨调用等待特定结果时仍使用 `message_id` 或 `operation_id` 查询，不把 Registry task 当作请求 Future。
 
 ### 13.9 生命周期事件
 
@@ -2330,7 +2317,7 @@ stateDiagram-v2
 | Agent 正在 retiring 时收到 wake | 写 `pending_wake`，阻止释放或重新进入 live |
 | 旧 Handle 在同 id 新 Agent 激活后 close | 通过精确 AgentEntry 身份忽略旧释放 |
 
-`pending_wake` 保护 Registry 激活/退休边界；AgentDriver 的 `wake_requested` 保护一个 live Driver task 的运行/退休边界。两者不重复。
+当前实现不再维护第二个 Driver 级 `wake_requested`。`AgentRegistry.wake_pending` 同时保护后台 task 的运行/退休边界；`Agent` 的 drive lock 只负责串行化驱动入口，两者职责不重复。
 
 ### 14.4 激活与 Package 边界
 

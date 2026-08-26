@@ -87,9 +87,9 @@ flowchart LR
 | `ContributionScope` | 注册贡献和外部资源的 LIFO 撤销边界 |
 | `AgentRegistry` | 单进程 `session_id → live Agent` 唯一映射、引用与唤醒 |
 | `AgentHandle` | 一个调用方对 live Agent 的精确、幂等引用 |
-| `Agent` | Root/Child 平等的消息、取消和等待接口 |
+| `Agent` | Root/Child 平等的消息、取消和等待接口；串行化同一 live Agent 的驱动入口 |
 | `AgentInbox` | 持久化 InboxMessage 的内存窄投影，不保存第二份队列 |
-| `AgentDriver` | 判断 Session 是否 runnable，串行接受或恢复 Operation |
+| `AgentDriver` | 判断 Session 是否 runnable，接受或恢复 Operation；不拥有前台 task 或互斥锁 |
 | `OperationDriver` | 推进一个已有 Operation，直到 waiting 或终态 |
 | `AgentRunStateMachine` | 校验 AgentRunState、ModelStepState 和 ToolCallState 转换 |
 | `RuntimeEffects` | Provider、Tool、Hook、Recall、Timer 等外部作用的窄执行边界 |
