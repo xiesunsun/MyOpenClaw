@@ -13,6 +13,12 @@ from pickel.shared.model_config import (
     ModelSelection,
     ProviderModelConfig,
 )
+
+_DEFAULT_WIRE_PROTOCOLS = {
+    "anthropic": "anthropic-messages",
+    "openai": "openai-responses",
+    "google/gemini": "gemini-generate-content",
+}
 from pickel.tools.sandbox import SandboxSettings
 
 
@@ -170,6 +176,15 @@ class AppConfig(BaseModel):
         data = provider_model.model_dump()
         data["provider"] = resolved_selection.provider
         data["model"] = resolved_selection.model
+        if data.get("wire_protocol") is None:
+            data["wire_protocol"] = _DEFAULT_WIRE_PROTOCOLS.get(
+                resolved_selection.provider
+            )
+        if data.get("wire_protocol") is None:
+            raise ValueError(
+                f"Provider '{resolved_selection.provider}' 的模型 "
+                f"'{resolved_selection.model}' 必须显式声明 wire_protocol"
+            )
         # 模型缺 api_key/api_base 时用 auth.providers 回填
         auth_entry = self.auth_providers.get(resolved_selection.provider) or {}
         if data.get("api_key") is None and auth_entry.get("api_key") is not None:

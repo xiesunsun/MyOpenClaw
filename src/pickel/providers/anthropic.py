@@ -38,7 +38,7 @@ from pickel.providers.stream import (
 from pickel.shared.model_config import ModelConfig
 
 
-class AnthropicProvider(Provider):
+class AnthropicMessagesProvider(Provider):
     request_cache_order = ("tools", "system", "messages")
 
     _IMAGE_MEDIA_TYPES = frozenset(
@@ -48,6 +48,7 @@ class AnthropicProvider(Provider):
     def __init__(
         self,
         model: str,
+        provider_name: str = "anthropic",
         api_key: str | None = None,
         api_base: str | None = None,
         temperature: float | None = None,
@@ -56,6 +57,7 @@ class AnthropicProvider(Provider):
         artifact_service: ArtifactService | None = None,
     ) -> None:
         self.model = model
+        self.provider_name = provider_name
         self.api_key = api_key
         self.api_base = api_base
         self.temperature = temperature
@@ -71,9 +73,10 @@ class AnthropicProvider(Provider):
         config: ModelConfig,
         *,
         artifact_service: ArtifactService | None = None,
-    ) -> "AnthropicProvider":
+    ) -> "AnthropicMessagesProvider":
         return cls(
             model=config.model,
+            provider_name=config.provider,
             api_key=config.api_key,
             api_base=config.api_base,
             temperature=config.temperature,
@@ -212,7 +215,7 @@ class AnthropicProvider(Provider):
                 payload.append(
                     {
                         "role": "user",
-                        "content": AnthropicProvider._user_content_blocks(
+                        "content": AnthropicMessagesProvider._user_content_blocks(
                             message,
                             artifact_service=artifact_service,
                         ),
@@ -222,7 +225,9 @@ class AnthropicProvider(Provider):
                 continue
 
             if isinstance(message, AssistantMessage):
-                assistant_blocks = AnthropicProvider._assistant_content_blocks(message)
+                assistant_blocks = AnthropicMessagesProvider._assistant_content_blocks(
+                    message
+                )
                 if assistant_blocks:
                     payload.append({"role": "assistant", "content": assistant_blocks})
                 index += 1
@@ -231,7 +236,7 @@ class AnthropicProvider(Provider):
                     messages[index], ToolResultMessage
                 ):
                     tool_result_blocks.append(
-                        AnthropicProvider._tool_result_block(
+                        AnthropicMessagesProvider._tool_result_block(
                             messages[index],  # type: ignore[arg-type]
                             artifact_service=artifact_service,
                         )
@@ -247,7 +252,7 @@ class AnthropicProvider(Provider):
                     {
                         "role": "user",
                         "content": [
-                            AnthropicProvider._tool_result_block(
+                            AnthropicMessagesProvider._tool_result_block(
                                 message,
                                 artifact_service=artifact_service,
                             )
@@ -272,7 +277,7 @@ class AnthropicProvider(Provider):
                 blocks.append({"type": "text", "text": block.text})
             elif isinstance(block, ArtifactBlock):
                 blocks.append(
-                    AnthropicProvider._artifact_content_block(
+                    AnthropicMessagesProvider._artifact_content_block(
                         block,
                         artifact_service=artifact_service,
                     )
@@ -319,7 +324,7 @@ class AnthropicProvider(Provider):
                 content.append({"type": "text", "text": item.text})
             elif isinstance(item, ArtifactBlock):
                 content.append(
-                    AnthropicProvider._artifact_content_block(
+                    AnthropicMessagesProvider._artifact_content_block(
                         item,
                         artifact_service=artifact_service,
                     )
@@ -367,7 +372,7 @@ class AnthropicProvider(Provider):
             "media_type": reference.media_type,
             "data": data,
         }
-        if reference.media_type in AnthropicProvider._IMAGE_MEDIA_TYPES:
+        if reference.media_type in AnthropicMessagesProvider._IMAGE_MEDIA_TYPES:
             return {"type": "image", "source": source}
         if reference.media_type == "application/pdf":
             result: dict[str, Any] = {"type": "document", "source": source}
@@ -480,7 +485,7 @@ class AnthropicProvider(Provider):
         return AssistantMessage(
             content=content,
             metadata=ModelResponseMetadata(
-                provider="anthropic",
+                provider=self.provider_name,
                 model=self.model,
                 provider_model_version=getattr(response, "model", None),
                 provider_response_id=getattr(response, "id", None),
@@ -515,7 +520,7 @@ class AnthropicProvider(Provider):
 
     @staticmethod
     def _block_type(block: Any) -> str | None:
-        value = AnthropicProvider._block_field(block, "type")
+        value = AnthropicMessagesProvider._block_field(block, "type")
         return str(value) if value is not None else None
 
     @staticmethod

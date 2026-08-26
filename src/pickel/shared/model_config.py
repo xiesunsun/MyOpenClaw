@@ -1,9 +1,17 @@
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, field_validator
 
+WireProtocol: TypeAlias = Literal[
+    "openai-responses",
+    "openai-chat-completions",
+    "anthropic-messages",
+    "gemini-generate-content",
+]
+
 
 class BaseModelConfig(BaseModel):
+    wire_protocol: WireProtocol | None = None
     api_key: str | None = None
     api_base: str | None = None
     temperature: float | None = None
@@ -22,6 +30,7 @@ class BaseModelConfig(BaseModel):
 class ModelConfig(BaseModelConfig):
     provider: str
     model: str
+    wire_protocol: WireProtocol
 
 
 class ModelSelection(BaseModel):

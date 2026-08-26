@@ -6,7 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 from pickel.context.model_context import ModelContext, SystemContent
-from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.stream import (
     StreamCompleted,
     TextDelta,
@@ -104,9 +104,10 @@ class _FakeMessages:
         return _FakeStream(self._events)
 
 
-def _provider(events=EVENTS) -> AnthropicProvider:
-    provider = AnthropicProvider.__new__(AnthropicProvider)
+def _provider(events=EVENTS) -> AnthropicMessagesProvider:
+    provider = AnthropicMessagesProvider.__new__(AnthropicMessagesProvider)
     provider.model = "claude-jupiter-v1-p"
+    provider.provider_name = "anthropic"
     provider.max_output_tokens = 1024
     provider.temperature = None
     provider.provider_options = {}

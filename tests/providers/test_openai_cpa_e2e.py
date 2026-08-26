@@ -14,7 +14,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
-from pickel.providers.openai import OpenAIProvider
+from pickel.providers.openai import OpenAIResponsesProvider
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("CPA_BASE_URL") or not os.environ.get("CPA_API_KEY"),
@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_cpa_responses_streaming_tool_round_trip() -> None:
-    provider = OpenAIProvider(
+    provider = OpenAIResponsesProvider(
         model="gpt-5.6-luna",
         api_base=os.environ.get("CPA_BASE_URL"),
         api_key=os.environ.get("CPA_API_KEY"),

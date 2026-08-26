@@ -96,7 +96,7 @@ class AgentPackageLoader:
             implementation = model.provider_implementation
             if (
                 implementation.kind != "provider"
-                or implementation.name != model.provider
+                or implementation.name != model.wire_protocol
             ):
                 raise PackageLoadError(
                     "provider_implementation_mismatch",

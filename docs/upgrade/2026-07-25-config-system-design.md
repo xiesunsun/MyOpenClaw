@@ -204,8 +204,10 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 - `api_key`、token、password、authorization 等秘密不得进入 AgentPackageVersion；只记录所需 SecretRef。
 - 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。
 - Environ、Settings 或 Agent 文件变化只影响未来接受的 Operation；已有 Operation 继续使用其 package_version_id 和 workspace_binding。
-- Runtime Boot 支持 Anthropic Messages 与 OpenAI Responses 两条明确 Provider
-  wire 映射；OpenAI 第一版固定 `store: false`，不使用
+- `ModelVersion.provider` 表示服务身份，`wire_protocol` 表示 HTTP wire；
+  `provider_implementation` 按 wire protocol 冻结，不能再假设服务商与协议一一对应。
+- Runtime Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible
+  Chat Completions 三条明确 wire 映射；OpenAI Responses 固定 `store: false`，不使用
   `previous_response_id` 或服务端 Conversation 作为恢复权威。Gemini 仍只保留
   Provider 直接调用测试，不接入 Boot。
 
@@ -297,7 +299,28 @@ CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
 `provider_options.reasoning_effort` 映射到 Responses 的
 `reasoning.effort`；`reasoning_summary` 映射到 `reasoning.summary`，只有
 Provider 实际返回 summary 时才形成 `ThinkingDelta`，CLI 不展示隐藏思维链。
-当前不配置 Chat Completions、协议自动降级或 `previous_response_id`。
+CPA 仍只走 Responses；任何服务都不做协议自动降级，也不使用
+`previous_response_id`。
+
+OpenCode Go 作为一个服务身份同时承载三种 wire，模型必须显式声明协议：
+
+```json
+{
+  "providers": {
+    "opencode-go": {
+      "models": {
+        "gpt-5.6-luna": { "wire_protocol": "openai-responses" },
+        "kimi-k3": { "wire_protocol": "openai-chat-completions" },
+        "minimax-m3": { "wire_protocol": "anthropic-messages" }
+      }
+    }
+  }
+}
+```
+
+`provider=opencode-go` 进入观测与模型身份；请求映射只由冻结的
+`wire_protocol` 决定。禁止按模型名前缀猜协议、失败后轮询其他协议，或把同一
+服务拆成三个虚假 Provider。
 
 ### 5.3 `auth.json`
 
@@ -311,6 +334,10 @@ Provider 实际返回 summary 时才形成 `ThinkingDelta`，CLI 不展示隐藏
     "openai": {
       "api_key": "${CPA_API_KEY}",
       "api_base": "${CPA_BASE_URL}"
+    },
+    "opencode-go": {
+      "api_key": "${OPENCODE_GO_API_KEY}",
+      "api_base": "https://opencode.ai/zen/go/v1"
     }
   },
   "openviking": {

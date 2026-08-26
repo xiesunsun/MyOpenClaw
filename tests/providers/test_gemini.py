@@ -25,6 +25,7 @@ class GeminiProviderTests(unittest.TestCase):
             ModelConfig(
                 provider="google/gemini",
                 model="gemini-test",
+                wire_protocol="gemini-generate-content",
                 temperature=None,
             )
         )

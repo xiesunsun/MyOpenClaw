@@ -27,12 +27,13 @@ def _model() -> ModelVersion:
     return ModelVersion(
         provider="anthropic",
         model="claude-test",
+        wire_protocol="anthropic-messages",
         api_base=None,
         temperature=None,
         max_input_tokens=None,
         max_output_tokens=1024,
         provider_options={"nested": {"items": ["x"]}},
-        provider_implementation=ImplementationRef("provider", "anthropic"),
+        provider_implementation=ImplementationRef("provider", "anthropic-messages"),
         required_secret_refs=(SecretRef("providers.anthropic.api_key"),),
     )
 
@@ -46,6 +47,7 @@ def _content() -> dict:
             "primary": {
                 "provider": "anthropic",
                 "model": "claude-test",
+                "wire_protocol": "anthropic-messages",
                 "api_base": None,
                 "temperature": None,
                 "max_input_tokens": None,
@@ -53,7 +55,7 @@ def _content() -> dict:
                 "provider_options": {"nested": {"items": ["x"]}},
                 "provider_implementation": {
                     "kind": "provider",
-                    "name": "anthropic",
+                    "name": "anthropic-messages",
                     "version": None,
                     "digest": None,
                 },

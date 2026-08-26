@@ -1,11 +1,13 @@
 from .config import ModelConfig
-from .anthropic import AnthropicProvider
+from .anthropic import AnthropicMessagesProvider
 from .base import Provider
-from .openai import OpenAIProvider
+from .openai import OpenAIResponsesProvider
+from .openai_chat_completions import OpenAIChatCompletionsProvider
 
 __all__ = [
-    "AnthropicProvider",
-    "OpenAIProvider",
+    "AnthropicMessagesProvider",
+    "OpenAIResponsesProvider",
+    "OpenAIChatCompletionsProvider",
     "Provider",
     "ModelConfig",
 ]

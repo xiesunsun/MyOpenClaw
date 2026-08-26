@@ -216,12 +216,13 @@ class AgentPackageBuilder:
         return ModelVersion(
             provider=config.provider,
             model=config.model,
+            wire_protocol=config.wire_protocol,
             api_base=config.api_base,
             temperature=config.temperature,
             max_input_tokens=config.max_input_tokens,
             max_output_tokens=config.max_output_tokens,
             provider_options=scan.value,
-            provider_implementation=ImplementationRef("provider", config.provider),
+            provider_implementation=ImplementationRef("provider", config.wire_protocol),
             required_secret_refs=tuple(refs),
         )
 

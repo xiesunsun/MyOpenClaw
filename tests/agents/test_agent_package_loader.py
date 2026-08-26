@@ -18,7 +18,7 @@ from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.config.app_config import ModelSelection
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
-from pickel.providers.openai import OpenAIProvider
+from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.tools.bus import ToolSource
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
@@ -99,6 +99,9 @@ def test_new_package_with_unsupported_provider_has_stable_failure_code(
     config.providers["google/gemini"] = type(config.providers["anthropic"])(
         models={"gemini-test": config.providers["anthropic"].models["claude-test"]}
     )
+    config.providers["google/gemini"].models[
+        "gemini-test"
+    ].wire_protocol = "gemini-generate-content"
     config.agents["Pickle"].llm = ModelSelection(
         provider="google/gemini", model="gemini-test"
     )
@@ -134,8 +137,8 @@ def test_new_and_frozen_packages_load_openai_responses_provider(tmp_path: Path) 
         artifact_service=_artifact_service(store),
     )
 
-    assert isinstance(current.model_clients["primary"], OpenAIProvider)
-    assert isinstance(restored.model_clients["primary"], OpenAIProvider)
+    assert isinstance(current.model_clients["primary"], OpenAIResponsesProvider)
+    assert isinstance(restored.model_clients["primary"], OpenAIResponsesProvider)
     assert current.model_clients["primary"].model == "gpt-5.6-luna"
     assert restored.version.package_version_id == current.version.package_version_id
 
@@ -153,7 +156,10 @@ def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
     primary = replace(
         current.model_policy.primary,
         provider="google/gemini",
-        provider_implementation=ImplementationRef("provider", "google/gemini"),
+        wire_protocol="gemini-generate-content",
+        provider_implementation=ImplementationRef(
+            "provider", "gemini-generate-content"
+        ),
     )
     version = build_agent_package_version(
         agent_id=current.agent_id,
@@ -246,7 +252,7 @@ def test_provider_version_that_cannot_be_verified_is_rejected(tmp_path: Path) ->
     primary = replace(
         current.model_policy.primary,
         provider_implementation=ImplementationRef(
-            "provider", "anthropic", version="unavailable-version"
+            "provider", "anthropic-messages", version="unavailable-version"
         ),
     )
     version = build_agent_package_version(

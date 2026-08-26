@@ -102,6 +102,7 @@ def _package(agent_id: str = "agent-1") -> AgentPackageVersion:
             primary=ModelVersion(
                 provider="test",
                 model="test-model",
+                wire_protocol="test",
                 api_base=None,
                 temperature=None,
                 max_input_tokens=None,

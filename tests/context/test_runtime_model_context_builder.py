@@ -33,12 +33,15 @@ def _package() -> AgentPackageVersion:
             primary=ModelVersion(
                 provider="anthropic",
                 model="claude-test",
+                wire_protocol="anthropic-messages",
                 api_base=None,
                 temperature=None,
                 max_input_tokens=None,
                 max_output_tokens=1024,
                 provider_options={},
-                provider_implementation=ImplementationRef("provider", "anthropic"),
+                provider_implementation=ImplementationRef(
+                    "provider", "anthropic-messages"
+                ),
                 required_secret_refs=(),
             )
         ),

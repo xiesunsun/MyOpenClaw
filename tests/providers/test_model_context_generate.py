@@ -18,7 +18,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
-from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.gemini import GeminiProvider
 
 
@@ -79,7 +79,7 @@ class ModelContextGenerateTests(unittest.TestCase):
             ],
         )
 
-        anthropic = AnthropicProvider(model="claude-test")
+        anthropic = AnthropicMessagesProvider(model="claude-test")
         anthropic.client = SimpleNamespace(
             messages=SimpleNamespace(
                 stream=Mock(
@@ -133,7 +133,7 @@ class ModelContextGenerateTests(unittest.TestCase):
 
     def test_anthropic_multi_round_tool_history_aggregates_tool_results(self) -> None:
         context = _sample_tool_history_context()
-        wire = AnthropicProvider._build_messages(context.messages)
+        wire = AnthropicMessagesProvider._build_messages(context.messages)
         roles = [item["role"] for item in wire]
         # user, assistant(tool calls), user(tool_results aggregated), assistant(final)
         self.assertEqual(["user", "assistant", "user", "assistant"], roles)

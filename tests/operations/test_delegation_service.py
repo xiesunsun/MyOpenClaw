@@ -67,6 +67,7 @@ def _package(agent_id: str, *, max_depth: int = 3):
             primary=ModelVersion(
                 provider="test",
                 model="test",
+                wire_protocol="test",
                 api_base=None,
                 temperature=None,
                 max_input_tokens=None,

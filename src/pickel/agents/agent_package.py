@@ -76,6 +76,7 @@ class AgentRuntimePolicy:
 class ModelVersion:
     provider: str
     model: str
+    wire_protocol: str
     api_base: str | None
     temperature: float | None
     max_input_tokens: int | None
@@ -85,8 +86,12 @@ class ModelVersion:
     required_secret_refs: tuple[SecretRef, ...]
 
     def __post_init__(self) -> None:
-        if not self.provider.strip() or not self.model.strip():
-            raise ValueError("ModelVersion.provider/model 不能为空")
+        if (
+            not self.provider.strip()
+            or not self.model.strip()
+            or not self.wire_protocol.strip()
+        ):
+            raise ValueError("ModelVersion.provider/model/wire_protocol 不能为空")
         if self.max_output_tokens < 1:
             raise ValueError("max_output_tokens 必须大于 0")
         object.__setattr__(self, "provider_options", freeze_json(self.provider_options))
@@ -315,13 +320,23 @@ def decode_legacy_agent_package(
     model = ModelVersion(
         provider=str(old_model["provider"]),
         model=str(old_model["model"]),
+        wire_protocol=(
+            "anthropic-messages"
+            if str(old_model["provider"]) == "anthropic"
+            else "openai-responses"
+        ),
         api_base=old_model.get("api_base"),
         temperature=old_model.get("temperature"),
         max_input_tokens=old_model.get("max_input_tokens"),
         max_output_tokens=int(old_model["max_output_tokens"]),
         provider_options=old_model.get("provider_options") or {},
         provider_implementation=ImplementationRef(
-            "provider", str(old_model["provider"])
+            "provider",
+            (
+                "anthropic-messages"
+                if str(old_model["provider"]) == "anthropic"
+                else "openai-responses"
+            ),
         ),
         required_secret_refs=tuple(
             SecretRef(f"providers.{old_model['provider']}.{name}")
@@ -419,6 +434,7 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
     return {
         "provider": model.provider,
         "model": model.model,
+        "wire_protocol": model.wire_protocol,
         "api_base": model.api_base,
         "temperature": model.temperature,
         "max_input_tokens": model.max_input_tokens,
@@ -497,6 +513,11 @@ def _secret_refs(values: Any) -> tuple[SecretRef, ...]:
 
 def _model_from_dict(value: Mapping[str, Any]) -> ModelVersion:
     data = dict(value)
+    if "wire_protocol" not in data:
+        provider = str(data.get("provider") or "")
+        data["wire_protocol"] = (
+            "anthropic-messages" if provider == "anthropic" else "openai-responses"
+        )
     data["provider_implementation"] = _ref_from_dict(data["provider_implementation"])
     data["required_secret_refs"] = _secret_refs(data.get("required_secret_refs"))
     return ModelVersion(**data)

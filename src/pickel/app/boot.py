@@ -36,8 +36,9 @@ from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
-from pickel.providers.anthropic import AnthropicProvider
-from pickel.providers.openai import OpenAIProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
+from pickel.providers.openai import OpenAIResponsesProvider
+from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
@@ -172,8 +173,8 @@ class Boot:
         """
 
         def load_provider(model: ModelVersion) -> Any | None:
-            self._require_supported_provider(
-                model.provider, package_version_id=package_version_id
+            self._require_supported_wire_protocol(
+                model.wire_protocol, package_version_id=package_version_id
             )
             config = self._model_config_from_version(model)
             return self._provider_from_config(
@@ -205,24 +206,36 @@ class Boot:
         package_version_id: str,
         artifact_service: ArtifactService,
     ):
-        Boot._require_supported_provider(
-            config.provider, package_version_id=package_version_id
+        Boot._require_supported_wire_protocol(
+            config.wire_protocol, package_version_id=package_version_id
         )
-        if config.provider == "anthropic":
-            return AnthropicProvider.from_config(
+        if config.wire_protocol == "anthropic-messages":
+            return AnthropicMessagesProvider.from_config(
                 config, artifact_service=artifact_service
             )
-        if config.provider == "openai":
-            return OpenAIProvider.from_config(config, artifact_service=artifact_service)
+        if config.wire_protocol == "openai-responses":
+            return OpenAIResponsesProvider.from_config(
+                config, artifact_service=artifact_service
+            )
+        if config.wire_protocol == "openai-chat-completions":
+            return OpenAIChatCompletionsProvider.from_config(
+                config, artifact_service=artifact_service
+            )
 
     @staticmethod
-    def _require_supported_provider(provider: str, *, package_version_id: str) -> None:
-        if provider in {"anthropic", "openai"}:
+    def _require_supported_wire_protocol(
+        wire_protocol: str, *, package_version_id: str
+    ) -> None:
+        if wire_protocol in {
+            "anthropic-messages",
+            "openai-responses",
+            "openai-chat-completions",
+        }:
             return
         raise PackageLoadError(
             "provider_unsupported",
             package_version_id,
-            f"当前 Runtime 不支持 Provider: {provider}",
+            f"当前 Runtime 不支持 wire protocol: {wire_protocol}",
         )
 
     def _extension_contributions(
@@ -521,6 +534,7 @@ class Boot:
         return ModelConfig(
             provider=model.provider,
             model=model.model,
+            wire_protocol=model.wire_protocol,
             api_key=api_key,
             api_base=model.api_base,
             temperature=model.temperature,

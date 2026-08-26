@@ -21,7 +21,7 @@ from pickel.conversations.content_blocks import (
     ThinkingBlock,
     ToolCallBlock,
 )
-from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 
 
@@ -51,9 +51,9 @@ class FakeAsyncMessageStreamManager:
         return None
 
 
-class AnthropicProviderTests(unittest.TestCase):
+class AnthropicMessagesProviderTests(unittest.TestCase):
     def test_build_tools_maps_tool_definitions(self) -> None:
-        tools = AnthropicProvider._build_tools(
+        tools = AnthropicMessagesProvider._build_tools(
             [
                 ToolDefinition(
                     name="echo",
@@ -95,7 +95,7 @@ class AnthropicProviderTests(unittest.TestCase):
             },
         }
 
-        tool = AnthropicProvider._build_tools(
+        tool = AnthropicMessagesProvider._build_tools(
             [ToolDefinition(name="search", description="Search", input_schema=schema)]
         )[0]
 
@@ -103,7 +103,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertNotIn("strict", tool)
 
     def test_build_messages_thinking_tool_use_and_results(self) -> None:
-        messages = AnthropicProvider._build_messages(
+        messages = AnthropicMessagesProvider._build_messages(
             [
                 UserMessage(content=[TextBlock(text="hello")]),
                 AssistantMessage(
@@ -154,7 +154,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("Done.", messages[3]["content"][1]["text"])
 
     def test_tool_result_preserves_structured_content(self) -> None:
-        block = AnthropicProvider._tool_result_block(
+        block = AnthropicMessagesProvider._tool_result_block(
             ToolResultMessage(
                 tool_call_id="call-1",
                 tool_name="lookup",
@@ -166,7 +166,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertIn('structured_content: {"id":7}', block["content"])
 
     def test_build_messages_marks_error_tool_results(self) -> None:
-        messages = AnthropicProvider._build_messages(
+        messages = AnthropicMessagesProvider._build_messages(
             [
                 AssistantMessage(
                     content=[
@@ -191,7 +191,7 @@ class AnthropicProviderTests(unittest.TestCase):
             blob_store=InMemoryBlobStore(),
         )
         reference = service.create_artifact(data=b"hi", media_type="image/png")
-        messages = AnthropicProvider._build_messages(
+        messages = AnthropicMessagesProvider._build_messages(
             [
                 AssistantMessage(
                     content=[ToolCallBlock(id="call-1", name="look", arguments={})]
@@ -227,7 +227,7 @@ class AnthropicProviderTests(unittest.TestCase):
             display_name="chart.png",
         )
 
-        messages = AnthropicProvider._build_messages(
+        messages = AnthropicMessagesProvider._build_messages(
             [UserMessage(content=[ArtifactBlock(artifact=reference)])],
             artifact_service=service,
         )
@@ -238,7 +238,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("aW1hZ2U=", block["source"]["data"])
 
     def test_build_messages_aggregates_consecutive_tool_results(self) -> None:
-        messages = AnthropicProvider._build_messages(
+        messages = AnthropicMessagesProvider._build_messages(
             [
                 UserMessage(content=[TextBlock(text="hi")]),
                 AssistantMessage(
@@ -265,7 +265,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("c2", messages[2]["content"][1]["tool_use_id"])
 
     def test_generate_maps_response_blocks_and_metadata(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-opus-4-7",
             temperature=0.2,
             max_output_tokens=2048,
@@ -348,7 +348,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertNotIn("temperature", create_kwargs)
 
     def test_generate_sends_temperature_for_non_opus_models(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-sonnet-4-0",
             temperature=0.4,
         )
@@ -377,7 +377,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual(0.4, stream.call_args.kwargs["temperature"])
 
     def test_count_context_tokens_uses_matching_request_shape(self) -> None:
-        provider = AnthropicProvider(model="claude-test")
+        provider = AnthropicMessagesProvider(model="claude-test")
         count_tokens = AsyncMock(return_value=SimpleNamespace(input_tokens=42))
         provider.client = SimpleNamespace(
             messages=SimpleNamespace(count_tokens=count_tokens, stream=Mock())
@@ -403,7 +403,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual(1, len(kwargs["tools"]))
 
     def test_count_context_tokens_returns_none_on_failure(self) -> None:
-        provider = AnthropicProvider(model="claude-test")
+        provider = AnthropicMessagesProvider(model="claude-test")
         provider.client = SimpleNamespace(
             messages=SimpleNamespace(
                 count_tokens=AsyncMock(side_effect=RuntimeError("boom")),
@@ -421,7 +421,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertIsNone(total)
 
     def test_cache_control_marks_system_and_enables_automatic_caching(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-test",
             provider_options={
                 "cache_control": {
@@ -460,7 +460,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertNotIn("cache_control", params["tools"][-1])
 
     def test_request_snapshot_preserves_wire_request_and_cache_order(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-test",
             max_output_tokens=2048,
             provider_options={"cache_control": {"type": "ephemeral"}},
@@ -489,7 +489,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("echo", snapshot["tools"][0]["name"])
 
     def test_cache_control_is_absent_by_default(self) -> None:
-        provider = AnthropicProvider(model="claude-test")
+        provider = AnthropicMessagesProvider(model="claude-test")
 
         params = provider._build_request_params(
             ModelContext(
@@ -503,7 +503,7 @@ class AnthropicProviderTests(unittest.TestCase):
 
     def test_cache_control_rejects_unsupported_ttl(self) -> None:
         with self.assertRaisesRegex(ValueError, "5m.*1h"):
-            AnthropicProvider(
+            AnthropicMessagesProvider(
                 model="claude-test",
                 provider_options={
                     "cache_control": {

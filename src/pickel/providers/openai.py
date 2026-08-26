@@ -38,7 +38,7 @@ from pickel.providers.stream import (
 from pickel.shared.model_config import ModelConfig
 
 
-class OpenAIProvider(Provider):
+class OpenAIResponsesProvider(Provider):
     """把唯一 ModelContext 映射到 OpenAI Responses API。"""
 
     request_cache_order = ("tools", "instructions", "input")
@@ -50,6 +50,7 @@ class OpenAIProvider(Provider):
     def __init__(
         self,
         model: str,
+        provider_name: str = "openai",
         api_key: str | None = None,
         api_base: str | None = None,
         temperature: float | None = None,
@@ -59,6 +60,7 @@ class OpenAIProvider(Provider):
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.model = model
+        self.provider_name = provider_name
         self.api_key = api_key
         self.api_base = (api_base or "https://api.openai.com/v1").rstrip("/") + "/"
         self.temperature = temperature
@@ -73,9 +75,10 @@ class OpenAIProvider(Provider):
         config: ModelConfig,
         *,
         artifact_service: ArtifactService | None = None,
-    ) -> "OpenAIProvider":
+    ) -> "OpenAIResponsesProvider":
         return cls(
             model=config.model,
+            provider_name=config.provider,
             api_key=config.api_key,
             api_base=config.api_base,
             temperature=config.temperature,
@@ -350,7 +353,7 @@ class OpenAIProvider(Provider):
         return AssistantMessage(
             content=tuple(content),
             metadata=ModelResponseMetadata(
-                provider="openai",
+                provider=self.provider_name,
                 model=self.model,
                 provider_model_version=self._string(payload.get("model")),
                 provider_response_id=self._string(payload.get("id")),
@@ -408,19 +411,19 @@ class OpenAIProvider(Provider):
         input_details = value.get("input_tokens_details")
         output_details = value.get("output_tokens_details")
         return ModelUsage(
-            input_tokens=OpenAIProvider._integer(value.get("input_tokens")),
-            output_tokens=OpenAIProvider._integer(value.get("output_tokens")),
-            cache_read_tokens=OpenAIProvider._integer(
+            input_tokens=OpenAIResponsesProvider._integer(value.get("input_tokens")),
+            output_tokens=OpenAIResponsesProvider._integer(value.get("output_tokens")),
+            cache_read_tokens=OpenAIResponsesProvider._integer(
                 input_details.get("cached_tokens")
                 if isinstance(input_details, Mapping)
                 else None
             ),
-            reasoning_tokens=OpenAIProvider._integer(
+            reasoning_tokens=OpenAIResponsesProvider._integer(
                 output_details.get("reasoning_tokens")
                 if isinstance(output_details, Mapping)
                 else None
             ),
-            total_tokens=OpenAIProvider._integer(value.get("total_tokens")),
+            total_tokens=OpenAIResponsesProvider._integer(value.get("total_tokens")),
         )
 
     def _build_client(self) -> httpx.AsyncClient:

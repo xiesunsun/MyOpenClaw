@@ -3,6 +3,7 @@ from pickel.shared.model_config import (
     ModelConfig,
     ModelSelection,
     ProviderModelConfig,
+    WireProtocol,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "ModelConfig",
     "ModelSelection",
     "ProviderModelConfig",
+    "WireProtocol",
 ]

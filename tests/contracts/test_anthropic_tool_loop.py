@@ -21,7 +21,7 @@ from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.operation_service import OperationService
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
-from pickel.providers.anthropic import AnthropicProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.agent import Agent
@@ -88,7 +88,7 @@ class _AnthropicContractProvider(Provider):
         raise AssertionError("运行时合同必须使用 Provider stream")
 
     async def stream(self, context):
-        messages = AnthropicProvider._build_messages(context.messages)
+        messages = AnthropicMessagesProvider._build_messages(context.messages)
         self.request_messages.append(messages)
         yield StreamCompleted(message=self.replies.pop(0))
 
@@ -102,12 +102,15 @@ def _package() -> AgentPackageVersion:
             primary=ModelVersion(
                 provider="anthropic",
                 model="claude-test",
+                wire_protocol="anthropic-messages",
                 api_base=None,
                 temperature=None,
                 max_input_tokens=None,
                 max_output_tokens=1024,
                 provider_options={},
-                provider_implementation=ImplementationRef("provider", "anthropic"),
+                provider_implementation=ImplementationRef(
+                    "provider", "anthropic-messages"
+                ),
                 required_secret_refs=(),
             )
         ),

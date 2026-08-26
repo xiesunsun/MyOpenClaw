@@ -23,7 +23,7 @@ from pickel.conversations.content_blocks import (
     ThinkingBlock,
     ToolCallBlock,
 )
-from pickel.providers.openai import OpenAIProvider
+from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.providers.stream import (
     StreamCompleted,
     TextDelta,
@@ -103,7 +103,7 @@ def _completed_response() -> dict:
 
 
 def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
-    provider = OpenAIProvider(
+    provider = OpenAIResponsesProvider(
         model="gpt-5.6-luna",
         max_output_tokens=128,
         provider_options={
@@ -186,7 +186,7 @@ def test_stream_and_generate_share_response_parser() -> None:
         base_url="https://cpa.example/v1/",
         transport=httpx.MockTransport(respond),
     )
-    provider = OpenAIProvider(model="gpt-5.6-luna", client=client)
+    provider = OpenAIResponsesProvider(model="gpt-5.6-luna", client=client)
 
     async def collect():
         return [delta async for delta in provider.stream(_context())]
@@ -234,7 +234,7 @@ def test_generate_rejects_invalid_function_arguments() -> None:
             )
         ),
     )
-    provider = OpenAIProvider(model="test", client=client)
+    provider = OpenAIResponsesProvider(model="test", client=client)
 
     with pytest.raises(ValueError, match="arguments"):
         asyncio.run(provider.generate(_context()))
@@ -260,7 +260,7 @@ def test_failed_stream_is_not_mistaken_for_completed_response() -> None:
             )
         ),
     )
-    provider = OpenAIProvider(model="test", client=client)
+    provider = OpenAIResponsesProvider(model="test", client=client)
 
     with pytest.raises(RuntimeError, match="gateway failed"):
         asyncio.run(provider.generate(_context()))

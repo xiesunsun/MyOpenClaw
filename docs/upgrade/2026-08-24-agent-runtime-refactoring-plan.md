@@ -399,7 +399,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 | ModelStepStarted / ToolCallStarted / ToolCallCompleted | 已删除；没有生产发射路径，连同专属 ToolRenderer 与无真实来源的 ToolTiming 一并移除 |
 | AgentRunUsage | 已接通；Provider metadata → 持久化 AssistantMessage → Operation 分支纯投影 → Event 与 App/CLI 结果；缺少稳定历史终点时明确返回 `None`，不误扫后续 Operation |
 | `/model`、`/thinking` | 已隐藏；未实现 Environ → 新 Package → 未来 Operation 的完整切换语义前不公开 |
-| Provider Boot | Anthropic Messages 与 OpenAI Responses 支持新建和冻结 Package 恢复；Gemini 统一返回 `provider_unsupported`，仅保留直接调用适配器测试 |
+| Provider Boot | Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions 支持新建和冻结 Package 恢复；服务身份与冻结 `wire_protocol` 分离；Gemini 统一返回 `provider_unsupported`，仅保留直接调用适配器测试 |
 | 重复 ArtifactService 注入 | 已收敛；RuntimeHost 按 Store 复用唯一实例，Boot 显式转发给 Provider 与 RuntimeEffects/ToolServices |
 
 执行控制下沉已经完成：`ConversationRuntime` 不再保存前台 task 与互斥锁；`Agent.followup_and_wait()` 在写 Inbox 前原子判断 busy，并与 `when_idle()`、`resume_operation()` 共用 drive lock；`AgentRegistry` 继续负责后台 task 和 wake 去重。调用期间临时 `LoadedPackageHandle` 允许 Conversation detach，而不提前关闭仍在执行的 Generation。
