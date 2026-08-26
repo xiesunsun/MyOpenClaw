@@ -245,7 +245,7 @@ flowchart LR
 ```json
 {
   "default_agent": "Pickle",
-  "default_llm": { "provider": "anthropic", "model": "claude-jupiter-v1-p" },
+  "default_llm": { "provider": "openai", "model": "gpt-5.6-luna" },
   "default_file_access_mode": "full",
   "default_skills_path": ".agent/skills",
   "react_max_steps": 100,
@@ -334,8 +334,8 @@ workspace_path: pickle_workspace   # 文件工具工作区，≠ 会话库
 tools: [list_directory, read_file, ...]
 file_access_mode: full
 llm:
-  provider: anthropic
-  model: claude-jupiter-v1-p
+  provider: openai
+  model: gpt-5.6-luna
 remote_agent_id: ${OPENVIKING_AGENT_ID}
 skills_path: null
 ```

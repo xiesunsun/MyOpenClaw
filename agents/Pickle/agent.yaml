@@ -13,6 +13,6 @@ extensions:
   - openviking
 file_access_mode: full
 llm:
-  provider: anthropic
-  model: claude-jupiter-v1-p
+  provider: openai
+  model: gpt-5.6-luna
 remote_agent_id: ${OPENVIKING_AGENT_ID}
