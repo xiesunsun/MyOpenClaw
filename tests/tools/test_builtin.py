@@ -31,7 +31,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "delegate_agent",
                 "send_message",
                 "list_agents",
-                "cancel_delegation",
+                "interrupt_agent",
                 "report",
                 "wait_delegation",
             },

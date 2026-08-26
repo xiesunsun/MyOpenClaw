@@ -22,6 +22,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 },
                 "required": ["name"],
             },
+            output_schema={"type": "string"},
         )
         async def greet(name: str, context: ToolExecutionContext) -> str:
             return f"{name}@{context.workspace_path}"
@@ -36,6 +37,7 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual("greet", greet.spec.name)
+        self.assertEqual({"type": "string"}, greet.spec.output_schema)
         self.assertEqual("pickle@/tmp/pickle", result.content)
         self.assertFalse(result.is_error)
 

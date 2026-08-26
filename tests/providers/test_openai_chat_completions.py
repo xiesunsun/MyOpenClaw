@@ -74,7 +74,7 @@ def test_snapshot_maps_full_context_and_tools() -> None:
         {
             "role": "tool",
             "tool_call_id": "call-1",
-            "content": 'result\nstructured_content: {"ok":true}',
+            "content": 'structured_content: {"ok":true}',
         },
     ]
     assert snapshot["tools"][0]["function"]["name"] == "lookup"

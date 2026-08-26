@@ -74,6 +74,7 @@ class FunctionTool(BaseTool):
         name: str,
         description: str,
         input_schema: dict[str, Any],
+        output_schema: Optional[dict[str, Any]] = None,
         func: ToolFunction,
         replay_policy: Literal["safe", "never"] = "never",
     ) -> None:
@@ -81,6 +82,7 @@ class FunctionTool(BaseTool):
             name=name,
             description=description,
             input_schema=input_schema,
+            output_schema=output_schema,
             replay_policy=replay_policy,
         )
         self._func = func
@@ -122,6 +124,7 @@ def tool(
     description: str,
     input_schema: Optional[dict[str, Any]] = None,
     parameters: Optional[dict[str, Any]] = None,
+    output_schema: Optional[dict[str, Any]] = None,
     replay_policy: Literal["safe", "never"] = "never",
 ) -> Callable[[ToolFunction], FunctionTool]:
     schema = input_schema or parameters
@@ -133,6 +136,7 @@ def tool(
             name=name,
             description=description,
             input_schema=schema,
+            output_schema=output_schema,
             func=func,
             replay_policy=replay_policy,
         )

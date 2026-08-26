@@ -624,6 +624,69 @@ def test_prepare_cancel_delegation_returns_active_operation(
     assert store.load_message("discarded-message").status == "discarded"
 
 
+def _switch_parent_call_to_interrupt(store: Store, child_session_id: str) -> None:
+    _switch_parent_call_to_cancel_delegation(
+        store,
+        child_session_id,
+        step_id="step-interrupt",
+        tool_call_id="tool-interrupt",
+    )
+    current = store.load_run_state("operation-1")
+    assert current is not None and current.current_step is not None
+    call = replace(current.current_step.tool_calls[0], tool_name="interrupt_agent")
+    switched = replace(
+        current,
+        current_step=replace(current.current_step, tool_calls=(call,)),
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._run_states["operation-1"] = switched
+        return
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE agent_run_states SET current_step_json = ? WHERE operation_id = ?",
+            (
+                json.dumps(
+                    switched.current_step.content_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "operation-1",
+            ),
+        )
+
+
+def test_prepare_interrupt_agent_preserves_target_inbox(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    delegation = _service(store).start_delegation(
+        "operation-1", "step-1", "tool-1", UserMessage((TextBlock("child"),))
+    )
+    _switch_parent_call_to_interrupt(store, delegation.child_session_id)
+
+    active_operation_id = DelegationService(
+        store=store, now=lambda: NOW
+    ).prepare_interrupt_agent(
+        "operation-1", "step-interrupt", "tool-interrupt", delegation.child_session_id
+    )
+
+    assert active_operation_id is None
+    assert store.load_message(delegation.initial_message_id).status == "pending"
+
+
+def test_prepare_interrupt_agent_rejects_non_direct_child(
+    store: Store, tmp_path: Path
+) -> None:
+    _setup(store, tmp_path / "workspace")
+    _switch_parent_call_to_interrupt(store, "session-1")
+
+    with pytest.raises(StorageConflictError, match="direct child"):
+        DelegationService(store=store, now=lambda: NOW).prepare_interrupt_agent(
+            "operation-1", "step-interrupt", "tool-interrupt", "session-1"
+        )
+
+
 def test_prepare_cancel_delegation_rejects_non_child_and_wrong_call(
     store: Store, tmp_path: Path
 ) -> None:

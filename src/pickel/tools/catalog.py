@@ -10,9 +10,9 @@ from pickel.tools.file_tools import (
     WriteTool,
 )
 from pickel.tools.delegate_agent import delegate_agent
+from pickel.tools.interrupt_agent import interrupt_agent
 from pickel.tools.send_message import send_message
 from pickel.tools.list_agents import list_agents
-from pickel.tools.cancel_delegation import cancel_delegation
 from pickel.tools.report import report
 from pickel.tools.wait_delegation import wait_delegation
 from pickel.tools.shell import BashTool
@@ -31,7 +31,7 @@ def builtin_tools() -> list[BaseTool]:
         delegate_agent,
         send_message,
         list_agents,
-        cancel_delegation,
+        interrupt_agent,
         report,
         wait_delegation,
     ]

@@ -18,6 +18,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.tools.bus import ToolBus, ToolEntry, ToolSnapshot
+from pickel.tools.cancel_delegation import cancel_delegation
 
 
 class PackageLoadError(RuntimeError):
@@ -173,7 +174,23 @@ class AgentPackageLoader:
         try:
             entry = self._tool_bus.get(version.name)
         except KeyError:
-            return None
+            # 迁移兼容：旧的冻结 Package 可能仍引用 cancel_delegation。
+            # 不把它注册回 ToolBus，避免新 Package/snapshot 重新公开旧名称；
+            # 仅在精确恢复该旧版本时提供一次隐藏的本地实现。
+            if (
+                version.name == "cancel_delegation"
+                and version.source.value == "builtin"
+            ):
+                entry = ToolEntry(
+                    name=version.name,
+                    tool=cancel_delegation,
+                    source=version.source,
+                    version=version.version,
+                    origin=None,
+                    enabled=True,
+                )
+            else:
+                return None
         ref = version.implementation_ref
         expected_origin = None if entry.source.value == "builtin" else ref.name
         if (

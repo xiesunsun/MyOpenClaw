@@ -27,6 +27,13 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
             },
         },
         "required": ["child_session_id", "message"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "type": "object",
+        "properties": {"message_id": {"type": "string"}},
+        "required": ["message_id"],
+        "additionalProperties": False,
     },
     replay_policy="safe",
 )

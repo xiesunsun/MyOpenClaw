@@ -66,3 +66,24 @@ def test_validate_tool_result_rejects_non_json_structured_content():
 
     assert error is not None
     assert "不是 JSON 数据" in error
+
+
+def test_validate_tool_result_requires_structured_content_when_schema_declared():
+    error = validate_tool_result(_Tool(), ToolExecutionResult(content="ok"))
+
+    assert error is not None
+    assert "None is not of type 'object'" in error
+
+
+def test_invalid_tool_result_drops_unserializable_structure():
+    from pickel.tools.validation import invalid_tool_result
+
+    result = invalid_tool_result(
+        ToolExecutionResult(content="ok", structured_content={"value": object()}),
+        "$.structured_content 不是 JSON 数据",
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert result.error is not None
+    assert result.error.type == "INVALID_TOOL_OUTPUT"

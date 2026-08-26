@@ -680,7 +680,7 @@ class SQLiteRuntimeStore:
                 connection.rollback()
                 raise
 
-    def prepare_cancel_delegation(
+    def prepare_interrupt_agent(
         self,
         *,
         sender_operation_id: str,
@@ -688,8 +688,13 @@ class SQLiteRuntimeStore:
         sender_tool_call_id: str,
         target_child_session_id: str,
         handled_at: datetime,
+        _expected_tool_name: str = "interrupt_agent",
     ) -> str | None:
-        """原子校验取消 ToolCall、清理 child 消息并返回 active Operation。"""
+        """原子校验 interrupt_agent，并返回 child 当时的 active Operation。
+
+        中断不丢弃目标 child Inbox；目标 Operation 的普通 cancellation
+        reconciliation 只处理它自己创建的后代消息。
+        """
         self._ensure_schema()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -759,47 +764,14 @@ class SQLiteRuntimeStore:
                     or step.step_id != sender_step_id
                     or step.phase != "awaiting_tools"
                     or call is None
-                    or call.tool_name != "cancel_delegation"
+                    or call.tool_name != _expected_tool_name
                     or call.status != "intent_recorded"
                     or call.execution_intent is not None
                     or call.arguments != {"child_session_id": target_child_session_id}
                 ):
                     raise StorageConflictError(
-                        "sender ToolCall 不是当前 cancel_delegation intent_recorded"
+                        f"sender ToolCall 不是当前 {_expected_tool_name} intent_recorded"
                     )
-                rows = connection.execute(
-                    "SELECT * FROM agent_inbox_messages WHERE session_id = ? AND status = 'pending'",
-                    (target_child_session_id,),
-                ).fetchall()
-                for row in rows:
-                    message = self._message_from_row(row)
-                    source = message.source
-                    source_operation = None
-                    if isinstance(source, AgentMessageSource):
-                        source_operation = connection.execute(
-                            "SELECT session_id FROM session_operations WHERE operation_id = ?",
-                            (source.sender_operation_id,),
-                        ).fetchone()
-                    if (
-                        isinstance(source, AgentMessageSource)
-                        and source.sender_session_id == operation_row["session_id"]
-                        and source.form == message.delivery
-                        and source_operation is not None
-                        and source_operation["session_id"]
-                        == operation_row["session_id"]
-                    ):
-                        connection.execute(
-                            """
-                            UPDATE agent_inbox_messages
-                            SET status = 'discarded', outcome_reason = ?, handled_at = ?
-                            WHERE message_id = ? AND status = 'pending'
-                            """,
-                            (
-                                "direct child 已被取消",
-                                handled_at.isoformat(),
-                                message.message_id,
-                            ),
-                        )
                 active_operation_id = target_row["active_operation_id"]
                 connection.commit()
                 return (
@@ -813,6 +785,48 @@ class SQLiteRuntimeStore:
             except (StorageConflictError, StorageIntegrityError, ValueError, TypeError):
                 connection.rollback()
                 raise
+
+    def prepare_cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        handled_at: datetime,
+    ) -> str | None:
+        """旧 Package 迁移兼容入口；新 Package 使用 interrupt_agent。"""
+        operation_id = self.prepare_interrupt_agent(
+            sender_operation_id=sender_operation_id,
+            sender_step_id=sender_step_id,
+            sender_tool_call_id=sender_tool_call_id,
+            target_child_session_id=target_child_session_id,
+            handled_at=handled_at,
+            _expected_tool_name="cancel_delegation",
+        )
+        # 仅为历史 Package 保留旧行为。新 interrupt_agent 明确保留目标 Inbox。
+        for message in self.list_pending(session_id=target_child_session_id):
+            source = message.source
+            operation = self.load_operation(sender_operation_id)
+            source_operation = (
+                self.load_operation(source.sender_operation_id)
+                if isinstance(source, AgentMessageSource)
+                else None
+            )
+            if (
+                isinstance(source, AgentMessageSource)
+                and operation is not None
+                and source.sender_session_id == operation.session_id
+                and source.form == message.delivery
+                and source_operation is not None
+                and source_operation.session_id == operation.session_id
+            ):
+                self.discard_message(
+                    message_id=message.message_id,
+                    reason="direct child 已被取消",
+                    handled_at=handled_at,
+                )
+        return operation_id
 
     def send_child_report(
         self,

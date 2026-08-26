@@ -95,6 +95,16 @@ class DelegationStore(Protocol):
         created_at: datetime,
     ) -> InboxMessage: ...
 
+    def prepare_interrupt_agent(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        handled_at: datetime,
+    ) -> str | None: ...
+
     def prepare_cancel_delegation(
         self,
         *,
@@ -278,6 +288,26 @@ class DelegationService:
             created_at=self._now(),
         )
 
+    def prepare_interrupt_agent(
+        self,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+    ) -> str | None:
+        """原子准备 direct child 中断，并返回当时的 active Operation。"""
+        if not sender_operation_id or not sender_step_id or not sender_tool_call_id:
+            raise ValueError("sender Operation、Step 和 ToolCall 身份不能为空")
+        if not target_child_session_id:
+            raise ValueError("child_session_id 不能为空")
+        return self._store.prepare_interrupt_agent(
+            sender_operation_id=sender_operation_id,
+            sender_step_id=sender_step_id,
+            sender_tool_call_id=sender_tool_call_id,
+            target_child_session_id=target_child_session_id,
+            handled_at=self._now(),
+        )
+
     def prepare_cancel_delegation(
         self,
         sender_operation_id: str,
@@ -285,11 +315,7 @@ class DelegationService:
         sender_tool_call_id: str,
         target_child_session_id: str,
     ) -> str | None:
-        """原子准备 direct child 取消，并返回当时的 active Operation。"""
-        if not sender_operation_id or not sender_step_id or not sender_tool_call_id:
-            raise ValueError("sender Operation、Step 和 ToolCall 身份不能为空")
-        if not target_child_session_id:
-            raise ValueError("child_session_id 不能为空")
+        """旧 Package 迁移兼容入口；新流程使用 interrupt_agent。"""
         return self._store.prepare_cancel_delegation(
             sender_operation_id=sender_operation_id,
             sender_step_id=sender_step_id,

@@ -28,6 +28,16 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
             },
         },
         "required": ["description", "prompt"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "child_session_id": {"type": "string"},
+            "message_id": {"type": "string"},
+        },
+        "required": ["child_session_id", "message_id"],
+        "additionalProperties": False,
     },
     replay_policy="safe",
 )

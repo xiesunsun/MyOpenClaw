@@ -21,6 +21,7 @@ from pickel.tools.base import (
     ToolSpec,
 )
 from pickel.tools.bus import ToolBus, ToolSource
+from pickel.tools.catalog import install_builtin_tools
 
 
 class _EchoTool(BaseTool):
@@ -133,6 +134,39 @@ def test_builder_preserves_tool_replay_policy(tmp_path: Path) -> None:
         ("echo", "never"),
         ("safe", "safe"),
     ]
+
+
+def test_pickel_package_uses_interrupt_tools_and_waits_without_legacy_cancel(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    config.agents["Pickle"].tools = [
+        "delegate_agent",
+        "send_message",
+        "list_agents",
+        "interrupt_agent",
+        "report",
+        "wait_delegation",
+    ]
+    bus = ToolBus()
+    install_builtin_tools(bus)
+
+    package = AgentPackageBuilder(
+        app_config=config, tool_bus=bus
+    ).build_agent_package_version()
+
+    names = {tool.name for tool in package.tools}
+    assert {
+        "delegate_agent",
+        "send_message",
+        "list_agents",
+        "interrupt_agent",
+        "report",
+        "wait_delegation",
+    } <= names
+    assert "cancel_delegation" not in names
+    assert all(tool.output_schema is not None for tool in package.tools)
 
 
 def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) -> None:

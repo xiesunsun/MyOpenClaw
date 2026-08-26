@@ -1,8 +1,8 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**更新日期**：2026-08-25
-**状态**：目标合同，实施中
+**更新日期**：2026-08-26
+**状态**：目标合同，实施中；Tool 与 Delegation 控制面收敛待验收
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -195,6 +195,36 @@ Recall/Hook/draft input 的纯 preview，source 为 `preview`。preview 不能�
 
 `HostCall` 不等于可恢复外部等待。需要重启后继续等待的交互必须由所属业务状态机持久化；当前 ToolApproval 和 Tool reconciliation 都直接修改 AgentRunState，不新增独立队列或 Manager。
 
+### 7.1 ToolDefinition 与结果边界
+
+`ToolDefinition` 是冻结 Package 中的完整 Runtime 执行定义，必须同时提供输入和输出
+schema。`output_schema` 只属于 Runtime/Package 执行合同；映射给模型的 Provider wire
+工具定义只发送 `name`、`description` 和 `input_schema`，Provider 不把
+`output_schema` 当作协议字段：
+
+```python
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    description: str
+    input_schema: FrozenJSON
+    output_schema: FrozenJSON
+```
+
+Tool 的执行合同固定为：
+
+```text
+ToolDefinition.output_schema
+→ execute(arguments) -> JSONValue
+→ 按 output_schema 验证 JSONValue
+→ render(validated_value) -> ToolResultMessage.content
+```
+
+验证失败是 Tool 错误，必须按原始 ToolCall 顺序形成模型可见错误结果。验证通过的
+JSON value 只通过 `render()` 转换为唯一的模型可见 `content`，持久化结果只引用该
+ToolResultMessage；不再并列保存或消费 `structured_content`。Provider、Trace 和 UI
+可以从同一 `content` 做各自展示映射，但不能形成第二份结果权威。
+
 ## 8. 多模态与多 Agent
 
 消息内容使用明确 Block：
@@ -223,8 +253,16 @@ Agent.when_idle()
 
 start_delegation() -> child_session_id
 wait_delegation()
-cancel_delegation()
+interrupt_agent()
 ```
+
+`wait_delegation()` 等待 child Operation 的终态，并从其
+`final_assistant_node_id` 读取唯一终态 AssistantMessage。child 的 `report` 只发送
+中间通信，不是终态结果，也不能填充 `final_assistant_node_id`。`interrupt_agent`
+是模型工具名：只选择目标 direct child 当前的 active Operation，随后按普通
+Operation cancellation 合同处理该 Operation 创建的非终态后代；调用方不能任意选择
+非后代 Operation。child Session 与 AgentDelegation 保留，不归档、删除、重建关系，
+也不把报告当作结果。
 
 ## 9. Observation 与生命周期
 
@@ -288,5 +326,5 @@ cancel_delegation()
 6. 当前 Operation 通过 Session.active_operation_id 恢复，不扫描历史 Operation。
 7. Tool 外部副作用前必须提交 ToolExecutionIntent；未知结果不得静默重放。
 8. RuntimeGeneration reload 后旧 Operation 继续引用原 LoadedAgentPackage，所有贡献可逆序撤销。
-9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane。
+9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane；child 终态结果只由最终 AssistantMessage 表达，report 仅为中间通信。
 10. 完成迁移的旧公共类型、表和兼容路径必须删除。

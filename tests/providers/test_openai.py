@@ -139,7 +139,7 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
         {
             "type": "function_call_output",
             "call_id": "call-1",
-            "output": 'result\nstructured_content: {"ok":true}',
+            "output": 'structured_content: {"ok":true}',
         },
     ]
     assert snapshot["tools"][0] == {

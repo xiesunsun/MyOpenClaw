@@ -62,7 +62,11 @@ from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.frozen_json import freeze_json_object, thaw_json
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
-from pickel.tools.validation import validate_json_schema
+from pickel.tools.validation import (
+    invalid_tool_result,
+    validate_json_schema,
+    validate_tool_result,
+)
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 RuntimeEventConsumer = Callable[[RuntimeEventBase], None | Awaitable[None]]
@@ -644,6 +648,21 @@ class OperationDriver:
                     tool_call_id=executable.tool_call_id,
                     host_calls=host_calls,
                 )
+                # OperationDriver 是结果提交前的最后一道边界。正常执行由
+                # RuntimeEffects 在精确 BaseTool 上验证；这里再用冻结
+                # ToolVersion 校验，覆盖兼容的直接 ToolEffect 和恢复实现。
+                tool_version = next(
+                    (
+                        item
+                        for item in package.tools
+                        if item.name == executable.tool_name
+                    ),
+                    None,
+                )
+                if tool_version is not None:
+                    validation_error = validate_tool_result(tool_version, result)
+                    if validation_error is not None:
+                        result = invalid_tool_result(result, validation_error)
                 result_node_id = self._node_id()
                 completed = replace(
                     next(
@@ -858,7 +877,7 @@ class OperationDriver:
         )
         if not isinstance(hook_contributions, ContextContributions):
             hook_contributions = ContextContributions()
-        return self._context_builder.build_model_context(
+        model_context = self._context_builder.build_model_context(
             package=package,
             visible_messages=visible,
             contributions=ContextContributions(
@@ -866,6 +885,21 @@ class OperationDriver:
                 messages=tuple(recalled) + hook_contributions.messages,
             ),
         )
+        # report 是 child→parent 的中间通信工具。它可以保留在冻结 Package
+        # 中供 delegated Session 执行，但 Root 的 ModelContext 不应暴露它。
+        # 这里仅收窄模型可见工具；执行端仍使用完整冻结 Package 做校验。
+        load_delegation = getattr(self._operations, "load_delegation", None)
+        is_delegated = callable(load_delegation) and (
+            load_delegation(operation.session_id) is not None
+        )
+        if not is_delegated:
+            model_context = replace(
+                model_context,
+                tools=tuple(
+                    tool for tool in model_context.tools if tool.name != "report"
+                ),
+            )
+        return model_context
 
     def _pending_step_messages(self, session_id: str) -> tuple[InboxMessage, ...]:
         return self._operations.list_pending_step_messages(session_id=session_id)

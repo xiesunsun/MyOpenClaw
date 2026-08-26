@@ -8,6 +8,7 @@ import pytest
 from pickel.agents.agent_package import (
     ExtensionVersion,
     ImplementationRef,
+    ToolVersion,
     build_agent_package_version,
 )
 from pickel.agents.agent_package_loader import AgentPackageLoader, PackageLoadError
@@ -21,7 +22,8 @@ from pickel.extensions_host.registry import ExtensionRegistry
 from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.providers.anthropic import AnthropicMessagesProvider
-from pickel.tools.bus import ToolSource
+from pickel.tools.bus import ToolSource, ToolActivation
+from pickel.tools.cancel_delegation import cancel_delegation
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
 
@@ -75,6 +77,52 @@ def test_loads_the_stored_version_instead_of_rebuilding_current_config(
 
     assert restored.version.package_version_id == old.version.package_version_id
     assert restored.model_clients["primary"].model == "claude-test"
+
+
+def test_legacy_cancel_tool_is_hidden_from_new_snapshot_but_loadable(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
+    legacy_tool = ToolVersion(
+        name="cancel_delegation",
+        source=ToolSource.BUILTIN,
+        implementation_ref=ImplementationRef("builtin", "cancel_delegation"),
+        version=None,
+        description=cancel_delegation.spec.description,
+        input_schema=cancel_delegation.spec.input_schema,
+        output_schema=cancel_delegation.spec.output_schema,
+        replay_policy="safe",
+    )
+    legacy = build_agent_package_version(
+        agent_id=current.agent_id,
+        format_version=current.format_version,
+        behavior_instruction=current.behavior_instruction,
+        model_policy=current.model_policy,
+        runtime_policy=current.runtime_policy,
+        workspace_policy=current.workspace_policy,
+        skills=current.skills,
+        tools=(legacy_tool,),
+        extensions=current.extensions,
+        created_at=current.created_at,
+    )
+    store.insert_agent_package_version(legacy)
+
+    assert "cancel_delegation" not in {
+        entry.name
+        for entry in _tool_bus()
+        .snapshot(ToolActivation(allowed=frozenset({"cancel_delegation"})))
+        .entries
+    }
+    loaded = AgentPackageLoader(
+        store, _tool_bus(), provider_loader=lambda model: object()
+    ).load(legacy.package_version_id)
+    assert loaded.tool_snapshot.names == ("cancel_delegation",)
 
 
 def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
+    ToolResultMessage,
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
@@ -257,6 +258,57 @@ async def test_recovered_cancelled_child_wakes_direct_parent():
 
     assert result.status == "cancelled"
     assert woken == ["parent-session"]
+
+
+@_run_async
+async def test_context_hides_report_for_root_and_keeps_it_for_delegated_session():
+    package = _loaded_package(tool_name="report").version
+    package.tools = (
+        SimpleNamespace(
+            name="report",
+            description="report",
+            replay_policy="safe",
+            source=SimpleNamespace(value="builtin"),
+            implementation_ref=SimpleNamespace(name="report"),
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        ),
+    )
+    operations = _Operations(
+        replace(
+            _queued_state(),
+            status="running",
+            current_step=ModelStepState(
+                "step-1", 1, "preparing_request", 0, None, None, ()
+            ),
+        )
+    )
+    operations.load_delegation = lambda session_id: None
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(provider=object()),
+        model_context_builder=ModelContextBuilder(),
+    )
+    root_context = await driver._build_context(
+        operation=_operation(),
+        state=operations.state,
+        package=package,
+        effects=RuntimeEffects(provider=object()),
+    )
+    assert [tool.name for tool in root_context.tools] == []
+
+    operations.load_delegation = lambda session_id: SimpleNamespace(
+        parent_session_id="parent-session"
+    )
+    delegated_context = await driver._build_context(
+        operation=_operation(),
+        state=operations.state,
+        package=package,
+        effects=RuntimeEffects(provider=object()),
+    )
+    assert [tool.name for tool in delegated_context.tools] == ["report"]
 
 
 @_run_async
@@ -529,7 +581,9 @@ async def test_historical_failure_or_cancellation_has_no_usage_endpoint(status):
     assert conversation.branch_calls == []
 
 
-def _loaded_package(*, replay_policy="safe", input_schema=None, tool_name="run"):
+def _loaded_package(
+    *, replay_policy="safe", input_schema=None, output_schema=None, tool_name="run"
+):
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
         behavior_instruction="behavior",
@@ -543,6 +597,7 @@ def _loaded_package(*, replay_policy="safe", input_schema=None, tool_name="run")
                 source=SimpleNamespace(value="builtin"),
                 implementation_ref=SimpleNamespace(name=tool_name),
                 input_schema=input_schema or {"type": "object"},
+                output_schema=output_schema,
             ),
         ),
     )
@@ -558,6 +613,7 @@ def _driver(
     tool_name="run",
     invoke_hook=None,
     input_schema=None,
+    output_schema=None,
     recall_sources=(),
     model_context_builder=None,
 ):
@@ -573,6 +629,7 @@ def _driver(
         package_loader=lambda package_version_id: _loaded_package(
             replay_policy=replay_policy,
             input_schema=input_schema,
+            output_schema=output_schema,
             tool_name=tool_name,
         ).version,
         effects_resolver=lambda package_version_id: effects,
@@ -808,6 +865,45 @@ async def test_tool_replay_policy_and_intent_before_effect():
     assert events[0].tool_name == "run"
     assert events[0].envelope.identity.tool_call_id == "tool-1"
     assert events[1].content == "ok"
+
+
+@_run_async
+async def test_invalid_structured_tool_result_is_committed_as_stable_error():
+    tool_message = AssistantMessage(
+        content=(ToolCallBlock(id="tool-1", name="run", arguments={}),)
+    )
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        return SimpleNamespace(
+            content="raw fallback",
+            content_blocks=[],
+            is_error=False,
+            structured_content={"ok": "wrong"},
+        )
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
+        tool=execute_tool,
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    tool_node = next(
+        node
+        for _state, node in operations.transition_calls
+        if node is not None
+        and isinstance(node.content, ToolResultMessage)
+        and node.content.tool_call_id == "tool-1"
+    )
+    assert tool_node.content.is_error is True
+    assert tool_node.content.structured_content is None
+    assert tool_node.content.content[0].text.startswith("INVALID_TOOL_OUTPUT: $.ok")
 
 
 @_run_async

@@ -10,8 +10,9 @@ tools:
   - delegate_agent
   - send_message
   - list_agents
-  - cancel_delegation
+  - interrupt_agent
   - report
+  - wait_delegation
   - mcp__tavily__*
 extensions:
   - mcp

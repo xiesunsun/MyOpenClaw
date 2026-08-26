@@ -462,7 +462,7 @@ class InMemoryRuntimeStore:
             self._inbox[message_id] = stored
             return stored
 
-    def prepare_cancel_delegation(
+    def prepare_interrupt_agent(
         self,
         *,
         sender_operation_id: str,
@@ -470,8 +470,13 @@ class InMemoryRuntimeStore:
         sender_tool_call_id: str,
         target_child_session_id: str,
         handled_at: datetime,
+        _expected_tool_name: str = "interrupt_agent",
     ) -> str | None:
-        """原子校验取消 ToolCall、清理 child 消息并返回 active Operation。"""
+        """原子校验 interrupt_agent，并返回 child 当时的 active Operation。
+
+        中断不丢弃目标 child Inbox；目标 Operation 的普通 cancellation
+        reconciliation 只处理它自己创建的后代消息。
+        """
         with self._lock:
             operation = self._operations.get(sender_operation_id)
             if operation is None:
@@ -519,14 +524,37 @@ class InMemoryRuntimeStore:
                 or step.step_id != sender_step_id
                 or step.phase != "awaiting_tools"
                 or call is None
-                or call.tool_name != "cancel_delegation"
+                or call.tool_name != _expected_tool_name
                 or call.status != "intent_recorded"
                 or call.execution_intent is not None
                 or call.arguments != {"child_session_id": target_child_session_id}
             ):
                 raise StorageConflictError(
-                    "sender ToolCall 不是当前 cancel_delegation intent_recorded"
+                    f"sender ToolCall 不是当前 {_expected_tool_name} intent_recorded"
                 )
+            return target.active_operation_id
+
+    def prepare_cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        handled_at: datetime,
+    ) -> str | None:
+        """旧 Package 迁移兼容入口；新 Package 使用 interrupt_agent。"""
+        operation_id = self.prepare_interrupt_agent(
+            sender_operation_id=sender_operation_id,
+            sender_step_id=sender_step_id,
+            sender_tool_call_id=sender_tool_call_id,
+            target_child_session_id=target_child_session_id,
+            handled_at=handled_at,
+            _expected_tool_name="cancel_delegation",
+        )
+        # 仅为历史 Package 保留旧行为。新 interrupt_agent 明确保留目标 Inbox。
+        with self._lock:
+            operation = self._operations.get(sender_operation_id)
             for message in tuple(self._inbox.values()):
                 source = message.source
                 source_operation = (
@@ -538,6 +566,7 @@ class InMemoryRuntimeStore:
                     message.session_id == target_child_session_id
                     and message.status == "pending"
                     and isinstance(source, AgentMessageSource)
+                    and operation is not None
                     and source.sender_session_id == operation.session_id
                     and source.form == message.delivery
                     and source_operation is not None
@@ -549,7 +578,7 @@ class InMemoryRuntimeStore:
                         outcome_reason="direct child 已被取消",
                         handled_at=handled_at,
                     )
-            return target.active_operation_id
+        return operation_id
 
     def send_child_report(
         self,

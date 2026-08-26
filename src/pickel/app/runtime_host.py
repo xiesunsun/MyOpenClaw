@@ -277,7 +277,7 @@ class _RuntimeDelegationControl:
                 return snapshot, None, True
             await asyncio.sleep(min(0.1, remaining))
 
-    async def cancel_delegation(
+    async def interrupt_agent(
         self,
         *,
         sender_operation_id: str,
@@ -287,7 +287,7 @@ class _RuntimeDelegationControl:
     ) -> str | None:
         operation_id = DelegationService(
             store=self._store,
-        ).prepare_cancel_delegation(
+        ).prepare_interrupt_agent(
             sender_operation_id,
             sender_step_id,
             sender_tool_call_id,
@@ -328,6 +328,53 @@ class _RuntimeDelegationControl:
                     "Child Session 取消后激活失败，将由下次启动恢复兜底: session_id=%s",
                     target_child_session_id,
                 )
+        return operation_id
+
+    async def cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+    ) -> str | None:
+        """旧 Package 迁移兼容入口；新 Package 使用 interrupt_agent。"""
+        operation_id = DelegationService(
+            store=self._store,
+        ).prepare_cancel_delegation(
+            sender_operation_id,
+            sender_step_id,
+            sender_tool_call_id,
+            target_child_session_id,
+        )
+        if operation_id is None:
+            return None
+        reason = f"parent_operation:{sender_operation_id}"
+        operation_service = OperationService(self._store)
+        accepted = operation_service.request_cancellation(operation_id, reason=reason)
+        state = self._store.load_run_state(operation_id)
+        if state is None:
+            raise StorageConflictError("child Operation 状态在取消竞争中消失")
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            return None
+        if not accepted and state.status != "cancelling":
+            accepted = operation_service.request_cancellation(
+                operation_id, reason=reason
+            )
+            state = self._store.load_run_state(operation_id)
+            if state is None:
+                raise StorageConflictError("child Operation 状态在重试取消中消失")
+            if state.status in {"succeeded", "failed", "cancelled"}:
+                return None
+            if not accepted and state.status != "cancelling":
+                raise StorageConflictError("child Operation 取消 CAS 冲突")
+        try:
+            await self._activate_session(target_child_session_id)
+        except Exception:
+            logger.exception(
+                "Child Session 取消后激活失败，将由下次启动恢复兜底: session_id=%s",
+                target_child_session_id,
+            )
         return operation_id
 
     async def _activate_session(self, session_id: str) -> None:

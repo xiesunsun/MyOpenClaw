@@ -65,7 +65,7 @@ class DelegationControl(Protocol):
         output: str,
     ) -> "InboxMessage": ...
 
-    async def cancel_delegation(
+    async def interrupt_agent(
         self,
         *,
         sender_operation_id: str,
@@ -73,6 +73,17 @@ class DelegationControl(Protocol):
         sender_tool_call_id: str,
         target_child_session_id: str,
     ) -> str | None: ...
+
+    async def cancel_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+    ) -> str | None:
+        """旧 Package 迁移兼容入口；新 Package 不公开此名称。"""
+        ...
 
     async def wait_delegation(
         self,

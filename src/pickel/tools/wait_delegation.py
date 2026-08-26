@@ -27,6 +27,16 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
         "required": ["child_session_id", "timeout_seconds"],
         "additionalProperties": False,
     },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "timed_out": {"type": "boolean"},
+            "agent": {"type": "object"},
+            "assistant_message": {"type": ["object", "null"]},
+        },
+        "required": ["timed_out", "agent", "assistant_message"],
+        "additionalProperties": False,
+    },
     replay_policy="safe",
 )
 async def wait_delegation(

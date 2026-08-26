@@ -1,7 +1,7 @@
 # Runtime 实体决策
 
 **日期**：2026-08-24  
-**更新日期**：2026-08-25  
+**更新日期**：2026-08-26
 **状态**：实体设计已收口，当前合同已对齐  
 **范围**：Agent Runtime 中持久化实体、值对象、状态、快照、运行时对象和服务的抽象边界  
 **不在范围**：实施排期、数据库迁移步骤、Provider 协议字段
@@ -1292,12 +1292,26 @@ status != completed
 ToolCallState.result_node_id
 └── ConversationNode
     └── ToolResultMessage
-        ├── content
-        ├── structured_content
-        └── ArtifactReference[]
+        └── content
+            └── ArtifactReference[]
 ```
 
 ToolCallState 不重复保存 ToolExecutionResult 内容。
+
+`ToolDefinition` 必须提供不可变的 `input_schema` 和 `output_schema`。Tool 的执行结果
+固定为规范 JSON value：
+
+```text
+ToolDefinition.output_schema
+→ execute(arguments) -> JSONValue
+→ 验证 JSONValue
+→ render(validated_value) -> ToolResultMessage.content
+```
+
+只有验证后的 `render()` 结果进入模型可见的 ToolResultMessage `content`，并由
+`result_node_id` 引用。验证失败按原始 ToolCall 顺序生成模型可见错误结果。删除
+`structured_content`，不再让结构化字段与 `content` 形成两份结果权威；Provider、UI
+和 Trace 只能从同一 `content` 派生展示。
 
 ### 7.9 Tool Result 与 Hook 提交顺序
 
@@ -1549,7 +1563,7 @@ class ToolVersion:
     version: str | None
     description: str
     input_schema: dict[str, JSONValue]
-    output_schema: dict[str, JSONValue] | None
+    output_schema: dict[str, JSONValue]
     replay_policy: Literal["safe", "never"]
 ```
 
@@ -2076,16 +2090,24 @@ Root 与 Child 使用相同 Agent、Inbox、Operation 和 Conversation Tree。�
 
 ### 12.3 Agent-to-Agent 消息与权限
 
-parent 后续任务使用 child `followup/steer`；child 报告使用 parent `steer` 或安静的 `inject`；中断调用统一的 `Agent.cancel(keep_inbox=True)`。Agent 消息 source 记录 `sender_session_id + sender_operation_id` 形成因果来源；发送和控制权限仍通过 AgentDelegation 图校验，不能因 source 字段存在而跳过授权。
+parent 后续任务使用 child `followup/steer`；child 报告使用 parent `steer` 或安静的 `inject`；进程内中断调用统一的 `Agent.cancel(keep_inbox=True)`。模型工具名为
+`interrupt_agent`，只选择目标 direct child 当前的 active Operation，随后按普通
+Operation cancellation 合同级联该 Operation 创建的非终态后代；调用方不能任意选择
+非后代 Operation。它不归档或删除 child Session，不修改或删除 AgentDelegation。Agent 消息
+source 记录 `sender_session_id + sender_operation_id` 形成因果来源；发送和控制权限
+仍通过 AgentDelegation 图校验，不能因 source 字段存在而跳过授权。
 
 父 Operation 的 `send_message` Tool 只向 sender Session 的 direct child 追加 `followup`，不等待 child 回答。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生；ToolCall 的冻结 arguments 与 `intent_recorded` 状态已经是完整决定，不新增 `SendAgentMessageIntent`。Store 在同一事务中校验 sender Operation/Session、当前 ToolCall、AgentDelegation 直接父关系、目标 Session 和 `AgentMessageSource`，再分配目标 Session FIFO sequence。相同 message ID 且 target、delivery、message、source 完全一致时，即使消息已 claim 或 child 已归档，也返回已有 InboxMessage；新消息禁止写入归档 child。
 
 父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照补充 `updated_at`、当前 Step phase、request attempt 和 pending message count，避免把失去驱动的 `running` 或尚未处理的 `ready` 误报为正常完成。
 
 `wait_delegation` 是显式、有界等待接口：校验 direct child，等待目标进入终态或达到
-timeout，并从 `final_assistant_node_id` 返回已持久化的最终 AssistantMessage。它不
-改变 child 状态、不把 Registry task 当 Future，也不要求 child 必须调用 `report`。
-`report` 继续承担 child 主动向 parent 发送中间或自包含 steer 的职责。
+timeout，并从 `final_assistant_node_id` 返回已持久化的最终 AssistantMessage。对成功
+的 child Operation，这个 final AssistantMessage 是唯一终态结果；它不改变 child
+状态、不把 Registry task 当 Future，也不要求 child 必须调用 `report`。`report` 继续
+承担 child 主动向 parent 发送中间 steer 的职责，永远不填充
+`final_assistant_node_id`，不结束 child Operation，也不构成 `wait_delegation` 的
+终态结果。
 
 child 的 `report` Tool 只接收必填 `output` 字符串，报告以 `Background subagent <child_session_id> reported:` 前缀包装为 parent 的 `steer` InboxMessage；不接收 parent、delivery 或终态参数，不结束 child 当前 Turn，也不代表 child 已完成。Store 从 sender Operation 得到 child Session，再沿该 Session 唯一 AgentDelegation 找到 direct parent；后续 child Operation 仍沿同一关系发送，不能越过一层。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生，重复请求在 target、delivery、message、source 一致时返回 existing，即使消息已处理或 parent 已归档；新消息写入归档 parent 被拒绝。首个接受事务校验当前 `report` ToolCall 的冻结 `output`，但 report 不绑定 child 终态，不新增 result/settlement 实体。durable append 后由 RuntimeHost activate 并显式 wake parent，激活失败保留已接受 Inbox，交由启动恢复兜底。
 
@@ -2230,14 +2252,15 @@ Operation 只由自身 Driver 收敛，进入 `cancelled` 后唤醒 direct paren
 通过 Registry 合并 wake，未激活 child 由启动恢复发现。User、Hook、Host、Runtime
 消息以及 child 向 parent 的 report 不属于清理范围。
 
-`cancel_delegation` 只允许当前 sender Session 的 active
-`cancel_delegation` ToolCall 取消其 direct child。Store 在同一事务中验证冻结
-arguments，丢弃该 sender Session 发往目标 child 的 pending AgentMessage，并返回
-child 当时的 `active_operation_id`；有 active Operation 时再由
-RuntimeHost 的 DelegationControl 调用普通 OperationService cancellation；若取消
-CAS 发生竞争则按同一持久化 Operation 重读并重试或报告冲突。无 active Operation
-时只返回成功，不激活空 child。该入口不归档/删除 Session，也不保存 Delegation
-状态。
+`interrupt_agent` 只允许当前 sender Session 的 active `interrupt_agent` ToolCall
+选择其 direct child 当前的 active Operation。Store 在同一事务中验证冻结 arguments
+与目标关系，取得 child 当时的 `active_operation_id`；有 active Operation 时再由
+RuntimeHost 的 DelegationControl 调用普通 OperationService cancellation。该 Operation
+进入普通 cancellation 后，必须继续沿 AgentDelegation 图级联其创建的非终态后代；
+调用方不能任意选择非后代 Operation。若取消 CAS 发生竞争则按同一持久化 Operation
+重读并重试或报告冲突；无 active Operation 时只返回已无可中断 Operation，不激活空
+child。该入口保留 child Session 和 AgentDelegation，不归档、删除或重建它们，也不
+保存 Delegation 状态。
 
 ### 13.8 wake、退休与 when_idle
 
@@ -3206,9 +3229,14 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: FrozenJSON
+    output_schema: FrozenJSON
 ```
 
 frozen dataclass 内不得继续保存可变 list/dict；AgentMessage、ContentBlock、SystemSection 和 Tool Schema 都必须深度不可变。Hook、Provider、Observer 和 Trace 不能通过共享引用修改已提交 Intent。
+
+`output_schema` 只供 Runtime/Package 在 Tool 执行结果上做验证，不属于 Provider wire
+协议字段。Provider Mapper 投影模型工具时只发送 `name`、`description` 和
+`input_schema`；Provider 不读取或发送 `output_schema`。
 
 SystemContent 若保留为命名包装，也只能持有 tuple；它不是额外组装入口。
 

@@ -1,7 +1,8 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：完成；真实多 Agent 并发执行闭环已补充验收
+**更新日期**：2026-08-26
+**状态**：前置批次完成；Tool 与 Delegation 契约收敛批次实施中
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -84,6 +85,7 @@ OperationDriver
 | 5 | 压平 Persistence | 经决策后，用明确领域事务替代无实际需求的通用抽象 |
 | 6 | 完成 Multi-Agent 最小闭环 | child Session 可异步执行、取消和恢复 |
 | 7 | 清理和验收 | 删除未接线公共能力，代码与命中文档一致 |
+| 8 | 收敛 Tool 输出与 Delegation 控制契约 | Tool 输出单一模型可见内容；child 终态结果、report 和中断语义无歧义 |
 
 ### 4.1 当前进度（2026-08-26）
 
@@ -118,11 +120,14 @@ OperationDriver
 | 6.3c-c `list_agents` child snapshot | 完成 | 立即读取 direct child；补充 phase、request attempt、pending message count 和 updated_at，`ready` 明确表示 pending Inbox | — |
 | 6.3c-f `wait_delegation` | 完成 | 有界等待 direct child 终态；超时不取消 child，终态从 `final_assistant_node_id` 读取持久化 AssistantMessage | 不新增 Result 实体 |
 | 6.3c-d `report` child-to-parent report | 完成 | Tool 只接收自包含 `output`；SQLite/InMemory 以 child Session 的 AgentDelegation 推导唯一 direct parent，原子写入 steer Inbox，稳定 ID 支持已处理/归档后的幂等重放；Host durable append 后 activate/wake parent，失败由启动恢复兜底 | 不绑定 child 终态，不实现 result/settlement/wait |
-| 6.3c-e `cancel_delegation` direct-child cancel | 完成 | SQLite/InMemory 原子验证当前 `cancel_delegation` intent、丢弃 sender Session 发往目标 child 的 pending AgentMessage，并返回 child 当时 active Operation；RuntimeHost 的 DelegationControl 复用 OperationService cancellation，active child 由 Host activate/wake，idle child 不激活 | 不归档/删除 Session，不新增 Delegation 状态或取消实体 |
+| 6.3c-e direct-child interruption（旧路径） | 已迁移 | 新 Package 不再公开 `cancel_delegation`；冻结旧 Package 仍可通过隐藏兼容入口恢复执行 | 新生产合同见 8.3 |
 | 6.3d Parent Operation 后代级联取消 | 完成 | OperationService 在 parent CAS 进入 `cancelling` 后沿 AgentDelegation 图幂等 CAS 所有非终态后代；双 Store 在 `cancelling → cancelled` 事务内检查后代终态及祖先来源 pending child 消息；只 discard 真实后代的 AgentMessage，child 收敛后唤醒 direct parent，重启继续 reconciliation | 不新增取消实体、Manager 或通用图缓存 |
 | 6.4 真实并发闭环 | 完成 | Provider 有界重试、异常终态收敛、跨 Operation FIFO drain、Delegation 重激活、`wait_delegation`、headless Trace、同 Package 并发门槛与状态诊断均已实现 | 真实外部 503 仍可发生，但不再留下假 `running` |
+| 8.1 Tool 输出合同 | 进行中 | 已支持 `output_schema` 声明、Runtime 输出验证、稳定 `INVALID_TOOL_OUTPUT` 和 Provider 单份文本投影；内置 Multi-Agent Tool 已补 schema | 仍需强制 schema、切换纯 JSON `execute + render` 并删除 `structured_content` 兼容字段 |
+| 8.2 Child 终态结果与 report 分离 | 完成 | child 成功终态只通过 `final_assistant_node_id` 指向最终 AssistantMessage；`report` 仅对 delegated Session 可见，只写 parent 中间通信；`wait_delegation` 只读持久化终态结果 | 成功/失败/取消、report、wait 与恢复路径已有合同测试 |
+| 8.3 `interrupt_agent` 控制语义 | 完成 | 新 Package 只公开 `interrupt_agent`；只选择 direct child 当前 active Operation，保留 Inbox、Session 与 AgentDelegation，并复用普通 cancellation 及后代级联；旧名仅隐藏加载冻结 Package | direct-child 权限、非后代拒绝、CAS、级联、恢复与关系保留由 Store/Operation/Package 合同测试覆盖 |
 
-当前验收基线：普通进程环境为 `964 passed, 7 skipped`；加载用户登录环境后，OpenCode Go 的 Responses、Chat Completions 与 Anthropic Messages 三个 live smoke 为 `3 passed`。整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；CPA `gpt-5.6-luna` 的文本流、Function Tool 和结果回传已通过端到端测试。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。观测报告直接读取 `ConversationNode`，并以 Session 摘要、对话、执行事件和显式错误状态呈现 Trace，同时保留完整原始记录，不再引用旧 ConversationEntry/Object 字段。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
+当前验收基线：普通进程环境（包含已配置的 Provider live smoke）为 `978 passed, 4 skipped`；OpenCode Go 的 Responses、Chat Completions 与 Anthropic Messages 三个 live smoke 已包含在该结果中。整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；CPA `gpt-5.6-luna` 的文本流、Function Tool 和结果回传已通过端到端测试。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。观测报告直接读取 `ConversationNode`，并以 Session 摘要、对话、执行事件和显式错误状态呈现 Trace，同时保留完整原始记录，不再引用旧 ConversationEntry/Object 字段。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
 
 ## 5. 阶段 0：回归基线
 
@@ -366,7 +371,7 @@ Conversation Tree 保留 `(session_id, parent_node_id)` 索引；对 1,000/10,00
 
 ## 11. 阶段 6：Agent Delegation 最小闭环
 
-不同 Agent 使用独立 child Session：
+Root 与 Child 使用同一 `Agent` 类型；每个 child 使用独立 child Session：
 
 ```text
 Parent Session
@@ -380,15 +385,19 @@ child Session 使用自己 Operation 冻结的 AgentPackageVersion 和 `active_n
 
 - `start_delegation(...) -> child_session_id`
 - `wait_delegation(...)`
-- `cancel_delegation(...)`
+- `interrupt_agent(...)`
 
-`start_delegation` 不同步等待 child 完成。父 Agent 通过 `wait_delegation` 读取 child 最终 AssistantMessage，大结果仍可使用 Artifact；child Session 的 `active_operation_id` 和对应 AgentRunState 是执行状态权威。
+`start_delegation` 不同步等待 child 完成。父 Agent 通过 `wait_delegation` 读取 child
+成功终态的唯一最终 AssistantMessage，大结果仍可使用 Artifact；child Session 的
+`active_operation_id` 和对应 AgentRunState 是执行状态权威。`report` 只做 child 到
+parent 的中间通信，不结束 child、不替代最终 AssistantMessage，也不作为
+`wait_delegation` 的结果。
 
-Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询全部非终态后代，以幂等 CAS 写入 child cancellation，再按 child Session 调用 `AgentRegistry.wake()`。不能只遍历 live Agent；父取消恢复时必须重做级联检查。child 由自己的 OperationDriver 协调 Tool Intent，Parent 达到安全边界后才能终态。
+Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询全部非终态后代，以幂等 CAS 写入 child cancellation，再按 child Session 调用 `AgentRegistry.wake()`。不能只遍历 live Agent；父取消恢复时必须重做级联检查。child 由自己的 OperationDriver 协调 Tool Intent，Parent 达到安全边界后才能终态。模型工具 `interrupt_agent` 是另一条窄控制路径：只选择目标 direct child 当前 Operation，随后按普通 cancellation 合同级联该 Operation 创建的非终态后代；保留 Session 与 AgentDelegation，不允许调用方任意选择非后代 Operation。
 
 验收：多个 child 可以并行；单个 child 失败不污染其他 Session；进程重启后可以分别恢复；child 使用自己的冻结 Package；父取消不会遗留运行或 waiting 的孤儿 Operation，也不会删除无关用户 InboxMessage。
 
-## 12. 阶段 7：清理与最终验收
+## 12. 阶段 7：清理（前置批次）
 
 逐项处理只有类型、没有产品路径的能力：
 
@@ -409,6 +418,44 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 Operation 生命周期引用已经完成：`RuntimeHost` 使用私有 `operation_id → LoadedPackageHandle` 表，waiting 保留，终态释放。headless Agent 的 Session 级 Handle 继续存活，以便同一次 drain 或后续 followup 继续工作；Conversation 接管或 Host shutdown 时再关闭。
 
 最终校对本文引用的领域合同，更新原文，不创建同主题 v2/v3。
+
+## 12.1 阶段 8：Tool 与 Delegation 契约收敛
+
+阶段 0–7 的实现批次已完成，但在最终合同校对中发现 Tool 输出和 Delegation 控制面
+仍有需要独立验证的语义收敛。阶段 8 不扩大实体边界，不新增 Result、Delegation
+状态或通用 Manager；只替换现有接口和结果权威。
+
+### 8.1 Tool 输出合同
+
+- `ToolDefinition.output_schema` 为必填且随 AgentPackageVersion 冻结；它是 Runtime/Package 执行合同，Provider wire 工具投影只发送 `name`、`description`、`input_schema`。
+- Tool `execute(arguments)` 只返回可序列化规范 `JSONValue`；不得返回并列的结构化结果和展示文本。
+- Runtime 按 output schema 验证返回值，再调用纯 `render(validated_value)` 生成唯一模型可见 `ToolResultMessage.content`。
+- 验证失败按 Provider 原始 ToolCall 顺序生成错误 ToolResult；`ToolCallState` 仍只保存结果 Node 引用。
+- 删除 `structured_content` 的读写、映射和测试权威；Provider、UI、Trace 只从同一 `content` 派生展示。
+
+验收：缺少 output schema 的 ToolDefinition 无法装载；合法 JSONValue 经过 schema
+验证和 render 后只产生一个模型可见 content；非法输出进入稳定错误 ToolResult；
+重启恢复和 Provider retry 不产生第二份结果内容。
+
+### 8.2 Child 终态结果与 report 分离
+
+- child 成功 Operation 的最终结果唯一由 `final_assistant_node_id` 指向的完整 AssistantMessage 表达。
+- `report` 只向 parent Inbox 写入中间通信；不结束 child、不设置 final_assistant_node_id、不创建 result/settlement 实体。
+- `wait_delegation` 有界等待 child 终态，并只从持久化最终 AssistantMessage 读取成功结果；超时不取消 child。
+
+验收：report 前后 child 均可继续执行；child 成功时 wait 返回最终 AssistantMessage
+而非 report；child 失败或取消时不伪造成功结果；重启后仍能从
+`final_assistant_node_id` 读取同一结果。
+
+### 8.3 `interrupt_agent` 控制语义
+
+- 将模型工具 `cancel_delegation` 重命名为 `interrupt_agent`，并更新冻结 ToolDefinition、调用方和文案。
+- 只校验并选择目标 direct child 当前的 active Operation，依照普通 cancellation/Tool reconciliation 安全收敛；该 Operation 创建的非终态后代继续执行既有级联取消。
+- 保留 child Session 与 AgentDelegation；不归档、删除或重建关系，调用方不能任意选择非后代 Operation。
+
+验收：非 direct child 被拒绝；CAS 竞争不会误中断新 Operation；目标 Operation 可
+跨重启进入 cancelling/cancelled；中断后同一 Session/Delegation 可继续接受后续
+followup；Session 与 AgentDelegation 关系保留，Inbox 处理遵循普通 cancellation 合同。
 
 ## 13. 每个批次的完成标准
 

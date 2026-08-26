@@ -311,13 +311,20 @@ class GeminiProvider(Provider):
 
     @staticmethod
     def _function_response_payload(message: ToolResultMessage) -> dict[str, Any]:
-        content: list[dict[str, Any]] = []
-        for block in message.content:
-            if isinstance(block, TextBlock):
-                content.append({"type": "text", "text": block.text})
+        # 结构化结果和文本结果是两种互斥的投影；结构化结果存在时不再
+        # 同时传 content，避免模型收到重复语义。is_error 仍作为控制信息保留。
+        if message.structured_content is not None:
+            return {
+                "structured_content": thaw_json(message.structured_content),
+                "is_error": message.is_error,
+            }
         return {
-            "content": content,
-            "structured_content": thaw_json(message.structured_content),
+            "content": [
+                {"type": "text", "text": block.text}
+                for block in message.content
+                if isinstance(block, TextBlock)
+            ],
+            "structured_content": None,
             "is_error": message.is_error,
         }
 

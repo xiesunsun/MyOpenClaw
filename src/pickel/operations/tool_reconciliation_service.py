@@ -16,6 +16,7 @@ from pickel.operations.agent_run_state import AgentRunState, ToolCallState
 from pickel.operations.operation_service import OperationService
 from pickel.persistence.errors import StorageConflictError
 from pickel.tools.base import ToolExecutionResult
+from pickel.tools.validation import invalid_tool_result, validate_tool_result
 
 ToolReconciliationOutcome = Literal["completed", "not_started", "unknown"]
 
@@ -149,6 +150,11 @@ class ToolReconciliationService:
             return committed
 
         assert result is not None
+        # Host 回报绕过正常 execute 适配器，也必须先保证结构化值可安全
+        # 冻结/持久化；Package-specific schema 由执行边界校验。
+        validation_error = validate_tool_result(None, result)
+        if validation_error is not None:
+            result = invalid_tool_result(result, validation_error)
         result_node_id = self._node_id()
         completed_call = replace(
             call,

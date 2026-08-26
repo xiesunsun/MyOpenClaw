@@ -1,7 +1,7 @@
 # Operation 持久化与恢复模型
 
 **日期**：2026-08-11  
-**更新日期**：2026-08-25
+**更新日期**：2026-08-26
 **状态**：目标合同；v10 恢复主链、PreToolUse、Approval CAS 与 Host reconcile 控制面已实施
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
@@ -204,6 +204,21 @@ class ToolCallState:
     is_error: bool | None
 ```
 
+ToolCallState 只保存执行位置和最终结果 Node 引用；Tool 的输出合同来自冻结
+`ToolDefinition`。该定义必须同时包含 `input_schema` 与 `output_schema`。
+`output_schema` 是 Runtime/Package 执行合同；Provider wire 的模型工具投影只发送
+`name`、`description` 和 `input_schema`，不把 `output_schema` 当作协议字段。执行严格遵循：
+
+```text
+execute(arguments) -> JSONValue
+→ 按 ToolDefinition.output_schema 验证
+→ render(validated_value) -> ToolResultMessage.content
+```
+
+只有验证后的 `render()` 结果进入模型可见的 ToolResultMessage `content`，再由
+`result_node_id` 引用。验证失败生成按 Provider ToolCall 顺序排列的错误 ToolResult。
+不持久化或消费独立的 `structured_content`，避免它与 `content` 形成双重结果权威。
+
 状态机：
 
 ```mermaid
@@ -233,6 +248,8 @@ ready
 → resolve ToolExecutionIntent
 → CAS commit intent_recorded
 → execute real Tool with tool_call_id as default idempotency key
+→ validate JSONValue against output_schema
+→ render validated value as ToolResultMessage.content
 → atomically append ToolResult + commit completed
 ```
 
@@ -328,6 +345,12 @@ Operation 已进入 `succeeded/failed/cancelled`，且不存在仍为 pending、
 竞争/未就绪的 false，不得直接写入 `cancelled`；child 收敛为 `cancelled` 后唤醒
 直接 parent，崩溃或未激活 Session 由下一次恢复 reconciliation 继续处理。
 
+模型工具 `interrupt_agent` 只允许调用方选择 direct child 当前的 active Operation，
+不能任意选择非后代 Operation。选中的 Operation 按本节普通 cancellation 与 Tool
+Intent reconciliation 收敛；其创建的非终态后代继续遵守既有 Parent Operation 后代
+级联取消不变量。该工具保留 child Session 和 AgentDelegation，不归档、删除或重建
+关系；中断完成后同一 child Session 仍可接受后续 Inbox 消息并创建新的 Operation。
+
 ## 9. Operation 终态
 
 终态事务：
@@ -371,7 +394,7 @@ waiting Operation 不轮询；批准、reconcile 或 cancel 必须先提交状�
 2. 恢复只从 active_operation_id 读取当前状态，不扫描历史。
 3. Request Intent 后崩溃不重跑 Context；Tool Intent 后崩溃不静默重放。
 4. 多审批、Approval/Cancel 和 Tool Result 并发由 revision CAS 防止丢更新。
-5. rejected ToolResult 保持 Provider 原始 ToolCall 顺序。
+5. rejected ToolResult 保持 Provider 原始 ToolCall 顺序；Tool 输出必须经 output_schema 验证并 render 为唯一模型可见 content。
 6. cancelling 可跨崩溃继续，未知 Tool 副作用不会被直接标记 cancelled。
 7. Parent 取消不会留下 running/waiting 的孤儿后代。
 8. 终态 State 与 Session.active_operation_id 清空原子一致。

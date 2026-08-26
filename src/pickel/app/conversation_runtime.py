@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -421,6 +422,10 @@ class ConversationRuntime:
         )
 
     def list_tools(self) -> tuple[ToolInfo, ...]:
+        is_delegated = (
+            self._operation_service.load_delegation(self._session.session_id)
+            is not None
+        )
         return tuple(
             ToolInfo(
                 name=entry.name,
@@ -429,6 +434,7 @@ class ConversationRuntime:
                 version=entry.version,
             )
             for entry in self._loaded_agent_package.tool_snapshot.entries
+            if is_delegated or entry.name != "report"
         )
 
     async def inspect_context(self) -> ContextInspection:
@@ -459,6 +465,16 @@ class ConversationRuntime:
                 package=self._loaded_agent_package.version,
                 visible_messages=visible,
             )
+            if (
+                self._operation_service.load_delegation(self._session.session_id)
+                is None
+            ):
+                context = replace(
+                    context,
+                    tools=tuple(
+                        tool for tool in context.tools if tool.name != "report"
+                    ),
+                )
         tool_calls = sum(
             1
             for message in context.messages

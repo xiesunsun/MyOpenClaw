@@ -171,7 +171,8 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
             )
         )
 
-        self.assertIn('structured_content: {"id":7}', block["content"])
+        self.assertEqual('structured_content: {"id":7}', block["content"])
+        self.assertNotIn("found", block["content"])
 
     def test_build_messages_marks_error_tool_results(self) -> None:
         messages = AnthropicMessagesProvider._build_messages(

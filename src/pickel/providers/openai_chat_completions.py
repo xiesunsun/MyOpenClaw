@@ -282,21 +282,25 @@ class OpenAIChatCompletionsProvider(Provider):
 
     @staticmethod
     def _tool_result(message: ToolResultMessage) -> str:
-        parts = [
-            block.text for block in message.content if isinstance(block, TextBlock)
-        ]
+        # structured_content 是唯一权威结果；content 只作为旧 Tool 的回退。
         if message.is_error:
-            parts.insert(0, "tool_error: true")
+            prefix = "tool_error: true\n"
+        else:
+            prefix = ""
         if message.structured_content is not None:
-            parts.append(
-                "structured_content: "
+            return (
+                prefix
+                + "structured_content: "
                 + json.dumps(
                     thaw_json(message.structured_content),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
             )
-        return "\n".join(parts)
+        parts = [
+            block.text for block in message.content if isinstance(block, TextBlock)
+        ]
+        return prefix + "\n".join(parts)
 
     @staticmethod
     def _tools(tools: tuple[ToolDefinition, ...]) -> list[dict[str, Any]]:

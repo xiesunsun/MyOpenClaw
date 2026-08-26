@@ -24,6 +24,12 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
         "required": ["output"],
         "additionalProperties": False,
     },
+    output_schema={
+        "type": "object",
+        "properties": {"message_id": {"type": "string"}},
+        "required": ["message_id"],
+        "additionalProperties": False,
+    },
     replay_policy="safe",
 )
 async def report(

@@ -45,6 +45,7 @@ from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
 from pickel.tools.base import ToolExecutionContext, ToolExecutionResult
+from pickel.tools.validation import invalid_tool_result, validate_tool_result
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -466,7 +467,11 @@ class Boot:
                 ),
             )
             try:
-                return await entry.tool.execute(dict(call.arguments), context)
+                result = await entry.tool.execute(dict(call.arguments), context)
+                validation_error = validate_tool_result(entry.tool, result)
+                if validation_error is not None:
+                    return invalid_tool_result(result, validation_error)
+                return result
             except Exception as exc:
                 return ToolExecutionResult(
                     content=f"工具 '{call.tool_name}' 执行失败: {exc}",

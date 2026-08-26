@@ -18,6 +18,10 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
         "properties": {},
         "additionalProperties": False,
     },
+    output_schema={
+        "type": "array",
+        "items": {"type": "object"},
+    },
     replay_policy="safe",
 )
 async def list_agents(
