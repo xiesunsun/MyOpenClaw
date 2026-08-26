@@ -225,7 +225,8 @@ def observe(
     """导出会话执行轨迹为自包含 HTML 观测平台。"""
     from pickel.observe.operation_report import export_operation_report
 
-    service = _boot().build_conversation_service()
+    boot = _boot()
+    service = boot.build_conversation_service(store=boot.runtime_store())
     if session:
         loaded_sessions = []
         for session_id in session:
@@ -273,9 +274,8 @@ def sessions(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    previews = boot.build_conversation_service().list_conversation_previews(
-        all_sessions=all_sessions
-    )
+    service = boot.build_conversation_service(store=boot.runtime_store())
+    previews = service.list_conversation_previews(all_sessions=all_sessions)
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
     table.add_column("agent id")
@@ -304,7 +304,7 @@ def delete_session(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    service = boot.build_conversation_service()
+    service = boot.build_conversation_service(store=boot.runtime_store())
     try:
         service.delete_conversation_session(session_id=session_id)
     except ConversationNotFoundError as exc:

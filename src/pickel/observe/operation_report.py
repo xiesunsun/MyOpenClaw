@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from pickel.config.paths import home_dir
-from pickel.conversations.agent_message import agent_message_from_dict
+from pickel.conversations.agent_message import agent_message_to_dict
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.observe.jsonl_trace_sink import trace_path
@@ -26,21 +26,20 @@ def export_operation_report(
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = []
     for session in sessions:
-        entries = conversation_service.list_active_branch_entries(
+        nodes = conversation_service.list_active_branch_nodes(
             session_id=session.session_id
         )
         messages = []
-        for entry in entries:
-            if entry.object.object_type != "agent_message":
+        for node in nodes:
+            if node.content_type != "agent_message":
                 continue
-            try:
-                message = agent_message_from_dict(entry.object.content)
-            except (KeyError, TypeError, ValueError):
-                continue
+            message = node.content
             messages.append(
                 {
-                    "node_id": entry.node.node_id,
-                    "message": entry.object.content,
+                    "node_id": node.node_id,
+                    "parent_node_id": node.parent_node_id,
+                    "created_at": node.created_at.isoformat(),
+                    "message": agent_message_to_dict(message),  # type: ignore[arg-type]
                     "role": message.role,
                 }
             )
@@ -49,9 +48,18 @@ def export_operation_report(
                 "session": {
                     "session_id": session.session_id,
                     "agent_id": session.agent_id,
-                    "status": session.status,
-                    "cwd": session.cwd,
-                    "commit_sequence": session.current_commit_sequence,
+                    "workspace_id": session.workspace_id,
+                    "cwd": str(session.cwd),
+                    "active_node_id": session.active_node_id,
+                    "active_operation_id": session.active_operation_id,
+                    "title": session.title,
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "archived_at": (
+                        session.archived_at.isoformat()
+                        if session.archived_at is not None
+                        else None
+                    ),
                 },
                 "messages": messages,
                 "events": _read_trace_events(trace_path(session.session_id)),
