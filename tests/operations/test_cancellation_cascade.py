@@ -11,6 +11,7 @@ import pytest
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import AgentMessageSource, UserMessageSource
 from pickel.agents.agent_package import (
@@ -403,9 +404,23 @@ def test_service_has_no_wake_dependency_and_driver_wakes_cascade_targets() -> No
 
     operations = Operations()
     wake_sessions: list[str] = []
+    input_node = ConversationNode(
+        node_id="node-1",
+        session_id="child-session",
+        parent_node_id=None,
+        content_type="agent_message",
+        content=UserMessage(),
+        created_at=NOW,
+    )
+    conversations = SimpleNamespace(
+        load_conversation_session=lambda session_id: SimpleNamespace(
+            active_node_id=input_node.node_id
+        ),
+        list_branch_nodes=lambda **kwargs: [input_node],
+    )
     driver = OperationDriver(
         operation_service=operations,
-        conversation_service=SimpleNamespace(),
+        conversation_service=conversations,
         package_loader=lambda package_id: SimpleNamespace(
             package_version_id=package_id,
             runtime_policy=SimpleNamespace(max_model_steps=3),
@@ -416,4 +431,6 @@ def test_service_has_no_wake_dependency_and_driver_wakes_cascade_targets() -> No
     result = asyncio.run(driver.drive_operation("child-operation"))
 
     assert result.status == "cancelled"
+    assert result.usage is not None
+    assert result.usage.steps == 0
     assert wake_sessions == ["sibling-session", "parent-session"]
