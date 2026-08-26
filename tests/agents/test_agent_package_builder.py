@@ -6,9 +6,12 @@ from pathlib import Path
 import pytest
 
 from pickel.agents.agent_package_builder import AgentPackageBuilder
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.agents.agent_package import ExtensionVersion, ImplementationRef
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.tools.base import (
     BaseTool,
@@ -239,8 +242,14 @@ def test_boot_resolves_a_single_loaded_agent_package(
     config = _config(tmp_path)
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
 
-    loaded = boot.resolve_loaded_agent_package()
+    loaded = boot.resolve_loaded_agent_package(
+        artifact_service=ArtifactService(
+            artifact_store=store,
+            blob_store=InMemoryBlobStore(),
+        )
+    )
 
     assert loaded.version.agent_id == "Pickle"
     assert loaded.version.behavior_instruction == "You are Pickle."

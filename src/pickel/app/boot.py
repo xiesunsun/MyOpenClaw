@@ -22,10 +22,8 @@ from pickel.agents.agent_package_builder import AgentPackageBuilder
 from pickel.agents.agent_package_loader import AgentPackageLoader, PackageLoadError
 from pickel.artifacts.artifact_service import ArtifactService
 from pickel.artifacts.artifact_store import ArtifactStore
-from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
-from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.config.app_config import AppConfig
-from pickel.config.paths import artifact_blobs_path, home_dir, runtime_db_path
+from pickel.config.paths import home_dir, runtime_db_path
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_store import ConversationStore
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
@@ -35,7 +33,6 @@ from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
-from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.anthropic import AnthropicProvider
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
@@ -125,7 +122,7 @@ class Boot:
         self,
         agent_id: str | None = None,
         *,
-        store: CompositionStore | None = None,
+        artifact_service: ArtifactService,
     ) -> LoadedAgentPackage:
         """先冻结 Package，再解析当前 Generation 的可执行实现。"""
         version = self._agent_package_builder.build_agent_package_version(agent_id)
@@ -140,7 +137,6 @@ class Boot:
         model_config = self.app_config.resolve_model_config(
             self.app_config.get_agent_config(resolved_id).llm
         )
-        artifact_service = self._artifact_service(store)
         provider = AnthropicProvider.from_config(
             model_config,
             artifact_service=artifact_service,
@@ -169,6 +165,7 @@ class Boot:
         package_version_id: str,
         *,
         store: CompositionStore,
+        artifact_service: ArtifactService,
         expected_agent_id: str | None = None,
     ) -> LoadedAgentPackage:
         """按 Operation 绑定的 Package Version 精确恢复。
@@ -176,7 +173,6 @@ class Boot:
         这里绝不调用 ``AgentPackageBuilder``。Builder 只服务于新 Session；恢复
         必须从 Store 读取冻结内容，并按其中的实现引用逐一校验当前 Generation。
         """
-        artifact_service = self._artifact_service(store)
 
         def load_provider(model: ModelVersion) -> Any | None:
             if model.provider != "anthropic":
@@ -256,6 +252,7 @@ class Boot:
         store: CompositionStore,
         session_id: str,
         loaded_agent_package: LoadedAgentPackage,
+        artifact_service: ArtifactService,
         session_cwd: Path,
         operation_service: OperationService | None = None,
         wake_callback: Callable[[str], None] | None = None,
@@ -266,8 +263,8 @@ class Boot:
         inbox_store = store
         operation_service = operation_service or OperationService(store)
         effects = self._build_effects(
-            store=store,
             loaded_agent_package=loaded_agent_package,
+            artifact_service=artifact_service,
             session_cwd=session_cwd,
             delegation_control=delegation_control,
         )
@@ -280,6 +277,7 @@ class Boot:
                 cached = self.load_agent_package(
                     requested,
                     store=store,
+                    artifact_service=artifact_service,
                     expected_agent_id=loaded_agent_package.version.agent_id,
                 )
                 loaded_packages[requested] = cached
@@ -290,8 +288,8 @@ class Boot:
             conversation_service=ConversationService(conversation_store),
             package_loader=lambda requested: loaded_for(requested).version,
             effects_resolver=lambda requested: self._build_effects(
-                store=store,
                 loaded_agent_package=loaded_for(requested),
+                artifact_service=artifact_service,
                 session_cwd=session_cwd,
                 delegation_control=delegation_control,
             ),
@@ -337,28 +335,16 @@ class Boot:
             self._runtime_store = SQLiteRuntimeStore(path)
         return self._runtime_store
 
-    def _artifact_service(self, store: CompositionStore | None) -> ArtifactService:
-        artifact_store = store or self.runtime_store()
-        return ArtifactService(
-            artifact_store=artifact_store,
-            blob_store=(
-                InMemoryBlobStore()
-                if isinstance(artifact_store, InMemoryRuntimeStore)
-                else FilesystemBlobStore(artifact_blobs_path())
-            ),
-        )
-
     def _build_effects(
         self,
         *,
-        store: CompositionStore,
         loaded_agent_package: LoadedAgentPackage,
+        artifact_service: ArtifactService,
         session_cwd: Path,
         delegation_control: DelegationControl | None = None,
     ) -> RuntimeEffects:
         agent_id = loaded_agent_package.version.agent_id
         provider = loaded_agent_package.model_clients["primary"]
-        artifact_service = provider.artifact_service
         workspace_root = Path(session_cwd).resolve()
         services = ToolServices(
             workspace_files=WorkspaceFileService(

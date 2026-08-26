@@ -12,6 +12,8 @@ from pickel.agents.agent_package import (
 )
 from pickel.agents.agent_package_loader import AgentPackageLoader, PackageLoadError
 from pickel.app.boot import Boot
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.config.app_config import ModelSelection
 from pickel.extensions_host.host import ExtensionHost
@@ -37,6 +39,13 @@ def _extension_registry(version: ExtensionVersion, bus) -> ExtensionRegistry:
     return registry
 
 
+def _artifact_service(store: InMemoryRuntimeStore) -> ArtifactService:
+    return ArtifactService(
+        artifact_store=store,
+        blob_store=InMemoryBlobStore(),
+    )
+
+
 def test_loads_the_stored_version_instead_of_rebuilding_current_config(
     tmp_path: Path,
 ) -> None:
@@ -45,7 +54,7 @@ def test_loads_the_stored_version_instead_of_rebuilding_current_config(
     boot = Boot(config, tool_bus=_tool_bus())
     store = InMemoryRuntimeStore()
 
-    old = boot.resolve_loaded_agent_package()
+    old = boot.resolve_loaded_agent_package(artifact_service=_artifact_service(store))
     store.insert_agent_package_version(old.version)
     config.providers["anthropic"].models["claude-current"] = config.providers[
         "anthropic"
@@ -57,6 +66,7 @@ def test_loads_the_stored_version_instead_of_rebuilding_current_config(
     restored = boot.load_agent_package(
         old.version.package_version_id,
         store=store,
+        artifact_service=_artifact_service(store),
         expected_agent_id="Pickle",
     )
 
@@ -69,8 +79,13 @@ def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
 
+    store = InMemoryRuntimeStore()
     with pytest.raises(PackageLoadError) as caught:
-        boot.load_agent_package("agentpkg_" + "0" * 64, store=InMemoryRuntimeStore())
+        boot.load_agent_package(
+            "agentpkg_" + "0" * 64,
+            store=store,
+            artifact_service=_artifact_service(store),
+        )
 
     assert caught.value.code == "package_version_missing"
 
@@ -88,8 +103,9 @@ def test_new_package_with_unsupported_provider_has_stable_failure_code(
     )
     boot = Boot(config, tool_bus=_tool_bus())
 
+    store = InMemoryRuntimeStore()
     with pytest.raises(PackageLoadError) as caught:
-        boot.resolve_loaded_agent_package()
+        boot.resolve_loaded_agent_package(artifact_service=_artifact_service(store))
 
     assert caught.value.code == "provider_unsupported"
     assert caught.value.package_version_id.startswith("agentpkg_")
@@ -102,7 +118,9 @@ def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
     store = InMemoryRuntimeStore()
-    current = boot.resolve_loaded_agent_package().version
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
     primary = replace(
         current.model_policy.primary,
         provider="google/gemini",
@@ -123,7 +141,11 @@ def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
     store.insert_agent_package_version(version)
 
     with pytest.raises(PackageLoadError) as caught:
-        boot.load_agent_package(version.package_version_id, store=store)
+        boot.load_agent_package(
+            version.package_version_id,
+            store=store,
+            artifact_service=_artifact_service(store),
+        )
 
     assert caught.value.code == "provider_unsupported"
     assert caught.value.package_version_id == version.package_version_id
@@ -136,7 +158,9 @@ def test_provider_loader_does_not_swallow_precise_package_load_error(
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
     store = InMemoryRuntimeStore()
-    version = boot.resolve_loaded_agent_package().version
+    version = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
     store.insert_agent_package_version(version)
     precise = PackageLoadError(
         "provider_unsupported", version.package_version_id, "测试错误"
@@ -165,13 +189,19 @@ def test_tool_implementation_mismatch_does_not_fallback_to_current_tool(
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
     store = InMemoryRuntimeStore()
-    version = boot.resolve_loaded_agent_package().version
+    version = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
     store.insert_agent_package_version(version)
     boot.tool_bus.unregister("echo")
     boot.tool_bus.register(_EchoTool(), source=ToolSource.BUILTIN, version="changed")
 
     with pytest.raises(PackageLoadError) as caught:
-        boot.load_agent_package(version.package_version_id, store=store)
+        boot.load_agent_package(
+            version.package_version_id,
+            store=store,
+            artifact_service=_artifact_service(store),
+        )
 
     assert caught.value.code == "tool_unavailable"
 
@@ -181,7 +211,9 @@ def test_provider_version_that_cannot_be_verified_is_rejected(tmp_path: Path) ->
     config.agents["Pickle"].extensions = []
     boot = Boot(config, tool_bus=_tool_bus())
     store = InMemoryRuntimeStore()
-    current = boot.resolve_loaded_agent_package().version
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
     primary = replace(
         current.model_policy.primary,
         provider_implementation=ImplementationRef(
@@ -203,7 +235,11 @@ def test_provider_version_that_cannot_be_verified_is_rejected(tmp_path: Path) ->
     store.insert_agent_package_version(version)
 
     with pytest.raises(PackageLoadError) as caught:
-        boot.load_agent_package(version.package_version_id, store=store)
+        boot.load_agent_package(
+            version.package_version_id,
+            store=store,
+            artifact_service=_artifact_service(store),
+        )
 
     assert caught.value.code == "provider_implementation_unavailable"
 
@@ -227,12 +263,15 @@ def test_extension_contributions_are_loaded_from_the_exact_registered_version(
         extensions=_extension_registry(extension, bus),
     )
     store = InMemoryRuntimeStore()
-    current = boot.resolve_loaded_agent_package()
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    )
     store.insert_agent_package_version(current.version)
 
     restored = boot.load_agent_package(
         current.version.package_version_id,
         store=store,
+        artifact_service=_artifact_service(store),
         expected_agent_id="Pickle",
     )
 
@@ -259,8 +298,10 @@ def test_extension_version_mismatch_never_uses_current_same_name_extension(
         tool_bus=old_bus,
         extensions=_extension_registry(old_extension, old_bus),
     )
-    package = old_boot.resolve_loaded_agent_package().version
     store = InMemoryRuntimeStore()
+    package = old_boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
     store.insert_agent_package_version(package)
 
     current_bus = _tool_bus()
@@ -281,6 +322,7 @@ def test_extension_version_mismatch_never_uses_current_same_name_extension(
         current_boot.load_agent_package(
             package.package_version_id,
             store=store,
+            artifact_service=_artifact_service(store),
             expected_agent_id="Pickle",
         )
 

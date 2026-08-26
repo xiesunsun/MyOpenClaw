@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pickel.app.boot import Boot
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.events import PreToolUseEvent
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
@@ -39,7 +41,7 @@ def _loaded_package(*, hooks: tuple[object, ...]) -> SimpleNamespace:
             primary=SimpleNamespace(provider="anthropic", model="test-model")
         ),
     )
-    provider = SimpleNamespace(artifact_service=None)
+    provider = SimpleNamespace()
     return SimpleNamespace(
         version=version,
         model_clients={"primary": provider},
@@ -52,9 +54,13 @@ def _loaded_package(*, hooks: tuple[object, ...]) -> SimpleNamespace:
 def test_build_effects_invokes_hooks_from_loaded_package(tmp_path: Path) -> None:
     handler = _Hook()
     loaded = _loaded_package(hooks=(handler,))
+    store = InMemoryRuntimeStore()
     effects = _boot_for_effects()._build_effects(
-        store=InMemoryRuntimeStore(),
         loaded_agent_package=loaded,
+        artifact_service=ArtifactService(
+            artifact_store=store,
+            blob_store=InMemoryBlobStore(),
+        ),
         session_cwd=tmp_path,
     )
     event = PreToolUseEvent(
@@ -76,9 +82,13 @@ def test_build_effects_invokes_hooks_from_loaded_package(tmp_path: Path) -> None
 
 
 def test_build_effects_without_hooks_is_noop_allow(tmp_path: Path) -> None:
+    store = InMemoryRuntimeStore()
     effects = _boot_for_effects()._build_effects(
-        store=InMemoryRuntimeStore(),
         loaded_agent_package=_loaded_package(hooks=()),
+        artifact_service=ArtifactService(
+            artifact_store=store,
+            blob_store=InMemoryBlobStore(),
+        ),
         session_cwd=tmp_path,
     )
     event = PreToolUseEvent(

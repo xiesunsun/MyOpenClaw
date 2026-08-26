@@ -7,6 +7,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pickel.app.boot import Boot
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
@@ -43,9 +46,15 @@ def test_loaded_package_captures_current_pickel_settings() -> None:
         )
 
         with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            store = InMemoryRuntimeStore()
             loaded = Boot.from_config(
                 app_config_from_yaml_file(config_path)
-            ).resolve_loaded_agent_package()
+            ).resolve_loaded_agent_package(
+                artifact_service=ArtifactService(
+                    artifact_store=store,
+                    blob_store=InMemoryBlobStore(),
+                )
+            )
 
         version = loaded.version
         assert version.runtime_policy.max_model_steps == 12

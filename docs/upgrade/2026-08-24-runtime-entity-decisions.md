@@ -1640,6 +1640,12 @@ ConversationStore
 
 这些服务不属于 Agent Package，不能放入 LoadedAgentPackage 资源袋。
 
+`ArtifactService` 由 RuntimeHost 按 `CompositionStore` 对象身份创建并复用；同一
+Store 的 Provider、RuntimeEffects 和 ToolServices 借用同一实例。Boot 只显式
+转发该依赖，不能自行创建 BlobStore，也不能从 Provider 反向发现服务。不同
+InMemory Store 各自拥有独立 InMemoryBlobStore；ephemeral reload 复用原 Store，
+因此 Artifact 元数据与 Blob 字节保持同一生命周期。
+
 ### 8.15 RuntimeGeneration 生命周期
 
 RuntimeGeneration 缓存相同 Package ID 的 LoadedAgentPackage。Operation 通过 LoadedPackageHandle 持有 Package 和 Generation 引用；reload 构建新 Generation，旧 Generation 在仍有非终态 AgentRun 使用时保持存活，引用归零后统一关闭 Provider、Tool、Hook、Recall 和 Extension 资源。完整所有权与 reload 合同见第 16 节。

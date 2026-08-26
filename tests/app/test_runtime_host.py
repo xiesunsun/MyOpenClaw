@@ -15,6 +15,7 @@ import pytest
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.agents.agent_package import package_version_id_for_content
 from pickel.app.boot import Boot
+from pickel.artifacts.artifact_service import ArtifactIntegrityError
 from pickel.app.runtime_host import RuntimeHost, _RuntimeDelegationControl
 from pickel.app.runtime_models import ConversationRequest
 from pickel.conversations.agent_message import UserMessage
@@ -445,6 +446,7 @@ def test_headless_delegation_uses_intent_package_registers_before_wake() -> None
             load_package.assert_called_once_with(
                 child_package_id,
                 store=store,
+                artifact_service=host._artifact_service_for(store),
                 expected_agent_id="Pickle",
             )
             assert events == ["register", "wake:child-session-1"]
@@ -474,6 +476,7 @@ def test_headless_active_operation_package_wins_over_parent_intent() -> None:
             load_package.assert_called_once_with(
                 child_package_id,
                 store=store,
+                artifact_service=host._artifact_service_for(store),
                 expected_agent_id="Pickle",
             )
             conversation.detach()
@@ -503,7 +506,9 @@ def test_active_operation_missing_package_uses_current_shell_only() -> None:
                 result = asyncio.run(host.activate_agent("child-session-1", store))
 
             assert result is built
-            resolve.assert_called_once_with("Pickle", store=store)
+            resolve.assert_called_once_with(
+                "Pickle", artifact_service=host._artifact_service_for(store)
+            )
             conversation.detach()
             asyncio.run(host.shutdown())
 
@@ -587,6 +592,87 @@ def test_runtime_host_keeps_ephemeral_conversation_off_disk() -> None:
 
         assert conversation.persistence == "ephemeral"
         assert not (root / "home" / "runtime.db").exists()
+
+
+def test_runtime_host_reuses_artifact_service_for_same_store() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            first = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            store = first.persistence_store
+            service = host._artifact_service_for(store)
+
+            loaded = host.boot.load_agent_package(
+                first.agent_definition.package_version_id,
+                store=store,
+                artifact_service=service,
+                expected_agent_id="Pickle",
+            )
+
+            assert host._artifact_service_for(store) is service
+            assert loaded.model_clients["primary"].artifact_service is service
+
+            first.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_runtime_host_isolates_artifact_services_for_in_memory_stores() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            first = host.open_conversation(
+                ConversationRequest(
+                    agent_id="Pickle", persistence="ephemeral", cwd=root
+                )
+            )
+            second = host.open_conversation(
+                ConversationRequest(
+                    agent_id="Pickle", persistence="ephemeral", cwd=root
+                )
+            )
+            first_service = host._artifact_service_for(first.persistence_store)
+            second_service = host._artifact_service_for(second.persistence_store)
+            reference = first_service.create_artifact(
+                data=b"store-one", media_type="text/plain"
+            )
+
+            assert first.persistence_store is not second.persistence_store
+            assert first_service is not second_service
+            with pytest.raises(ArtifactIntegrityError):
+                second_service.load_artifact_bytes(reference)
+
+            first.detach()
+            second.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_ephemeral_reload_keeps_artifact_bytes_readable() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(
+                    agent_id="Pickle", persistence="ephemeral", cwd=root
+                )
+            )
+            store = conversation.persistence_store
+            service = host._artifact_service_for(store)
+            reference = service.create_artifact(
+                data=b"survives-reload", media_type="text/plain"
+            )
+
+            result = asyncio.run(host.reload(conversation, app_config=host.app_config))
+
+            assert host._artifact_service_for(store).load_artifact_bytes(reference) == (
+                b"survives-reload"
+            )
+            result.conversation.detach()
+            asyncio.run(host.shutdown())
 
 
 def test_direct_conversation_detach_unregisters_agent_before_reopen() -> None:

@@ -9,6 +9,9 @@ from typing import Any
 from uuid import uuid4
 
 from pickel.agents.agent_package_loader import PackageLoadError
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.app.boot import Boot, CompositionStore
 from pickel.app.conversation_runtime import ConversationRuntime
 from pickel.app.runtime_models import (
@@ -21,6 +24,7 @@ from pickel.app.runtime_models import (
 )
 from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
+from pickel.config.paths import artifact_blobs_path
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.conversation_session import ConversationSession
@@ -217,6 +221,9 @@ class RuntimeHost:
         self._retired_generations: set[RuntimeGeneration] = set()
         self._agent_registry = AgentRegistry()
         self._headless_agents: dict[str, tuple[Agent, LoadedPackageHandle]] = {}
+        self._artifact_services: dict[int, tuple[CompositionStore, ArtifactService]] = (
+            {}
+        )
 
     @property
     def agent_registry(self) -> AgentRegistry:
@@ -278,6 +285,25 @@ class RuntimeHost:
             except Exception:
                 logger.exception("启动恢复 Session 失败: session_id=%s", session_id)
 
+    def _artifact_service_for(self, store: CompositionStore) -> ArtifactService:
+        """按 Store 对象复用唯一 ArtifactService 及其 BlobStore。"""
+        key = id(store)
+        cached = self._artifact_services.get(key)
+        if cached is not None:
+            cached_store, artifact_service = cached
+            if cached_store is store:
+                return artifact_service
+        artifact_service = ArtifactService(
+            artifact_store=store,
+            blob_store=(
+                InMemoryBlobStore()
+                if isinstance(store, InMemoryRuntimeStore)
+                else FilesystemBlobStore(artifact_blobs_path())
+            ),
+        )
+        self._artifact_services[key] = (store, artifact_service)
+        return artifact_service
+
     @property
     def active_generation(self) -> RuntimeGeneration:
         return self._active_generation
@@ -296,6 +322,7 @@ class RuntimeHost:
         if session.archived_at is not None:
             raise ValueError("归档 Session 不能激活 Agent")
         boot = self._active_generation_boot()
+        artifact_service = self._artifact_service_for(store)
         package_id: str | None = None
         if session.active_operation_id is not None:
             operation = store.load_operation(session.active_operation_id)
@@ -333,12 +360,15 @@ class RuntimeHost:
                     )
                 package_id = call.execution_intent.child_package_version_id
         if package_id is None:
-            loaded = boot.resolve_loaded_agent_package(session.agent_id, store=store)
+            loaded = boot.resolve_loaded_agent_package(
+                session.agent_id, artifact_service=artifact_service
+            )
         else:
             try:
                 loaded = boot.load_agent_package(
                     package_id,
                     store=store,
+                    artifact_service=artifact_service,
                     expected_agent_id=session.agent_id,
                 )
             except PackageLoadError:
@@ -347,7 +377,7 @@ class RuntimeHost:
                 # Agent 外壳可先使用当前包；OperationDriver 仍会按 Operation
                 # 绑定的历史包精确加载，并把缺失记录为可恢复失败。
                 loaded = boot.resolve_loaded_agent_package(
-                    session.agent_id, store=store
+                    session.agent_id, artifact_service=artifact_service
                 )
         if loaded.version.agent_id != session.agent_id:
             raise ValueError("LoadedAgentPackage.agent_id 与 Session 不匹配")
@@ -363,6 +393,7 @@ class RuntimeHost:
                 store=store,
                 session_id=session_id,
                 loaded_agent_package=loaded,
+                artifact_service=artifact_service,
                 session_cwd=session.cwd,
                 operation_service=OperationService(store),
                 wake_callback=self._agent_registry.wake,
@@ -442,7 +473,10 @@ class RuntimeHost:
             session = service.load_conversation_session(request.session_id)
             agent_id = session.agent_id
         else:
-            loaded = boot.resolve_loaded_agent_package(request.agent_id, store=store)
+            loaded = boot.resolve_loaded_agent_package(
+                request.agent_id,
+                artifact_service=self._artifact_service_for(store),
+            )
             agent_id = loaded.version.agent_id
             session = service.create_conversation_session(
                 agent_id=agent_id,
@@ -585,6 +619,7 @@ class RuntimeHost:
         # 同一个 OperationService 同时服务 AgentDriver 与 UI Adapter，避免
         # ConversationRuntime 绕过窄服务直接读取 Operation 状态。
         operation_service = OperationService(store)
+        artifact_service = self._artifact_service_for(store)
         if session.active_operation_id is not None:
             try:
                 operation = operation_service.load_operation(
@@ -601,15 +636,20 @@ class RuntimeHost:
                 loaded = boot.load_agent_package(
                     operation.agent_package_version_id,
                     store=store,
+                    artifact_service=artifact_service,
                     expected_agent_id=agent_id,
                 )
             except PackageLoadError:
                 # Host 仍需要构建 Agent，由 OperationDriver 将同一装载
                 # 失败以 revision CAS 持久化为 retryable failed。此处的
                 # 当前 Package 只用于组合 UI/Host，不会执行旧 Operation。
-                loaded = boot.resolve_loaded_agent_package(agent_id, store=store)
+                loaded = boot.resolve_loaded_agent_package(
+                    agent_id, artifact_service=artifact_service
+                )
         else:
-            loaded = boot.resolve_loaded_agent_package(agent_id, store=store)
+            loaded = boot.resolve_loaded_agent_package(
+                agent_id, artifact_service=artifact_service
+            )
         loaded = generation.cache_loaded_package(
             loaded.version.package_version_id,
             loaded,
@@ -627,6 +667,7 @@ class RuntimeHost:
                     store=store,
                     session_id=session.session_id,
                     loaded_agent_package=loaded,
+                    artifact_service=artifact_service,
                     session_cwd=session.cwd,
                     operation_service=operation_service,
                     wake_callback=self._agent_registry.wake,
@@ -707,6 +748,7 @@ class RuntimeHost:
         self._retired_generations = {
             retired for retired in self._retired_generations if not retired.closed
         }
+        self._artifact_services.clear()
 
     def _active_generation_boot(self) -> Boot:
         # RuntimeGeneration 的所有贡献属于随代切换的 Boot；这里单独方法让
