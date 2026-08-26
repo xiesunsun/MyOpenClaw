@@ -1,7 +1,7 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：实施中；六项目标的核心链路已闭合，剩余 Operation 级 LoadedPackageHandle 生命周期
+**状态**：完成；六项目标、清理与最终生命周期验收均已闭合
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -120,7 +120,7 @@ OperationDriver
 | 6.3c-e `cancel_delegation` direct-child cancel | 完成 | SQLite/InMemory 原子验证当前 `cancel_delegation` intent、丢弃 sender Session 发往目标 child 的 pending AgentMessage，并返回 child 当时 active Operation；RuntimeHost 的 DelegationControl 复用 OperationService cancellation，active child 由 Host activate/wake，idle child 不激活 | 不归档/删除 Session，不新增 Delegation 状态或取消实体 |
 | 6.3d Parent Operation 后代级联取消 | 完成 | OperationService 在 parent CAS 进入 `cancelling` 后沿 AgentDelegation 图幂等 CAS 所有非终态后代；双 Store 在 `cancelling → cancelled` 事务内检查后代终态及祖先来源 pending child 消息；只 discard 真实后代的 AgentMessage，child 收敛后唤醒 direct parent，重启继续 reconciliation | 不新增取消实体、Manager 或通用图缓存 |
 
-第三十七轮验收基线：`928 passed, 4 skipped`，整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted`、`ToolCallStarted`、`ToolCallCompleted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。
+第三十八轮验收基线：`933 passed, 4 skipped`，整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted`、`ToolCallStarted`、`ToolCallCompleted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
 
 ## 5. 阶段 0：回归基线
 
@@ -404,7 +404,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 
 执行控制下沉已经完成：`ConversationRuntime` 不再保存前台 task 与互斥锁；`Agent.followup_and_wait()` 在写 Inbox 前原子判断 busy，并与 `when_idle()`、`resume_operation()` 共用 drive lock；`AgentRegistry` 继续负责后台 task 和 wake 去重。调用期间临时 `LoadedPackageHandle` 允许 Conversation detach，而不提前关闭仍在执行的 Generation。
 
-阶段 7 尚余一个独立合同缺口：当前 Handle 覆盖 Conversation 或一次前台调用，还没有按第 16.7 节覆盖 `Operation accepted → waiting/resume → terminal` 的完整生命周期。实现前需确定最小所有权边界，不能用 Conversation 是否 attached 代替 Operation 存活，也不为此直接引入通用 Lease Manager。完成该批次前本计划保持“实施中”。
+Operation 生命周期引用已经完成：`RuntimeHost` 使用私有 `operation_id → LoadedPackageHandle` 表，不增加通用 Lease Manager；第一次驱动或激活已有 Operation 时获取，waiting 保留，终态释放。reload 后的新 Agent 通过旧 Handle 使用旧代 LoadedAgentPackage 与 Boot 组合出的 RuntimeEffects；纯 headless Agent 在终态退休，Conversation 接管时移除重复 headless Handle，shutdown 兜底关闭仍存活引用。
 
 最终校对本文引用的领域合同，更新原文，不创建同主题 v2/v3。
 

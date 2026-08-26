@@ -2763,7 +2763,7 @@ stateDiagram-v2
     closed --> [*]
 ```
 
-generation_id 仅用于当前进程诊断，不写入 SessionOperation，也不参与崩溃恢复。ExtensionCatalog 在 Generation publish 后只允许通过 Generation 所属的动态 Scope 做精确变更；新 Operation 从 active Generation 构建 Package，旧 Operation 不跨代查找同名贡献。
+generation_id 仅用于当前进程诊断，不写入 SessionOperation，也不参与崩溃恢复。ExtensionCatalog 在 Generation publish 后只允许通过 Generation 所属的动态 Scope 做精确变更；新 Operation 从 active Generation 构建 Package，旧 Operation 不跨代查找同名贡献。Generation 同时保留构建该代的 Boot 组合根，只用于从该代 LoadedAgentPackage 创建 RuntimeEffects；reload 后不得用新 Boot 为旧 Operation 重新组合 ToolServices、Sandbox 或 SkillStore。
 
 ### 16.7 LoadedPackageHandle 与 Operation 引用
 
@@ -2783,6 +2783,10 @@ Operation accepted
 ```
 
 waiting Operation 仍是非终态，必须保持旧 Generation 引用；否则 reload 后批准恢复时可能换成新 Provider、Tool、Hook 或 Extension 配置。LoadedAgentPackage 不公开独立 close，避免多个 Operation 共享缓存时被其中一个提前关闭。
+
+第一版不增加 Lease Manager。`RuntimeHost` 直接维护私有的 `operation_id → LoadedPackageHandle` 表：第一次驱动或 Host 激活已有 Operation 时幂等获取，waiting 保留，`succeeded / failed / cancelled` 后释放。OperationDriver 解析 Package 与 RuntimeEffects 时传入完整 SessionOperation，使 reload 后的新 Agent 仍能命中旧 Handle 和旧代 Boot；终态释放回调必须幂等，清理失败不能反转已经提交的业务终态。
+
+纯 headless Agent 在 Operation 终态后同时退休并释放自己的 Session 级 Handle，未来消息从当前 Generation 重新激活。Conversation 接管 headless Agent 时，先获得 Conversation Handle，再移除 headless Handle；二者不长期重复持有旧代。
 
 进程崩溃后 Generation 消失；启动时根据 AgentPackageVersion、ExtensionVersion、ImplementationRef 和配置重建。精确实现不可用时 Operation 写入稳定、可重试的失败，不用当前同名实现替代。
 
@@ -2811,7 +2815,7 @@ sequenceDiagram
 
 ### 16.9 shutdown 与错误处理
 
-RuntimeHost shutdown 先停止创建新 Generation 和接受新 Operation，再让 AgentRegistry 停止 Driver，最后依次 retire/close Generation。关闭时：
+RuntimeHost shutdown 先停止创建新 Generation 和接受新 Operation，再让 AgentRegistry 停止 Driver，随后释放 Conversation、headless 与尚未终态的 Operation Handle，最后依次 retire/close Generation。关闭时：
 
 ```text
 拒绝新注册

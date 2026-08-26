@@ -83,7 +83,7 @@ flowchart LR
 | 名称 | 唯一职责 |
 | --- | --- |
 | `RuntimeHost` | 进程启动、shutdown、配置 reload 和 RuntimeGeneration 切换 |
-| `RuntimeGeneration` | 一代完整可执行贡献及其生命周期所有权 |
+| `RuntimeGeneration` | 一代完整可执行贡献、组合根及其生命周期所有权 |
 | `ContributionScope` | 注册贡献和外部资源的 LIFO 撤销边界 |
 | `AgentRegistry` | 单进程 `session_id → live Agent` 唯一映射、引用与唤醒 |
 | `AgentHandle` | 一个调用方对 live Agent 的精确、幂等引用 |
