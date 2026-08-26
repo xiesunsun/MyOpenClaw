@@ -48,7 +48,7 @@ from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
-from pickel.operations.agent_run_state import AgentRunError, DelegateAgentIntent
+from pickel.operations.agent_run_state import AgentRunError
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -420,15 +420,6 @@ class RuntimeHost:
             generations.add(handle.generation)
             await handle.close()
 
-        # 纯 headless Agent 在终态后没有继续绑定旧代的理由。未来消息会从
-        # 当前 Generation 重新激活；UI 已接管的 Agent 不再位于这张表中。
-        headless = self._headless_agents.pop(operation.session_id, None)
-        if headless is not None:
-            agent, headless_handle = headless
-            self._agent_registry.unregister(operation.session_id, agent)
-            generations.add(headless_handle.generation)
-            await headless_handle.close()
-
         for generation in generations:
             if generation.closed:
                 self._retired_generations.discard(generation)
@@ -463,32 +454,12 @@ class RuntimeHost:
             delegation = store.load_delegation(session_id)
             if delegation is not None:
                 parent_operation = store.load_operation(delegation.parent_operation_id)
-                parent_state = store.load_run_state(delegation.parent_operation_id)
-                if parent_operation is None or parent_state is None:
-                    raise ValueError("Delegation parent Operation/State 不存在")
-                step = parent_state.current_step
-                call = (
-                    next(
-                        (
-                            item
-                            for item in step.tool_calls
-                            if item.tool_call_id == delegation.parent_tool_call_id
-                        ),
-                        None,
-                    )
-                    if step is not None
-                    else None
-                )
-                if (
-                    step is None
-                    or step.step_id != delegation.parent_step_id
-                    or call is None
-                    or not isinstance(call.execution_intent, DelegateAgentIntent)
-                ):
-                    raise ValueError(
-                        "Delegation parent ToolCall 缺少 DelegateAgentIntent"
-                    )
-                package_id = call.execution_intent.child_package_version_id
+                if parent_operation is None:
+                    raise ValueError("Delegation parent Operation 不存在")
+                # 当前 delegate_agent 只能创建同 Package child。Parent
+                # Operation 的不可变绑定在终态后仍然可恢复，不能再依赖
+                # 已清空的 current_step / DelegateAgentIntent。
+                package_id = parent_operation.agent_package_version_id
         if session.active_operation_id is not None:
             try:
                 loaded = self._load_operation_package(

@@ -67,17 +67,21 @@ def _headless_fixture(host: RuntimeHost, root: Path, *, active_operation: bool =
     parent_loaded = host.active_generation.loaded_packages[
         conversation.agent_definition.package_version_id
     ]
-    child_content = parent_loaded.version.content_dict()
-    child_content["behavior_instruction"] = "child package"
-    child_package_id = package_version_id_for_content(child_content)
-    child_loaded = replace(
-        parent_loaded,
-        version=replace(
-            parent_loaded.version,
-            package_version_id=child_package_id,
-            behavior_instruction="child package",
-        ),
-    )
+    if active_operation:
+        child_content = parent_loaded.version.content_dict()
+        child_content["behavior_instruction"] = "child package"
+        child_package_id = package_version_id_for_content(child_content)
+        child_loaded = replace(
+            parent_loaded,
+            version=replace(
+                parent_loaded.version,
+                package_version_id=child_package_id,
+                behavior_instruction="child package",
+            ),
+        )
+    else:
+        child_package_id = parent_loaded.version.package_version_id
+        child_loaded = parent_loaded
     intent_package_id = "agentpkg_" + "d" * 64 if active_operation else child_package_id
     child_session = replace(
         conversation.session,
@@ -572,7 +576,9 @@ def test_headless_active_operation_package_wins_over_parent_intent() -> None:
             asyncio.run(host.shutdown())
 
 
-def test_headless_agent_releases_session_and_operation_handles_at_terminal() -> None:
+def test_headless_agent_keeps_session_handle_and_releases_operation_handle_at_terminal() -> (
+    None
+):
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
@@ -598,10 +604,10 @@ def test_headless_agent_releases_session_and_operation_handles_at_terminal() -> 
             asyncio.run(host._release_operation_package(operation))
 
             assert operation_handle.closed
-            assert headless_handle.closed
+            assert not headless_handle.closed
             assert operation.operation_id not in host._operation_package_handles
-            assert operation.session_id not in host._headless_agents
-            assert host.agent_registry.get(operation.session_id) is None
+            assert operation.session_id in host._headless_agents
+            assert host.agent_registry.get(operation.session_id) is built
             conversation.detach()
             asyncio.run(host.shutdown())
 

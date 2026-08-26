@@ -110,13 +110,24 @@ class AgentDriver:
         consume_tool_event=None,
         host_calls=None,
     ) -> AgentDriveResult:
-        """推进一次，直到 OperationDriver 返回等待点或终态。"""
-        return await self.drive_once(
-            session_id=session_id,
-            consume_delta=consume_delta,
-            consume_tool_event=consume_tool_event,
-            host_calls=host_calls,
-        )
+        """连续 drain Session FIFO，直到真正空闲或进入等待点。"""
+        last = AgentDriveResult(None)
+        while True:
+            current = await self.drive_once(
+                session_id=session_id,
+                consume_delta=consume_delta,
+                consume_tool_event=consume_tool_event,
+                host_calls=host_calls,
+            )
+            if current.operation_result is None:
+                return last
+            last = current
+            if current.operation_result.status not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+            }:
+                return current
 
     async def resume_operation(
         self,

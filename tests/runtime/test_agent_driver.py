@@ -217,6 +217,54 @@ def test_idle_accepts_followup_after_inject_without_accepting_inject():
     assert operations.message.message_id == "followup"
 
 
+def test_when_idle_drains_next_followup_after_terminal_operation():
+    session = _session(active_operation_id="operation-1")
+
+    class ConversationStore:
+        def load_session(self, _session_id):
+            return session
+
+    class InboxStore:
+        def __init__(self):
+            self.pending = [SimpleNamespace(message_id="followup", delivery="followup")]
+
+        def list_pending(self, *, session_id):
+            return tuple(self.pending)
+
+    inbox = InboxStore()
+
+    class Operations:
+        def accept_pending_message(self, **kwargs):
+            inbox.pending.clear()
+            session.active_operation_id = "operation-2"
+            return SimpleNamespace(
+                operation=SimpleNamespace(operation_id="operation-2")
+            )
+
+    class OperationDriver:
+        def __init__(self):
+            self.calls = []
+
+        async def drive_operation(self, operation_id, **kwargs):
+            self.calls.append(operation_id)
+            session.active_operation_id = None
+            return SimpleNamespace(status="succeeded")
+
+    operation_driver = OperationDriver()
+    driver = AgentDriver(
+        conversation_store=ConversationStore(),
+        inbox_store=inbox,
+        operation_service=Operations(),
+        operation_driver=operation_driver,
+        package_resolver=lambda **_: ("package-1", None),
+    )
+
+    result = asyncio.run(driver.when_idle(session_id="session-1"))
+
+    assert operation_driver.calls == ["operation-1", "operation-2"]
+    assert result.operation_result.status == "succeeded"
+
+
 def test_agent_message_delivery_wakes_only_followup_and_steer():
     class Inbox:
         session_id = "session-1"
