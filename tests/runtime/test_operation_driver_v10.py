@@ -36,6 +36,7 @@ from pickel.hooks.decisions import PreToolUseDecision
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
+from pickel.runtime.runtime_events import ToolCallCompleted, ToolCallStarted
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 
@@ -727,12 +728,17 @@ async def test_tool_replay_policy_and_intent_before_effect():
         )
 
     operations = _Operations(_queued_state())
+    events = []
     result = await _driver(
         operations, provider, tool=execute_tool, replay_policy="never"
-    ).drive_operation("operation-1")
+    ).drive_operation("operation-1", consume_tool_event=events.append)
 
     assert result.status == "succeeded"
     assert seen == [("intent_recorded", "never")]
+    assert [type(event) for event in events] == [ToolCallStarted, ToolCallCompleted]
+    assert events[0].tool_name == "run"
+    assert events[0].envelope.identity.tool_call_id == "tool-1"
+    assert events[1].content == "ok"
 
 
 @_run_async

@@ -61,6 +61,7 @@ class AgentDriver:
         *,
         session_id: str,
         consume_delta=None,
+        consume_tool_event=None,
         host_calls=None,
     ) -> AgentDriveResult:
         session = self._load_session(session_id)
@@ -71,6 +72,7 @@ class AgentDriver:
             result = await self._operation_driver.drive_operation(
                 session.active_operation_id,
                 consume_delta=consume_delta,
+                consume_tool_event=consume_tool_event,
                 host_calls=host_calls,
             )
             return AgentDriveResult(result)
@@ -95,17 +97,24 @@ class AgentDriver:
         result = await self._operation_driver.drive_operation(
             accepted.operation.operation_id,
             consume_delta=consume_delta,
+            consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
         return AgentDriveResult(result, accepted)
 
     async def when_idle(
-        self, *, session_id: str, consume_delta=None, host_calls=None
+        self,
+        *,
+        session_id: str,
+        consume_delta=None,
+        consume_tool_event=None,
+        host_calls=None,
     ) -> AgentDriveResult:
         """推进一次，直到 OperationDriver 返回等待点或终态。"""
         return await self.drive_once(
             session_id=session_id,
             consume_delta=consume_delta,
+            consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
 
@@ -115,6 +124,7 @@ class AgentDriver:
         session_id: str,
         operation_id: str,
         consume_delta=None,
+        consume_tool_event=None,
         host_calls=None,
     ) -> OperationDriveResult:
         """按显式身份恢复 Session 当前接受的 Operation。
@@ -132,6 +142,7 @@ class AgentDriver:
         return await self._operation_driver.drive_operation(
             operation_id,
             consume_delta=consume_delta,
+            consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
 

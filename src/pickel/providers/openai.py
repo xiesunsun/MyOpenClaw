@@ -181,8 +181,14 @@ class OpenAIProvider(Provider):
             request["tools"] = self._build_tools(context.tools)
 
         reasoning_effort = self.provider_options.get("reasoning_effort")
-        if reasoning_effort is not None:
-            request["reasoning"] = {"effort": str(reasoning_effort)}
+        reasoning_summary = self.provider_options.get("reasoning_summary")
+        if reasoning_effort is not None or reasoning_summary is not None:
+            reasoning = {}
+            if reasoning_effort is not None:
+                reasoning["effort"] = str(reasoning_effort)
+            if reasoning_summary is not None:
+                reasoning["summary"] = str(reasoning_summary)
+            request["reasoning"] = reasoning
         parallel_tool_calls = self.provider_options.get("parallel_tool_calls")
         if parallel_tool_calls is not None:
             request["parallel_tool_calls"] = bool(parallel_tool_calls)

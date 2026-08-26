@@ -284,6 +284,7 @@ CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
           "max_output_tokens": 65536,
           "provider_options": {
             "reasoning_effort": "low",
+            "reasoning_summary": "auto",
             "parallel_tool_calls": true
           }
         }
@@ -294,8 +295,9 @@ CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
 ```
 
 `provider_options.reasoning_effort` 映射到 Responses 的
-`reasoning.effort`。当前不配置 Chat Completions、协议自动降级或
-`previous_response_id`。
+`reasoning.effort`；`reasoning_summary` 映射到 `reasoning.summary`，只有
+Provider 实际返回 summary 时才形成 `ThinkingDelta`，CLI 不展示隐藏思维链。
+当前不配置 Chat Completions、协议自动降级或 `previous_response_id`。
 
 ### 5.3 `auth.json`
 

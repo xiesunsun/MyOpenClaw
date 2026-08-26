@@ -7,6 +7,7 @@ Operation，并严格执行 ``intent commit -> 外部副作用 -> 结果 commit`
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -50,12 +51,19 @@ from pickel.providers.stream import StreamDelta
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
-from pickel.shared.frozen_json import freeze_json_object
+from pickel.runtime.runtime_events import (
+    RuntimeEventBase,
+    ToolCallCompleted,
+    ToolCallStarted,
+)
+from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.frozen_json import freeze_json_object, thaw_json
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionResult
 from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
+RuntimeEventConsumer = Callable[[RuntimeEventBase], None | Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +78,17 @@ class OperationDriveResult:
 
 
 _AUTO_USAGE_LEAF = object()
+
+
+async def _consume_runtime_event(
+    consumer: RuntimeEventConsumer | None,
+    event: RuntimeEventBase,
+) -> None:
+    if consumer is None:
+        return
+    consumed = consumer(event)
+    if inspect.isawaitable(consumed):
+        await consumed
 
 
 class OperationDriver:
@@ -109,11 +128,13 @@ class OperationDriver:
         operation_id: str,
         *,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_tool_event: RuntimeEventConsumer | None = None,
         host_calls=None,
     ) -> OperationDriveResult:
         result = await self._drive_operation(
             operation_id,
             consume_delta=consume_delta,
+            consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
         if (
@@ -136,6 +157,7 @@ class OperationDriver:
         operation_id: str,
         *,
         consume_delta: StreamDeltaConsumer | None = None,
+        consume_tool_event: RuntimeEventConsumer | None = None,
         host_calls=None,
     ) -> OperationDriveResult:
         operation = self._operations.load_operation(operation_id)
@@ -549,6 +571,21 @@ class OperationDriver:
                 executable = recorded
 
             if executable is not None:
+                identity = ExecutionIdentity(
+                    session_id=operation.session_id,
+                    operation_id=operation.operation_id,
+                    step_id=state.current_step.step_id,
+                    step_sequence=state.current_step.step_sequence,
+                    tool_call_id=executable.tool_call_id,
+                )
+                await _consume_runtime_event(
+                    consume_tool_event,
+                    ToolCallStarted(
+                        envelope=EventEnvelope(identity=identity),
+                        tool_name=executable.tool_name,
+                        arguments=thaw_json(executable.arguments),
+                    ),
+                )
                 result = await effects.execute_tool_call(
                     operation=operation,
                     state=state,
@@ -581,6 +618,15 @@ class OperationDriver:
                     state,
                     message=message,
                     node_id=result_node_id,
+                )
+                await _consume_runtime_event(
+                    consume_tool_event,
+                    ToolCallCompleted(
+                        envelope=EventEnvelope(identity=identity),
+                        tool_name=executable.tool_name,
+                        content=result.content,
+                        is_error=result.is_error,
+                    ),
                 )
                 continue
 

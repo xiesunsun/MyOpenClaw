@@ -13,6 +13,8 @@ from pickel.runtime.runtime_events import (
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
+    ToolCallCompleted,
+    ToolCallStarted,
     AgentRunInterrupted,
 )
 from pickel.runtime.agent_run_usage import AgentRunUsage
@@ -83,6 +85,29 @@ def test_工具参数增量不上屏():
     )
 
     assert '{"text"' not in text
+
+
+def test_工具开始与持久化结果会上屏():
+    identity = ExecutionIdentity(tool_call_id="c1")
+    text = _render(
+        [
+            ToolCallStarted(
+                envelope=EventEnvelope(identity=identity),
+                tool_name="lookup",
+                arguments={"query": "pickel"},
+            ),
+            ToolCallCompleted(
+                envelope=EventEnvelope(identity=identity),
+                tool_name="lookup",
+                content="value",
+            ),
+        ]
+    )
+
+    assert "⏺ lookup  query='pickel'" in text
+    assert "· running" in text
+    assert "· ok" in text
+    assert "· out  value" in text
 
 
 @pytest.mark.parametrize(

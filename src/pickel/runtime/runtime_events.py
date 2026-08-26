@@ -149,6 +149,40 @@ class ToolCallArgsDeltaEvent(RuntimeEventBase):
 
 
 @dataclass(frozen=True)
+class ToolCallStarted(RuntimeEventBase):
+    """Tool Intent 已提交，即将执行外部调用。"""
+
+    EVENT_TYPE: ClassVar[str] = "tool_call_started"
+
+    tool_name: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+        }
+
+
+@dataclass(frozen=True)
+class ToolCallCompleted(RuntimeEventBase):
+    """Tool Result 已提交到 Conversation。"""
+
+    EVENT_TYPE: ClassVar[str] = "tool_call_completed"
+
+    tool_name: str = ""
+    content: str = ""
+    is_error: bool = False
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "content": self.content,
+            "is_error": self.is_error,
+        }
+
+
+@dataclass(frozen=True)
 class AgentRunInterrupted(RuntimeEventBase):
     """用户中断；partial_text 是已生成但未完成的正文。"""
 

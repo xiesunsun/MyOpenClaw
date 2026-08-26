@@ -8,12 +8,15 @@ from rich.console import Console
 
 from pickel.cli.render.message import render_interrupted
 from pickel.cli.render.stream import StreamRenderer
+from pickel.cli.render.tool import ToolRenderer
 from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
     RuntimeEventBase,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ToolCallArgsDeltaEvent,
+    ToolCallCompleted,
+    ToolCallStarted,
     AgentRunInterrupted,
 )
 
@@ -27,6 +30,7 @@ class ChatEventRenderer:
         # footer 退到装配时注入的 label（E2 遗留修复）
         self._fallback_model_label = fallback_model_label
         self._stream = StreamRenderer(console)
+        self._tool = ToolRenderer(console)
 
     async def handle_event(self, event: RuntimeEventBase) -> None:
         if isinstance(event, TextDeltaEvent):
@@ -39,6 +43,15 @@ class ChatEventRenderer:
 
         if isinstance(event, ToolCallArgsDeltaEvent):
             # partial_json 拼完前不是合法 JSON，展示半截只会制造噪音
+            return
+
+        if isinstance(event, ToolCallStarted):
+            self._stream.end()
+            self._tool.on_started(event)
+            return
+
+        if isinstance(event, ToolCallCompleted):
+            self._tool.on_completed(event)
             return
 
         if isinstance(event, AgentRunInterrupted):

@@ -49,7 +49,12 @@ class Agent:
         return message_id
 
     async def followup_and_wait(
-        self, message: UserMessage, *, consume_delta=None, host_calls=None
+        self,
+        message: UserMessage,
+        *,
+        consume_delta=None,
+        consume_tool_event=None,
+        host_calls=None,
     ) -> AgentDriveResult:
         """原子写入前台 followup 并立即驱动一次。
 
@@ -63,6 +68,7 @@ class Agent:
             return await self._driver.when_idle(
                 session_id=self._session_id,
                 consume_delta=consume_delta,
+                consume_tool_event=consume_tool_event,
                 host_calls=host_calls,
             )
 
@@ -78,17 +84,23 @@ class Agent:
         return self._driver.cancel(session_id=self._session_id, reason=reason)
 
     async def when_idle(
-        self, *, consume_delta=None, host_calls=None
+        self, *, consume_delta=None, consume_tool_event=None, host_calls=None
     ) -> AgentDriveResult:
         async with self._drive_lock:
             return await self._driver.when_idle(
                 session_id=self._session_id,
                 consume_delta=consume_delta,
+                consume_tool_event=consume_tool_event,
                 host_calls=host_calls,
             )
 
     async def resume_operation(
-        self, operation_id: str, *, consume_delta=None, host_calls=None
+        self,
+        operation_id: str,
+        *,
+        consume_delta=None,
+        consume_tool_event=None,
+        host_calls=None,
     ) -> OperationDriveResult:
         """恢复当前 Session 的指定 Operation；不绕过 AgentDriver 校验。"""
         async with self._drive_lock:
@@ -96,5 +108,6 @@ class Agent:
                 session_id=self._session_id,
                 operation_id=operation_id,
                 consume_delta=consume_delta,
+                consume_tool_event=consume_tool_event,
                 host_calls=host_calls,
             )

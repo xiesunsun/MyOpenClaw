@@ -232,6 +232,7 @@ class ConversationRuntime:
             result = await self._agent.followup_and_wait(
                 request.message,
                 consume_delta=consume_delta,
+                consume_tool_event=self._events.emit,
                 host_calls=self._runtime_bus.host_calls.client,
             )
             if result.accepted is not None:

@@ -108,6 +108,7 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
         max_output_tokens=128,
         provider_options={
             "reasoning_effort": "medium",
+            "reasoning_summary": "auto",
             "parallel_tool_calls": True,
         },
     )
@@ -118,7 +119,7 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
     assert snapshot["store"] is False
     assert "previous_response_id" not in snapshot
     assert snapshot["instructions"] == "system"
-    assert snapshot["reasoning"] == {"effort": "medium"}
+    assert snapshot["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert snapshot["parallel_tool_calls"] is True
     assert snapshot["input"] == [
         {

@@ -26,8 +26,10 @@ class _OperationDriver:
         self.result = result
         self.calls = []
 
-    async def drive_operation(self, operation_id: str, *, consume_delta, host_calls):
-        self.calls.append((operation_id, consume_delta, host_calls))
+    async def drive_operation(
+        self, operation_id: str, *, consume_delta, consume_tool_event, host_calls
+    ):
+        self.calls.append((operation_id, consume_delta, consume_tool_event, host_calls))
         return self.result
 
 
@@ -44,8 +46,10 @@ class _SerializedOperationDriver:
         self.second_started = asyncio.Event()
         self.calls = 0
 
-    async def drive_operation(self, _operation_id, *, consume_delta, host_calls):
-        del consume_delta, host_calls
+    async def drive_operation(
+        self, _operation_id, *, consume_delta, consume_tool_event, host_calls
+    ):
+        del consume_delta, consume_tool_event, host_calls
         self.calls += 1
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -102,7 +106,7 @@ def test_resume_operation_requires_exact_active_operation_and_forwards_arguments
 
     assert resumed is result
     assert operation_driver.calls == [
-        ("operation-1", consume_delta, host_calls),
+        ("operation-1", consume_delta, None, host_calls),
     ]
 
 
@@ -157,7 +161,7 @@ def test_agent_resume_operation_is_a_thin_proxy():
 
     assert resumed is result
     assert operation_driver.calls == [
-        ("operation-1", consume_delta, host_calls),
+        ("operation-1", consume_delta, None, host_calls),
     ]
 
 
@@ -312,6 +316,7 @@ def test_agent_followup_and_wait_sends_once_forwards_arguments_without_wake():
             {
                 "session_id": "session-1",
                 "consume_delta": consume_delta,
+                "consume_tool_event": None,
                 "host_calls": host_calls,
             }
         ]

@@ -54,14 +54,7 @@ def estimate_context_usage(
     )
     tool_chars = len(
         json.dumps(
-            [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                }
-                for tool in context.tools
-            ],
+            [tool.to_dict() for tool in context.tools],
             ensure_ascii=False,
             separators=(",", ":"),
         )
