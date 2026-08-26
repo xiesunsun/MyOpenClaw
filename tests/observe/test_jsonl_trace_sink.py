@@ -103,6 +103,26 @@ def test_flush_等待已入队记录落盘且不关闭_sink(tmp_path: Path):
     sink.close()
 
 
+def test_reopen_continues_file_trace_sequence(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    first = JsonlTraceSink(path)
+    first_bus = EventBus()
+    first_bus.subscribe(first)
+    asyncio.run(_emit(first_bus))
+    first.close()
+
+    second = JsonlTraceSink(path)
+    second_bus = EventBus()
+    second_bus.subscribe(second)
+    asyncio.run(_emit(second_bus))
+    second.close()
+
+    records = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["trace_seq"] for record in records] == [0, 1, 2, 3]
+
+
 async def _emit(bus: EventBus) -> None:
     await bus.emit(
         AgentRunStarted(

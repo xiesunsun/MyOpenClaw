@@ -673,6 +673,10 @@ def test_list_child_agents_returns_ready_without_mutating_facts(
         "completed_step_count": 0,
         "final_assistant_node_id": None,
         "error": None,
+        "updated_at": NOW.isoformat(),
+        "phase": "pending_inbox",
+        "request_attempt": 0,
+        "pending_message_count": 1,
     }
     assert before == (
         store.load_session(delegation.child_session_id),

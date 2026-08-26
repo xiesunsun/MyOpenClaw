@@ -2816,7 +2816,7 @@ waiting Operation 仍是非终态，必须保持旧 Generation 引用；否则 r
 
 第一版不增加 Lease Manager。`RuntimeHost` 直接维护私有的 `operation_id → LoadedPackageHandle` 表：第一次驱动或 Host 激活已有 Operation 时幂等获取，waiting 保留，`succeeded / failed / cancelled` 后释放。OperationDriver 解析 Package 与 RuntimeEffects 时传入完整 SessionOperation，使 reload 后的新 Agent 仍能命中旧 Handle 和旧代 Boot；终态释放回调必须幂等，清理失败不能反转已经提交的业务终态。
 
-纯 headless Agent 在 Operation 终态后同时退休并释放自己的 Session 级 Handle，未来消息从当前 Generation 重新激活。Conversation 接管 headless Agent 时，先获得 Conversation Handle，再移除 headless Handle；二者不长期重复持有旧代。
+纯 headless Agent 不在每个 Operation 终态后立即退休；AgentDriver 必须先继续 drain pending Inbox，而且持久化 child 后续还可被 followup。Session 级 Handle 在 Conversation 接管或 Host shutdown 时释放；Operation 级 Handle 仍在对应 Operation 终态后立即释放。
 
 进程崩溃后 Generation 消失；启动时根据 AgentPackageVersion、ExtensionVersion、ImplementationRef 和配置重建。精确实现不可用时 Operation 写入稳定、可重试的失败，不用当前同名实现替代。
 
@@ -2938,7 +2938,7 @@ class EventEnvelope:
 | `stream_id` | 一次 EventPublisher 生命周期 | 否 |
 | `stream_sequence` | 同一 stream 内的全序 | 否 |
 
-当前无作用域的 event_sequence 改为 `(stream_id, stream_sequence)`。Agent 释放、重新激活、reload 或进程重启会产生新 stream，sequence 可以从零开始；它不能用于 CAS、恢复或跨进程排序。Trace Sink 的 trace_sequence 只是文件入队顺序，与 stream_sequence 也不是同一权威。
+当前无作用域的 event_sequence 改为 `(stream_id, stream_sequence)`。Agent 释放、重新激活、reload 或进程重启会产生新 stream，sequence 可以从零开始；它不能用于 CAS、恢复或跨进程排序。Trace Sink 的 `trace_seq` 只是单个 JSONL 文件的入队顺序，重新打开同一文件时从已有最大值继续；它与 stream_sequence 不是同一权威，也不参与恢复。
 
 ### 17.4 三类 Runtime Event
 

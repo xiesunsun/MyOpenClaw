@@ -11,7 +11,7 @@ from typing import Literal, Protocol
 from uuid import uuid4
 
 from pickel.agents.agent_package import AgentPackageVersion
-from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import AgentMessageSource, InboxMessage
@@ -104,6 +104,8 @@ class DelegationStore(Protocol):
         target_child_session_id: str,
         handled_at: datetime,
     ) -> str | None: ...
+
+    def load_node(self, node_id: str): ...
 
 
 class DelegationService:
@@ -412,6 +414,84 @@ class DelegationService:
         snapshots.sort(key=lambda item: (item[0], item[1]))
         return tuple(item[2] for item in snapshots)
 
+    def inspect_wait_target(
+        self,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        timeout_seconds: float,
+    ) -> "ChildAgentSnapshot":
+        """校验 wait_delegation ToolCall 并返回 direct child 快照。"""
+        operation = self._store.load_operation(sender_operation_id)
+        state = self._store.load_run_state(sender_operation_id)
+        if operation is None or state is None:
+            raise StorageIntegrityError("sender Operation 或 AgentRunState 不存在")
+        session = self._store.load_session(operation.session_id)
+        if session is None or session.active_operation_id != sender_operation_id:
+            raise StorageConflictError(
+                "sender Operation 不是 Session 的 active Operation"
+            )
+        step = state.current_step
+        call = (
+            next(
+                (
+                    item
+                    for item in step.tool_calls
+                    if item.tool_call_id == sender_tool_call_id
+                ),
+                None,
+            )
+            if step is not None
+            else None
+        )
+        expected_arguments = {
+            "child_session_id": target_child_session_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        if (
+            state.status != "running"
+            or step is None
+            or step.step_id != sender_step_id
+            or step.phase != "awaiting_tools"
+            or call is None
+            or call.tool_name != "wait_delegation"
+            or call.status != "intent_recorded"
+            or call.execution_intent is not None
+            or dict(call.arguments) != expected_arguments
+        ):
+            raise StorageConflictError(
+                "sender ToolCall 不是当前 wait_delegation intent_recorded"
+            )
+        direct_children = {
+            delegation.child_session_id
+            for parent in self._store.list_operations(session_id=operation.session_id)
+            for delegation in self._store.list_delegations(
+                parent_operation_id=parent.operation_id
+            )
+        }
+        if target_child_session_id not in direct_children:
+            raise StorageConflictError("wait_delegation 目标不是 direct child")
+        child = self._store.load_session(target_child_session_id)
+        if child is None:
+            raise StorageIntegrityError("delegation child Session 不存在")
+        return self._snapshot_child(child)
+
+    def load_final_assistant(
+        self, snapshot: "ChildAgentSnapshot"
+    ) -> AssistantMessage | None:
+        node_id = snapshot.final_assistant_node_id
+        if node_id is None:
+            return None
+        node = self._store.load_node(node_id)
+        if (
+            node is None
+            or node.session_id != snapshot.child_session_id
+            or not isinstance(node.content, AssistantMessage)
+        ):
+            raise StorageIntegrityError("child final_assistant_node_id 指向无效")
+        return node.content
+
     def _snapshot_child(self, session: ConversationSession) -> "ChildAgentSnapshot":
         operations = self._store.list_operations(session_id=session.session_id)
         latest = operations[-1] if operations else None
@@ -440,6 +520,12 @@ class DelegationService:
                 completed_step_count=0,
                 final_assistant_node_id=None,
                 error=None,
+                updated_at=session.updated_at,
+                phase="pending_inbox",
+                request_attempt=0,
+                pending_message_count=sum(
+                    item.delivery in {"followup", "steer"} for item in pending
+                ),
             )
         if latest is None:
             return ChildAgentSnapshot(
@@ -451,6 +537,7 @@ class DelegationService:
                 completed_step_count=0,
                 final_assistant_node_id=None,
                 error=None,
+                updated_at=session.updated_at,
             )
         state = self._store.load_run_state(latest.operation_id)
         if state is None or state.status not in {"succeeded", "failed", "cancelled"}:
@@ -474,6 +561,7 @@ class DelegationService:
                 completed_step_count=0,
                 final_assistant_node_id=None,
                 error=None,
+                updated_at=session.updated_at,
             )
         state = self._store.load_run_state(operation.operation_id)
         if state is None or state.status not in {"succeeded", "failed", "cancelled"}:
@@ -485,8 +573,8 @@ class DelegationService:
             status=status,
         )
 
-    @staticmethod
     def _snapshot_from_state(
+        self,
         session: ConversationSession,
         operation: SessionOperation,
         state: AgentRunState,
@@ -502,6 +590,18 @@ class DelegationService:
             completed_step_count=state.completed_step_count,
             final_assistant_node_id=state.final_assistant_node_id,
             error=state.error,
+            updated_at=session.updated_at,
+            phase=(
+                state.current_step.phase if state.current_step is not None else None
+            ),
+            request_attempt=(
+                state.current_step.request_attempt
+                if state.current_step is not None
+                else 0
+            ),
+            pending_message_count=len(
+                self._store.list_pending(session_id=session.session_id)
+            ),
         )
 
 
@@ -518,6 +618,10 @@ class ChildAgentSnapshot:
     completed_step_count: int
     final_assistant_node_id: str | None
     error: AgentRunError | None
+    updated_at: datetime | None = None
+    phase: str | None = None
+    request_attempt: int = 0
+    pending_message_count: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -537,6 +641,12 @@ class ChildAgentSnapshot:
                 if self.error is not None
                 else None
             ),
+            "updated_at": (
+                self.updated_at.isoformat() if self.updated_at is not None else None
+            ),
+            "phase": self.phase,
+            "request_attempt": self.request_attempt,
+            "pending_message_count": self.pending_message_count,
         }
 
 

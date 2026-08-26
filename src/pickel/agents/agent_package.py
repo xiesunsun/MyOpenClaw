@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -288,6 +289,9 @@ class LoadedAgentPackage:
     lifecycle_hooks: tuple[Any, ...] = ()
     recall_sources: tuple[Any, ...] = ()
     generation_id: str | None = None
+    model_request_limiter: asyncio.Semaphore = field(
+        init=False, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -295,6 +299,11 @@ class LoadedAgentPackage:
         )
         object.__setattr__(self, "lifecycle_hooks", tuple(self.lifecycle_hooks))
         object.__setattr__(self, "recall_sources", tuple(self.recall_sources))
+        object.__setattr__(
+            self,
+            "model_request_limiter",
+            asyncio.Semaphore(self.version.runtime_policy.max_parallel_model_requests),
+        )
 
 
 def canonical_json_bytes(content: Mapping[str, Any]) -> bytes:

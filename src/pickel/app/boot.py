@@ -480,6 +480,9 @@ class Boot:
             recall_sources=tuple(loaded_agent_package.recall_sources),
             provider_name=loaded_agent_package.version.model_policy.primary.provider,
             model_name=loaded_agent_package.version.model_policy.primary.model,
+            model_request_limiter=getattr(
+                loaded_agent_package, "model_request_limiter", None
+            ),
         )
 
     @staticmethod

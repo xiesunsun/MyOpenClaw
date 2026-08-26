@@ -79,6 +79,7 @@ class RuntimeEffects:
     provider_timeout_seconds: float = 600.0
     provider_name: str = ""
     model_name: str = ""
+    model_request_limiter: asyncio.Semaphore | None = None
 
     async def invoke_hook(self, hook_name: str, event: Any) -> Any:
         if self.invoke_hook_effect is None:
@@ -135,16 +136,24 @@ class RuntimeEffects:
         )
         started = time.perf_counter()
         first_delta: list[float | None] = [None]
-        message = await asyncio.wait_for(
-            self._consume_stream(
-                model_context=model_context,
-                consume_delta=consume_delta,
-                identity=identity,
-                started=started,
-                first_delta=first_delta,
-            ),
-            timeout=self.provider_timeout_seconds,
-        )
+
+        async def request() -> AssistantMessage:
+            return await asyncio.wait_for(
+                self._consume_stream(
+                    model_context=model_context,
+                    consume_delta=consume_delta,
+                    identity=identity,
+                    started=started,
+                    first_delta=first_delta,
+                ),
+                timeout=self.provider_timeout_seconds,
+            )
+
+        if self.model_request_limiter is None:
+            message = await request()
+        else:
+            async with self.model_request_limiter:
+                message = await request()
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         if message.metadata is not None:
             metadata = replace(

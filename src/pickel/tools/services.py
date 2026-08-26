@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pickel.inbox.message import InboxMessage
     from pickel.operations.agent_delegation import AgentDelegation
     from pickel.operations.delegation_service import ChildAgentSnapshot
+    from pickel.conversations.agent_message import AssistantMessage
 
 if TYPE_CHECKING:  # 运行期不导入，避免 base ↔ shell / file_service 循环
     from pickel.artifacts.artifact_service import ArtifactService
@@ -72,6 +73,16 @@ class DelegationControl(Protocol):
         sender_tool_call_id: str,
         target_child_session_id: str,
     ) -> str | None: ...
+
+    async def wait_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        timeout_seconds: float,
+    ) -> tuple["ChildAgentSnapshot", "AssistantMessage | None", bool]: ...
 
 
 @dataclass(frozen=True)

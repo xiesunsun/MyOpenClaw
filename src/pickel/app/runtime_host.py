@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from pickel.config.loader import Config
 from pickel.config.paths import artifact_blobs_path
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.extensions_host.event_processor import ConversationExtensionContext
 from pickel.extensions_host.loader import (
@@ -44,6 +46,14 @@ from pickel.app.runtime_generation import (
 from pickel.inbox.message import InboxMessage
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.errors import StorageConflictError
+from pickel.observe.jsonl_trace_sink import (
+    JsonlTraceSink,
+    TraceOptions,
+    trace_mode,
+    trace_path,
+)
+from pickel.observe.records import observation_scope
+from pickel.providers.stream import TextDelta, ThinkingDelta, ToolCallArgsDelta
 from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.agent_delegation import AgentDelegation
@@ -52,11 +62,94 @@ from pickel.operations.agent_run_state import AgentRunError
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.runtime.runtime_effects import RuntimeEffects
+from pickel.runtime.runtime_events import (
+    AgentRunCompleted,
+    AgentRunFailed,
+    AssistantMessageEvent,
+    TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ToolCallArgsDeltaEvent,
+)
 from pickel.shared.conversation_mode import ConversationMode
+from pickel.shared.event_envelope import EventEnvelope
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
 
 logger = logging.getLogger(__name__)
+
+
+class _HeadlessTraceDriver:
+    """Host 拥有的 headless 驱动观测适配；不污染 Agent 实体。"""
+
+    def __init__(self, agent: Agent, sink: JsonlTraceSink) -> None:
+        self._agent = agent
+        self._sink = sink
+
+    async def __call__(self):
+        with observation_scope(self._sink):
+            result = await self._agent.when_idle(
+                consume_delta=self._consume_delta,
+                consume_tool_event=self._sink,
+            )
+        self._record_result(result)
+        return result
+
+    def close(self) -> None:
+        self._sink.close()
+
+    def _consume_delta(self, delta, identity: ExecutionIdentity) -> None:
+        envelope = EventEnvelope(identity=identity)
+        if isinstance(delta, TextDelta):
+            self._sink(TextDeltaEvent(envelope=envelope, text=delta.text))
+        elif isinstance(delta, ThinkingDelta):
+            self._sink(ThinkingDeltaEvent(envelope=envelope, text=delta.text))
+        elif isinstance(delta, ToolCallArgsDelta):
+            self._sink(
+                ToolCallArgsDeltaEvent(
+                    envelope=envelope, partial_json=delta.partial_json
+                )
+            )
+
+    def _record_result(self, result) -> None:
+        operation_result = result.operation_result
+        if operation_result is None:
+            return
+        envelope = EventEnvelope(
+            identity=ExecutionIdentity(
+                session_id=self._agent.session_id,
+                operation_id=operation_result.operation_id,
+            )
+        )
+        message = operation_result.assistant_message
+        if message is not None:
+            text = "\n".join(
+                block.text
+                for block in message.content
+                if isinstance(block, TextBlock) and block.text
+            )
+            self._sink(
+                AssistantMessageEvent(
+                    envelope=envelope, text=text, usage=operation_result.usage
+                )
+            )
+        if operation_result.status == "failed":
+            error = operation_result.state.error
+            self._sink(
+                AgentRunFailed(
+                    envelope=envelope,
+                    error_type=error.code if error is not None else "unknown",
+                    message=error.message if error is not None else "AgentRun 失败",
+                )
+            )
+        elif operation_result.status in {"succeeded", "cancelled"}:
+            self._sink(
+                AgentRunCompleted(
+                    envelope=envelope,
+                    usage=operation_result.usage,
+                    outcome=operation_result.status,
+                )
+            )
 
 
 class _RuntimeDelegationControl:
@@ -150,6 +243,40 @@ class _RuntimeDelegationControl:
             )
         return stored
 
+    async def wait_delegation(
+        self,
+        *,
+        sender_operation_id: str,
+        sender_step_id: str,
+        sender_tool_call_id: str,
+        target_child_session_id: str,
+        timeout_seconds: float,
+    ):
+        service = DelegationService(store=self._store)
+        try:
+            await self._activate_session(target_child_session_id)
+        except Exception:
+            logger.exception(
+                "wait_delegation 激活 child 失败: session_id=%s",
+                target_child_session_id,
+            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            snapshot = service.inspect_wait_target(
+                sender_operation_id,
+                sender_step_id,
+                sender_tool_call_id,
+                target_child_session_id,
+                timeout_seconds,
+            )
+            if snapshot.status in {"succeeded", "failed", "cancelled", "archived"}:
+                return snapshot, service.load_final_assistant(snapshot), False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return snapshot, None, True
+            await asyncio.sleep(min(0.1, remaining))
+
     async def cancel_delegation(
         self,
         *,
@@ -224,7 +351,9 @@ class RuntimeHost:
         self._conversations: set[ConversationRuntime] = set()
         self._retired_generations: set[RuntimeGeneration] = set()
         self._agent_registry = AgentRegistry()
-        self._headless_agents: dict[str, tuple[Agent, LoadedPackageHandle]] = {}
+        self._headless_agents: dict[
+            str, tuple[Agent, LoadedPackageHandle, _HeadlessTraceDriver | None]
+        ] = {}
         self._operation_package_handles: dict[str, LoadedPackageHandle] = {}
         self._artifact_services: dict[int, tuple[CompositionStore, ArtifactService]] = (
             {}
@@ -522,8 +651,10 @@ class RuntimeHost:
         )
         handle = generation.acquire_loaded_package(loaded.version.package_version_id)
         agent: Agent | None = None
+        trace_sink: JsonlTraceSink | None = None
         registered = False
         try:
+            trace_sink = self._open_headless_trace(session_id)
             agent = boot.build_agent(
                 store=store,
                 session_id=session_id,
@@ -554,18 +685,52 @@ class RuntimeHost:
                 ),
                 release_operation_package=self._release_operation_package,
             )
-            self._agent_registry.register(agent)
+            trace_driver = (
+                _HeadlessTraceDriver(agent, trace_sink)
+                if trace_sink is not None and isinstance(agent, Agent)
+                else None
+            )
+            if trace_sink is not None and trace_driver is None:
+                trace_sink.close()
+                trace_sink = None
+            self._agent_registry.register(
+                agent,
+                drive=trace_driver if trace_driver is not None else None,
+            )
             registered = True
             store.insert_agent_package_version(loaded.version)
-            self._headless_agents[session_id] = (agent, handle)
+            self._headless_agents[session_id] = (agent, handle, trace_driver)
             self._agent_registry.wake(session_id)
             return agent
         except BaseException:
             self._headless_agents.pop(session_id, None)
             if registered and agent is not None:
                 self._agent_registry.unregister(session_id, agent)
+            if trace_sink is not None:
+                trace_sink.close()
             await handle.close()
             raise
+
+    def _open_headless_trace(self, session_id: str) -> JsonlTraceSink | None:
+        configured = self.app_config.observability.trace
+        mode = trace_mode(configured.mode)
+        if mode == "off":
+            return None
+        try:
+            return JsonlTraceSink(
+                trace_path(session_id),
+                TraceOptions(
+                    mode=mode,
+                    queue_capacity=configured.queue_capacity,
+                    batch_size=configured.batch_size,
+                    flush_interval_ms=configured.flush_interval_ms,
+                    max_file_size_mb=configured.max_file_size_mb,
+                    max_age_days=configured.max_age_days,
+                    max_total_size_mb=configured.max_total_size_mb,
+                ),
+            )
+        except OSError:
+            return None
 
     def list_agents(self) -> tuple[AgentInfo, ...]:
         return tuple(
@@ -910,6 +1075,8 @@ class RuntimeHost:
         if headless is not None and headless[0] is previous_agent:
             # Conversation Handle 已接管 live Agent；移除 Host 的额外常驻引用。
             self._headless_agents.pop(session.session_id, None)
+            if headless[2] is not None:
+                headless[2].close()
             headless[1].close_sync()
         self._conversations.add(conversation)
         return conversation
@@ -932,7 +1099,11 @@ class RuntimeHost:
 
     async def shutdown(self) -> None:
         await self._agent_registry.shutdown()
-        for _session_id, (_agent, handle) in tuple(self._headless_agents.items()):
+        for _session_id, (_agent, handle, trace_driver) in tuple(
+            self._headless_agents.items()
+        ):
+            if trace_driver is not None:
+                trace_driver.close()
             await handle.close()
         self._headless_agents.clear()
         for conversation in tuple(self._conversations):

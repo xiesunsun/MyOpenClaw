@@ -64,6 +64,23 @@ class _MetadataProvider:
         )
 
 
+class _ConcurrentProvider:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+        self.two_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream(self, context):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.active == 2:
+            self.two_started.set()
+        await self.release.wait()
+        self.active -= 1
+        yield StreamCompleted(AssistantMessage())
+
+
 def _state(*, phase: str) -> AgentRunState:
     step = ModelStepState(
         step_id="step-1",
@@ -215,6 +232,34 @@ async def test_runtime_creates_metadata_only_with_stable_provider_identity(
         assert metadata.elapsed_ms == result.elapsed_ms
         assert metadata.context_fingerprint == "fingerprint"
         assert metadata.hook_injected_chars == 0
+
+
+@_run_async
+async def test_shared_package_limiter_bounds_parallel_model_requests() -> None:
+    provider = _ConcurrentProvider()
+    limiter = asyncio.Semaphore(2)
+    effects = RuntimeEffects(
+        provider=provider,
+        model_request_limiter=limiter,
+    )
+    context = ModelContext(system=SystemContent(), messages=())
+    tasks = [
+        asyncio.create_task(
+            effects.execute_model_request(
+                operation=_operation(),
+                state=_state(phase="request_ready"),
+                model_context=context,
+            )
+        )
+        for _ in range(5)
+    ]
+
+    await asyncio.wait_for(provider.two_started.wait(), timeout=1)
+    assert provider.active == 2
+    provider.release.set()
+    await asyncio.gather(*tasks)
+
+    assert provider.max_active == 2
 
 
 @_run_async

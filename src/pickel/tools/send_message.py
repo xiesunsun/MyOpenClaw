@@ -55,6 +55,9 @@ async def send_message(
     )
     payload = {"message_id": stored.message_id}
     return ToolExecutionResult(
-        content=f"消息已接受：message={stored.message_id}",
+        content=(
+            f"消息已持久化为 pending：message={stored.message_id}。"
+            "这只表示 child 已可靠接收，不表示已处理或完成。"
+        ),
         structured_content=payload,
     )

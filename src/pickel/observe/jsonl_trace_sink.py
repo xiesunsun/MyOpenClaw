@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -142,6 +143,26 @@ class _TraceBuffer:
             return len(self._items)
 
 
+def _next_trace_sequence(path: Path) -> int:
+    """从已有 JSONL 恢复文件级入队序号。
+
+    Trace 单文件有大小上限，初始化时线性扫描可以同时容忍崩溃
+    留下的不完整末行，不会把新 publisher 的序号重置为 0。
+    """
+    if not path.exists():
+        return 0
+    maximum = -1
+    try:
+        with path.open("r", encoding="utf-8") as existing:
+            for line in existing:
+                match = re.search(r'"trace_seq"\s*:\s*(\d+)', line)
+                if match is not None:
+                    maximum = max(maximum, int(match.group(1)))
+    except OSError:
+        return 0
+    return maximum + 1
+
+
 class JsonlTraceSink:
     """EventBus handler + Observer；调用方只入队，文件 I/O 在后台线程。"""
 
@@ -156,11 +177,12 @@ class JsonlTraceSink:
         self._path = Path(path)
         self._options = options or TraceOptions()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        next_trace_seq = _next_trace_sequence(self._path)
         # 提前验证路径可写，避免后台线程才发现初始化失败。
         self._handle = self._path.open("a", encoding="utf-8")
         self._buffer = _TraceBuffer(self._options.queue_capacity)
         self._sequence_lock = threading.Lock()
-        self._next_trace_seq = 0
+        self._next_trace_seq = next_trace_seq
         self._closed = False
         self._write_errors = 0
         self._written = 0

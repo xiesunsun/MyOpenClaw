@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
     from pickel.runtime.agent import Agent
@@ -19,8 +19,14 @@ class AgentRegistry:
         self._agents: dict[str, Agent] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._wake_pending: set[str] = set()
+        self._drives: dict[str, Callable[[], Awaitable[object]]] = {}
 
-    def register(self, agent: Agent) -> None:
+    def register(
+        self,
+        agent: Agent,
+        *,
+        drive: Callable[[], Awaitable[object]] | None = None,
+    ) -> None:
         session_id = agent.session_id
         existing = self._agents.get(session_id)
         if existing is agent:
@@ -28,6 +34,8 @@ class AgentRegistry:
         if existing is not None:
             raise ValueError(f"Session 已有 live Agent: {session_id}")
         self._agents[session_id] = agent
+        if drive is not None:
+            self._drives[session_id] = drive
 
     def get(self, session_id: str) -> Agent | None:
         return self._agents.get(session_id)
@@ -62,6 +70,7 @@ class AgentRegistry:
         if self._agents.get(session_id) is not expected_agent:
             return False
         self._agents.pop(session_id, None)
+        self._drives.pop(session_id, None)
         self._wake_pending.discard(session_id)
         task = self._tasks.pop(session_id, None)
         if task is not None and not task.done() and task is not asyncio.current_task():
@@ -72,6 +81,7 @@ class AgentRegistry:
         """停止并等待全部后台 wake task，避免资源先于驱动退出。"""
         tasks = tuple(self._tasks.values())
         self._agents.clear()
+        self._drives.clear()
         self._tasks.clear()
         self._wake_pending.clear()
         for task in tasks:
@@ -83,7 +93,8 @@ class AgentRegistry:
     async def _drive(self, session_id: str, agent: Agent) -> None:
         while True:
             self._wake_pending.discard(session_id)
-            await agent.when_idle()
+            drive = self._drives.get(session_id) or agent.when_idle
+            await drive()
             if self._agents.get(session_id) is not agent:
                 return
             if session_id not in self._wake_pending:

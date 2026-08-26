@@ -519,9 +519,9 @@ def test_headless_delegation_uses_intent_package_registers_before_wake() -> None
                 patch.object(
                     host.agent_registry,
                     "register",
-                    side_effect=lambda agent: (
+                    side_effect=lambda agent, **kwargs: (
                         events.append("register"),
-                        AgentRegistry.register(host.agent_registry, agent),
+                        AgentRegistry.register(host.agent_registry, agent, **kwargs),
                     )[1],
                 ),
                 patch.object(
