@@ -126,7 +126,7 @@ class RuntimeErrorInfo:
 class AgentRunResult:
     """Runtime Application 的稳定 AgentRun 结果。"""
 
-    status: Literal["completed", "blocked", "failed"]
+    status: Literal["completed", "blocked", "failed", "cancelled"]
     session_id: str
     operation_id: str
     message: AssistantMessage | None

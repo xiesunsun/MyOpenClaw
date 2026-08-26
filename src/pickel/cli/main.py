@@ -162,6 +162,8 @@ def _run_query(
 
     if result.status == "blocked":
         raise typer.Exit(code=3)
+    if result.status == "cancelled":
+        raise typer.Exit(code=130)
     if result.status == "failed":
         if result.error is not None:
             typer.echo(

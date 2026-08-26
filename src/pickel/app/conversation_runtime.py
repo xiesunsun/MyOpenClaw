@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pickel.agents.agent_package import LoadedAgentPackage
 from pickel.app.boot import CompositionStore
@@ -77,6 +77,24 @@ from pickel.shared.conversation_output import (
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.skills.store import SkillStoreError
+
+_AppRunStatus = Literal["completed", "blocked", "failed", "cancelled"]
+
+
+def _map_operation_status(operation_status: str | None) -> _AppRunStatus:
+    """把 Operation 终态映射为 Application Surface 的稳定状态。"""
+
+    if operation_status is None:
+        return "blocked"
+    if operation_status == "succeeded":
+        return "completed"
+    if operation_status in {"waiting", "cancelling"}:
+        return "blocked"
+    if operation_status == "failed":
+        return "failed"
+    if operation_status == "cancelled":
+        return "cancelled"
+    raise ValueError(f"未知 Operation status: {operation_status!r}")
 
 
 class ConversationRuntime:
@@ -248,36 +266,86 @@ class ConversationRuntime:
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             operation_result = result.operation_result
+            # usage 是 Driver 针对本次 Operation 捕获的模型请求合计；只读取一次，
+            # 并将同一个不可变值广播给所有 Application Surface 消费者。
+            usage = operation_result.usage if operation_result is not None else None
             message = (
                 operation_result.assistant_message
                 if operation_result is not None
                 else None
             )
-            status = (
+            operation_status = (
                 operation_result.status if operation_result is not None else "waiting"
             )
+            app_status = _map_operation_status(
+                operation_status if operation_result is not None else None
+            )
+
             if message is not None:
                 await self._events.emit(
                     AssistantMessageEvent(
                         envelope=envelope,
                         text=self._assistant_text(message),
+                        usage=usage,
                     )
                 )
+
+            if app_status == "failed":
+                assert operation_result is not None
+                state_error = operation_result.state.error
+                if state_error is None:
+                    raise RuntimeError("failed Operation 缺少持久化 error")
+                error = RuntimeErrorInfo(
+                    error_type=state_error.code,
+                    message=state_error.message,
+                )
+                await self._events.emit(
+                    AgentRunFailed(
+                        envelope=envelope,
+                        error_type=error.error_type,
+                        message=error.message,
+                    )
+                )
+                timer.finish(
+                    status="error",
+                    attributes={"outcome": app_status},
+                    error=ErrorInfo(
+                        kind="agent_run",
+                        type=error.error_type,
+                        message=error.message,
+                        retryable=getattr(state_error, "retryable", None),
+                    ),
+                )
+                self._refresh_session()
+                return AgentRunResult(
+                    status=app_status,
+                    session_id=self._session.session_id,
+                    operation_id=operation_id,
+                    message=message,
+                    usage=usage,
+                    elapsed_ms=elapsed_ms,
+                    error=error,
+                )
+
             await self._events.emit(
                 AgentRunCompleted(
                     envelope=envelope,
+                    usage=usage,
                     elapsed_ms=elapsed_ms,
-                    outcome=("blocked" if status == "waiting" else "completed"),
+                    outcome=app_status,
                 )
             )
-            timer.finish(attributes={"outcome": status})
+            timer.finish(
+                status="cancelled" if app_status == "cancelled" else "ok",
+                attributes={"outcome": app_status},
+            )
             self._refresh_session()
             return AgentRunResult(
-                status=("blocked" if status == "waiting" else "completed"),
+                status=app_status,
                 session_id=self._session.session_id,
                 operation_id=operation_id,
                 message=message,
-                usage=None,
+                usage=usage,
                 elapsed_ms=elapsed_ms,
             )
         except asyncio.CancelledError:

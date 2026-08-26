@@ -84,6 +84,26 @@ def test_move_active_leaf_uses_node_cas(tmp_path: Path) -> None:
     assert moved.active_node_id == first.node_id
 
 
+def test_list_branch_nodes_uses_explicit_leaf(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    session = service.create_conversation_session(agent_id="Pickle", cwd=str(tmp_path))
+    first = service.append_user_message(
+        session_id=session.session_id,
+        message=UserMessage(content=[TextBlock(text="first")]),
+    )
+    second = service.append_assistant_message(
+        session_id=session.session_id,
+        message=AssistantMessage(content=[TextBlock(text="second")]),
+    )
+
+    nodes = service.list_branch_nodes(
+        session_id=session.session_id, leaf_node_id=first.node_id
+    )
+
+    assert [node.node_id for node in nodes] == [first.node_id]
+    assert second.node_id not in [node.node_id for node in nodes]
+
+
 def test_append_cas_failure_does_not_leave_node(tmp_path: Path) -> None:
     class RejectingStore(InMemoryRuntimeStore):
         def append_node(self, *, node, expected_node_id):
