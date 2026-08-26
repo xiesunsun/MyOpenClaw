@@ -19,7 +19,7 @@ from pickel.agents.agent_package import (
     ModelVersion,
 )
 from pickel.agents.agent_package_builder import AgentPackageBuilder
-from pickel.agents.agent_package_loader import AgentPackageLoader
+from pickel.agents.agent_package_loader import AgentPackageLoader, PackageLoadError
 from pickel.artifacts.artifact_service import ArtifactService
 from pickel.artifacts.artifact_store import ArtifactStore
 from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
@@ -130,14 +130,16 @@ class Boot:
         """先冻结 Package，再解析当前 Generation 的可执行实现。"""
         version = self._agent_package_builder.build_agent_package_version(agent_id)
         resolved_id = agent_id or self.app_config.default_agent
+        if version.model_policy.primary.provider != "anthropic":
+            raise PackageLoadError(
+                "provider_unsupported",
+                version.package_version_id,
+                "当前 Runtime 只支持 Anthropic Provider: "
+                f"{version.model_policy.primary.provider}",
+            )
         model_config = self.app_config.resolve_model_config(
             self.app_config.get_agent_config(resolved_id).llm
         )
-        if version.model_policy.primary.provider != "anthropic":
-            raise ValueError(
-                "当前 LoadedAgentPackage 只支持 Anthropic Provider: "
-                f"{version.model_policy.primary.provider}"
-            )
         artifact_service = self._artifact_service(store)
         provider = AnthropicProvider.from_config(
             model_config,
@@ -177,16 +179,16 @@ class Boot:
         artifact_service = self._artifact_service(store)
 
         def load_provider(model: ModelVersion) -> Any | None:
-            config = self._model_config_from_version(model)
-            if model.provider == "anthropic":
-                return AnthropicProvider.from_config(
-                    config, artifact_service=artifact_service
+            if model.provider != "anthropic":
+                raise PackageLoadError(
+                    "provider_unsupported",
+                    package_version_id,
+                    f"当前 Runtime 只支持 Anthropic Provider: {model.provider}",
                 )
-            # 当前核心只承诺 Anthropic；未来 Provider 必须通过显式实现注册表接入。
-            provider = self.extensions.providers(self._scope(expected_agent_id)).get(
-                model.provider
+            config = self._model_config_from_version(model)
+            return AnthropicProvider.from_config(
+                config, artifact_service=artifact_service
             )
-            return provider
 
         resolved_agent_id = expected_agent_id or self.app_config.default_agent
 

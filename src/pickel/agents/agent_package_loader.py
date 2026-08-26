@@ -112,6 +112,10 @@ class AgentPackageLoader:
                 )
             try:
                 client = self._provider_loader(model)
+            except PackageLoadError:
+                # Provider loader 已经给出可恢复流程依赖的精确原因码；不能
+                # 把 provider_unsupported 等确定错误降级为 provider_unavailable。
+                raise
             except Exception as exc:
                 raise PackageLoadError(
                     "provider_unavailable",

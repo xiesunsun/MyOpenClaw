@@ -98,7 +98,7 @@ OperationDriver
 | 2.0 Agent Package v10 | Loader 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 当前 Config 仅能构建 primary，worker/utility 的配置来源归入配置升级批次 |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
 | 2.4 Host 控制面 | 完成 | `Agent.resume_operation(operation_id)` 精确身份恢复；cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`；`ToolReconciliationService` 对 `completed/not_started/unknown` 做单次 revision CAS，取消中的已完成结果经可恢复的两步 CAS 收敛 | 完整交互界面和 AgentRegistry 调度不在本批次 |
-| 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 与 Gemini 的 generate/stream、full trace snapshot 分别复用同一 request builder；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
+| 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 生产路径和 Gemini Provider 直接调用测试分别复用各自唯一的 request builder，后者不表示 Boot 已支持 Gemini；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
 | 4.1 EventEnvelope 执行身份 | 完成 | 新增唯一 `ExecutionIdentity` 值对象；`EventEnvelope` 改为组合该身份，不再复制执行字段；Runtime Event、EventBus、Trace、CLI 与 Extension 调用方已迁移，扁平 JSON 增加 `tool_call_id/message_id` | Tool、Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.2 Tool execution 执行身份 | 完成 | `ToolExecutionContext` 只组合 `ExecutionIdentity`，删除五个重复执行字段；Boot 在工具执行边界一次性组装完整身份，Shell 与 MCP Proxy 调用方已迁移；`tool_call_id` 继续作为默认幂等身份 | Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.3 Hook 执行身份 | 完成 | Hook 控制事件只组合 `ExecutionIdentity`；Pre/Post Tool Hook 的 `tool_call_id` 收敛到统一身份；Lifecycle 与 OperationDriver 调用方已迁移；仅为旧 Hook 身份存在的 `EventIdentity` 已删除 | Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
@@ -120,7 +120,7 @@ OperationDriver
 | 6.3c-e `cancel_delegation` direct-child cancel | 完成 | SQLite/InMemory 原子验证当前 `cancel_delegation` intent、丢弃 sender Session 发往目标 child 的 pending AgentMessage，并返回 child 当时 active Operation；RuntimeHost 的 DelegationControl 复用 OperationService cancellation，active child 由 Host activate/wake，idle child 不激活 | 不归档/删除 Session，不新增 Delegation 状态或取消实体 |
 | 6.3d Parent Operation 后代级联取消 | 完成 | OperationService 在 parent CAS 进入 `cancelling` 后沿 AgentDelegation 图幂等 CAS 所有非终态后代；双 Store 在 `cancelling → cancelled` 事务内检查后代终态及祖先来源 pending child 消息；只 discard 真实后代的 AgentMessage，child 收敛后唤醒 direct parent，重启继续 reconciliation | 不新增取消实体、Manager 或通用图缓存 |
 
-第三十二轮验收基线：`904 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start、6.3c-b `send_message` direct-child followup、6.3c-c `list_agents` child snapshot、6.3c-d `report` child-to-parent report、6.3c-e `cancel_delegation`、6.3d 后代级联取消已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的 `ActivationControl`、`tool_set_active` 与 `agent_disabled` 激活残影，并隐藏尚未实现 Package 切换语义的 `/model`、`/thinking`；实际请求统一由 `RequestSnapshotRecord` 记录。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第三十三轮验收基线：`907 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start、6.3c-b `send_message` direct-child followup、6.3c-c `list_agents` child snapshot、6.3c-d `report` child-to-parent report、6.3c-e `cancel_delegation`、6.3d 后代级联取消已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的 `ActivationControl`、`tool_set_active` 与 `agent_disabled` 激活残影，隐藏尚未实现 Package 切换语义的 `/model`、`/thinking`，并将非 Anthropic Boot 与冻结 Package 恢复统一为稳定的 `provider_unsupported`，删除无调用方的 Provider factory；实际请求统一由 `RequestSnapshotRecord` 记录。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
 
 ## 5. 阶段 0：回归基线
 
@@ -397,7 +397,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 | ActivationControl | 已删除；未接入 RuntimeHost/Boot |
 | AgentRunUsage | Provider 能提供则接通，否则暂不公开 |
 | `/model`、`/thinking` | 已隐藏；未实现 Environ → 新 Package → 未来 Operation 的完整切换语义前不公开 |
-| Gemini Boot | 完成生产路径或明确标记未支持 |
+| Gemini Boot | 已明确未支持；新建与冻结 Package 恢复统一返回 `provider_unsupported`，Gemini Provider 仅保留直接调用适配器测试 |
 | 重复 ArtifactService 注入 | 保留唯一依赖来源 |
 
 最终校对本文引用的领域合同，更新原文，不创建同主题 v2/v3。

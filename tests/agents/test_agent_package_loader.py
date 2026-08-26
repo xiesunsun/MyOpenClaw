@@ -10,7 +10,7 @@ from pickel.agents.agent_package import (
     ImplementationRef,
     build_agent_package_version,
 )
-from pickel.agents.agent_package_loader import PackageLoadError
+from pickel.agents.agent_package_loader import AgentPackageLoader, PackageLoadError
 from pickel.app.boot import Boot
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.config.app_config import ModelSelection
@@ -73,6 +73,89 @@ def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:
         boot.load_agent_package("agentpkg_" + "0" * 64, store=InMemoryRuntimeStore())
 
     assert caught.value.code == "package_version_missing"
+
+
+def test_new_package_with_unsupported_provider_has_stable_failure_code(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    config.providers["google/gemini"] = type(config.providers["anthropic"])(
+        models={"gemini-test": config.providers["anthropic"].models["claude-test"]}
+    )
+    config.agents["Pickle"].llm = ModelSelection(
+        provider="google/gemini", model="gemini-test"
+    )
+    boot = Boot(config, tool_bus=_tool_bus())
+
+    with pytest.raises(PackageLoadError) as caught:
+        boot.resolve_loaded_agent_package()
+
+    assert caught.value.code == "provider_unsupported"
+    assert caught.value.package_version_id.startswith("agentpkg_")
+
+
+def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+    current = boot.resolve_loaded_agent_package().version
+    primary = replace(
+        current.model_policy.primary,
+        provider="google/gemini",
+        provider_implementation=ImplementationRef("provider", "google/gemini"),
+    )
+    version = build_agent_package_version(
+        agent_id=current.agent_id,
+        format_version=current.format_version,
+        behavior_instruction=current.behavior_instruction,
+        model_policy=replace(current.model_policy, primary=primary),
+        runtime_policy=current.runtime_policy,
+        workspace_policy=current.workspace_policy,
+        skills=current.skills,
+        tools=current.tools,
+        extensions=current.extensions,
+        created_at=current.created_at,
+    )
+    store.insert_agent_package_version(version)
+
+    with pytest.raises(PackageLoadError) as caught:
+        boot.load_agent_package(version.package_version_id, store=store)
+
+    assert caught.value.code == "provider_unsupported"
+    assert caught.value.package_version_id == version.package_version_id
+
+
+def test_provider_loader_does_not_swallow_precise_package_load_error(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+    version = boot.resolve_loaded_agent_package().version
+    store.insert_agent_package_version(version)
+    precise = PackageLoadError(
+        "provider_unsupported", version.package_version_id, "测试错误"
+    )
+
+    def provider_loader(_model):
+        raise precise
+
+    loader = AgentPackageLoader(
+        store,
+        boot.tool_bus,
+        provider_loader=provider_loader,
+    )
+
+    with pytest.raises(PackageLoadError) as caught:
+        loader.load(version.package_version_id)
+
+    assert caught.value is precise
+    assert caught.value.code == "provider_unsupported"
 
 
 def test_tool_implementation_mismatch_does_not_fallback_to_current_tool(
