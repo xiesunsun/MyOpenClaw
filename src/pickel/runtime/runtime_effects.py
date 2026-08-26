@@ -17,6 +17,7 @@ from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
     AgentMessage,
     AssistantMessage,
+    ModelResponseMetadata,
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock
@@ -148,10 +149,26 @@ class RuntimeEffects:
         if message.metadata is not None:
             metadata = replace(
                 message.metadata,
+                # Runtime 实测耗时是后续 Usage 聚合的原始事实，覆盖 Provider
+                # 可能附带的 elapsed_ms；其余 Provider 响应字段保持不变。
+                elapsed_ms=elapsed_ms,
                 context_fingerprint=context_fingerprint,
                 hook_injected_chars=max(0, hook_injected_chars),
             )
             message = replace(message, metadata=metadata)
+        elif self.provider_name and self.model_name:
+            # Provider 没有返回 metadata 时，只有两个稳定身份都存在才创建
+            # Runtime metadata；不能用空字符串伪造 Provider/model 身份。
+            message = replace(
+                message,
+                metadata=ModelResponseMetadata(
+                    provider=self.provider_name,
+                    model=self.model_name,
+                    elapsed_ms=elapsed_ms,
+                    context_fingerprint=context_fingerprint,
+                    hook_injected_chars=max(0, hook_injected_chars),
+                ),
+            )
         return ModelRequestResult(
             assistant_message=message,
             elapsed_ms=elapsed_ms,

@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pickel.providers.stream import StreamCompleted, TextDelta, ToolCallArgsDelta
 from pickel.runtime.runtime_effects import ModelExecutionBoundaryError, RuntimeEffects
 from pickel.tools.base import ToolExecutionResult
-from pickel.conversations.agent_message import AssistantMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ModelResponseMetadata,
+    ModelUsage,
+)
 
 
 def _run_async(function):
@@ -40,6 +44,24 @@ class _StreamingProvider:
         yield ToolCallArgsDelta("tool-1", '{"a":')
         yield ToolCallArgsDelta("tool-2", '{"b":')
         yield StreamCompleted(AssistantMessage())
+
+
+class _MetadataProvider:
+    async def stream(self, context):
+        yield StreamCompleted(
+            AssistantMessage(
+                metadata=ModelResponseMetadata(
+                    provider="provider",
+                    model="model",
+                    provider_model_version="version-1",
+                    provider_response_id="response-1",
+                    finish_reason="stop",
+                    finish_message="done",
+                    elapsed_ms=999,
+                    usage=ModelUsage(input_tokens=3, output_tokens=2),
+                )
+            )
+        )
 
 
 def _state(*, phase: str) -> AgentRunState:
@@ -124,6 +146,75 @@ async def test_stream_delta_identity_tracks_each_tool_call_without_carryover() -
         "tool-2",
         None,
     ]
+
+
+@_run_async
+async def test_runtime_elapsed_overrides_provider_elapsed_and_preserves_metadata(
+    monkeypatch,
+) -> None:
+    clock = iter((100.0, 100.125, 100.25))
+    monkeypatch.setattr(
+        "pickel.runtime.runtime_effects.time.perf_counter", lambda: next(clock)
+    )
+    effects = RuntimeEffects(provider=_MetadataProvider())
+
+    result = await effects.execute_model_request(
+        operation=_operation(),
+        state=_state(phase="request_ready"),
+        model_context=ModelContext(system=SystemContent(), messages=()),
+        context_fingerprint="fingerprint",
+        hook_injected_chars=12,
+    )
+
+    metadata = result.assistant_message.metadata
+    assert metadata is not None
+    assert metadata.elapsed_ms == 250
+    assert metadata.provider == "provider"
+    assert metadata.model == "model"
+    assert metadata.provider_model_version == "version-1"
+    assert metadata.provider_response_id == "response-1"
+    assert metadata.finish_reason == "stop"
+    assert metadata.finish_message == "done"
+    assert metadata.usage == ModelUsage(input_tokens=3, output_tokens=2)
+    assert metadata.context_fingerprint == "fingerprint"
+    assert metadata.hook_injected_chars == 12
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "model_name", "expected_metadata"),
+    [
+        ("provider", "model", True),
+        ("", "", False),
+        ("provider", "", False),
+        ("", "model", False),
+    ],
+)
+@_run_async
+async def test_runtime_creates_metadata_only_with_stable_provider_identity(
+    provider_name, model_name, expected_metadata
+) -> None:
+    effects = RuntimeEffects(
+        provider=_Provider(),
+        provider_name=provider_name,
+        model_name=model_name,
+    )
+
+    result = await effects.execute_model_request(
+        operation=_operation(),
+        state=_state(phase="request_ready"),
+        model_context=ModelContext(system=SystemContent(), messages=()),
+        context_fingerprint="fingerprint",
+        hook_injected_chars=-1,
+    )
+
+    metadata = result.assistant_message.metadata
+    assert (metadata is not None) is expected_metadata
+    if metadata is not None:
+        assert metadata.provider == provider_name
+        assert metadata.model == model_name
+        assert metadata.elapsed_ms == result.elapsed_ms
+        assert metadata.context_fingerprint == "fingerprint"
+        assert metadata.hook_injected_chars == 0
 
 
 @_run_async
