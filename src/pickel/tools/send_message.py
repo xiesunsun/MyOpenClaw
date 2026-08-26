@@ -6,7 +6,7 @@ from typing import Any
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -39,19 +39,15 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def send_message(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> dict[str, str]:
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。",
-            is_error=True,
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     child_session_id = str(arguments["child_session_id"])
     message = str(arguments["message"])
     if not child_session_id.strip() or not message.strip():
-        return ToolExecutionResult(
-            content="send_message 的 child_session_id 和 message 不能为空。",
-            is_error=True,
+        raise ToolExecutionError(
+            "send_message 的 child_session_id 和 message 不能为空。"
         )
     stored = await control.send_parent_followup(
         sender_operation_id=context.identity.operation_id or "",
@@ -61,10 +57,4 @@ async def send_message(
         message=UserMessage((TextBlock(message),)),
     )
     payload = {"message_id": stored.message_id}
-    return ToolExecutionResult(
-        content=(
-            f"消息已持久化为 pending：message={stored.message_id}。"
-            "这只表示 child 已可靠接收，不表示已处理或完成。"
-        ),
-        structured_content=payload,
-    )
+    return payload

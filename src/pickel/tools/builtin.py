@@ -14,6 +14,7 @@ from pickel.tools.base import ToolExecutionContext, tool
         },
         "required": ["text"],
     },
+    output_schema={"type": "string"},
 )
 async def echo(text: str, context: ToolExecutionContext) -> str:
     return text

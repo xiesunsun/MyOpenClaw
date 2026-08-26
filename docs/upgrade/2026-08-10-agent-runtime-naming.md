@@ -2,7 +2,7 @@
 
 **日期**：2026-08-10
 **更新日期**：2026-08-26
-**状态**：目标合同，实施中；Tool 与 Delegation 控制面收敛待验收
+**状态**：当前合同；Tool 与 Delegation 控制面已经收敛
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -224,6 +224,11 @@ ToolDefinition.output_schema
 JSON value 只通过 `render()` 转换为唯一的模型可见 `content`，持久化结果只引用该
 ToolResultMessage；不再并列保存或消费 `structured_content`。Provider、Trace 和 UI
 可以从同一 `content` 做各自展示映射，但不能形成第二份结果权威。
+
+升级前已持久化的 ModelRequestIntent 可能没有 `output_schema`；反序列化只为恢复
+补入 permissive schema，因为该字段不进入 Provider wire，也不决定 Tool 执行。
+新 Tool、Package 和 ModelContext 的构建入口仍必须显式提供 `output_schema`，真实
+执行始终以 Operation 冻结 Package 中的定义为准。
 
 ## 8. 多模态与多 Agent
 

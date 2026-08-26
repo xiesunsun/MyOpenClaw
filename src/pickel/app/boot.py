@@ -26,6 +26,8 @@ from pickel.config.app_config import AppConfig
 from pickel.config.paths import home_dir, runtime_db_path
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_store import ConversationStore
+from pickel.conversations.agent_message import ToolResultMessage
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.shared.frozen_json import thaw_json
 from pickel.shared.model_config import ModelConfig
@@ -44,8 +46,10 @@ from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult
-from pickel.tools.validation import invalid_tool_result, validate_tool_result
+from pickel.tools.base import ToolExecutionContext
+from pickel.tools.validation import (
+    validate_tool_output,
+)
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolActivation, ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -444,8 +448,11 @@ class Boot:
             )
             entry = loaded_agent_package.tool_snapshot.get(call.tool_name)
             if entry is None:
-                return ToolExecutionResult(
-                    content=f"工具不可用: {call.tool_name}", is_error=True
+                return ToolResultMessage(
+                    tool_call_id=tool_call_id,
+                    tool_name=call.tool_name,
+                    content=(TextBlock(f"工具不可用: {call.tool_name}"),),
+                    is_error=True,
                 )
             context = ToolExecutionContext(
                 agent_id=agent_id,
@@ -467,14 +474,41 @@ class Boot:
                 ),
             )
             try:
-                result = await entry.tool.execute(dict(call.arguments), context)
-                validation_error = validate_tool_result(entry.tool, result)
+                value = await entry.tool.execute(dict(call.arguments), context)
+                validation_error = validate_tool_output(entry.tool, value)
                 if validation_error is not None:
-                    return invalid_tool_result(result, validation_error)
-                return result
+                    return ToolResultMessage(
+                        tool_call_id=tool_call_id,
+                        tool_name=call.tool_name,
+                        content=(
+                            TextBlock(f"INVALID_TOOL_OUTPUT: {validation_error}"),
+                        ),
+                        is_error=True,
+                    )
+                render = getattr(entry.tool, "render", None)
+                if not callable(render):
+                    return ToolResultMessage(
+                        tool_call_id=tool_call_id,
+                        tool_name=call.tool_name,
+                        content=(TextBlock("INVALID_TOOL_OUTPUT: Tool 未提供 render"),),
+                        is_error=True,
+                    )
+                rendered = render(value)
+                content = tuple(rendered)
+                if not all(
+                    isinstance(block, (TextBlock, ArtifactBlock)) for block in content
+                ):
+                    raise TypeError("Tool.render 必须返回 ToolResultContent 序列")
+                return ToolResultMessage(
+                    tool_call_id=tool_call_id,
+                    tool_name=call.tool_name,
+                    content=content,
+                )
             except Exception as exc:
-                return ToolExecutionResult(
-                    content=f"工具 '{call.tool_name}' 执行失败: {exc}",
+                return ToolResultMessage(
+                    tool_call_id=tool_call_id,
+                    tool_name=call.tool_name,
+                    content=(TextBlock(f"工具 '{call.tool_name}' 执行失败: {exc}"),),
                     is_error=True,
                 )
 

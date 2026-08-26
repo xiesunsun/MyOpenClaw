@@ -31,7 +31,6 @@ def _context() -> ModelContext:
                 tool_call_id="call-1",
                 tool_name="lookup",
                 content=(TextBlock("result"),),
-                structured_content={"ok": True},
             ),
         ),
         tools=(
@@ -39,6 +38,7 @@ def _context() -> ModelContext:
                 "lookup",
                 "lookup value",
                 {"type": "object", "properties": {"q": {"type": "string"}}},
+                {"type": "object"},
             ),
         ),
     )
@@ -74,7 +74,7 @@ def test_snapshot_maps_full_context_and_tools() -> None:
         {
             "role": "tool",
             "tool_call_id": "call-1",
-            "content": 'structured_content: {"ok":true}',
+            "content": "result",
         },
     ]
     assert snapshot["tools"][0]["function"]["name"] == "lookup"

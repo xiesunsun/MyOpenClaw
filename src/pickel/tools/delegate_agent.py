@@ -6,7 +6,7 @@ from typing import Any
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -43,20 +43,14 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def delegate_agent(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> dict[str, str]:
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。",
-            is_error=True,
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     description = str(arguments["description"])
     prompt = str(arguments["prompt"])
     if not description.strip() or not prompt.strip():
-        return ToolExecutionResult(
-            content="delegate_agent 的 description 和 prompt 不能为空。",
-            is_error=True,
-        )
+        raise ToolExecutionError("delegate_agent 的 description 和 prompt 不能为空。")
     delegation = await control.start_delegation(
         parent_operation_id=context.identity.operation_id,
         parent_step_id=context.identity.step_id,
@@ -67,10 +61,4 @@ async def delegate_agent(
         "child_session_id": delegation.child_session_id,
         "message_id": delegation.initial_message_id,
     }
-    return ToolExecutionResult(
-        content=(
-            "Child 已接受："
-            f"session={delegation.child_session_id}, message={delegation.initial_message_id}"
-        ),
-        structured_content=payload,
-    )
+    return payload

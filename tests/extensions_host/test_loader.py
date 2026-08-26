@@ -35,6 +35,7 @@ class _Probe(BaseTool):
         name="probe",
         description="probe",
         input_schema={"type": "object", "properties": {}},
+        output_schema={"type": "object"},
     )
 
 
@@ -55,6 +56,7 @@ class _Probe(BaseTool):
         name="probe",
         description="probe",
         input_schema={"type": "object", "properties": {}},
+        output_schema={"type": "object"},
     )
 
 

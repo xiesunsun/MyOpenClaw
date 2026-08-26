@@ -290,29 +290,11 @@ class OpenAIResponsesProvider(Provider):
         content: list[dict[str, Any]] = []
         if message.is_error:
             content.append({"type": "input_text", "text": "tool_error: true"})
-        if message.structured_content is not None:
-            # structured_content 是唯一权威结果；content 只作为旧 Tool 的回退。
-            content.append(
-                {
-                    "type": "input_text",
-                    "text": "structured_content: "
-                    + json.dumps(
-                        thaw_json(message.structured_content),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                }
-            )
-            # 结构化文本去重不影响独立的 Artifact 结果块。
-            for block in message.content:
-                if isinstance(block, ArtifactBlock):
-                    content.append(self._artifact_input(block))
-        else:
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    content.append({"type": "input_text", "text": block.text})
-                elif isinstance(block, ArtifactBlock):
-                    content.append(self._artifact_input(block))
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                content.append({"type": "input_text", "text": block.text})
+            elif isinstance(block, ArtifactBlock):
+                content.append(self._artifact_input(block))
         if not content:
             return ""
         if all(item["type"] == "input_text" for item in content):

@@ -188,6 +188,6 @@ class SandboxMetadataTests(unittest.IsolatedAsyncioTestCase):
             try:
                 result = await BashTool().execute({"command": "echo hi"}, context)
 
-                self.assertEqual(HAS_OS_SANDBOX, result.metadata["sandboxed"])
+                self.assertEqual(HAS_OS_SANDBOX, result["sandboxed"])
             finally:
                 manager.close(context.identity.session_id)

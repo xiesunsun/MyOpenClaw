@@ -149,16 +149,17 @@ class ToolVersion:
     version: str | None
     description: str
     input_schema: Mapping[str, FrozenJSON]
-    output_schema: Mapping[str, FrozenJSON] | None
+    output_schema: Mapping[str, FrozenJSON]
     replay_policy: Literal["safe", "never"]
 
     def __post_init__(self) -> None:
         if self.replay_policy not in {"safe", "never"}:
             raise ValueError("ToolVersion.replay_policy 必须是 safe 或 never")
+        if not isinstance(self.output_schema, Mapping):
+            raise TypeError("ToolVersion.output_schema 必须是 JSON Schema object")
         object.__setattr__(self, "source", ToolSource(self.source))
         object.__setattr__(self, "input_schema", freeze_json(self.input_schema))
-        if self.output_schema is not None:
-            object.__setattr__(self, "output_schema", freeze_json(self.output_schema))
+        object.__setattr__(self, "output_schema", freeze_json(self.output_schema))
 
 
 @dataclass(frozen=True)
@@ -526,9 +527,7 @@ def _tool_dict(tool: ToolVersion) -> dict[str, Any]:
         "version": tool.version,
         "description": tool.description,
         "input_schema": thaw_json(tool.input_schema),
-        "output_schema": (
-            thaw_json(tool.output_schema) if tool.output_schema is not None else None
-        ),
+        "output_schema": thaw_json(tool.output_schema),
         "replay_policy": tool.replay_policy,
     }
 
@@ -582,6 +581,8 @@ def _skill_from_dict(value: Mapping[str, Any]) -> SkillVersion:
 
 def _tool_from_dict(value: Mapping[str, Any]) -> ToolVersion:
     data = dict(value)
+    if "output_schema" not in data or data["output_schema"] is None:
+        raise ValueError("ToolVersion.output_schema 缺失或为 null")
     data["implementation_ref"] = _ref_from_dict(data["implementation_ref"])
     return ToolVersion(**data)
 

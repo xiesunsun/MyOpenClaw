@@ -16,7 +16,6 @@ from pickel.conversations.content_blocks import (
     content_blocks_from_list,
     content_blocks_to_list,
 )
-from pickel.shared.frozen_json import freeze_json, thaw_json
 
 PAYLOAD_VERSION = 3
 SUPPORTED_PAYLOAD_VERSIONS = frozenset({1, 2, 3})
@@ -75,18 +74,10 @@ class ToolResultMessage:
     tool_name: str
     content: tuple[ToolResultContent, ...] = ()
     is_error: bool = False
-    # 工具返回给模型的结构化数据。运行时诊断仍留在 ToolExecutionResult。
-    structured_content: Any | None = None
     role: Literal["tool"] = "tool"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "content", tuple(self.content))
-        if self.structured_content is not None:
-            object.__setattr__(
-                self,
-                "structured_content",
-                freeze_json(self.structured_content),
-            )
 
 
 AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
@@ -184,7 +175,6 @@ def agent_message_to_dict(message: AgentMessage) -> dict[str, Any]:
             "tool_name": message.tool_name,
             "content": content_blocks_to_list(list(message.content)),
             "is_error": message.is_error,
-            "structured_content": thaw_json(message.structured_content),
         }
     raise TypeError(f"不支持的 AgentMessage 类型: {type(message)!r}")
 
@@ -218,9 +208,6 @@ def agent_message_from_dict(data: dict[str, Any]) -> AgentMessage:
             tool_name=data["tool_name"],
             content=_as_tool_result_content(blocks),
             is_error=bool(data.get("is_error", False)),
-            structured_content=(
-                data.get("structured_content") if version >= 2 else None
-            ),
         )
     raise ValueError(f"未知 AgentMessage role: {role!r}")
 

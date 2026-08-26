@@ -16,9 +16,40 @@ from pickel.operations.agent_run_state import (
 from pickel.operations.tool_reconciliation_service import ToolReconciliationService
 from pickel.persistence.errors import StorageConflictError
 from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
-from pickel.tools.base import ToolExecutionResult
+from pickel.tools.base import BaseTool, ToolSpec
+from pickel.tools.base import ToolExecutionContext
+from pickel.conversations.content_blocks import ToolResultContent
 
 NOW = datetime(2026, 8, 25, tzinfo=timezone.utc)
+
+
+class _EchoTool(BaseTool):
+    spec = ToolSpec(
+        name="echo",
+        description="echo",
+        input_schema={"type": "object"},
+        output_schema={"type": "string"},
+    )
+
+    async def execute(self, arguments: dict, context: ToolExecutionContext) -> str:
+        return ""
+
+    def render(self, validated_value: str) -> tuple[ToolResultContent, ...]:
+        from pickel.conversations.content_blocks import TextBlock
+
+        return (TextBlock(validated_value),)
+
+
+class _NullTool(BaseTool):
+    spec = ToolSpec(
+        name="echo",
+        description="echo",
+        input_schema={"type": "object"},
+        output_schema={"type": "null"},
+    )
+
+    async def execute(self, arguments: dict, context: ToolExecutionContext):
+        return None
 
 
 class _Operations:
@@ -105,6 +136,7 @@ def _service(
     revision: int = 7,
     commit: bool = True,
     wake=None,
+    tool=None,
 ):
     operations = _Operations(
         _state(*calls, status=status, revision=revision), commit=commit
@@ -113,21 +145,26 @@ def _service(
         operations,
         _Conversations(),
         wake=wake or (lambda _session_id: None),
+        resolve_tool=lambda _operation, _call: tool or _EchoTool(),
         node_id_factory=lambda: "tool-result-1",
         now=lambda: NOW,
     )
     return service, operations
 
 
-def _reconcile(service, *, outcome="completed", result=None, **kwargs):
+_UNSET = object()
+
+
+def _reconcile(service, *, outcome="completed", result=_UNSET, **kwargs):
     arguments = {
         "operation_id": "operation-1",
         "step_id": "step-1",
         "tool_call_id": "tool-1",
         "expected_revision": 7,
         "outcome": outcome,
-        "result": result,
     }
+    if result is not _UNSET:
+        arguments["result"] = result
     arguments.update(kwargs)
     return service.reconcile_tool_call(**arguments)
 
@@ -138,7 +175,7 @@ def test_completed_appends_tool_result_and_resumes_waiting_operation() -> None:
 
     state = _reconcile(
         service,
-        result=ToolExecutionResult(content="done", structured_content={"ok": True}),
+        result="done",
     )
 
     assert state.status == "running"
@@ -151,8 +188,16 @@ def test_completed_appends_tool_result_and_resumes_waiting_operation() -> None:
     assert node.parent_node_id == "assistant-1"
     assert node.content.tool_call_id == "tool-1"
     assert node.content.content[0].text == "done"
-    assert node.content.structured_content == {"ok": True}
     assert woken == ["session-1"]
+
+
+def test_completed_accepts_json_null_when_schema_allows_it() -> None:
+    service, operations = _service(_call("tool-1"), tool=_NullTool())
+
+    state = _reconcile(service, result=None)
+
+    assert state.status == "running"
+    assert operations.nodes[0].content.content[0].text == "null"
 
 
 def test_not_started_safe_keeps_intent_for_replay_and_wakes() -> None:
@@ -184,7 +229,7 @@ def test_completed_while_cancelling_persists_result_then_wakes_driver() -> None:
         _call("tool-1"), status="cancelling", wake=woken.append
     )
 
-    state = _reconcile(service, result=ToolExecutionResult(content="late result"))
+    state = _reconcile(service, result="late result")
 
     assert state.status == "cancelling"
     assert state.current_step.tool_calls[0].status == "completed"
@@ -212,7 +257,7 @@ def test_stale_revision_is_rejected_without_retry() -> None:
         _reconcile(
             service,
             expected_revision=6,
-            result=ToolExecutionResult(content="done"),
+            result="done",
         )
 
     assert operations.commit_count == 0
@@ -225,13 +270,13 @@ def test_wrong_step_and_provider_order_are_rejected() -> None:
         _reconcile(
             service,
             step_id="old-step",
-            result=ToolExecutionResult(content="done"),
+            result="done",
         )
     with pytest.raises(StorageConflictError, match="Provider ToolCall 顺序"):
         _reconcile(
             service,
             tool_call_id="tool-2",
-            result=ToolExecutionResult(content="done"),
+            result="done",
         )
 
     assert operations.commit_count == 0
@@ -242,7 +287,7 @@ def test_cas_failure_is_not_retried_or_woken() -> None:
     service, operations = _service(_call("tool-1"), commit=False, wake=woken.append)
 
     with pytest.raises(StorageConflictError, match="CAS 失败"):
-        _reconcile(service, result=ToolExecutionResult(content="done"))
+        _reconcile(service, result="done")
 
     assert operations.commit_count == 1
     assert operations.state.revision == 7
@@ -252,9 +297,9 @@ def test_cas_failure_is_not_retried_or_woken() -> None:
 @pytest.mark.parametrize(
     "outcome,result",
     [
-        ("completed", None),
-        ("not_started", ToolExecutionResult(content="unexpected")),
-        ("unknown", ToolExecutionResult(content="unexpected")),
+        ("completed", _UNSET),
+        ("not_started", "unexpected"),
+        ("unknown", "unexpected"),
     ],
 )
 def test_result_shape_matches_outcome(outcome: str, result) -> None:

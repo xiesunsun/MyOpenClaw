@@ -13,7 +13,7 @@ from pickel.extensions.mcp.connection import McpConnectionError
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionContext
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.tools.bus import ToolBus, ToolSource
 from pickel.tools.services import ToolServices
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
@@ -97,13 +97,11 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.start()
             echo = bus.get("mcp__fixture__echo").tool
             result = await echo.execute({"text": "hi"}, _context())
-            self.assertFalse(result.is_error)
-            self.assertEqual("echo:hi", result.content)
-            self.assertEqual("fixture", result.metadata["server"])
+            self.assertEqual("echo:hi", result["content_blocks"][0]["text"])
 
             boom = bus.get("mcp__fixture__boom").tool
-            result = await boom.execute({}, _context())
-            self.assertTrue(result.is_error)
+            with self.assertRaises(ToolExecutionError):
+                await boom.execute({}, _context())
         finally:
             await runtime.close()
 
@@ -142,14 +140,52 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual("hello", result.content)
-        self.assertEqual({"answer": 42}, result.structured_content)
-        self.assertEqual({"type": "object"}, proxy.spec.output_schema)
-        self.assertEqual(2, len(result.content_blocks))
-        self.assertEqual("artifact", result.content_blocks[1].type)
-        self.assertEqual("image/png", result.content_blocks[1].artifact.media_type)
-        self.assertEqual(["audio"], result.metadata["unsupported_content"])
-        self.assertEqual("audio", result.metadata["unsupported_mcp_content"][0]["type"])
+        self.assertEqual("hello", result["content_blocks"][0]["text"])
+        self.assertEqual({"answer": 42}, result["structured"])
+        self.assertEqual(
+            {"type": "object"},
+            proxy.spec.output_schema["properties"]["structured"]["anyOf"][0],
+        )
+        rendered = proxy.render(result)
+        self.assertEqual(3, len(rendered))
+        self.assertEqual("artifact", rendered[1].type)
+        self.assertEqual("image/png", rendered[1].artifact.media_type)
+        self.assertEqual("[unsupported content: audio]", rendered[2].text)
+        self.assertEqual(["audio"], result["unsupported_content"])
+
+        structured_only = proxy.render(
+            {
+                "content_blocks": [],
+                "structured": {"answer": 42},
+                "unsupported_content": [],
+            }
+        )
+        self.assertEqual(1, len(structured_only))
+        self.assertEqual('{"answer":42}', structured_only[0].text)
+
+        empty = proxy.render(
+            {
+                "content_blocks": [],
+                "structured": None,
+                "unsupported_content": [],
+            }
+        )
+        self.assertEqual("null", empty[0].text)
+
+    def test_proxy_uses_envelope_schema_when_mcp_schema_is_missing(self) -> None:
+        runtime = SimpleNamespace(spec=SimpleNamespace(name="fake"))
+        tool = mcp.types.Tool(
+            name="no_schema",
+            description="d",
+            input_schema={"type": "object"},
+        )
+
+        proxy = McpProxyTool(runtime, tool)
+
+        properties = proxy.spec.output_schema["properties"]
+        self.assertEqual("object", proxy.spec.output_schema["type"])
+        self.assertEqual({}, properties["structured"]["anyOf"][0])
+        self.assertEqual({"type": "null"}, properties["structured"]["anyOf"][1])
 
     async def test_connection_loss_reconnects_without_replaying_tool(self) -> None:
         bus = ToolBus()
@@ -188,8 +224,7 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.close()
 
-        self.assertFalse(result.is_error)
-        self.assertEqual("elicited:Ada:2", result.content)
+        self.assertEqual("elicited:Ada:2", result["content_blocks"][0]["text"])
         self.assertEqual(1, len(seen))
         self.assertEqual("Provide user details", seen[0][0].message)
         self.assertEqual("operation-1", seen[0][1].identity.operation_id)
@@ -217,8 +252,7 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.close()
 
-        self.assertFalse(result.is_error)
-        self.assertEqual("project:Pickel", result.content)
+        self.assertEqual("project:Pickel", result["content_blocks"][0]["text"])
         self.assertEqual(
             ["Provide user details", "Provide a project for Ada"],
             messages,
@@ -279,13 +313,12 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         try:
             await runtime.start()
             die = bus.get("mcp__fixture__die").tool
-            first = await die.execute({}, _context())
-            self.assertTrue(first.is_error)
+            with self.assertRaises(ToolExecutionError):
+                await die.execute({}, _context())
 
             echo = bus.get("mcp__fixture__echo").tool
             second = await echo.execute({"text": "back"}, _context())
-            self.assertFalse(second.is_error)
-            self.assertEqual("echo:back", second.content)
+            self.assertEqual("echo:back", second["content_blocks"][0]["text"])
         finally:
             await runtime.close()
 
@@ -299,11 +332,11 @@ class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             echo = bus.get("mcp__fixture__echo").tool
             # 让重连必然失败：偷换 spec 为坏命令
             runtime.spec = type(spec)(name=spec.name, command="/no/such/command-xyz")
-            await die.execute({}, _context())
+            with self.assertRaises(ToolExecutionError):
+                await die.execute({}, _context())
 
-            result = await echo.execute({"text": "x"}, _context())
-
-            self.assertTrue(result.is_error)
+            with self.assertRaises(ToolExecutionError):
+                await echo.execute({"text": "x"}, _context())
             self.assertEqual([], bus.list_names(source=ToolSource.MCP))
         finally:
             await runtime.close()

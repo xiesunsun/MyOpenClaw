@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,6 @@ from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
     ToolSpec,
 )
 from pickel.tools.bus import ToolBus, ToolSource
@@ -39,8 +39,8 @@ class _EchoTool(BaseTool):
         self,
         arguments: dict,
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        return ToolExecutionResult(content=str(arguments.get("text", "")))
+    ) -> str:
+        return str(arguments.get("text", ""))
 
 
 class _HiddenTool(_EchoTool):
@@ -48,6 +48,7 @@ class _HiddenTool(_EchoTool):
         name="hidden",
         description="Not allowed",
         input_schema={"type": "object"},
+        output_schema={"type": "string"},
     )
 
 
@@ -56,6 +57,7 @@ class _SafeTool(_EchoTool):
         name="safe",
         description="Safe replay tool",
         input_schema={"type": "object"},
+        output_schema={"type": "string"},
         replay_policy="safe",
     )
 
@@ -134,6 +136,16 @@ def test_builder_preserves_tool_replay_policy(tmp_path: Path) -> None:
         ("echo", "never"),
         ("safe", "safe"),
     ]
+
+
+def test_tool_version_rejects_null_output_schema(tmp_path: Path) -> None:
+    package = AgentPackageBuilder(
+        app_config=_config(tmp_path),
+        tool_bus=_tool_bus(),
+    ).build_agent_package_version()
+
+    with pytest.raises(TypeError, match="output_schema"):
+        replace(package.tools[0], output_schema=None)
 
 
 def test_pickel_package_uses_interrupt_tools_and_waits_without_legacy_cancel(

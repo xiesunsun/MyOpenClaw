@@ -91,6 +91,30 @@ def test_conversation_node_strict_content_codec() -> None:
         )
 
 
+def test_conversation_node_ignores_historical_structured_tool_content() -> None:
+    node = ConversationNode.from_content_json(
+        node_id="node_1",
+        session_id="session_1",
+        parent_node_id=None,
+        content_type="agent_message",
+        content_json=(
+            '{"payload_version":3,"role":"tool","tool_call_id":"c1",'
+            '"tool_name":"echo","content":[{"type":"text","text":"ok"}],'
+            '"is_error":false,"structured_content":{"duplicate":true}}'
+        ),
+        created_at=NOW,
+    )
+
+    assert node.content_dict() == {
+        "payload_version": 3,
+        "role": "tool",
+        "tool_call_id": "c1",
+        "tool_name": "echo",
+        "content": [{"type": "text", "text": "ok"}],
+        "is_error": False,
+    }
+
+
 def test_inbox_message_roundtrip_and_state_invariants() -> None:
     message = InboxMessage(
         "message_1",
@@ -124,7 +148,7 @@ def test_run_state_uses_revision_and_exact_phases() -> None:
         ModelContext(
             SystemContent.from_text("system"),
             [UserMessage()],
-            [ToolDefinition("echo", "Echo", {"type": "object"})],
+            [ToolDefinition("echo", "Echo", {"type": "object"}, {"type": "string"})],
         ),
         "fp",
     )
@@ -142,24 +166,26 @@ def test_run_state_uses_revision_and_exact_phases() -> None:
 
 def test_model_context_deep_freezes_messages_and_tool_schema() -> None:
     blocks = [ToolCallBlock("call", "echo", {"nested": {"value": 1}})]
-    structured = {"items": [{"value": 1}]}
+    rendered = TextBlock("rendered")
     message = AssistantMessage(content=blocks)
-    tool_message = ToolResultMessage("call", "echo", structured_content=structured)
+    tool_message = ToolResultMessage("call", "echo", content=[rendered])
     context = ModelContext(
         SystemContent(),
         [message, tool_message],
-        [ToolDefinition("echo", "Echo", {"properties": {"x": {"type": "string"}}})],
+        [
+            ToolDefinition(
+                "echo",
+                "Echo",
+                {"properties": {"x": {"type": "string"}}},
+                {"type": "string"},
+            )
+        ],
     )
     blocks.append(ToolCallBlock("other", "other", {}))
-    structured["items"][0]["value"] = 9
     assert len(context.messages[0].content) == 1
-    assert context.messages[1].structured_content["items"][0]["value"] == 1
+    assert context.messages[1].content[0].text == "rendered"
     with pytest.raises(AttributeError):
         context.messages[0].content.append(TextBlock("nope"))
-    with pytest.raises(TypeError):
-        context.messages[1].structured_content["items"] = []
-    with pytest.raises(TypeError):
-        context.messages[1].structured_content["items"][0]["value"] = 2
     with pytest.raises(TypeError):
         context.messages[0].content[0].arguments["x"] = {}
 

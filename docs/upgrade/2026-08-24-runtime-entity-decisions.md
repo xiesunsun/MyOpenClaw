@@ -1170,7 +1170,7 @@ class ToolCallState:
 | `execution_intent` | Tool 在跨越执行边界前解析 | 保存精确恢复或协调所需的工具特定数据 |
 | `decision_reason` | Hook 或权限判断 | 展示等待或拒绝原因 |
 | `result_node_id` | ToolResult ConversationNode 提交后产生 | 关联模型可见结果 |
-| `is_error` | ToolExecutionResult | 判断模型可见结果是否错误 |
+| `is_error` | Runtime 对执行异常、schema 校验或 render 失败的判断 | 判断模型可见结果是否错误 |
 
 列表顺序就是 Provider ToolCall 顺序，不增加 `call_sequence`。`tool_call_id`、`tool_name`、`arguments`、`replay_policy` 创建后不可修改；`execution_intent` 只允许在 `ready → intent_recorded` 时从空值写入一次。
 
@@ -1225,7 +1225,8 @@ sequenceDiagram
     S->>S: status = intent_recorded
     Note over S: Commit
     S->>T: 执行外部副作用
-    T-->>S: ToolExecutionResult
+    T-->>S: JSONValue
+    S->>S: output_schema 验证 + render
     S->>N: 写入 ToolResultMessage
     S->>S: status = completed
     Note over S,N: Commit
@@ -1296,7 +1297,7 @@ ToolCallState.result_node_id
             └── ArtifactReference[]
 ```
 
-ToolCallState 不重复保存 ToolExecutionResult 内容。
+ToolCallState 不重复保存 JSONValue 或 ToolResultMessage 内容。
 
 `ToolDefinition` 必须提供不可变的 `input_schema` 和 `output_schema`。Tool 的执行结果
 固定为规范 JSON value：
@@ -1317,8 +1318,8 @@ ToolDefinition.output_schema
 
 ```mermaid
 flowchart LR
-    E[执行 Tool] --> R[ToolExecutionResult]
-    R --> C[提交 Result Node + completed State]
+    E[执行 Tool 得到 JSONValue] --> R[验证 output_schema 并 render]
+    R --> C[提交唯一 ToolResultMessage + completed State]
     C --> H[PostToolUse Hook]
     H --> F[提交 pending context feedback]
 ```

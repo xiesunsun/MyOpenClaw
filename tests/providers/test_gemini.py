@@ -42,6 +42,7 @@ class GeminiProviderTests(unittest.TestCase):
                         "properties": {"text": {"type": "string"}},
                         "required": ["text"],
                     },
+                    output_schema={"type": "object"},
                 )
             ]
         )
@@ -82,7 +83,6 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(
             {
                 "content": [{"type": "text", "text": "pong"}],
-                "structured_content": None,
                 "is_error": False,
             },
             contents[2].parts[0].function_response.response,
@@ -105,26 +105,27 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(
             {
                 "content": [{"type": "text", "text": "failed"}],
-                "structured_content": None,
                 "is_error": True,
             },
             contents[1].parts[0].function_response.response,
         )
 
-    def test_build_contents_preserves_structured_tool_result(self) -> None:
+    def test_build_contents_uses_only_tool_result_content(self) -> None:
         contents = GeminiProvider._build_contents(
             [
                 ToolResultMessage(
                     tool_call_id="call-1",
                     tool_name="lookup",
                     content=[TextBlock(text="found")],
-                    structured_content={"id": 7},
                 )
             ]
         )
 
         response = contents[0].parts[0].function_response.response
-        self.assertEqual({"id": 7}, response["structured_content"])
+        self.assertEqual(
+            {"content": [{"type": "text", "text": "found"}], "is_error": False},
+            response,
+        )
 
     def test_build_contents_aggregates_multiple_tool_results(self) -> None:
         contents = GeminiProvider._build_contents(
@@ -290,6 +291,7 @@ class GeminiProviderTests(unittest.TestCase):
                             name="echo",
                             description="Echo",
                             input_schema={"type": "object"},
+                            output_schema={"type": "object"},
                         )
                     ],
                 )
@@ -413,6 +415,7 @@ class GeminiProviderTests(unittest.TestCase):
                     name="echo",
                     description="Echo text",
                     input_schema={"type": "object"},
+                    output_schema={"type": "object"},
                 )
             ],
         )

@@ -59,7 +59,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(
-            ["ready", "running", "terminated"],
+            ("ready", "running", "terminated"),
             specs["bash"].output_schema["properties"]["shell_status"]["enum"],
         )
 
@@ -117,9 +117,8 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertIn("1: hello", result.content)
-        self.assertIn("2: world", result.content)
-        self.assertFalse(result.is_error)
+        self.assertIn("1: hello", result)
+        self.assertIn("2: world", result)
 
 
 if __name__ == "__main__":

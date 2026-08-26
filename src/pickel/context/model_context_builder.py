@@ -46,6 +46,7 @@ class ModelContextBuilder:
                     name=tool.name,
                     description=tool.description,
                     input_schema=tool.input_schema,
+                    output_schema=tool.output_schema,
                 )
                 for tool in package.tools
             ),

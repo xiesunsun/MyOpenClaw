@@ -2,9 +2,11 @@ from pathlib import Path
 import unittest
 from dataclasses import fields
 
+import pytest
+
+from pickel.context.model_context import ToolDefinition
 from pickel.tools.base import (
     ToolExecutionContext,
-    ToolExecutionResult,
     tool,
 )
 from pickel.shared.execution_identity import ExecutionIdentity
@@ -38,8 +40,8 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("greet", greet.spec.name)
         self.assertEqual({"type": "string"}, greet.spec.output_schema)
-        self.assertEqual("pickle@/tmp/pickle", result.content)
-        self.assertFalse(result.is_error)
+        self.assertEqual("pickle@/tmp/pickle", result)
+        self.assertEqual("pickle@/tmp/pickle", greet.render(result)[0].text)
 
     async def test_decorator_supports_raw_arguments_parameter_and_structured_result(
         self,
@@ -54,15 +56,13 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
                 },
                 "required": ["value"],
             },
+            output_schema={"type": "object"},
         )
         async def inspect_tool(
             arguments: dict[str, object],
             context: ToolExecutionContext,
-        ) -> ToolExecutionResult:
-            return ToolExecutionResult(
-                content=f"{arguments['value']}:{context.agent_id}",
-                metadata={"seen": True},
-            )
+        ) -> dict[str, object]:
+            return {"value": f"{arguments['value']}:{context.agent_id}", "seen": True}
 
         result = await inspect_tool.execute(
             {"value": "ping"},
@@ -73,8 +73,39 @@ class ToolDecoratorTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual("ping:Pickle", result.content)
-        self.assertEqual({"seen": True}, result.metadata)
+        self.assertEqual(
+            {"value": "ping:Pickle", "seen": True},
+            result,
+        )
+        self.assertEqual(
+            '{"seen":true,"value":"ping:Pickle"}',
+            inspect_tool.render(result)[0].text,
+        )
+
+    def test_tool_schemas_are_deeply_frozen(self) -> None:
+        nested_input = {"type": "object", "properties": {"x": {"type": "string"}}}
+        nested_output = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+        decorated = tool(
+            name="frozen",
+            description="frozen",
+            input_schema=nested_input,
+            output_schema=nested_output,
+        )(lambda arguments, context: {"ok": True})
+
+        nested_input["properties"]["x"]["type"] = "integer"
+        nested_output["properties"]["ok"]["type"] = "string"
+        self.assertEqual(
+            "string", decorated.spec.input_schema["properties"]["x"]["type"]
+        )
+        self.assertEqual(
+            "boolean", decorated.spec.output_schema["properties"]["ok"]["type"]
+        )
+        with self.assertRaises(TypeError):
+            decorated.spec.output_schema["properties"]["ok"] = {}  # type: ignore[index]
+
+    def test_tool_definition_requires_output_schema(self) -> None:
+        with pytest.raises(TypeError, match="JSON object"):
+            ToolDefinition("missing", "missing", {"type": "object"}, None)
 
 
 class ToolServicesTests(unittest.TestCase):

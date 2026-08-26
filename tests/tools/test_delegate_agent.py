@@ -2,9 +2,11 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionContext
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.tools.delegate_agent import delegate_agent
 from pickel.tools.services import ToolServices
 
@@ -69,8 +71,7 @@ async def test_delegate_agent_returns_durable_acceptance_handle() -> None:
         _context(control),
     )
 
-    assert result.is_error is False
-    assert result.structured_content == {
+    assert result == {
         "child_session_id": "child-session",
         "message_id": "child-message",
     }
@@ -86,17 +87,15 @@ async def test_delegate_agent_returns_durable_acceptance_handle() -> None:
 
 @_run_async
 async def test_delegate_agent_requires_delegation_control() -> None:
-    result = await delegate_agent.execute(
-        {"description": "research", "prompt": "Find the answer."},
-        ToolExecutionContext(
-            agent_id="Pickle",
-            identity=ExecutionIdentity(session_id="session-1"),
-            workspace_path=Path.cwd(),
-        ),
-    )
-
-    assert result.is_error is True
-    assert "DelegationControl" in result.content
+    with pytest.raises(ToolExecutionError, match="DelegationControl"):
+        await delegate_agent.execute(
+            {"description": "research", "prompt": "Find the answer."},
+            ToolExecutionContext(
+                agent_id="Pickle",
+                identity=ExecutionIdentity(session_id="session-1"),
+                workspace_path=Path.cwd(),
+            ),
+        )
 
 
 @_run_async

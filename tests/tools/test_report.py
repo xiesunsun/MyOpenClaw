@@ -53,8 +53,6 @@ def test_report_schema_and_result() -> None:
     result = asyncio.run(report.execute({"output": "finding"}, context))
 
     assert report.spec.replay_policy == "safe"
-    assert report.spec.input_schema["required"] == ["output"]
+    assert report.spec.input_schema["required"] == ("output",)
     assert set(report.spec.input_schema["properties"]) == {"output"}
-    assert result.is_error is False
-    assert result.structured_content == {"message_id": "message-report"}
-    assert "message-report" in result.content
+    assert result == {"message_id": "message-report"}

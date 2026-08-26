@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from pickel.conversations.agent_message import agent_message_to_dict
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -41,19 +41,14 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def wait_delegation(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> dict[str, object]:
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。", is_error=True
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     child_session_id = str(arguments["child_session_id"])
     timeout_seconds = float(arguments["timeout_seconds"])
     if not child_session_id.strip():
-        return ToolExecutionResult(
-            content="wait_delegation 的 child_session_id 不能为空。",
-            is_error=True,
-        )
+        raise ToolExecutionError("wait_delegation 的 child_session_id 不能为空。")
     snapshot, assistant, timed_out = await control.wait_delegation(
         sender_operation_id=context.identity.operation_id or "",
         sender_step_id=context.identity.step_id or "",
@@ -68,11 +63,4 @@ async def wait_delegation(
             agent_message_to_dict(assistant) if assistant is not None else None
         ),
     }
-    return ToolExecutionResult(
-        content=(
-            f"child {child_session_id} 在有界等待内未进入终态。"
-            if timed_out
-            else f"child {child_session_id} 已进入终态：{snapshot.status}。"
-        ),
-        structured_content=payload,
-    )
+    return payload

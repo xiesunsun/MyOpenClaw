@@ -42,6 +42,7 @@ def test_cpa_responses_streaming_tool_round_trip() -> None:
             "required": ["key"],
             "additionalProperties": False,
         },
+        {"type": "object"},
     )
 
     first = asyncio.run(

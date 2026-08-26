@@ -2,7 +2,7 @@ from pickel.tools.base import (
     BaseTool,
     FunctionTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
     tool,
 )
@@ -24,7 +24,7 @@ __all__ = [
     "ToolBus",
     "ToolEntry",
     "ToolExecutionContext",
-    "ToolExecutionResult",
+    "ToolExecutionError",
     "ToolNameConflictError",
     "ToolServices",
     "ToolSnapshot",

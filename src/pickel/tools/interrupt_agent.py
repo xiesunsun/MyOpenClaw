@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -45,17 +45,13 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def interrupt_agent(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> dict[str, object]:
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。", is_error=True
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     child_session_id = str(arguments.get("child_session_id", ""))
     if not child_session_id.strip():
-        return ToolExecutionResult(
-            content="interrupt_agent 的 child_session_id 不能为空。", is_error=True
-        )
+        raise ToolExecutionError("interrupt_agent 的 child_session_id 不能为空。")
     operation_id = await control.interrupt_agent(
         sender_operation_id=context.identity.operation_id or "",
         sender_step_id=context.identity.step_id or "",
@@ -70,10 +66,4 @@ async def interrupt_agent(
         "operation_id": operation_id,
         "status": status,
     }
-    return ToolExecutionResult(
-        content=(
-            f"Child 中断请求已接受：child_session_id={child_session_id}, "
-            f"status={status}"
-        ),
-        structured_content=payload,
-    )
+    return payload

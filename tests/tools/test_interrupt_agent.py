@@ -37,7 +37,7 @@ def test_interrupt_agent_returns_cancellation_handle() -> None:
 
     assert interrupt_agent.spec.replay_policy == "safe"
     assert interrupt_agent.spec.output_schema is not None
-    assert result.structured_content == {
+    assert result == {
         "child_session_id": "child-1",
         "operation_id": "child-operation",
         "status": "cancellation_requested",

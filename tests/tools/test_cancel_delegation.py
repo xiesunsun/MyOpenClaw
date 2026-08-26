@@ -41,7 +41,7 @@ def test_cancel_delegation_schema_and_active_result() -> None:
     )
 
     assert cancel_delegation.spec.replay_policy == "safe"
-    assert result.structured_content == {
+    assert result == {
         "child_session_id": "child-1",
         "operation_id": "child-op",
         "status": "cancellation_requested",
@@ -53,8 +53,7 @@ def test_cancel_delegation_idle_result() -> None:
         cancel_delegation.execute({"child_session_id": "child-1"}, _context(None))
     )
 
-    assert result.is_error is False
-    assert result.structured_content == {
+    assert result == {
         "child_session_id": "child-1",
         "operation_id": None,
         "status": "no_active_operation",

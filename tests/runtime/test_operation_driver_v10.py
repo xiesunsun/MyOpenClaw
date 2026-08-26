@@ -582,8 +582,13 @@ async def test_historical_failure_or_cancellation_has_no_usage_endpoint(status):
 
 
 def _loaded_package(
-    *, replay_policy="safe", input_schema=None, output_schema=None, tool_name="run"
+    *,
+    replay_policy="safe",
+    input_schema=None,
+    output_schema=None,
+    tool_name="run",
 ):
+    output_schema = output_schema or {"type": "string"}
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
         behavior_instruction="behavior",
@@ -636,6 +641,14 @@ def _driver(
         model_context_builder=model_context_builder or _ContextBuilder(),
         step_id_factory=lambda: "step-1",
         node_id_factory=lambda: "node-result",
+    )
+
+
+def _tool_result(tool_call_id: str, tool_name: str, text: str) -> ToolResultMessage:
+    return ToolResultMessage(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        content=(TextBlock(text),),
     )
 
 
@@ -849,9 +862,7 @@ async def test_tool_replay_policy_and_intent_before_effect():
             c for c in state.current_step.tool_calls if c.tool_call_id == tool_call_id
         )
         seen.append((call.status, call.replay_policy))
-        return SimpleNamespace(
-            content="ok", content_blocks=[], is_error=False, structured_content=None
-        )
+        return _tool_result(tool_call_id, "run", "ok")
 
     operations = _Operations(_queued_state())
     events = []
@@ -865,45 +876,6 @@ async def test_tool_replay_policy_and_intent_before_effect():
     assert events[0].tool_name == "run"
     assert events[0].envelope.identity.tool_call_id == "tool-1"
     assert events[1].content == "ok"
-
-
-@_run_async
-async def test_invalid_structured_tool_result_is_committed_as_stable_error():
-    tool_message = AssistantMessage(
-        content=(ToolCallBlock(id="tool-1", name="run", arguments={}),)
-    )
-
-    async def execute_tool(*, operation, state, tool_call_id, host_calls):
-        return SimpleNamespace(
-            content="raw fallback",
-            content_blocks=[],
-            is_error=False,
-            structured_content={"ok": "wrong"},
-        )
-
-    operations = _Operations(_queued_state())
-    result = await _driver(
-        operations,
-        _Provider([tool_message, AssistantMessage(content=(TextBlock(text="done"),))]),
-        tool=execute_tool,
-        output_schema={
-            "type": "object",
-            "properties": {"ok": {"type": "boolean"}},
-            "required": ["ok"],
-        },
-    ).drive_operation("operation-1")
-
-    assert result.status == "succeeded"
-    tool_node = next(
-        node
-        for _state, node in operations.transition_calls
-        if node is not None
-        and isinstance(node.content, ToolResultMessage)
-        and node.content.tool_call_id == "tool-1"
-    )
-    assert tool_node.content.is_error is True
-    assert tool_node.content.structured_content is None
-    assert tool_node.content.content[0].text.startswith("INVALID_TOOL_OUTPUT: $.ok")
 
 
 @_run_async
@@ -926,9 +898,7 @@ async def test_delegate_agent_freezes_parent_package_before_effect():
             if call.tool_call_id == tool_call_id
         )
         seen.append((call.status, call.execution_intent))
-        return SimpleNamespace(
-            content="accepted", content_blocks=[], is_error=False, structured_content={}
-        )
+        return _tool_result(tool_call_id, "delegate_agent", "accepted")
 
     operations = _Operations(_queued_state())
     result = await _driver(
@@ -984,9 +954,7 @@ async def test_delegate_agent_safe_replay_uses_persisted_intent():
             if item.tool_call_id == tool_call_id
         )
         seen.append(persisted.execution_intent)
-        return SimpleNamespace(
-            content="accepted", content_blocks=[], is_error=False, structured_content={}
-        )
+        return _tool_result(tool_call_id, "delegate_agent", "accepted")
 
     operations = _Operations(state)
     result = await _driver(
@@ -1021,9 +989,7 @@ async def test_send_message_is_safe_replay_without_a_new_intent_type():
             if item.tool_call_id == tool_call_id
         )
         seen.append((call.status, call.replay_policy, call.execution_intent))
-        return SimpleNamespace(
-            content="accepted", content_blocks=[], is_error=False, structured_content={}
-        )
+        return _tool_result(tool_call_id, "send_message", "accepted")
 
     result = await _driver(
         _Operations(_queued_state()),
@@ -1051,9 +1017,7 @@ async def test_list_agents_is_safe_replay_without_a_new_intent_type():
             if item.tool_call_id == tool_call_id
         )
         seen.append((call.status, call.replay_policy, call.execution_intent))
-        return SimpleNamespace(
-            content="accepted", content_blocks=[], is_error=False, structured_content=[]
-        )
+        return _tool_result(tool_call_id, "list_agents", "accepted")
 
     result = await _driver(
         _Operations(_queued_state()),
@@ -1083,9 +1047,7 @@ async def test_report_is_safe_replay_without_a_new_intent_type():
             if item.tool_call_id == tool_call_id
         )
         seen.append((call.status, call.replay_policy, call.execution_intent))
-        return SimpleNamespace(
-            content="accepted", content_blocks=[], is_error=False, structured_content={}
-        )
+        return _tool_result(tool_call_id, "report", "accepted")
 
     result = await _driver(
         _Operations(_queued_state()),
@@ -1154,9 +1116,7 @@ async def test_pre_tool_deny_becomes_ordered_error_without_executing_tool():
 
     async def execute_tool(*, operation, state, tool_call_id, host_calls):
         executed.append(tool_call_id)
-        return SimpleNamespace(
-            content="ok", content_blocks=[], is_error=False, structured_content=None
-        )
+        return _tool_result(tool_call_id, "run", "ok")
 
     operations = _Operations(_queued_state())
     result = await _driver(
@@ -1243,12 +1203,7 @@ async def test_unknown_tool_is_rejected_before_intent_or_execution():
 
     async def execute_tool(*, operation, state, tool_call_id, host_calls):
         executed.append(tool_call_id)
-        return SimpleNamespace(
-            content="must not run",
-            content_blocks=[],
-            is_error=False,
-            structured_content=None,
-        )
+        return _tool_result(tool_call_id, "missing", "must not run")
 
     operations = _Operations(_queued_state())
     result = await _driver(
@@ -1283,12 +1238,7 @@ async def test_updated_arguments_are_validated_before_intent():
 
     async def execute_tool(*, operation, state, tool_call_id, host_calls):
         executed.append(tool_call_id)
-        return SimpleNamespace(
-            content="must not run",
-            content_blocks=[],
-            is_error=False,
-            structured_content=None,
-        )
+        return _tool_result(tool_call_id, "run", "must not run")
 
     operations = _Operations(_queued_state())
     result = await _driver(
@@ -1348,9 +1298,7 @@ async def test_safe_and_never_tool_intent_recovery_have_different_outcomes():
 
         async def execute_tool(*, operation, state, tool_call_id, host_calls):
             executed.append(tool_call_id)
-            return SimpleNamespace(
-                content="ok", content_blocks=[], is_error=False, structured_content=None
-            )
+            return _tool_result(tool_call_id, "run", "ok")
 
         operations = _Operations(state)
         result = await _driver(
@@ -1410,9 +1358,7 @@ async def test_rejected_tool_call_becomes_error_result_in_provider_order():
 
     async def execute_tool(*, operation, state, tool_call_id, host_calls):
         executed.append(tool_call_id)
-        return SimpleNamespace(
-            content="ok", content_blocks=[], is_error=False, structured_content=None
-        )
+        return _tool_result(tool_call_id, "run", "ok")
 
     operations = _Operations(state)
     result = await _driver(

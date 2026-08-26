@@ -16,7 +16,11 @@ from pickel.agents.agent_package import (
     AgentPackageVersion,
     build_agent_package_version,
 )
-from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.operation_service import OperationService
@@ -32,10 +36,11 @@ from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
 )
 from pickel.tools.bus import ToolSource
+from pickel.tools.validation import validate_tool_output
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 
 
@@ -52,6 +57,7 @@ class _ResultTool(BaseTool):
             "properties": {"value": {"type": "string"}},
             "required": ["value"],
         },
+        output_schema={"type": "string"},
     )
 
     def __init__(self, *, crash: bool = False) -> None:
@@ -62,15 +68,17 @@ class _ResultTool(BaseTool):
         self,
         arguments: dict,
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
+    ) -> str:
         value = str(arguments["value"])
         self.values.append(value)
         if self.crash:
             raise _SimulatedProcessCrash
-        return ToolExecutionResult(
-            content=f"{value}-result",
-            is_error=value == "failed",
-        )
+        if value == "failed":
+            raise ToolExecutionError("模拟工具失败")
+        return f"{value}-result"
+
+    def render(self, validated_value: str):
+        return (TextBlock(validated_value),)
 
 
 class _AnthropicContractProvider(Provider):
@@ -129,7 +137,7 @@ def _package() -> AgentPackageVersion:
                     "properties": {"value": {"type": "string"}},
                     "required": ["value"],
                 },
-                output_schema=None,
+                output_schema={"type": "string"},
                 replay_policy="never",
             ),
         ),
@@ -162,7 +170,28 @@ def _build_agent(
             ),
             workspace_path=operation.workspace_binding.working_directory,
         )
-        return await tool.execute(dict(call.arguments), context)
+        try:
+            value = await tool.execute(dict(call.arguments), context)
+        except ToolExecutionError as exc:
+            return ToolResultMessage(
+                tool_call_id=tool_call_id,
+                tool_name=call.tool_name,
+                content=(TextBlock(str(exc)),),
+                is_error=True,
+            )
+        error = validate_tool_output(tool, value)
+        if error is not None:
+            return ToolResultMessage(
+                tool_call_id=tool_call_id,
+                tool_name=call.tool_name,
+                content=(TextBlock(f"INVALID_TOOL_OUTPUT: {error}"),),
+                is_error=True,
+            )
+        return ToolResultMessage(
+            tool_call_id=tool_call_id,
+            tool_name=call.tool_name,
+            content=tool.render(value),
+        )
 
     effects = RuntimeEffects(
         provider=provider,

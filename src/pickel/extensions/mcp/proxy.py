@@ -1,10 +1,9 @@
-"""MCP 工具 → BaseTool 代理，保留 schema、内容块与结构化结果。"""
+"""MCP 工具 → BaseTool 代理。"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
 from typing import TYPE_CHECKING, Any
 
 import mcp.types
@@ -12,10 +11,16 @@ import mcp.types
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
 )
-from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
+from pickel.conversations.content_blocks import (
+    ArtifactBlock,
+    TextBlock,
+    ToolResultContent,
+    content_block_from_dict,
+    content_block_to_dict,
+)
 from pickel.runtime.host_calls import HostCallContext
 
 if TYPE_CHECKING:
@@ -24,11 +29,38 @@ if TYPE_CHECKING:
 
 class McpProxyTool(BaseTool):
     def __init__(self, runtime: McpServerRuntime, tool: mcp.types.Tool) -> None:
+        # MCP 的 outputSchema 可缺省；代理仍必须冻结一个明确的 envelope。
+        # server schema 只约束 envelope 的 structured 字段。
+        structured_schema = tool.output_schema
+        if not isinstance(structured_schema, dict):
+            structured_schema = {}
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "content_blocks": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "structured": {
+                    "anyOf": [structured_schema, {"type": "null"}],
+                },
+                "unsupported_content": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "content_blocks",
+                "structured",
+                "unsupported_content",
+            ],
+            "additionalProperties": False,
+        }
         self.spec = ToolSpec(
             name=tool.name,
             description=tool.description or "",
             input_schema=tool.input_schema,
-            output_schema=tool.output_schema,
+            output_schema=output_schema,
         )
         self._runtime = runtime
 
@@ -36,11 +68,7 @@ class McpProxyTool(BaseTool):
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
-        metadata: dict[str, Any] = {
-            "server": self._runtime.spec.name,
-            "mcp_tool": self.spec.name,
-        }
+    ) -> Any:
         try:
             host_calls = context.services.host_calls
             if host_calls is None:
@@ -55,23 +83,15 @@ class McpProxyTool(BaseTool):
                     ),
                 )
         except asyncio.TimeoutError:
-            return ToolExecutionResult(
-                content=f"MCP tool call timed out ({self.spec.name})",
-                is_error=True,
-                metadata=metadata,
-            )
+            raise ToolExecutionError(f"MCP tool call timed out ({self.spec.name})")
         except Exception as exc:
-            return ToolExecutionResult(
-                content=f"MCP server '{self._runtime.spec.name}' is unavailable: {exc}",
-                is_error=True,
-                metadata=metadata,
-            )
-        text_parts: list[str] = []
+            raise ToolExecutionError(
+                f"MCP server '{self._runtime.spec.name}' is unavailable: {exc}"
+            ) from exc
         content_blocks: list[TextBlock | ArtifactBlock] = []
         unsupported: list[str] = []
         for block in result.content:
             if isinstance(block, mcp.types.TextContent):
-                text_parts.append(block.text)
                 content_blocks.append(TextBlock(text=block.text))
             elif isinstance(block, mcp.types.ImageContent):
                 artifact_service = context.services.artifact_service
@@ -85,26 +105,38 @@ class McpProxyTool(BaseTool):
                 content_blocks.append(ArtifactBlock(artifact=reference))
             else:
                 unsupported.append(block.type)
-        structured_content = result.structured_content
-        if not text_parts and structured_content is not None:
-            text_parts.append(
-                json.dumps(structured_content, ensure_ascii=False, default=str)
-            )
-        if not text_parts and unsupported:
-            text_parts.extend(f"[unsupported content: {kind}]" for kind in unsupported)
-        if unsupported:
-            metadata["unsupported_content"] = unsupported
-            metadata["unsupported_mcp_content"] = [
-                block.model_dump(mode="json", by_alias=True, exclude_none=True)
-                for block in result.content
-                if not isinstance(
-                    block, (mcp.types.TextContent, mcp.types.ImageContent)
-                )
-            ]
-        return ToolExecutionResult(
-            content="\n".join(text_parts),
-            content_blocks=content_blocks,
-            structured_content=structured_content,
-            is_error=bool(result.is_error),
-            metadata=metadata,
-        )
+        if result.is_error:
+            raise ToolExecutionError("MCP 工具返回错误")
+        return {
+            "content_blocks": [
+                content_block_to_dict(block) for block in content_blocks
+            ],
+            "structured": result.structured_content,
+            "unsupported_content": unsupported,
+        }
+
+    def render(self, validated_value: Any) -> tuple[ToolResultContent, ...]:
+        """纯还原 MCP 返回的 provider-neutral content blocks。"""
+        if not isinstance(validated_value, dict):
+            return super().render(validated_value)
+        structured = validated_value.get("structured")
+        blocks = validated_value.get("content_blocks")
+        if not isinstance(blocks, list):
+            if structured is not None:
+                return super().render(structured)
+            return super().render(validated_value)
+        rendered: list[ToolResultContent] = []
+        for block in blocks:
+            try:
+                parsed = content_block_from_dict(block)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if isinstance(parsed, (TextBlock, ArtifactBlock)):
+                rendered.append(parsed)
+        if not rendered and structured is not None:
+            return super().render(structured)
+        for kind in validated_value.get("unsupported_content", ()):
+            rendered.append(TextBlock(text=f"[unsupported content: {kind}]"))
+        if not rendered:
+            return super().render(None)
+        return tuple(rendered)

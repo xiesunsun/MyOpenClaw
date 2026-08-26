@@ -35,7 +35,7 @@ from pickel.tools.base import BaseTool, ToolSpec
 from pickel.runtime.runtime_events import AssistantMessageEvent
 
 class Probe(BaseTool):
-    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'})
+    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'}, output_schema={'type': 'object'})
 
 class Processor:
     async def handle_event(self, event): pass
@@ -137,7 +137,7 @@ class ContributionScopeTests(unittest.TestCase):
 from pathlib import Path
 from pickel.tools.base import BaseTool, ToolSpec
 class Probe(BaseTool):
-    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'})
+    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'}, output_schema={'type': 'object'})
 def setup(host):
     def mark(label, fail=False):
         def dispose():
@@ -216,7 +216,7 @@ def setup(host):
                 """
 from pickel.tools.base import BaseTool, ToolSpec
 class Probe(BaseTool):
-    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'})
+    spec = ToolSpec(name='probe', description='probe', input_schema={'type': 'object'}, output_schema={'type': 'object'})
 def setup(host):
     host.register_tool(Probe())
 """,
@@ -236,6 +236,7 @@ def setup(host):
                     name="probe",
                     description="replacement",
                     input_schema={"type": "object"},
+                    output_schema={"type": "object"},
                 )
 
             bus.register(NewProbe(), source=ToolSource.EXTENSION, origin="healthy")

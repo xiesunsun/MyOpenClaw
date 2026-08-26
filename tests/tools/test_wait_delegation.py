@@ -54,9 +54,8 @@ def test_wait_delegation_returns_persisted_assistant_message() -> None:
         )
     )
 
-    assert result.is_error is False
-    assert result.structured_content["timed_out"] is False
-    assert result.structured_content["agent"]["status"] == "succeeded"
-    assert result.structured_content["assistant_message"]["content"] == [
+    assert result["timed_out"] is False
+    assert result["agent"]["status"] == "succeeded"
+    assert result["assistant_message"]["content"] == [
         {"type": "text", "text": "final report"}
     ]

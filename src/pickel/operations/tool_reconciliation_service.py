@@ -9,16 +9,26 @@ from typing import Literal
 from uuid import uuid4
 
 from pickel.conversations.agent_message import ToolResultMessage
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.agent_run_state import AgentRunState, ToolCallState
 from pickel.operations.operation_service import OperationService
+from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.errors import StorageConflictError
-from pickel.tools.base import ToolExecutionResult
-from pickel.tools.validation import invalid_tool_result, validate_tool_result
+from pickel.tools.base import BaseTool, JSONValue
+from pickel.tools.validation import (
+    validate_tool_output,
+)
 
 ToolReconciliationOutcome = Literal["completed", "not_started", "unknown"]
+
+
+class _MissingResult:
+    pass
+
+
+_MISSING_RESULT = _MissingResult()
 
 
 class ToolReconciliationService:
@@ -36,12 +46,16 @@ class ToolReconciliationService:
         conversation_service: ConversationService,
         *,
         wake: Callable[[str], None],
+        resolve_tool: (
+            Callable[[SessionOperation, ToolCallState], BaseTool] | None
+        ) = None,
         node_id_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
         self._wake = wake
+        self._resolve_tool = resolve_tool
         self._node_id = node_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -53,7 +67,7 @@ class ToolReconciliationService:
         *,
         outcome: ToolReconciliationOutcome,
         expected_revision: int,
-        result: ToolExecutionResult | None = None,
+        result: JSONValue | _MissingResult = _MISSING_RESULT,
         reconciled_at: datetime | None = None,
     ) -> AgentRunState:
         """接受一个 intent 的 Host 核对结果并返回最新 AgentRunState。
@@ -66,9 +80,9 @@ class ToolReconciliationService:
             raise ValueError(f"不支持的 Tool reconciliation outcome: {outcome!r}")
         if not operation_id or not step_id or not tool_call_id:
             raise ValueError("operation_id、step_id 和 tool_call_id 不能为空")
-        if outcome == "completed" and result is None:
+        if outcome == "completed" and result is _MISSING_RESULT:
             raise ValueError("completed reconciliation 必须提供 result")
-        if outcome != "completed" and result is not None:
+        if outcome != "completed" and result is not _MISSING_RESULT:
             raise ValueError(f"{outcome} reconciliation 不能提供 result")
 
         current = self._operations.load_agent_run_state(operation_id)
@@ -149,12 +163,39 @@ class ToolReconciliationService:
             self._wake(operation.session_id)
             return committed
 
-        assert result is not None
-        # Host 回报绕过正常 execute 适配器，也必须先保证结构化值可安全
-        # 冻结/持久化；Package-specific schema 由执行边界校验。
-        validation_error = validate_tool_result(None, result)
+        assert not isinstance(result, _MissingResult)
+        if self._resolve_tool is None:
+            raise ValueError(
+                "Tool reconciliation completed 必须提供 resolve_tool，"
+                "以验证并 render JSONValue"
+            )
+        tool = self._resolve_tool(operation, call)
+        validation_error = validate_tool_output(tool, result)
         if validation_error is not None:
-            result = invalid_tool_result(result, validation_error)
+            result = _invalid_tool_result(call, validation_error)
+        else:
+            render = getattr(tool, "render", None)
+            if not callable(render):
+                result = _invalid_tool_result(
+                    call, "Tool 未提供 render(validated_value)"
+                )
+            else:
+                try:
+                    rendered = render(result)
+                    content = tuple(rendered)
+                    if not all(
+                        isinstance(block, (TextBlock, ArtifactBlock))
+                        for block in content
+                    ):
+                        raise TypeError("Tool.render 返回了不支持的 content block")
+                except Exception as exc:
+                    result = _invalid_tool_result(call, f"render 失败: {exc}")
+                else:
+                    result = ToolResultMessage(
+                        tool_call_id=call.tool_call_id,
+                        tool_name=call.tool_name,
+                        content=content,
+                    )
         result_node_id = self._node_id()
         completed_call = replace(
             call,
@@ -176,7 +217,7 @@ class ToolReconciliationService:
             current_step=next_step,
         )
         session = self._conversations.load_conversation_session(operation.session_id)
-        message = self._tool_result_message(completed_call, result)
+        message = result
         node = ConversationNode(
             node_id=result_node_id,
             session_id=operation.session_id,
@@ -226,18 +267,16 @@ class ToolReconciliationService:
                 return index, call
         raise StorageConflictError("当前 ModelStep 没有可核对的未完成 ToolCall")
 
-    @staticmethod
-    def _tool_result_message(
-        call: ToolCallState, result: ToolExecutionResult
-    ) -> ToolResultMessage:
-        content = tuple(result.content_blocks) or (TextBlock(text=result.content),)
-        return ToolResultMessage(
-            tool_call_id=call.tool_call_id,
-            tool_name=call.tool_name,
-            content=content,
-            is_error=result.is_error,
-            structured_content=result.structured_content,
-        )
+
+def _invalid_tool_result(
+    call: ToolCallState, validation_error: str
+) -> ToolResultMessage:
+    return ToolResultMessage(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        content=(TextBlock(text=f"INVALID_TOOL_OUTPUT: {validation_error}"),),
+        is_error=True,
+    )
 
 
 __all__ = ["ToolReconciliationOutcome", "ToolReconciliationService"]

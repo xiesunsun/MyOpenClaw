@@ -55,11 +55,13 @@ def _sample_tool_history_context() -> ModelContext:
                 name="list_directory",
                 description="list",
                 input_schema={"type": "object"},
+                output_schema={"type": "object"},
             ),
             ToolDefinition(
                 name="read_file",
                 description="read",
                 input_schema={"type": "object"},
+                output_schema={"type": "object"},
             ),
         ],
     )
@@ -75,6 +77,7 @@ class ModelContextGenerateTests(unittest.TestCase):
                     name="echo",
                     description="echo",
                     input_schema={"type": "object"},
+                    output_schema={"type": "object"},
                 )
             ],
         )
@@ -161,7 +164,6 @@ class ModelContextGenerateTests(unittest.TestCase):
         self.assertEqual(
             {
                 "content": [{"type": "text", "text": "a.py\nb.py"}],
-                "structured_content": None,
                 "is_error": False,
             },
             contents[2].parts[0].function_response.response,

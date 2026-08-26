@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -123,6 +124,34 @@ def test_legacy_cancel_tool_is_hidden_from_new_snapshot_but_loadable(
         store, _tool_bus(), provider_loader=lambda model: object()
     ).load(legacy.package_version_id)
     assert loaded.tool_snapshot.names == ("cancel_delegation",)
+
+
+def test_loader_rejects_tool_without_output_schema(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
+    malformed = SimpleNamespace(
+        package_version_id=current.package_version_id,
+        agent_id=current.agent_id,
+        model_policy=current.model_policy,
+        tools=(SimpleNamespace(name="echo", output_schema=None),),
+        extensions=current.extensions,
+    )
+
+    class _MalformedStore:
+        def load_agent_package_version(self, _package_version_id):
+            return malformed
+
+    with pytest.raises(PackageLoadError, match="output_schema") as caught:
+        AgentPackageLoader(
+            _MalformedStore(), _tool_bus(), provider_loader=lambda _model: object()
+        ).load(current.package_version_id)
+
+    assert caught.value.code == "package_invalid"
 
 
 def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:

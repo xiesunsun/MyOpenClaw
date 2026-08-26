@@ -51,6 +51,4 @@ def test_list_agents_schema_and_result() -> None:
         "properties": {},
         "additionalProperties": False,
     }
-    assert result.is_error is False
-    assert result.structured_content[0]["status"] == "running"
-    assert "1 个" in result.content
+    assert result[0]["status"] == "running"

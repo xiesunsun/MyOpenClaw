@@ -319,40 +319,16 @@ class AnthropicMessagesProvider(Provider):
         artifact_service: ArtifactService | None = None,
     ) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
-        if message.structured_content is not None:
-            # 结构化结果是唯一权威投影；content 仅在没有结构化结果时
-            # 作为兼容旧 Tool 的文本/Artifact 回退，避免模型看到同一结果两遍。
-            content.append(
-                {
-                    "type": "text",
-                    "text": "structured_content: "
-                    + json.dumps(
-                        thaw_json(message.structured_content),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                }
-            )
-            # 结构化文本去重不影响独立的 Artifact 结果块。
-            for item in message.content:
-                if isinstance(item, ArtifactBlock):
-                    content.append(
-                        AnthropicMessagesProvider._artifact_content_block(
-                            item,
-                            artifact_service=artifact_service,
-                        )
+        for item in message.content:
+            if isinstance(item, TextBlock):
+                content.append({"type": "text", "text": item.text})
+            elif isinstance(item, ArtifactBlock):
+                content.append(
+                    AnthropicMessagesProvider._artifact_content_block(
+                        item,
+                        artifact_service=artifact_service,
                     )
-        else:
-            for item in message.content:
-                if isinstance(item, TextBlock):
-                    content.append({"type": "text", "text": item.text})
-                elif isinstance(item, ArtifactBlock):
-                    content.append(
-                        AnthropicMessagesProvider._artifact_content_block(
-                            item,
-                            artifact_service=artifact_service,
-                        )
-                    )
+                )
         wire_content: str | list[dict[str, Any]]
         if content and all(item["type"] == "text" for item in content):
             wire_content = "\n".join(str(item["text"]) for item in content)

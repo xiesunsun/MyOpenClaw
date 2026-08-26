@@ -56,15 +56,20 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: Mapping[str, Any]
+    output_schema: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_schema", freeze_json_object(self.input_schema))
+        object.__setattr__(
+            self, "output_schema", freeze_json_object(self.output_schema)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
             "input_schema": thaw_json(self.input_schema),
+            "output_schema": thaw_json(self.output_schema),
         }
 
 
@@ -138,14 +143,25 @@ def model_context_from_dict(value: dict[str, Any]) -> ModelContext:
     for tool in tools:
         if not isinstance(tool, dict):
             raise TypeError("tools 元素必须是 JSON object")
-        _require_keys(tool, {"name", "description", "input_schema"})
+        tool_keys = set(tool)
+        current_keys = {"name", "description", "input_schema", "output_schema"}
+        legacy_keys = {"name", "description", "input_schema"}
+        if tool_keys != current_keys and tool_keys != legacy_keys:
+            _require_keys(tool, current_keys)
         if not isinstance(tool["input_schema"], dict):
             raise TypeError("tool.input_schema 必须是 JSON object")
+        # 本批次之前持久化的 ModelRequestIntent 没有 output_schema。该字段不
+        # 进入 Provider wire，也不参与 Tool 执行；恢复时用显式 permissive
+        # schema 补齐值对象，真实执行合同仍只来自冻结 AgentPackageVersion。
+        output_schema = tool.get("output_schema", {})
+        if not isinstance(output_schema, dict):
+            raise TypeError("tool.output_schema 必须是 JSON object")
         parsed_tools.append(
             ToolDefinition(
                 _string(tool, "name"),
                 _string(tool, "description"),
                 tool["input_schema"],
+                output_schema,
             )
         )
     return ModelContext(

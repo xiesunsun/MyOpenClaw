@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
 )
 from pickel.tools.file_errors import FileToolError
@@ -36,8 +36,8 @@ class BaseFileTool(BaseTool):
     def __init__(self, formatter: FileToolFormatter) -> None:
         self.formatter = formatter
 
-    def _error_result(self, exc: Exception) -> ToolExecutionResult:
-        return ToolExecutionResult(content=str(exc), is_error=True)
+    def _error_result(self, exc: Exception) -> NoReturn:
+        raise ToolExecutionError(str(exc)) from exc
 
 
 class LsTool(BaseFileTool):
@@ -65,11 +65,12 @@ class LsTool(BaseFileTool):
             },
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             result = _require_workspace_files(context).list_directory(
                 path=str(arguments.get("path", ".")),
@@ -77,14 +78,7 @@ class LsTool(BaseFileTool):
                 include_hidden=True,
                 max_entries=int(arguments.get("limit", 500)),
             )
-            return ToolExecutionResult(
-                content=self.formatter.format_directory_listing(result),
-                metadata={
-                    "path": result.base_path,
-                    "returned_count": len(result.entries),
-                    "truncated": result.truncated,
-                },
-            )
+            return self.formatter.format_directory_listing(result)
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
@@ -122,26 +116,19 @@ class GlobTool(BaseFileTool):
             "required": ["pattern"],
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             result = _require_workspace_files(context).glob_search(
                 pattern=str(arguments["pattern"]),
                 base_path=str(arguments.get("path", ".")),
                 max_results=int(arguments.get("limit", 1_000)),
             )
-            return ToolExecutionResult(
-                content=self.formatter.format_glob_search(result),
-                metadata={
-                    "path": result.base_path,
-                    "pattern": result.pattern,
-                    "returned_count": len(result.matches),
-                    "truncated": result.truncated,
-                },
-            )
+            return self.formatter.format_glob_search(result)
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
@@ -188,11 +175,12 @@ class GrepTool(BaseFileTool):
             "required": ["pattern"],
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             result = _require_workspace_files(context).grep_search(
                 pattern=str(arguments["pattern"]),
@@ -205,14 +193,7 @@ class GrepTool(BaseFileTool):
                 case_sensitive=not bool(arguments.get("ignore_case", False)),
                 max_results=int(arguments.get("limit", 100)),
             )
-            return ToolExecutionResult(
-                content=self.formatter.format_grep_search(result),
-                metadata={
-                    "pattern": result.pattern,
-                    "returned_count": len(result.hits),
-                    "truncated": result.truncated,
-                },
-            )
+            return self.formatter.format_grep_search(result)
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
@@ -248,11 +229,12 @@ class ReadTool(BaseFileTool):
             "required": ["path"],
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             offset = int(arguments.get("offset", 1))
             limit = int(arguments.get("limit", DEFAULT_READ_LINES))
@@ -264,16 +246,7 @@ class ReadTool(BaseFileTool):
             content, chars_truncated = _truncate_read(
                 self.formatter.format_file_read(result)
             )
-            return ToolExecutionResult(
-                content=content,
-                metadata={
-                    "path": result.path,
-                    "offset": result.start_line,
-                    "end_line": result.end_line,
-                    "total_lines": result.total_lines,
-                    "truncated": result.truncated or chars_truncated,
-                },
-            )
+            return content
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
@@ -299,25 +272,19 @@ class EditTool(BaseFileTool):
             "required": ["path", "old_text", "new_text"],
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             result = _require_workspace_files(context).replace_exact(
                 path=str(arguments["path"]),
                 old_text=str(arguments["old_text"]),
                 new_text=str(arguments["new_text"]),
             )
-            return ToolExecutionResult(
-                content=self.formatter.format_replace(result),
-                metadata={
-                    "path": result.path,
-                    "match_count": result.match_count,
-                    "bytes_written": result.bytes_written,
-                },
-            )
+            return self.formatter.format_replace(result)
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)
 
@@ -338,24 +305,17 @@ class WriteTool(BaseFileTool):
             "required": ["path", "content"],
             "additionalProperties": False,
         },
+        output_schema={"type": "string"},
     )
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
-    ) -> ToolExecutionResult:
+    ) -> str:
         try:
             result = _require_workspace_files(context).write_file(
                 path=str(arguments["path"]),
                 content=str(arguments["content"]),
             )
-            return ToolExecutionResult(
-                content=self.formatter.format_write_file(result),
-                metadata={
-                    "path": result.path,
-                    "created": result.created,
-                    "overwritten": result.overwritten,
-                    "bytes_written": result.bytes_written,
-                },
-            )
+            return self.formatter.format_write_file(result)
         except (FileToolError, RuntimeError, ValueError) as exc:
             return self._error_result(exc)

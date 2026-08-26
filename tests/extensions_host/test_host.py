@@ -23,6 +23,7 @@ def _stub_tool(name: str) -> BaseTool:
             name=name,
             description=f"{name} description",
             input_schema={"type": "object", "properties": {}},
+            output_schema={"type": "object"},
         )
 
     return _Stub()

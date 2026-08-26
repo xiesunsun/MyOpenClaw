@@ -7,6 +7,7 @@ Builder，也不会从当前 AppConfig 重新生成 Package；当前进程没有
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from pickel.agents.agent_package import (
@@ -133,6 +134,12 @@ class AgentPackageLoader:
 
         entries: list[ToolEntry] = []
         for tool in version.tools:
+            if not isinstance(getattr(tool, "output_schema", None), Mapping):
+                raise PackageLoadError(
+                    "package_invalid",
+                    package_version_id,
+                    f"Tool {getattr(tool, 'name', '<unknown>')} 缺少 output_schema",
+                )
             entry = self._tool_bus_entry(tool)
             if entry is None:
                 raise PackageLoadError(

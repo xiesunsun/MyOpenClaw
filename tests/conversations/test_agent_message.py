@@ -65,7 +65,6 @@ def test_tool_result_message_round_trip():
         tool_name="read_file",
         content=[TextBlock(text="ok")],
         is_error=False,
-        structured_content={"count": 1},
     )
     restored = agent_message_from_dict(agent_message_to_dict(msg))
     assert restored == msg
@@ -84,4 +83,20 @@ def test_v1_tool_result_message_remains_readable():
     )
 
     assert isinstance(restored, ToolResultMessage)
-    assert restored.structured_content is None
+    assert "structured_content" not in agent_message_to_dict(restored)
+
+
+def test_historical_structured_content_is_ignored_on_read():
+    restored = agent_message_from_dict(
+        {
+            "payload_version": 3,
+            "role": "tool",
+            "tool_call_id": "c1",
+            "tool_name": "read_file",
+            "content": [{"type": "text", "text": "ok"}],
+            "is_error": False,
+            "structured_content": {"count": 1},
+        }
+    )
+
+    assert "structured_content" not in agent_message_to_dict(restored)

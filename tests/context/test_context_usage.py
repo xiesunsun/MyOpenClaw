@@ -16,6 +16,7 @@ def test_tool_schema_estimate_uses_json_projection_of_frozen_schema() -> None:
                         "query": {"type": "string"},
                     },
                 },
+                output_schema={"type": "object"},
             ),
         ),
     )

@@ -70,5 +70,4 @@ async def test_send_message_returns_stable_message_handle() -> None:
         {"child_session_id": "child-1", "message": "continue"}, _context()
     )
 
-    assert result.is_error is False
-    assert result.structured_content == {"message_id": "message-stable"}
+    assert result == {"message_id": "message-stable"}

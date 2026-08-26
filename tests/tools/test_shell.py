@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pickel.tools.base import ToolExecutionContext
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -72,11 +72,10 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             {"command": "echo hi", "timeout": 2.5}, context
         )
 
-        self.assertFalse(result.is_error)
-        self.assertEqual("remote-ok", result.content)
+        self.assertEqual("remote-ok", result["stdout"])
         self.assertEqual("echo hi", bash.calls[0]["command"])
         self.assertEqual(2.5, bash.calls[0]["timeout"])
-        self.assertEqual("staging", result.structured_content["environment"])
+        self.assertEqual("staging", result["environment"])
 
     async def test_bash_uses_replaceable_operations_and_persists_cwd(self) -> None:
         manager = LocalBashOperations()
@@ -98,11 +97,12 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 bash.close(context.identity.session_id)
 
-        self.assertFalse(first.is_error)
-        self.assertEqual(str((workspace / "nested").resolve()), second.content.strip())
+        self.assertEqual(
+            str((workspace / "nested").resolve()), second["stdout"].strip()
+        )
         self.assertEqual(
             str((workspace / "nested").resolve()),
-            second.structured_content["cwd"],
+            second["cwd"],
         )
 
     async def test_bash_nonzero_exit_is_command_result_not_tool_error(self) -> None:
@@ -124,8 +124,9 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 bash.close(context.identity.session_id)
 
-        self.assertFalse(result.is_error)
-        self.assertEqual(7, result.structured_content["exit_code"])
+        self.assertEqual(7, result["exit_code"])
+        rendered = tool.render(result)
+        self.assertIn("exit_code=7", rendered[0].text)
 
     async def test_bash_timeout_stops_foreground_and_keeps_shell_usable(self) -> None:
         manager = LocalBashOperations()
@@ -147,10 +148,9 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 bash.close(context.identity.session_id)
 
-        self.assertFalse(timed_out.is_error)
-        self.assertTrue(timed_out.structured_content["timed_out"])
-        self.assertEqual(124, timed_out.structured_content["exit_code"])
-        self.assertIn("alive", after.content)
+        self.assertTrue(timed_out["timed_out"])
+        self.assertEqual(124, timed_out["exit_code"])
+        self.assertIn("alive", after["stdout"])
 
 
 class BashSessionBehaviorTests(unittest.TestCase):
@@ -303,9 +303,8 @@ class StderrSeparationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 manager.close(context.identity.session_id)
 
-        self.assertIn("ok", result.content)
-        self.assertIn("--- stderr ---", result.content)
-        self.assertIn("bad", result.content)
+        self.assertIn("ok", result["stdout"])
+        self.assertIn("bad", result["stderr"])
 
 
 class TimeoutKeepsSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -410,10 +409,8 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
                 workspace_path=Path(tmpdir),
                 services=ToolServices(bash=FailingBash()),
             )
-            result = await tool.execute({"command": "rm -rf /"}, context)
-
-        self.assertTrue(result.is_error)
-        self.assertIn("blocked", result.content.lower())
+            with self.assertRaisesRegex(ToolExecutionError, "blocked"):
+                await tool.execute({"command": "rm -rf /"}, context)
 
     async def test_tool_allows_harmless_rm_in_workspace(self) -> None:
         manager = LocalBashOperations()
@@ -430,5 +427,3 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
                 result = await tool.execute({"command": "rm -rf ./build"}, context)
             finally:
                 manager.close(context.identity.session_id)
-
-        self.assertFalse(result.is_error)

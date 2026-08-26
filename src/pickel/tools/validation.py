@@ -9,9 +9,8 @@ from typing import Any
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 
-from pickel.observe.records import ErrorInfo
 from pickel.shared.frozen_json import thaw_json
-from pickel.tools.base import BaseTool, ToolExecutionResult
+from pickel.tools.base import BaseTool
 
 
 def validate_tool_arguments(tool: BaseTool, arguments: dict[str, Any]) -> str | None:
@@ -24,54 +23,20 @@ def validate_json_schema(value: Any, schema: Mapping[str, Any]) -> str | None:
     return _validate(value, schema)
 
 
-def validate_tool_result(
-    tool: BaseTool | Any, result: ToolExecutionResult
-) -> str | None:
-    """验证工具结果的 JSON 合法性和声明的 output schema。
+def validate_tool_output(tool: BaseTool | Any, value: Any) -> str | None:
+    """验证 ``Tool.execute`` 返回的原始 JSONValue。
 
-    ``tool`` 通常是 ``BaseTool``。恢复路径只有冻结的 ``ToolVersion``，因此
-    这里也接受拥有 ``output_schema`` 属性的 Tool 定义，避免为验证重建可执行
-    Tool 实例。
+    ``tool`` 同样可以是只包含冻结 ``output_schema`` 的 ToolVersion。
     """
-    if result.structured_content is not None:
-        try:
-            json.dumps(result.structured_content, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            return f"$.structured_content 不是 JSON 数据: {exc}"
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        return f"$ 不是 JSON 数据: {exc}"
     spec = getattr(tool, "spec", tool)
     output_schema = getattr(spec, "output_schema", None)
-    if output_schema is None or result.is_error:
-        return None
-    return validate_json_schema(result.structured_content, output_schema)
-
-
-def invalid_tool_result(
-    result: ToolExecutionResult,
-    validation_error: str,
-) -> ToolExecutionResult:
-    """将非法结果收敛为可持久化、稳定的错误 ToolResult。
-
-    不保留非法 ``structured_content``：后续 ``ToolResultMessage`` 会冻结并写入
-    ConversationNode，继续携带它会让错误在提交阶段才爆出。
-    """
-    return ToolExecutionResult(
-        content=f"INVALID_TOOL_OUTPUT: {validation_error}",
-        is_error=True,
-        metadata={
-            **(
-                result.metadata
-                if isinstance(getattr(result, "metadata", None), dict)
-                else {}
-            ),
-            "validation_error": validation_error,
-        },
-        error=ErrorInfo(
-            kind="tool_output",
-            type="INVALID_TOOL_OUTPUT",
-            message=validation_error,
-            retryable=False,
-        ),
-    )
+    if output_schema is None:
+        return "工具未声明 output_schema"
+    return validate_json_schema(value, output_schema)
 
 
 def _validate(value: Any, schema: Mapping[str, Any]) -> str | None:

@@ -147,8 +147,12 @@ def _validate_agent_message_object(value: dict[str, Any]) -> None:
             "tool_name",
             "content",
             "is_error",
-            "structured_content",
         }
+        # v2/v3 历史 payload 可能有旧的 structured_content；校验前丢弃，
+        # 不恢复为消息字段或第二份结果权威。
+        if version in {2, 3} and "structured_content" in value:
+            value = dict(value)
+            value.pop("structured_content")
     else:
         raise ValueError(f"未知 AgentMessage role: {role!r}")
     _require_keys(value, keys)

@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from pickel.tools.base import ToolExecutionContext
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
@@ -58,9 +58,8 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertEqual(50_000, len(result.content))
-        self.assertIn("Output truncated", result.content)
-        self.assertTrue(result.metadata["truncated"])
+        self.assertEqual(50_000, len(result))
+        self.assertIn("Output truncated", result)
 
     async def test_read_tool_supports_line_ranges(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -89,17 +88,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertEqual("2: beta\n3: gamma", result.content)
-        self.assertEqual(
-            {
-                "path": "note.txt",
-                "offset": 2,
-                "end_line": 3,
-                "total_lines": 3,
-                "truncated": False,
-            },
-            result.metadata,
-        )
+        self.assertEqual("2: beta\n3: gamma", result)
 
     async def test_read_tool_reports_continuation_and_rejects_offset_past_end(
         self,
@@ -115,15 +104,13 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
             partial = await tool.execute(
                 {"path": "note.txt", "offset": 2, "limit": 2}, context
             )
-            past_end = await tool.execute(
-                {"path": "note.txt", "offset": 9, "limit": 2}, context
-            )
+            with self.assertRaisesRegex(ToolExecutionError, "beyond the end"):
+                await tool.execute(
+                    {"path": "note.txt", "offset": 9, "limit": 2}, context
+                )
 
-        self.assertIn("Showing lines 2-3", partial.content)
-        self.assertIn("offset=4", partial.content)
-        self.assertTrue(partial.metadata["truncated"])
-        self.assertTrue(past_end.is_error)
-        self.assertIn("beyond the end", past_end.content)
+        self.assertIn("Showing lines 2-3", partial)
+        self.assertIn("offset=4", partial)
 
     async def test_glob_finds_files_and_marks_result_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -137,10 +124,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"pattern": "**/*.py", "limit": 1}, self._context(workspace)
             )
 
-        self.assertFalse(result.is_error)
-        self.assertEqual(1, result.metadata["returned_count"])
-        self.assertTrue(result.metadata["truncated"])
-        self.assertIn("Result limit reached", result.content)
+        self.assertIn("Result limit reached", result)
 
     async def test_grep_supports_case_filter_limit_and_invalid_regex(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -161,14 +145,11 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 },
                 context,
             )
-            invalid = await tool.execute({"pattern": "["}, context)
+            with self.assertRaises(ToolExecutionError):
+                await tool.execute({"pattern": "["}, context)
 
-        self.assertFalse(result.is_error)
-        self.assertEqual(1, result.metadata["returned_count"])
-        self.assertTrue(result.metadata["truncated"])
-        self.assertIn("one.py:", result.content)
-        self.assertNotIn("two.txt", result.content)
-        self.assertTrue(invalid.is_error)
+        self.assertIn("one.py:", result)
+        self.assertNotIn("two.txt", result)
 
     async def test_search_does_not_follow_symlink_outside_workspace(self) -> None:
         with (
@@ -188,8 +169,8 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"pattern": "private-token"}, context
             )
 
-        self.assertNotIn("linked.txt", glob_result.content)
-        self.assertNotIn("private-token", grep_result.content)
+        self.assertNotIn("linked.txt", glob_result)
+        self.assertNotIn("private-token", grep_result)
 
     async def test_search_uses_python_fallback_when_ripgrep_is_unavailable(
         self,
@@ -210,8 +191,8 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     {"pattern": "fallback", "glob": "*.py"}, context
                 )
 
-        self.assertIn("nested/note.py", glob_result.content)
-        self.assertIn("nested/note.py:1:fallback match", grep_result.content)
+        self.assertIn("nested/note.py", glob_result)
+        self.assertIn("nested/note.py:1:fallback match", grep_result)
 
     async def test_grep_skips_binary_files_in_ripgrep_and_fallback(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -224,8 +205,8 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
             with patch("pickel.tools.file_service.shutil.which", return_value=None):
                 fallback_result = await tool.execute({"pattern": "needle"}, context)
 
-        self.assertEqual("(no matches)", rg_result.content)
-        self.assertEqual("(no matches)", fallback_result.content)
+        self.assertEqual("(no matches)", rg_result)
+        self.assertEqual("(no matches)", fallback_result)
 
     async def test_ripgrep_and_fallback_share_git_ignore_and_hidden_semantics(
         self,
@@ -254,18 +235,12 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     {"pattern": "needle", "glob": "*.py"}, context
                 )
 
-        self.assertEqual(
-            set(rg_glob.content.splitlines()), set(fallback_glob.content.splitlines())
-        )
-        self.assertEqual(
-            set(rg_grep.content.splitlines()), set(fallback_grep.content.splitlines())
-        )
-        self.assertEqual(
-            set(rg_all.content.splitlines()), set(fallback_all.content.splitlines())
-        )
-        self.assertNotIn("ignored.py", rg_glob.content)
-        self.assertIn(".hidden.py", rg_glob.content)
-        self.assertNotIn(".git/", rg_all.content)
+        self.assertEqual(set(rg_glob.splitlines()), set(fallback_glob.splitlines()))
+        self.assertEqual(set(rg_grep.splitlines()), set(fallback_grep.splitlines()))
+        self.assertEqual(set(rg_all.splitlines()), set(fallback_all.splitlines()))
+        self.assertNotIn("ignored.py", rg_glob)
+        self.assertIn(".hidden.py", rg_glob)
+        self.assertNotIn(".git/", rg_all)
 
     async def test_empty_results_are_self_describing(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -287,10 +262,10 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 {"pattern": "missing"}, context
             )
 
-        self.assertEqual("(empty directory)", ls_result.content)
-        self.assertEqual("(empty file)", read_result.content)
-        self.assertEqual("(no matches)", glob_result.content)
-        self.assertEqual("(no matches)", grep_result.content)
+        self.assertEqual("(empty directory)", ls_result)
+        self.assertEqual("(empty file)", read_result)
+        self.assertEqual("(no matches)", glob_result)
+        self.assertEqual("(no matches)", grep_result)
 
     async def test_ls_marks_truncation_only_when_more_entries_exist(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -303,31 +278,29 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
             (workspace / "two.txt").write_text("", encoding="utf-8")
             truncated = await tool.execute({"limit": 1}, context)
 
-        self.assertFalse(exact.metadata["truncated"])
-        self.assertTrue(truncated.metadata["truncated"])
+        self.assertNotIn("Result limit reached", exact)
+        self.assertIn("Result limit reached", truncated)
 
     async def test_read_tool_rejects_paths_outside_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             tool = ReadTool(FileToolFormatter())
 
-            result = await tool.execute(
-                {"path": "../secret.txt"},
-                ToolExecutionContext(
-                    agent_id="Pickle",
-                    identity=ExecutionIdentity(session_id="session-1"),
-                    workspace_path=workspace,
-                    services=ToolServices(
-                        workspace_files=WorkspaceFileService(
-                            workspace_root=workspace,
-                            access_policy=WorkspacePathAccessPolicy(),
-                        )
+            with self.assertRaisesRegex(ToolExecutionError, "outside the workspace"):
+                await tool.execute(
+                    {"path": "../secret.txt"},
+                    ToolExecutionContext(
+                        agent_id="Pickle",
+                        identity=ExecutionIdentity(session_id="session-1"),
+                        workspace_path=workspace,
+                        services=ToolServices(
+                            workspace_files=WorkspaceFileService(
+                                workspace_root=workspace,
+                                access_policy=WorkspacePathAccessPolicy(),
+                            )
+                        ),
                     ),
-                ),
-            )
-
-        self.assertTrue(result.is_error)
-        self.assertIn("outside the workspace", result.content)
+                )
 
     async def test_write_tool_can_create_and_replace_text(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -368,12 +341,9 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
 
             content = (workspace / "nested" / "note.txt").read_text(encoding="utf-8")
 
-        self.assertFalse(create_result.is_error)
-        self.assertFalse(edit_result.is_error)
         self.assertEqual("hello pickle", content)
-        self.assertEqual(1, edit_result.metadata["match_count"])
-        self.assertIn("-hello world", edit_result.content)
-        self.assertIn("+hello pickle", edit_result.content)
+        self.assertIn("-hello world", edit_result)
+        self.assertIn("+hello pickle", edit_result)
 
     async def test_replace_tool_rejects_multiple_exact_matches(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -381,27 +351,25 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
             (workspace / "note.txt").write_text("dup\ndup\n", encoding="utf-8")
             tool = EditTool(FileToolFormatter())
 
-            result = await tool.execute(
-                {
-                    "path": "note.txt",
-                    "old_text": "dup",
-                    "new_text": "value",
-                },
-                ToolExecutionContext(
-                    agent_id="Pickle",
-                    identity=ExecutionIdentity(session_id="session-1"),
-                    workspace_path=workspace,
-                    services=ToolServices(
-                        workspace_files=WorkspaceFileService(
-                            workspace_root=workspace,
-                            access_policy=WorkspacePathAccessPolicy(),
-                        )
+            with self.assertRaisesRegex(ToolExecutionError, "Found 2 exact matches"):
+                await tool.execute(
+                    {
+                        "path": "note.txt",
+                        "old_text": "dup",
+                        "new_text": "value",
+                    },
+                    ToolExecutionContext(
+                        agent_id="Pickle",
+                        identity=ExecutionIdentity(session_id="session-1"),
+                        workspace_path=workspace,
+                        services=ToolServices(
+                            workspace_files=WorkspaceFileService(
+                                workspace_root=workspace,
+                                access_policy=WorkspacePathAccessPolicy(),
+                            )
+                        ),
                     ),
-                ),
-            )
-
-        self.assertTrue(result.is_error)
-        self.assertIn("Found 2 exact matches", result.content)
+                )
 
     async def test_full_access_policy_allows_absolute_paths_outside_workspace(
         self,
@@ -430,8 +398,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertFalse(result.is_error)
-        self.assertIn("outside", result.content)
+        self.assertIn("outside", result)
 
 
 if __name__ == "__main__":

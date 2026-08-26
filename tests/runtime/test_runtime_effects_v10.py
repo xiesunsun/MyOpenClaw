@@ -17,11 +17,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 from pickel.providers.stream import StreamCompleted, TextDelta, ToolCallArgsDelta
 from pickel.runtime.runtime_effects import ModelExecutionBoundaryError, RuntimeEffects
-from pickel.tools.base import ToolExecutionResult
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ModelResponseMetadata,
     ModelUsage,
+    ToolResultMessage,
 )
 
 
@@ -269,7 +269,7 @@ async def test_tool_effect_requires_intent_recorded_state() -> None:
     async def execute_tool(**kwargs):
         nonlocal called
         called = True
-        return ToolExecutionResult(content="ok")
+        return ToolResultMessage(tool_call_id="tool-1", tool_name="echo")
 
     effects = RuntimeEffects(provider=_Provider(), execute_tool=execute_tool)
     with pytest.raises(RuntimeError, match="intent_recorded"):

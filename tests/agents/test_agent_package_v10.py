@@ -141,6 +141,39 @@ def test_v1_codec_keeps_legacy_hash_shape_and_uses_policy_defaults() -> None:
     assert loaded.runtime_policy.max_parallel_model_requests == 2
 
 
+@pytest.mark.parametrize(
+    "schema_value",
+    [pytest.param(None, id="null"), pytest.param("missing", id="missing")],
+)
+def test_package_codec_rejects_missing_or_null_tool_output_schema(schema_value) -> None:
+    content = _content()
+    content["tools"] = [
+        {
+            "name": "echo",
+            "source": "builtin",
+            "implementation_ref": {
+                "kind": "builtin",
+                "name": "echo",
+                "version": None,
+                "digest": None,
+            },
+            "version": None,
+            "description": "Echo",
+            "input_schema": {"type": "object"},
+            "replay_policy": "safe",
+        }
+    ]
+    if schema_value != "missing":
+        content["tools"][0]["output_schema"] = schema_value
+
+    with pytest.raises((TypeError, ValueError), match="output_schema"):
+        decode_agent_package_content(
+            package_version_id=package_version_id_for_content(content),
+            content=content,
+            created_at=datetime.now(timezone.utc),
+        )
+
+
 def test_legacy_codec_is_explicit_and_produces_target_shape() -> None:
     legacy = {
         "schema_version": 3,
@@ -170,6 +203,13 @@ def test_legacy_codec_is_explicit_and_produces_target_shape() -> None:
         SecretRef("providers.anthropic.api_key"),
     )
     assert not hasattr(loaded, "schema_version")
+
+    legacy["tools"] = [{"name": "echo"}]
+    with pytest.raises(ValueError, match="output_schema"):
+        decode_legacy_agent_package(
+            content=legacy,
+            created_at=datetime.now(timezone.utc),
+        )
 
 
 def test_builder_freezes_existing_app_config_without_role_fallback(

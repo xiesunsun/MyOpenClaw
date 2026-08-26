@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -26,22 +26,16 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def list_agents(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> list[dict[str, object]]:
     """返回 durable child 的即时状态投影。"""
     del arguments
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。",
-            is_error=True,
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     snapshots = await control.list_child_agents(
         sender_operation_id=context.identity.operation_id or "",
         sender_step_id=context.identity.step_id or "",
         sender_tool_call_id=context.identity.tool_call_id or "",
     )
     payload = [snapshot.to_dict() for snapshot in snapshots]
-    return ToolExecutionResult(
-        content=f"当前 Session 有 {len(payload)} 个 direct child Agent。",
-        structured_content=payload,
-    )
+    return payload

@@ -3,6 +3,7 @@ from pickel.context.model_context import (
     SystemContent,
     SystemSection,
     ToolDefinition,
+    model_context_from_dict,
 )
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
@@ -16,7 +17,10 @@ def test_model_context_holds_system_messages_tools():
         messages=[UserMessage(content=[TextBlock(text="hi")])],
         tools=[
             ToolDefinition(
-                name="read_file", description="read", input_schema={"type": "object"}
+                name="read_file",
+                description="read",
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
             )
         ],
     )
@@ -44,3 +48,22 @@ def test_system_content_from_text_and_as_text():
         ]
     )
     assert multi.as_text() == "first\n\nsecond"
+
+
+def test_historical_model_intent_without_output_schema_remains_readable():
+    context = model_context_from_dict(
+        {
+            "system": {"sections": []},
+            "messages": [],
+            "tools": [
+                {
+                    "name": "legacy",
+                    "description": "legacy request intent",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+        }
+    )
+
+    assert dict(context.tools[0].output_schema) == {}
+    assert "output_schema" in context.to_dict()["tools"][0]

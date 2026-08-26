@@ -48,7 +48,6 @@ def _context() -> ModelContext:
                 tool_call_id="call-1",
                 tool_name="lookup",
                 content=(TextBlock("result"),),
-                structured_content={"ok": True},
             ),
         ),
         tools=(
@@ -56,6 +55,7 @@ def _context() -> ModelContext:
                 "lookup",
                 "lookup value",
                 {"type": "object", "properties": {"query": {"type": "string"}}},
+                {"type": "object"},
             ),
         ),
     )
@@ -139,7 +139,7 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
         {
             "type": "function_call_output",
             "call_id": "call-1",
-            "output": 'structured_content: {"ok":true}',
+            "output": "result",
         },
     ]
     assert snapshot["tools"][0] == {

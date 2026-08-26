@@ -65,7 +65,7 @@ def _package() -> AgentPackageVersion:
                 version=None,
                 description="Echo text",
                 input_schema={"type": "object"},
-                output_schema=None,
+                output_schema={"type": "string"},
                 replay_policy="safe",
             ),
         ),

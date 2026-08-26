@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional, Union
+from typing import Any, Awaitable, Callable, Literal, TypeAlias, Union
 
-from pickel.observe.records import ErrorInfo
 from pickel.conversations.content_blocks import ToolResultContent
+from pickel.conversations.content_blocks import TextBlock
 from pickel.shared.execution_identity import ExecutionIdentity
+from pickel.shared.frozen_json import freeze_json_object
 from pickel.tools.services import ToolServices
 
-ToolFunctionResult = Union[Awaitable["ToolExecutionResult"], "ToolExecutionResult"]
+JSONValue: TypeAlias = (
+    str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
+)
+ToolFunctionResult = Union[Awaitable[JSONValue], JSONValue]
 ToolFunction = Callable[[dict[str, Any], "ToolExecutionContext"], ToolFunctionResult]
+ToolRenderer = Callable[[JSONValue], tuple[ToolResultContent, ...]]
 
 
 @dataclass(frozen=True)
@@ -19,12 +25,18 @@ class ToolSpec:
     name: str
     description: str
     input_schema: dict[str, Any]
-    output_schema: Optional[dict[str, Any]] = None
+    output_schema: dict[str, Any]
     replay_policy: Literal["safe", "never"] = "never"
 
     def __post_init__(self) -> None:
         if self.replay_policy not in {"safe", "never"}:
             raise ValueError("ToolSpec.replay_policy 必须是 safe 或 never")
+        if not isinstance(self.output_schema, dict):
+            raise TypeError("ToolSpec.output_schema 必须是 JSON Schema object")
+        object.__setattr__(self, "input_schema", freeze_json_object(self.input_schema))
+        object.__setattr__(
+            self, "output_schema", freeze_json_object(self.output_schema)
+        )
 
 
 @dataclass(frozen=True)
@@ -35,25 +47,8 @@ class ToolExecutionContext:
     services: ToolServices = field(default_factory=ToolServices)
 
 
-@dataclass
-class ToolExecutionResult:
-    """工具执行结果。
-
-    ``content``、``content_blocks``、``structured_content`` 和 ``is_error``
-    构成模型可见合同；``metadata`` 与 ``error`` 只服务 Runtime 和观测系统。
-    """
-
-    content: str
-    is_error: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
-    error: ErrorInfo | None = None
-    # 新字段放在末尾，避免破坏外部 extension 的位置参数调用。
-    content_blocks: list[ToolResultContent] = field(default_factory=list)
-    structured_content: Any | None = None
-
-    def __post_init__(self) -> None:
-        if self.error is not None:
-            self.is_error = True
+class ToolExecutionError(RuntimeError):
+    """工具执行失败；失败不是另一种成功返回值。"""
 
 
 class BaseTool:
@@ -63,8 +58,22 @@ class BaseTool:
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
+    ) -> JSONValue:
         raise NotImplementedError
+
+    def render(self, validated_value: JSONValue) -> tuple[ToolResultContent, ...]:
+        """纯地把已校验 JSON value 转成模型可见内容。"""
+        if isinstance(validated_value, str):
+            text = validated_value
+        else:
+            text = json.dumps(
+                validated_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        return (TextBlock(text=text),)
 
 
 class FunctionTool(BaseTool):
@@ -74,8 +83,9 @@ class FunctionTool(BaseTool):
         name: str,
         description: str,
         input_schema: dict[str, Any],
-        output_schema: Optional[dict[str, Any]] = None,
+        output_schema: dict[str, Any],
         func: ToolFunction,
+        renderer: ToolRenderer | None = None,
         replay_policy: Literal["safe", "never"] = "never",
     ) -> None:
         self.spec = ToolSpec(
@@ -86,20 +96,24 @@ class FunctionTool(BaseTool):
             replay_policy=replay_policy,
         )
         self._func = func
+        self._renderer = renderer
         self._signature = inspect.signature(func)
 
     async def execute(
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
+    ) -> JSONValue:
         call_kwargs = self._build_call_kwargs(arguments, context)
         result = self._func(**call_kwargs)
         if inspect.isawaitable(result):
             result = await result
-        if isinstance(result, ToolExecutionResult):
-            return result
-        return ToolExecutionResult(content=str(result))
+        return result
+
+    def render(self, validated_value: JSONValue) -> tuple[ToolResultContent, ...]:
+        if self._renderer is not None:
+            return self._renderer(validated_value)
+        return super().render(validated_value)
 
     def _build_call_kwargs(
         self,
@@ -122,14 +136,17 @@ def tool(
     *,
     name: str,
     description: str,
-    input_schema: Optional[dict[str, Any]] = None,
-    parameters: Optional[dict[str, Any]] = None,
-    output_schema: Optional[dict[str, Any]] = None,
+    input_schema: dict[str, Any] | None = None,
+    parameters: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    render: ToolRenderer | None = None,
     replay_policy: Literal["safe", "never"] = "never",
 ) -> Callable[[ToolFunction], FunctionTool]:
     schema = input_schema or parameters
     if schema is None:
         raise ValueError("tool() requires either input_schema or parameters")
+    if output_schema is None:
+        raise ValueError("tool() requires output_schema")
 
     def decorator(func: ToolFunction) -> FunctionTool:
         return FunctionTool(
@@ -138,6 +155,7 @@ def tool(
             input_schema=schema,
             output_schema=output_schema,
             func=func,
+            renderer=render,
             replay_policy=replay_policy,
         )
 

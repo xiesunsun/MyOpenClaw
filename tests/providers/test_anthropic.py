@@ -71,6 +71,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
                         "properties": {"text": {"type": "string"}},
                         "required": ["text"],
                     },
+                    output_schema={"type": "object"},
                 )
             ]
         )
@@ -104,7 +105,14 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
         }
 
         tool = AnthropicMessagesProvider._build_tools(
-            [ToolDefinition(name="search", description="Search", input_schema=schema)]
+            [
+                ToolDefinition(
+                    name="search",
+                    description="Search",
+                    input_schema=schema,
+                    output_schema={"type": "object"},
+                )
+            ]
         )[0]
 
         self.assertEqual(schema, tool["input_schema"])
@@ -161,18 +169,16 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
         self.assertEqual("thinking", messages[3]["content"][0]["type"])
         self.assertEqual("Done.", messages[3]["content"][1]["text"])
 
-    def test_tool_result_preserves_structured_content(self) -> None:
+    def test_tool_result_uses_only_message_content(self) -> None:
         block = AnthropicMessagesProvider._tool_result_block(
             ToolResultMessage(
                 tool_call_id="call-1",
                 tool_name="lookup",
                 content=[TextBlock(text="found")],
-                structured_content={"id": 7},
             )
         )
 
-        self.assertEqual('structured_content: {"id":7}', block["content"])
-        self.assertNotIn("found", block["content"])
+        self.assertEqual("found", block["content"])
 
     def test_build_messages_marks_error_tool_results(self) -> None:
         messages = AnthropicMessagesProvider._build_messages(
@@ -330,6 +336,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
                                 "properties": {"text": {"type": "string"}},
                                 "required": ["text"],
                             },
+                            output_schema={"type": "object"},
                         )
                     ],
                 )
@@ -401,6 +408,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
                             name="echo",
                             description="Echo",
                             input_schema={"type": "object"},
+                            output_schema={"type": "object"},
                         )
                     ],
                 )
@@ -449,6 +457,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
                         name="echo",
                         description="Echo",
                         input_schema={"type": "object"},
+                        output_schema={"type": "object"},
                     )
                 ],
             )
@@ -482,6 +491,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
                     name="echo",
                     description="Echo",
                     input_schema={"type": "object"},
+                    output_schema={"type": "object"},
                 )
             ],
         )

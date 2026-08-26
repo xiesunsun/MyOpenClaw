@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
 @tool(
@@ -34,26 +34,17 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionResult, tool
 )
 async def report(
     arguments: dict[str, Any], context: ToolExecutionContext
-) -> ToolExecutionResult:
+) -> dict[str, str]:
     control = context.services.delegation
     if control is None:
-        return ToolExecutionResult(
-            content="当前上下文没有 DelegationControl。",
-            is_error=True,
-        )
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
     output = arguments.get("output")
     if not isinstance(output, str) or not output.strip():
-        return ToolExecutionResult(
-            content="report 的 output 不能为空。",
-            is_error=True,
-        )
+        raise ToolExecutionError("report 的 output 不能为空。")
     stored = await control.send_child_report(
         sender_operation_id=context.identity.operation_id or "",
         sender_step_id=context.identity.step_id or "",
         sender_tool_call_id=context.identity.tool_call_id or "",
         output=output,
     )
-    return ToolExecutionResult(
-        content=f"报告已接受：message={stored.message_id}",
-        structured_content={"message_id": stored.message_id},
-    )
+    return {"message_id": stored.message_id}

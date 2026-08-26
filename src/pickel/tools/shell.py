@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+from pickel.conversations.content_blocks import TextBlock, ToolResultContent
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
 )
 from pickel.tools.sandbox import SandboxPolicy
@@ -716,22 +717,15 @@ class BashTool(BaseTool):
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
+    ) -> dict[str, Any]:
         bash = context.services.bash
         if bash is None:
-            return ToolExecutionResult(
-                content="Bash is not available in this agent environment.",
-                is_error=True,
-            )
+            raise ToolExecutionError("Bash is not available in this agent environment.")
 
         # 仅作为明显误操作的快速反馈；真正安全边界由执行环境提供。
         reason = _dangerous_command_reason(str(arguments["command"]))
         if reason is not None:
-            return ToolExecutionResult(
-                content=f"Command blocked ({reason}).",
-                is_error=True,
-                metadata={"blocked": True, "reason": reason},
-            )
+            raise ToolExecutionError(f"Command blocked ({reason}).")
 
         timeout = arguments.get("timeout")
         try:
@@ -742,10 +736,7 @@ class BashTool(BaseTool):
                 timeout=float(timeout) if timeout is not None else None,
             )
         except Exception as exc:
-            return ToolExecutionResult(
-                content=f"Bash execution failed: {exc}",
-                is_error=True,
-            )
+            raise ToolExecutionError(f"Bash execution failed: {exc}") from exc
 
         structured = {
             "stdout": result.stdout,
@@ -761,21 +752,32 @@ class BashTool(BaseTool):
             "sandboxed": result.sandboxed,
             "environment": result.environment,
         }
-        return ToolExecutionResult(
-            content=_format_result_content(result),
-            is_error=result.shell_status is ShellStatus.TERMINATED,
-            metadata=dict(structured),
-            structured_content=structured,
+        return structured
+
+    def render(self, validated_value: Any) -> tuple[ToolResultContent, ...]:
+        """把结构化命令结果压成适合模型阅读的单一文本。"""
+        if not isinstance(validated_value, dict):
+            return super().render(validated_value)
+        parts: list[str] = []
+        stdout = str(validated_value.get("stdout", ""))
+        stderr = str(validated_value.get("stderr", ""))
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append(f"--- stderr ---\n{stderr}")
+        status = (
+            f"exit_code={validated_value.get('exit_code')} "
+            f"cwd={validated_value.get('cwd')} "
+            f"shell_status={validated_value.get('shell_status')}"
         )
-
-
-def _format_result_content(result: ShellExecutionResult) -> str:
-    parts = [result.stdout] if result.stdout else []
-    if result.stderr:
-        parts.append(f"--- stderr ---\n{result.stderr}")
-    if result.status_message:
-        parts.append(f"[status] {result.status_message}")
-    return "\n".join(parts)
+        if validated_value.get("timed_out"):
+            status += " timed_out=true"
+        if validated_value.get("truncated"):
+            status += " truncated=true"
+            if validated_value.get("full_output_path"):
+                status += f" full_output_path={validated_value['full_output_path']}"
+        parts.append(f"[status] {status}")
+        return (TextBlock(text="\n".join(parts)),)
 
 
 # 仅拦截明显误操作，不维护“危险命令大全”；安全边界由 OS sandbox 提供。

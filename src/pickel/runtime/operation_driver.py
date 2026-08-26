@@ -61,12 +61,7 @@ from pickel.runtime.runtime_events import (
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.frozen_json import freeze_json_object, thaw_json
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionResult
-from pickel.tools.validation import (
-    invalid_tool_result,
-    validate_json_schema,
-    validate_tool_result,
-)
+from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 RuntimeEventConsumer = Callable[[RuntimeEventBase], None | Awaitable[None]]
@@ -568,9 +563,11 @@ class OperationDriver:
                         current_step=replace(step, tool_calls=calls),
                     ),
                     state,
-                    message=_tool_result_message(
-                        pending,
-                        ToolExecutionResult(content=content, is_error=True),
+                    message=ToolResultMessage(
+                        tool_call_id=pending.tool_call_id,
+                        tool_name=pending.tool_name,
+                        content=(TextBlock(text=content),),
+                        is_error=True,
                     ),
                     node_id=result_node_id,
                 )
@@ -648,21 +645,13 @@ class OperationDriver:
                     tool_call_id=executable.tool_call_id,
                     host_calls=host_calls,
                 )
-                # OperationDriver 是结果提交前的最后一道边界。正常执行由
-                # RuntimeEffects 在精确 BaseTool 上验证；这里再用冻结
-                # ToolVersion 校验，覆盖兼容的直接 ToolEffect 和恢复实现。
-                tool_version = next(
-                    (
-                        item
-                        for item in package.tools
-                        if item.name == executable.tool_name
-                    ),
-                    None,
-                )
-                if tool_version is not None:
-                    validation_error = validate_tool_result(tool_version, result)
-                    if validation_error is not None:
-                        result = invalid_tool_result(result, validation_error)
+                if not isinstance(result, ToolResultMessage):
+                    raise RuntimeError("ToolEffect 必须返回已渲染 ToolResultMessage")
+                if (
+                    result.tool_call_id != executable.tool_call_id
+                    or result.tool_name != executable.tool_name
+                ):
+                    raise RuntimeError("ToolResultMessage 与 ToolCall 身份不一致")
                 result_node_id = self._node_id()
                 completed = replace(
                     next(
@@ -683,7 +672,7 @@ class OperationDriver:
                     for call in state.current_step.tool_calls
                 )
                 next_step = replace(state.current_step, tool_calls=calls)
-                message = _tool_result_message(executable, result)
+                message = result
                 state = self._commit(
                     replace(state, current_step=next_step),
                     state,
@@ -695,7 +684,7 @@ class OperationDriver:
                     ToolCallCompleted(
                         envelope=EventEnvelope(identity=identity),
                         tool_name=executable.tool_name,
-                        content=result.content,
+                        content=_tool_result_text(result),
                         is_error=result.is_error,
                     ),
                 )
@@ -1032,14 +1021,7 @@ def _rejected_tool_call(
     )
 
 
-def _tool_result_message(
-    call: ToolCallState, result: ToolExecutionResult
-) -> ToolResultMessage:
-    content = tuple(result.content_blocks) or (TextBlock(text=result.content),)
-    return ToolResultMessage(
-        tool_call_id=call.tool_call_id,
-        tool_name=call.tool_name,
-        content=content,
-        is_error=result.is_error,
-        structured_content=result.structured_content,
+def _tool_result_text(message: ToolResultMessage) -> str:
+    return "\n".join(
+        block.text for block in message.content if isinstance(block, TextBlock)
     )

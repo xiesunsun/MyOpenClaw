@@ -18,6 +18,7 @@ from pickel.conversations.agent_message import (
     AgentMessage,
     AssistantMessage,
     ModelResponseMetadata,
+    ToolResultMessage,
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock
@@ -31,7 +32,6 @@ from pickel.observe.records import (
 from pickel.providers.base import Provider
 from pickel.providers.stream import ToolCallArgsDelta, StreamCompleted, StreamDelta
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.base import ToolExecutionResult
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 
@@ -44,7 +44,7 @@ class ToolEffect(Protocol):
         state: AgentRunState,
         tool_call_id: str,
         host_calls: Any | None = None,
-    ) -> ToolExecutionResult: ...
+    ) -> ToolResultMessage: ...
 
 
 class HookEffect(Protocol):
@@ -224,7 +224,7 @@ class RuntimeEffects:
         state: AgentRunState,
         tool_call_id: str,
         host_calls: Any | None = None,
-    ) -> ToolExecutionResult:
+    ) -> ToolResultMessage:
         if self.execute_tool is None:
             raise RuntimeError("未配置 ToolEffect")
         if operation.operation_id != state.operation_id:

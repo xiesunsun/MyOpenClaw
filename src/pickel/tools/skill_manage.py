@@ -10,7 +10,7 @@ from pickel.skills.store import SkillStoreError, SkillWriteRequest
 from pickel.tools.base import (
     BaseTool,
     ToolExecutionContext,
-    ToolExecutionResult,
+    ToolExecutionError,
     ToolSpec,
 )
 
@@ -58,21 +58,37 @@ class SkillManageTool(BaseTool):
             },
             "required": ["action", "skill_name"],
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "skill_name": {"type": "string"},
+                "applied": {"type": "boolean"},
+                "pending_id": {"type": ["string", "null"]},
+                "path": {"type": ["string", "null"]},
+                "message": {"type": "string"},
+            },
+            "required": [
+                "action",
+                "skill_name",
+                "applied",
+                "pending_id",
+                "path",
+                "message",
+            ],
+            "additionalProperties": False,
+        },
     )
 
     async def execute(
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolExecutionResult:
+    ) -> dict[str, Any]:
         store = context.services.skill_store
         if store is None:
-            return ToolExecutionResult(
-                content=(
-                    "Skill management is unavailable: this agent has no skills "
-                    "directory configured."
-                ),
-                is_error=True,
+            raise ToolExecutionError(
+                "Skill management is unavailable: this agent has no skills directory configured."
             )
         request = SkillWriteRequest(
             action=str(arguments["action"]),
@@ -84,24 +100,14 @@ class SkillManageTool(BaseTool):
         try:
             outcome = await asyncio.to_thread(store.submit, request)
         except SkillGuardError as exc:
-            return ToolExecutionResult(
-                content=str(exc),
-                is_error=True,
-                metadata={"guard_rule": exc.rule, "action": request.action},
-            )
+            raise ToolExecutionError(str(exc)) from exc
         except SkillStoreError as exc:
-            return ToolExecutionResult(
-                content=str(exc),
-                is_error=True,
-                metadata={"action": request.action},
-            )
-        return ToolExecutionResult(
-            content=outcome.message,
-            metadata={
-                "action": request.action,
-                "skill_name": request.skill_name,
-                "applied": outcome.applied,
-                "pending_id": outcome.pending_id,
-                "path": str(outcome.path) if outcome.path else None,
-            },
-        )
+            raise ToolExecutionError(str(exc)) from exc
+        return {
+            "action": request.action,
+            "skill_name": request.skill_name,
+            "applied": outcome.applied,
+            "pending_id": outcome.pending_id,
+            "path": str(outcome.path) if outcome.path else None,
+            "message": outcome.message,
+        }
