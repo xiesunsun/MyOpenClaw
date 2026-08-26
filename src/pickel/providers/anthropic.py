@@ -59,7 +59,7 @@ class AnthropicMessagesProvider(Provider):
         self.model = model
         self.provider_name = provider_name
         self.api_key = api_key
-        self.api_base = api_base
+        self.api_base = self._normalize_api_base(api_base)
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
@@ -444,6 +444,16 @@ class AnthropicMessagesProvider(Provider):
             kwargs["max_retries"] = max_retries
 
         return AsyncAnthropic(**kwargs)
+
+    @staticmethod
+    def _normalize_api_base(value: str | None) -> str | None:
+        """Anthropic SDK 自己追加 ``/v1/messages``，配置只保留服务根路径。"""
+        if value is None:
+            return None
+        normalized = value.rstrip("/")
+        if normalized.endswith("/v1"):
+            normalized = normalized[: -len("/v1")]
+        return normalized
 
     def _should_send_temperature(self) -> bool:
         return self.temperature is not None and self.model != "claude-opus-4-7"

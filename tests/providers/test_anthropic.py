@@ -52,6 +52,14 @@ class FakeAsyncMessageStreamManager:
 
 
 class AnthropicMessagesProviderTests(unittest.TestCase):
+    def test_api_base_removes_sdk_owned_v1_suffix(self) -> None:
+        self.assertEqual(
+            "https://opencode.ai/zen/go",
+            AnthropicMessagesProvider._normalize_api_base(
+                "https://opencode.ai/zen/go/v1/"
+            ),
+        )
+
     def test_build_tools_maps_tool_definitions(self) -> None:
         tools = AnthropicMessagesProvider._build_tools(
             [

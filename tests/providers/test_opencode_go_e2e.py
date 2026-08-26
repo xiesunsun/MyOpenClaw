@@ -38,16 +38,23 @@ def _context() -> ModelContext:
     ],
 )
 def test_opencode_go_text_stream(provider_type, model: str) -> None:
-    provider = provider_type(
-        model=model,
-        provider_name="opencode-go",
-        api_base=_API_BASE,
-        api_key=os.environ["OPENCODE_GO_API_KEY"],
-        max_output_tokens=64,
-        provider_options={"timeout_seconds": 90},
-    )
+    async def run():
+        provider = provider_type(
+            model=model,
+            provider_name="opencode-go",
+            api_base=_API_BASE,
+            api_key=os.environ["OPENCODE_GO_API_KEY"],
+            max_output_tokens=64,
+            provider_options={"timeout_seconds": 90},
+        )
+        try:
+            return await provider.generate(_context())
+        finally:
+            client = getattr(provider, "client", None)
+            if client is not None and hasattr(client, "aclose"):
+                await client.aclose()
 
-    message = asyncio.run(provider.generate(_context()))
+    message = asyncio.run(run())
     text = "".join(
         block.text for block in message.content if isinstance(block, TextBlock)
     )
@@ -55,7 +62,3 @@ def test_opencode_go_text_stream(provider_type, model: str) -> None:
     assert "OPENCODE_GO_OK" in text
     assert message.metadata is not None
     assert message.metadata.provider == "opencode-go"
-
-    client = getattr(provider, "client", None)
-    if client is not None and hasattr(client, "aclose"):
-        asyncio.run(client.aclose())
