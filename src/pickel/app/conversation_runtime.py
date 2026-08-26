@@ -133,7 +133,6 @@ class ConversationRuntime:
         self._runtime_bus = RuntimeBus()
         self._events = self._runtime_bus.events
         self._outputs = ConversationOutputBus()
-        self._active_operation_id: str | None = None
         self._active_task: asyncio.Task[Any] | None = None
         self._closed = False
         self._release_package_after_task = False
@@ -191,10 +190,6 @@ class ConversationRuntime:
     def closed(self) -> bool:
         return self._closed
 
-    @property
-    def active_operation_id(self) -> str | None:
-        return self._active_operation_id
-
     async def start_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
         with observation_scope(self._trace_sink):
             return await self._execute_agent_run(request)
@@ -250,7 +245,6 @@ class ConversationRuntime:
                 operation_id = result.accepted.operation.operation_id
             elif self._session.active_operation_id is not None:
                 operation_id = self._session.active_operation_id
-            self._active_operation_id = operation_id
             envelope = EventEnvelope(
                 identity=ExecutionIdentity(
                     session_id=self._session.session_id,
@@ -397,21 +391,9 @@ class ConversationRuntime:
             async with self._control_lock:
                 if self._active_task is task:
                     self._active_task = None
-                    self._active_operation_id = None
                     if self._release_package_after_task:
                         self._release_package_after_task = False
                         self._close_loaded_package_handle()
-
-    async def interrupt(self, *, expected_operation_id: str) -> None:
-        async with self._control_lock:
-            if self._active_operation_id != expected_operation_id:
-                raise ValueError(
-                    "活动 Operation 不匹配: "
-                    f"expected={expected_operation_id}, "
-                    f"actual={self._active_operation_id}"
-                )
-            assert self._active_task is not None
-            self._active_task.cancel()
 
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
         return self._events.subscribe(handler)

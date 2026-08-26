@@ -51,7 +51,6 @@ def _runtime(operation_result):
     runtime._runtime_bus = SimpleNamespace(host_calls=SimpleNamespace(client=None))
     runtime._closed = False
     runtime._active_task = None
-    runtime._active_operation_id = None
     runtime._control_lock = asyncio.Lock()
     runtime._release_package_after_task = False
     runtime._trace_sink = None
