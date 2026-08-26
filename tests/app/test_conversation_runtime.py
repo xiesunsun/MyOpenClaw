@@ -7,7 +7,11 @@ import pytest
 
 import pickel.app.conversation_runtime as conversation_runtime_module
 from pickel.app.conversation_runtime import ConversationRuntime
-from pickel.app.runtime_models import AgentRunRequest
+from pickel.app.runtime_models import (
+    AgentRunRequest,
+    ConversationClosedError,
+    OperationInProgressError,
+)
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.runtime.agent_run_usage import AgentRunUsage
@@ -18,10 +22,24 @@ from pickel.runtime.runtime_events import (
     AssistantMessageEvent,
 )
 from pickel.operations.agent_run_state import AgentRunError
+from pickel.app.runtime_generation import RuntimeGeneration, RuntimeGenerationState
+from pickel.runtime.agent import AgentBusyError
 
 
 class _FakeInbox:
+    def __init__(self) -> None:
+        self.sent = []
+
     async def send(self, message, *, delivery):
+        self.sent.append((message, delivery))
+        return None
+
+
+class _FakeRuntimeBus:
+    def __init__(self) -> None:
+        self.host_calls = SimpleNamespace(client=None)
+
+    def close_now(self) -> None:
         return None
 
 
@@ -29,15 +47,41 @@ class _FakeAgent:
     def __init__(self, result) -> None:
         self.inbox = _FakeInbox()
         self.result = result
+        self.followup_calls = []
+        self.cancel_calls = []
+        self.busy = False
 
-    async def when_idle(self, **kwargs):
+    async def followup_and_wait(self, message, **kwargs):
+        if self.busy:
+            raise AgentBusyError("Agent 当前正在驱动，不能接受前台 followup")
+        self.followup_calls.append((message, kwargs))
         return self.result
 
     def cancel(self, *, reason):
-        raise AssertionError(f"不应取消正常测试运行: {reason}")
+        self.cancel_calls.append(reason)
 
 
-def _runtime(operation_result):
+class _FakeHandle:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.closed = False
+
+    def close_sync(self) -> None:
+        assert not self.closed
+        self.closed = True
+
+
+class _FakeGeneration:
+    def __init__(self) -> None:
+        self.handles = []
+
+    def acquire_loaded_package(self, package_version_id):
+        handle = _FakeHandle(package_version_id)
+        self.handles.append(handle)
+        return handle
+
+
+def _runtime(operation_result, *, generation=None, adapter_handle=None):
     runtime = object.__new__(ConversationRuntime)
     session = SimpleNamespace(session_id="session-1", active_operation_id="op-1")
     runtime._agent = _FakeAgent(
@@ -48,11 +92,18 @@ def _runtime(operation_result):
         load_conversation_session=lambda _session_id: session
     )
     runtime._events = EventBus()
-    runtime._runtime_bus = SimpleNamespace(host_calls=SimpleNamespace(client=None))
+    runtime._runtime_bus = _FakeRuntimeBus()
     runtime._closed = False
-    runtime._active_task = None
-    runtime._control_lock = asyncio.Lock()
-    runtime._release_package_after_task = False
+    runtime._runtime_generation = generation
+    runtime._loaded_agent_package = SimpleNamespace(
+        version=SimpleNamespace(package_version_id="package-1")
+    )
+    runtime._loaded_package_handle = adapter_handle
+    runtime._background_tasks = set()
+    runtime._event_processors = []
+    runtime._unsubscribe_trace = None
+    runtime._outputs = SimpleNamespace(clear=lambda: None)
+    runtime._on_detach = None
     runtime._trace_sink = None
     return runtime
 
@@ -167,3 +218,107 @@ def test_unknown_operation_status_is_explicit_failure() -> None:
     assert result.status == "failed"
     assert result.error is not None
     assert "未知 Operation status" in result.error.message
+
+
+def test_busy_agent_maps_to_application_error_without_failed_result() -> None:
+    generation = _FakeGeneration()
+    runtime = _runtime(_operation_result("succeeded"), generation=generation)
+    runtime._agent.busy = True
+    events = []
+    runtime.subscribe(events.append)
+
+    with pytest.raises(OperationInProgressError):
+        asyncio.run(runtime.start_agent_run(_request()))
+
+    assert runtime._agent.inbox.sent == []
+    assert not any(isinstance(event, AgentRunFailed) for event in events)
+    assert len(generation.handles) == 1
+    assert generation.handles[0].closed
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def test_temporary_package_handle_closes_for_completed_results(outcome: str) -> None:
+    generation = _FakeGeneration()
+    error = AgentRunError(code="provider", message="failed", retryable=False)
+    runtime = _runtime(
+        _operation_result(
+            outcome,
+            error=error if outcome == "failed" else None,
+        ),
+        generation=generation,
+    )
+
+    result = asyncio.run(runtime.start_agent_run(_request()))
+
+    assert result.status == ("failed" if outcome == "failed" else "completed")
+    assert generation.handles[0].closed
+
+
+def test_temporary_package_handle_closes_after_cancellation() -> None:
+    generation = _FakeGeneration()
+    runtime = _runtime(_operation_result("succeeded"), generation=generation)
+
+    async def cancelled_followup(message, **kwargs):
+        raise asyncio.CancelledError
+
+    runtime._agent.followup_and_wait = cancelled_followup
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(runtime.start_agent_run(_request()))
+
+    assert runtime._agent.cancel_calls == ["用户中断"]
+    assert generation.handles[0].closed
+
+
+def test_closed_conversation_does_not_acquire_temporary_package_handle() -> None:
+    generation = _FakeGeneration()
+    runtime = _runtime(_operation_result("succeeded"), generation=generation)
+    runtime._closed = True
+
+    with pytest.raises(ConversationClosedError):
+        asyncio.run(runtime.start_agent_run(_request()))
+
+    assert generation.handles == []
+
+
+def test_detach_closes_adapter_handle_but_keeps_running_generation_alive() -> None:
+    async def scenario() -> None:
+        package = SimpleNamespace()
+        generation = RuntimeGeneration(
+            "generation-1",
+            state=RuntimeGenerationState.ACTIVE,
+            loaded_packages={"package-1": package},
+        )
+        adapter_handle = generation.acquire_loaded_package("package-1")
+        runtime = _runtime(
+            _operation_result("succeeded"),
+            generation=generation,
+            adapter_handle=adapter_handle,
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def followup_and_wait(message, **kwargs):
+            started.set()
+            await release.wait()
+            return SimpleNamespace(
+                operation_result=_operation_result("succeeded"), accepted=None
+            )
+
+        runtime._agent.followup_and_wait = followup_and_wait
+        task = asyncio.create_task(runtime.start_agent_run(_request()))
+        await started.wait()
+
+        runtime.detach()
+        generation.retire()
+        assert adapter_handle.closed
+        assert generation.operation_ref_count == 1
+        assert not generation.closed
+
+        release.set()
+        await task
+        await generation.wait_closed()
+        assert generation.operation_ref_count == 0
+        assert generation.closed
+
+    asyncio.run(scenario())

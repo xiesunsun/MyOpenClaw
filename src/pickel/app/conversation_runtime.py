@@ -63,7 +63,7 @@ from pickel.providers.stream import (
     ThinkingDelta,
 )
 from pickel.app.runtime_generation import LoadedPackageHandle
-from pickel.runtime.agent import Agent
+from pickel.runtime.agent import Agent, AgentBusyError
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.shared.conversation_output import (
@@ -133,10 +133,7 @@ class ConversationRuntime:
         self._runtime_bus = RuntimeBus()
         self._events = self._runtime_bus.events
         self._outputs = ConversationOutputBus()
-        self._active_task: asyncio.Task[Any] | None = None
         self._closed = False
-        self._release_package_after_task = False
-        self._control_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._event_processors: list[tuple[EventProcessor, Callable[[], None]]] = []
         self._trace_sink: JsonlTraceSink | None = None
@@ -197,16 +194,12 @@ class ConversationRuntime:
     async def _execute_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
         if self._closed:
             raise ConversationClosedError("Conversation 已关闭")
-        task = asyncio.current_task()
-        if task is None:
-            raise RuntimeError("AgentRun 必须运行在 asyncio.Task 中")
-        async with self._control_lock:
-            if self._active_task is not None:
-                raise OperationInProgressError(
-                    "当前 Conversation 已有 Operation 正在执行"
-                )
-            self._active_task = task
-            operation_id = self._session.active_operation_id or "pending"
+        temporary_package_handle = None
+        if self._runtime_generation is not None:
+            temporary_package_handle = self._runtime_generation.acquire_loaded_package(
+                self._loaded_agent_package.version.package_version_id
+            )
+        operation_id = self._session.active_operation_id or "pending"
         started = time.perf_counter()
         timer = SpanTimer(
             "pickel.agent_run",
@@ -235,11 +228,10 @@ class ConversationRuntime:
                 )
 
         try:
-            # UI 前台拥有本次 when_idle drive，避免 followup 的自动 wake 抢先消费消息。
-            await self._agent.inbox.send(request.message, delivery="followup")
-            result = await self._agent.when_idle(
-                host_calls=self._runtime_bus.host_calls.client,
+            result = await self._agent.followup_and_wait(
+                request.message,
                 consume_delta=consume_delta,
+                host_calls=self._runtime_bus.host_calls.client,
             )
             if result.accepted is not None:
                 operation_id = result.accepted.operation.operation_id
@@ -355,6 +347,10 @@ class ConversationRuntime:
             )
             self._refresh_session()
             raise
+        except AgentBusyError as exc:
+            raise OperationInProgressError(
+                "当前 Conversation 已有 Operation 正在执行"
+            ) from exc
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             envelope = EventEnvelope(
@@ -388,12 +384,8 @@ class ConversationRuntime:
                 ),
             )
         finally:
-            async with self._control_lock:
-                if self._active_task is task:
-                    self._active_task = None
-                    if self._release_package_after_task:
-                        self._release_package_after_task = False
-                        self._close_loaded_package_handle()
+            if temporary_package_handle is not None:
+                temporary_package_handle.close_sync()
 
     def subscribe(self, handler: RuntimeEventHandler) -> Callable[[], None]:
         return self._events.subscribe(handler)
@@ -574,12 +566,7 @@ class ConversationRuntime:
             task.cancel()
         self._background_tasks.clear()
         self._outputs.clear()
-        if self._active_task is None:
-            self._close_loaded_package_handle()
-        else:
-            # detach 不得让仍在运行的 Operation 失去其 Generation；在终态
-            # finally 中释放精确 Package Handle。
-            self._release_package_after_task = True
+        self._close_loaded_package_handle()
         self._closed = True
         on_detach = self._on_detach
         self._on_detach = None
