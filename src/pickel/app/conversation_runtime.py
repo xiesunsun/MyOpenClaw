@@ -61,6 +61,7 @@ from pickel.observe.records import (
 from pickel.providers.stream import (
     TextDelta,
     ThinkingDelta,
+    ToolCallArgsDelta,
 )
 from pickel.app.runtime_generation import LoadedPackageHandle
 from pickel.runtime.agent import Agent, AgentBusyError
@@ -371,6 +372,7 @@ class ConversationRuntime:
                 attributes={"outcome": "failed"},
                 error=ErrorInfo.from_exception(exc, kind="agent_run"),
             )
+            self._refresh_session()
             return AgentRunResult(
                 status="failed",
                 session_id=self._session.session_id,

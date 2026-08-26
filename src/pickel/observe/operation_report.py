@@ -65,8 +65,7 @@ def export_operation_report(
                 "events": _read_trace_events(trace_path(session.session_id)),
             }
         )
-    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
-    target.write_text(_html_document(encoded), encoding="utf-8")
+    target.write_text(_html_document(payload), encoding="utf-8")
     return target
 
 
@@ -84,13 +83,124 @@ def _read_trace_events(path: Path) -> list[dict]:
     return events
 
 
-def _html_document(encoded: str) -> str:
+def _text(value: object) -> str:
+    return html.escape("—" if value is None or value == "" else str(value))
+
+
+def _json(value: object) -> str:
+    return html.escape(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def _message_content(message: dict) -> str:
+    blocks = message.get("message", {}).get("content", [])
+    rendered = []
+    for block in blocks:
+        block_type = block.get("type")
+        if block_type == "text":
+            rendered.append(f'<p class="message-text">{_text(block.get("text"))}</p>')
+        elif block_type == "thinking":
+            rendered.append(
+                f'<p class="muted message-text">思考：{_text(block.get("thinking"))}</p>'
+            )
+        else:
+            rendered.append(f'<pre class="compact">{_json(block)}</pre>')
+    return "".join(rendered) or '<p class="muted">无内容</p>'
+
+
+def _event_view(event: dict) -> tuple[str, str, str, str]:
+    record_type = str(event.get("record_type", "runtime_event"))
+    if record_type == "span":
+        payload = event.get("payload") or {}
+        name = str(payload.get("name", "span"))
+        status = str(payload.get("status", "unknown"))
+        occurred_at = str(payload.get("started_at", event.get("recorded_at", "")))
+        error = payload.get("error") or {}
+        summary = str(error.get("message") or payload.get("attributes") or "")
+        return name, status, occurred_at, summary
+    name = str(event.get("event_type", record_type))
+    status = "error" if name.endswith("failed") else "event"
+    occurred_at = str(event.get("occurred_at", event.get("recorded_at", "")))
+    summary = str(
+        event.get("message")
+        or event.get("text")
+        or event.get("outcome")
+        or event.get("user_text")
+        or ""
+    )
+    return name, status, occurred_at, summary
+
+
+def _session_section(item: dict) -> str:
+    session = item["session"]
+    messages = item["messages"]
+    events = item["events"]
+    failures = sum(_event_view(event)[1] == "error" for event in events)
+    message_rows = (
+        "".join(f"""<article class="message {message['role']}">
+<header><span class="badge">{_text(message['role'])}</span>
+<time>{_text(message['created_at'])}</time></header>
+{_message_content(message)}
+<footer>node {_text(message['node_id'])} · parent {_text(message['parent_node_id'])}</footer>
+</article>""" for message in messages)
+        or '<p class="empty">本次会话尚无已持久化消息</p>'
+    )
+    event_rows = (
+        "".join(f"""<tr class="{_text(_event_view(event)[1])}">
+<td><span class="status">{_text(_event_view(event)[1])}</span></td>
+<td><strong>{_text(_event_view(event)[0])}</strong><br><span class="summary">{_text(_event_view(event)[3])}</span></td>
+<td><time>{_text(_event_view(event)[2])}</time></td>
+<td><code>{_text(event.get('operation_id'))}</code></td>
+<td><details><summary>详情</summary><pre class="compact">{_json(event)}</pre></details></td>
+</tr>""" for event in events)
+        or '<tr><td colspan="5" class="empty">没有观测事件</td></tr>'
+    )
+    health = "异常" if failures else "正常"
+    health_class = "danger" if failures else "ok"
+    return f"""<section class="session">
+<div class="session-head"><div><span class="eyebrow">CONVERSATION SESSION</span>
+<h2>{_text(session.get('title') or session['agent_id'])}</h2>
+<code>{_text(session['session_id'])}</code></div>
+<span class="health {health_class}">{health}</span></div>
+<div class="metrics">
+<div><strong>{len(messages)}</strong><span>消息</span></div>
+<div><strong>{len(events)}</strong><span>事件</span></div>
+<div><strong>{failures}</strong><span>错误</span></div>
+<div><strong>{_text(session.get('active_operation_id'))}</strong><span>活动 Operation</span></div>
+</div>
+<dl class="metadata">
+<div><dt>Agent</dt><dd>{_text(session['agent_id'])}</dd></div>
+<div><dt>Workspace</dt><dd>{_text(session['workspace_id'])}</dd></div>
+<div><dt>工作目录</dt><dd>{_text(session['cwd'])}</dd></div>
+<div><dt>更新时间</dt><dd>{_text(session['updated_at'])}</dd></div>
+</dl>
+<h3>对话</h3><div class="conversation">{message_rows}</div>
+<h3>执行事件</h3><div class="table-wrap"><table>
+<thead><tr><th>状态</th><th>事件</th><th>时间</th><th>Operation</th><th>原始记录</th></tr></thead>
+<tbody>{event_rows}</tbody></table></div>
+</section>"""
+
+
+def _html_document(payload: list[dict]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+    sections = "".join(_session_section(item) for item in payload)
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pickel Operation Report</title>
-<style>body{{font:14px ui-monospace,monospace;margin:2rem;max-width:1200px}}
-pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fa;padding:1rem}}</style>
-</head><body><h1>Pickel Operation Report</h1>
-<p>Conversation facts and derived runtime events. Recovery uses persisted Operation State, not this report.</p>
-<pre>{html.escape(encoded)}</pre></body></html>"""
+<style>
+:root{{--bg:#f4f7fb;--panel:#fff;--line:#dfe5ec;--text:#17212b;--muted:#667382;--blue:#2563eb;--red:#b42318;--red-bg:#fff1f0;--green:#067647;--green-bg:#ecfdf3}}
+*{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+main{{max-width:1440px;margin:auto;padding:32px}} h1{{margin:4px 0;font-size:28px}} h2{{margin:3px 0 0;font-size:21px}} h3{{margin:28px 0 10px;font-size:15px}} code,pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}} .intro,.muted,time,footer,.summary{{color:var(--muted)}}
+.session{{margin-top:24px;padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 24px #1f29370a}} .session-head{{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}} .eyebrow{{font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--blue)}}
+.health,.status,.badge{{display:inline-block;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:650}} .health.ok{{color:var(--green);background:var(--green-bg)}} .health.danger,.error .status{{color:var(--red);background:var(--red-bg)}} .event .status{{color:var(--blue);background:#eff6ff}} .ok .status{{color:var(--green);background:var(--green-bg)}}
+.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:20px 0}} .metrics div{{padding:12px 14px;background:#f8fafc;border:1px solid var(--line);border-radius:9px}} .metrics strong{{display:block;font-size:20px;overflow:hidden;text-overflow:ellipsis}} .metrics span{{color:var(--muted);font-size:12px}}
+.metadata{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;margin:0;border:1px solid var(--line);border-radius:9px;overflow:hidden}} .metadata div{{display:grid;grid-template-columns:110px 1fr;padding:8px 11px;border-bottom:1px solid var(--line)}} .metadata div:nth-last-child(-n+2){{border-bottom:0}} dt{{color:var(--muted)}} dd{{margin:0;overflow-wrap:anywhere}}
+.conversation{{display:grid;gap:10px}} .message{{border:1px solid var(--line);border-left:4px solid #94a3b8;border-radius:8px;padding:12px 14px}} .message.assistant{{border-left-color:var(--blue);background:#f8fbff}} .message header{{display:flex;justify-content:space-between;gap:12px}} .message footer{{font-size:11px;overflow-wrap:anywhere}} .message-text{{margin:10px 0;white-space:pre-wrap}} .badge{{background:#eef2f6}}
+.table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}} th{{color:var(--muted);font-size:11px;text-transform:uppercase}} td:nth-child(2){{min-width:260px}} td:nth-child(3){{white-space:nowrap}} details summary{{cursor:pointer;color:var(--blue)}} pre.compact{{max-width:780px;margin:8px 0 0;padding:10px;background:#111827;color:#e5e7eb;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}} .empty{{padding:22px;color:var(--muted);text-align:center}}
+.raw{{margin-top:24px}} .raw>summary{{font-weight:650}} @media(max-width:760px){{main{{padding:16px}}.metrics,.metadata{{grid-template-columns:1fr}}.metadata div{{border-bottom:1px solid var(--line)!important}}}}
+</style></head><body><main>
+<span class="eyebrow">PICKEL OBSERVABILITY</span><h1>Operation Report</h1>
+<p class="intro">Conversation 事实与运行轨迹。执行恢复以持久化 Operation State 为准，本报告仅用于诊断。</p>
+{sections}
+<details class="raw"><summary>完整原始数据</summary><pre data-report-json>{html.escape(encoded)}</pre></details>
+</main></body></html>"""

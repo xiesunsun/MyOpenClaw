@@ -8,7 +8,7 @@ from pickel.context.history_compaction import HistoryCompaction
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
-from pickel.observe.operation_report import export_operation_report
+from pickel.observe.operation_report import _html_document, export_operation_report
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 
 
@@ -44,7 +44,7 @@ def test_report_uses_current_session_and_conversation_node_contract(tmp_path) ->
     )
 
     document = path.read_text(encoding="utf-8")
-    encoded = document.split("<pre>", 1)[1].split("</pre>", 1)[0]
+    encoded = document.split("<pre data-report-json>", 1)[1].split("</pre>", 1)[0]
     payload = json.loads(html.unescape(encoded))
     exported = payload[0]
     assert exported["session"] == {
@@ -70,3 +70,43 @@ def test_report_uses_current_session_and_conversation_node_contract(tmp_path) ->
     ]
     assert "status" not in exported["session"]
     assert "commit_sequence" not in exported["session"]
+    assert "Operation Report" in document
+    assert "对话" in document
+    assert "执行事件" in document
+    assert "hello" in document
+    assert "world" in document
+
+
+def test_report_surfaces_runtime_failure_without_hiding_raw_record() -> None:
+    payload = [
+        {
+            "session": {
+                "session_id": "session-1",
+                "agent_id": "Pickle",
+                "workspace_id": "workspace-1",
+                "cwd": "/workspace",
+                "active_operation_id": None,
+                "title": None,
+                "updated_at": "2026-08-26T00:00:00+00:00",
+            },
+            "messages": [],
+            "events": [
+                {
+                    "record_type": "runtime_event",
+                    "event_type": "agent_run_failed",
+                    "operation_id": "pending",
+                    "occurred_at": "2026-08-26T00:00:01+00:00",
+                    "error_type": "NameError",
+                    "message": "missing delta type",
+                }
+            ],
+        }
+    ]
+
+    document = _html_document(payload)
+
+    assert '<span class="health danger">异常</span>' in document
+    assert "agent_run_failed" in document
+    assert "missing delta type" in document
+    encoded = document.split("<pre data-report-json>", 1)[1].split("</pre>", 1)[0]
+    assert json.loads(html.unescape(encoded)) == payload

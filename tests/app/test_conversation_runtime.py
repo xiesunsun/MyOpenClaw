@@ -20,7 +20,10 @@ from pickel.runtime.runtime_events import (
     AgentRunCompleted,
     AgentRunFailed,
     AssistantMessageEvent,
+    ToolCallArgsDeltaEvent,
 )
+from pickel.providers.stream import ToolCallArgsDelta
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.operations.agent_run_state import AgentRunError
 from pickel.app.runtime_generation import RuntimeGeneration, RuntimeGenerationState
 from pickel.runtime.agent import AgentBusyError
@@ -185,6 +188,39 @@ def test_missing_operation_result_is_blocked() -> None:
     assert completed.outcome == "blocked"
 
 
+def test_tool_call_args_delta_reaches_application_event_bus() -> None:
+    runtime = _runtime(_operation_result("succeeded"))
+    events = []
+    runtime.subscribe(events.append)
+
+    async def followup_and_wait(message, **kwargs):
+        identity = ExecutionIdentity(
+            session_id="session-1",
+            operation_id="op-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+        )
+        await kwargs["consume_delta"](
+            ToolCallArgsDelta(
+                tool_call_id="call-1",
+                partial_json='{"query":',
+            ),
+            identity,
+        )
+        return SimpleNamespace(
+            operation_result=_operation_result("succeeded"),
+            accepted=None,
+        )
+
+    runtime._agent.followup_and_wait = followup_and_wait
+
+    asyncio.run(runtime.start_agent_run(_request()))
+
+    delta = next(event for event in events if isinstance(event, ToolCallArgsDeltaEvent))
+    assert delta.partial_json == '{"query":'
+    assert delta.envelope.identity.tool_call_id == "call-1"
+
+
 def test_persisted_failure_emits_failure_and_preserves_message_usage() -> None:
     usage = AgentRunUsage(steps=1, elapsed_ms=55)
     message = AssistantMessage(content=(TextBlock("partial"),))
@@ -218,6 +254,28 @@ def test_unknown_operation_status_is_explicit_failure() -> None:
     assert result.status == "failed"
     assert result.error is not None
     assert "未知 Operation status" in result.error.message
+
+
+def test_unexpected_failure_refreshes_session_before_observation() -> None:
+    runtime = _runtime(_operation_result("succeeded"))
+    refreshed_session = SimpleNamespace(
+        session_id="session-1",
+        active_operation_id="accepted-op",
+        active_node_id="user-node",
+    )
+    runtime._conversation_service.load_conversation_session = (
+        lambda _session_id: refreshed_session
+    )
+
+    async def failed_followup(message, **kwargs):
+        raise NameError("missing delta type")
+
+    runtime._agent.followup_and_wait = failed_followup
+
+    result = asyncio.run(runtime.start_agent_run(_request()))
+
+    assert result.status == "failed"
+    assert runtime.session is refreshed_session
 
 
 def test_busy_agent_maps_to_application_error_without_failed_result() -> None:
