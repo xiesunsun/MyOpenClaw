@@ -24,7 +24,6 @@ from pickel.cli.slash import (
     SlashCompleter,
     parse_slash,
 )
-from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
@@ -103,12 +102,6 @@ class ChatLoop:
         return self._host.boot if self._host is not None else None
 
     @property
-    def _app_config(self) -> AppConfig | None:
-        if self._host is not None:
-            return self._host.app_config
-        return self._conversation.app_config
-
-    @property
     def _tool_bus(self):
         return self._boot.tool_bus if self._boot is not None else None
 
@@ -137,8 +130,7 @@ class ChatLoop:
         """
         renderer = ChatEventRenderer(
             self.console,
-            # usage=None 时 footer 退到这个 label；agent.model_config 在
-            # /model 切换时被 run 原地更新（run.py），每轮取即最新
+            # usage=None 时 footer 退到这个 label。
             fallback_model_label=(
                 f"{self._conversation.model_config.provider} / "
                 f"{self._conversation.model_config.model}"
@@ -236,56 +228,6 @@ class ChatLoop:
     def _close_session(self) -> None:
         self._conversation.archive()
 
-    def _list_available_models(self) -> list[str]:
-        if self._host is not None:
-            return [item.model_id for item in self._host.list_models()]
-        if self._app_config is None:
-            return []
-        return [
-            f"{provider}/{model}"
-            for provider in sorted(self._app_config.providers)
-            for model in sorted(self._app_config.providers[provider].models)
-        ]
-
-    def _handle_model_command(self, arg: str | None) -> None:
-        if self._app_config is None:
-            self._render_error_message("AppConfig 未提供，无法使用 /model")
-            return
-        if not arg:
-            lines = self._list_available_models()
-            if not lines:
-                self._render_system_message("无可用模型。")
-                return
-            current = self._conversation.snapshot().model_id
-            body = "Available models:\n" + "\n".join(lines) + f"\n\nCurrent: {current}"
-            self._render_system_message(body)
-            return
-        try:
-            selection = self._conversation.set_model(arg)
-            self._render_system_message(
-                f"Model set to {selection.provider}/{selection.model}"
-            )
-        except (KeyError, ValueError) as exc:
-            self._render_error_message(str(exc))
-
-    def _handle_thinking_command(self, arg: str | None) -> None:
-        if self._app_config is None:
-            self._render_error_message("AppConfig 未提供，无法使用 /thinking")
-            return
-        if not arg:
-            current = self._conversation.snapshot().thinking
-            self._render_system_message(
-                f"thinking: {current if current is not None else '(unset)'}\n"
-                "Usage: /thinking <level>"
-            )
-            return
-        level = arg.strip()
-        try:
-            self._conversation.set_thinking(level)
-            self._render_system_message(f"thinking set to {level}")
-        except ValueError as exc:
-            self._render_error_message(str(exc))
-
     def _handle_agent_command(self, arg: str | None) -> None:
         if self._host is None:
             self._render_error_message("Boot/AppConfig 未提供，无法使用 /agent")
@@ -369,16 +311,12 @@ class ChatLoop:
 
     def complete(self, kind: str, argument: str) -> tuple[str, ...]:
         """SlashCompleter 的动态真源。"""
-        if kind == "models":
-            return tuple(self._list_available_models())
         if kind == "agents":
             return (
                 tuple(item.agent_id for item in self._host.list_agents())
                 if self._host is not None
                 else ()
             )
-        if kind == "thinking":
-            return ("off", "low", "medium", "high", "xhigh")
         if kind == "tools":
             try:
                 return tuple(item.name for item in self._conversation.list_tools())
@@ -403,14 +341,6 @@ class ChatLoop:
 
     def _command_help(self, _arg: str | None) -> bool:
         self._render_help()
-        return True
-
-    def _command_model(self, arg: str | None) -> bool:
-        self._handle_model_command(arg)
-        return True
-
-    def _command_thinking(self, arg: str | None) -> bool:
-        self._handle_thinking_command(arg)
         return True
 
     def _command_agent(self, arg: str | None) -> bool:

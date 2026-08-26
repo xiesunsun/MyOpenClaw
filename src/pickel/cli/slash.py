@@ -95,25 +95,11 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
     [
         SlashCommand("help", "Show this help message", "/help", "_command_help"),
         SlashCommand(
-            "model",
-            "List or set provider/model",
-            "/model [provider/model]",
-            "_command_model",
-            "models",
-        ),
-        SlashCommand(
             "mcp",
             "Show MCP server status",
             "/mcp [server]",
             "_command_mcp",
             "mcp_servers",
-        ),
-        SlashCommand(
-            "thinking",
-            "Show or set thinking level",
-            "/thinking [level]",
-            "_command_thinking",
-            "thinking",
         ),
         SlashCommand(
             "agent",

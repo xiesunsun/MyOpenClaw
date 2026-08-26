@@ -1,20 +1,20 @@
+import asyncio
 import unittest
+from unittest.mock import MagicMock
 
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
+from pickel.cli.chat import ChatLoop
 from pickel.cli.slash import BUILTIN_SLASH_COMMANDS, SlashCompleter, parse_slash
 
 
 class _Sources:
     def __init__(self) -> None:
-        self.models = ["anthropic/ClaudeCase"]
         self.pending = ["AbC123"]
         self.mcp_servers = ["GitHub"]
 
     def complete(self, kind: str, argument: str):
-        if kind == "models":
-            return tuple(self.models)
         if kind == "skills":
             if argument.startswith("approve "):
                 return tuple(self.pending)
@@ -41,17 +41,26 @@ class SlashCompleterTests(unittest.TestCase):
 
     def test_only_slash_input_has_completions(self) -> None:
         self.assertEqual([], _values(self.completer, "hello"))
-        self.assertIn("/model", _values(self.completer, "/mo"))
+        self.assertEqual([], _values(self.completer, "/mo"))
+        self.assertIn("/mcp", _values(self.completer, "/mc"))
 
-    def test_argument_completion_reads_current_source_each_time(self) -> None:
-        self.assertEqual(
-            ["anthropic/ClaudeCase"],
-            _values(self.completer, "/model anth"),
-        )
-        self.sources.models = ["anthropic/Changed"]
-        self.assertEqual(
-            ["anthropic/Changed"],
-            _values(self.completer, "/model anth"),
+    def test_model_and_thinking_are_not_registered_or_completed(self) -> None:
+        self.assertIsNone(BUILTIN_SLASH_COMMANDS.get("model"))
+        self.assertIsNone(BUILTIN_SLASH_COMMANDS.get("thinking"))
+        self.assertEqual([], _values(self.completer, "/model "))
+        self.assertEqual([], _values(self.completer, "/thinking "))
+
+    def test_removed_commands_are_not_dispatched(self) -> None:
+        loop = object.__new__(ChatLoop)
+        loop._slash_registry = BUILTIN_SLASH_COMMANDS
+        loop._render_error_message = MagicMock()
+
+        asyncio.run(loop._handle_command("/model anthropic/test"))
+        asyncio.run(loop._handle_command("/thinking high"))
+
+        self.assertEqual(2, loop._render_error_message.call_count)
+        self.assertIn(
+            "Unknown command", loop._render_error_message.call_args_list[0].args[0]
         )
 
     def test_nested_skill_completion_preserves_candidate_case(self) -> None:

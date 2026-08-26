@@ -550,12 +550,6 @@ class ConversationRuntime:
         self._loaded_package_handle = None
         handle.close_sync()
 
-    def set_model(self, model_id: str):
-        raise ValueError("模型切换需要创建新的 AgentPackageVersion 并重装 Runtime")
-
-    def set_thinking(self, level: str) -> None:
-        raise ValueError("thinking 切换需要创建新的 AgentPackageVersion 并重装 Runtime")
-
     def export_observation(self, out: Path | None = None) -> Path:
         self.flush()
         return export_operation_report(
