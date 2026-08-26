@@ -10,6 +10,10 @@ from pickel.runtime.operation_driver import OperationDriveResult
 from pickel.runtime.agent_inbox import AgentInbox
 
 
+class AgentBusyError(RuntimeError):
+    """Agent 已有前台驱动占用时，拒绝新的原子 followup。"""
+
+
 class Agent:
     """一个 Session 的平等消息、取消和等待接口。
 
@@ -43,6 +47,24 @@ class Agent:
         message_id = await self._inbox.send(message, delivery="followup")
         self._driver.wake(self._session_id)
         return message_id
+
+    async def followup_and_wait(
+        self, message: UserMessage, *, consume_delta=None, host_calls=None
+    ) -> AgentDriveResult:
+        """原子写入前台 followup 并立即驱动一次。
+
+        该入口用于前台调用方把消息接受和驱动绑定为一个不可交错的操作：
+        驱动已被占用时在写入 Inbox 前直接报告忙碌，不额外触发 wake。
+        """
+        if self._drive_lock.locked():
+            raise AgentBusyError("Agent 当前正在驱动，不能接受前台 followup")
+        async with self._drive_lock:
+            await self._inbox.send(message, delivery="followup")
+            return await self._driver.when_idle(
+                session_id=self._session_id,
+                consume_delta=consume_delta,
+                host_calls=host_calls,
+            )
 
     async def steer(self, message: UserMessage) -> str:
         message_id = await self._inbox.send(message, delivery="steer")

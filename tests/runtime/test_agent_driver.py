@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from pickel.persistence.errors import StorageConflictError
-from pickel.runtime.agent import Agent
+from pickel.runtime.agent import Agent, AgentBusyError
 from pickel.runtime.agent_driver import AgentDriver
 
 
@@ -237,6 +237,173 @@ def test_agent_message_delivery_wakes_only_followup_and_steer():
         await agent.steer(SimpleNamespace())
         await agent.inject(SimpleNamespace())
         assert driver.wakes == ["session-1", "session-1"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_followup_and_wait_rejects_busy_before_writing_inbox():
+    class Inbox:
+        session_id = "session-1"
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, message, *, delivery):
+            self.sent.append((message, delivery))
+            return "message-1"
+
+    class Driver:
+        async def when_idle(self, **kwargs):
+            del kwargs
+            await asyncio.Event().wait()
+
+    async def scenario():
+        inbox = Inbox()
+        agent = Agent(session_id="session-1", inbox=inbox, driver=Driver())
+        running = asyncio.create_task(agent.when_idle())
+        await asyncio.sleep(0)
+        with pytest.raises(AgentBusyError):
+            await agent.followup_and_wait(SimpleNamespace())
+        assert inbox.sent == []
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    asyncio.run(scenario())
+
+
+def test_agent_followup_and_wait_sends_once_forwards_arguments_without_wake():
+    class Inbox:
+        session_id = "session-1"
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, message, *, delivery):
+            self.sent.append((message, delivery))
+            return "message-1"
+
+    class Driver:
+        def __init__(self):
+            self.calls = []
+            self.wakes = []
+            self.result = SimpleNamespace(operation_result=None)
+
+        def wake(self, session_id):
+            self.wakes.append(session_id)
+
+        async def when_idle(self, **kwargs):
+            self.calls.append(kwargs)
+            return self.result
+
+    async def scenario():
+        inbox = Inbox()
+        driver = Driver()
+        agent = Agent(session_id="session-1", inbox=inbox, driver=driver)
+        consume_delta = object()
+        host_calls = object()
+        result = await agent.followup_and_wait(
+            SimpleNamespace(), consume_delta=consume_delta, host_calls=host_calls
+        )
+        assert result is driver.result
+        assert len(inbox.sent) == 1
+        assert inbox.sent[0][1] == "followup"
+        assert driver.calls == [
+            {
+                "session_id": "session-1",
+                "consume_delta": consume_delta,
+                "host_calls": host_calls,
+            }
+        ]
+        assert driver.wakes == []
+
+    asyncio.run(scenario())
+
+
+def test_agent_followup_and_wait_does_not_run_concurrently_with_when_idle():
+    class Inbox:
+        session_id = "session-1"
+
+        async def send(self, message, *, delivery):
+            del message, delivery
+            return "message-1"
+
+    class Driver:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def when_idle(self, **kwargs):
+            del kwargs
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started.set()
+            await self.release.wait()
+            self.active -= 1
+            return SimpleNamespace(operation_result=None)
+
+    async def scenario():
+        driver = Driver()
+        agent = Agent(session_id="session-1", inbox=Inbox(), driver=driver)
+        background = asyncio.create_task(agent.when_idle())
+        await driver.started.wait()
+        with pytest.raises(AgentBusyError):
+            await agent.followup_and_wait(SimpleNamespace())
+        driver.release.set()
+        await background
+        assert driver.max_active == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_agent_followup_and_wait_releases_lock_after_failure_or_cancellation(cancelled):
+    class Inbox:
+        session_id = "session-1"
+
+        def __init__(self):
+            self.sent = 0
+
+        async def send(self, message, *, delivery):
+            del message, delivery
+            self.sent += 1
+            return f"message-{self.sent}"
+
+    class Driver:
+        def __init__(self):
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def when_idle(self, **kwargs):
+            del kwargs
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                if cancelled:
+                    await asyncio.Event().wait()
+                self.release.set()
+                raise ValueError("drive failed")
+            return SimpleNamespace(operation_result=None)
+
+    async def scenario():
+        inbox = Inbox()
+        driver = Driver()
+        agent = Agent(session_id="session-1", inbox=inbox, driver=driver)
+        first = asyncio.create_task(agent.followup_and_wait(SimpleNamespace()))
+        await driver.started.wait()
+        if cancelled:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            with pytest.raises(ValueError, match="drive failed"):
+                await first
+        result = await agent.followup_and_wait(SimpleNamespace())
+        assert result.operation_result is None
+        assert inbox.sent == 2
 
     asyncio.run(scenario())
 
