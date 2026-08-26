@@ -19,6 +19,9 @@ _DEFAULT_WIRE_PROTOCOLS = {
     "openai": "openai-responses",
     "google/gemini": "gemini-generate-content",
 }
+_PROVIDER_DEFAULT_API_BASES = {
+    "opencode-go": "https://opencode.ai/zen/go/v1",
+}
 from pickel.tools.sandbox import SandboxSettings
 
 
@@ -26,10 +29,16 @@ class ProviderCatalog(BaseModel):
     models: dict[str, ProviderModelConfig]
 
 
+class AgentModels(BaseModel):
+    primary: ModelSelection | None = None
+    worker: ModelSelection | None = None
+    utility: ModelSelection | None = None
+
+
 class AgentConfig(BaseModel):
     workspace_path: Path
     behavior_path: Path
-    llm: ModelSelection | None = None
+    models: AgentModels = Field(default_factory=AgentModels)
     tools: list[str] = Field(default_factory=list)
     # "*" 保持旧 Agent 的全量装配语义；新 Agent 应显式声明运行所需 Extension。
     extensions: list[str] = Field(default_factory=lambda: ["*"])
@@ -191,6 +200,12 @@ class AppConfig(BaseModel):
             data["api_key"] = auth_entry["api_key"]
         if data.get("api_base") is None and auth_entry.get("api_base") is not None:
             data["api_base"] = auth_entry["api_base"]
+        if data.get("api_base") is None:
+            data["api_base"] = _PROVIDER_DEFAULT_API_BASES.get(
+                resolved_selection.provider
+            )
+        if resolved_selection.provider == "opencode-go" and not data.get("api_key"):
+            raise ValueError("OpenCode Go 需要 providers.opencode-go.api_key")
         model = ModelConfig.model_validate(data)
         if environ is not None:
             model = environ.overlay_model_config(model)

@@ -20,7 +20,7 @@ _YAML_FIELDS = frozenset(
         "tools",
         "extensions",
         "file_access_mode",
-        "llm",
+        "models",
         "remote_agent_id",
         "skills_path",
         "behavior_path",
@@ -68,6 +68,8 @@ def load_agent_dir(agent_dir: Path, project_root: Path) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise ValueError(f"Invalid agent.yaml at {yaml_path}: expected mapping")
         data = expand_env_vars(raw)
+        if "llm" in data:
+            raise ValueError(f"{yaml_path} 不再支持 llm；请改为 models.primary")
 
     config: dict[str, Any] = {
         key: value for key, value in data.items() if key in _YAML_FIELDS

@@ -481,6 +481,30 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(root / "custom-skills", config.resolve_skills_path())
 
+    def test_opencode_go_requires_key_only_when_selected(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(textwrap.dedent("""
+                    default_agent: Pickle
+                    default_llm:
+                      provider: opencode-go
+                      model: kimi-k3
+                    providers:
+                      opencode-go:
+                        models:
+                          kimi-k3:
+                            wire_protocol: openai-chat-completions
+                    agents:
+                      Pickle:
+                        workspace_path: .
+                        behavior_path: .
+                    """).strip())
+            config = app_config_from_yaml_file(config_path)
+
+            with self.assertRaisesRegex(ValueError, "OpenCode Go 需要"):
+                config.resolve_model_config()
+
 
 if __name__ == "__main__":
     unittest.main()

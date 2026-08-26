@@ -19,6 +19,8 @@ from pickel.config.app_config import ModelSelection
 from pickel.extensions_host.host import ExtensionHost
 from pickel.extensions_host.registry import ExtensionRegistry
 from pickel.providers.openai import OpenAIResponsesProvider
+from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
+from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.tools.bus import ToolSource
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
@@ -60,7 +62,7 @@ def test_loads_the_stored_version_instead_of_rebuilding_current_config(
     config.providers["anthropic"].models["claude-current"] = config.providers[
         "anthropic"
     ].models["claude-test"]
-    config.agents["Pickle"].llm = ModelSelection(
+    config.agents["Pickle"].models.primary = ModelSelection(
         provider="anthropic", model="claude-current"
     )
 
@@ -102,7 +104,7 @@ def test_new_package_with_unsupported_provider_has_stable_failure_code(
     config.providers["google/gemini"].models[
         "gemini-test"
     ].wire_protocol = "gemini-generate-content"
-    config.agents["Pickle"].llm = ModelSelection(
+    config.agents["Pickle"].models.primary = ModelSelection(
         provider="google/gemini", model="gemini-test"
     )
     boot = Boot(config, tool_bus=_tool_bus())
@@ -121,7 +123,7 @@ def test_new_and_frozen_packages_load_openai_responses_provider(tmp_path: Path) 
     config.providers["openai"] = type(config.providers["anthropic"])(
         models={"gpt-5.6-luna": config.providers["anthropic"].models["claude-test"]}
     )
-    config.agents["Pickle"].llm = ModelSelection(
+    config.agents["Pickle"].models.primary = ModelSelection(
         provider="openai", model="gpt-5.6-luna"
     )
     boot = Boot(config, tool_bus=_tool_bus())
@@ -141,6 +143,74 @@ def test_new_and_frozen_packages_load_openai_responses_provider(tmp_path: Path) 
     assert isinstance(restored.model_clients["primary"], OpenAIResponsesProvider)
     assert current.model_clients["primary"].model == "gpt-5.6-luna"
     assert restored.version.package_version_id == current.version.package_version_id
+
+
+def test_opencode_go_dispatches_each_model_role_by_frozen_wire_protocol(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    catalog_type = type(config.providers["anthropic"])
+    model_type = type(config.providers["anthropic"].models["claude-test"])
+    config.providers["opencode-go"] = catalog_type(
+        models={
+            "gpt-5.6-luna": model_type(
+                wire_protocol="openai-responses", max_output_tokens=1024
+            ),
+            "kimi-k3": model_type(
+                wire_protocol="openai-chat-completions", max_output_tokens=1024
+            ),
+            "minimax-m3": model_type(
+                wire_protocol="anthropic-messages", max_output_tokens=1024
+            ),
+        }
+    )
+    config.auth_providers["opencode-go"] = {
+        "api_key": "go-secret",
+        "api_base": "https://opencode.ai/zen/go/v1",
+    }
+    config.agents["Pickle"].models.primary = ModelSelection(
+        provider="opencode-go", model="gpt-5.6-luna"
+    )
+    config.agents["Pickle"].models.worker = ModelSelection(
+        provider="opencode-go", model="kimi-k3"
+    )
+    config.agents["Pickle"].models.utility = ModelSelection(
+        provider="opencode-go", model="minimax-m3"
+    )
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+
+    loaded = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    )
+    store.insert_agent_package_version(loaded.version)
+    restored = boot.load_agent_package(
+        loaded.version.package_version_id,
+        store=store,
+        artifact_service=_artifact_service(store),
+    )
+
+    assert isinstance(restored.model_clients["primary"], OpenAIResponsesProvider)
+    assert isinstance(restored.model_clients["worker"], OpenAIChatCompletionsProvider)
+    assert isinstance(restored.model_clients["utility"], AnthropicMessagesProvider)
+    assert all(
+        client.provider_name == "opencode-go"
+        for client in restored.model_clients.values()
+    )
+    assert {
+        model.wire_protocol
+        for model in (
+            restored.version.model_policy.primary,
+            restored.version.model_policy.worker,
+            restored.version.model_policy.utility,
+        )
+        if model is not None
+    } == {
+        "openai-responses",
+        "openai-chat-completions",
+        "anthropic-messages",
+    }
 
 
 def test_frozen_package_with_unsupported_provider_has_stable_failure_code(

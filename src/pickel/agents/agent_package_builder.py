@@ -76,8 +76,7 @@ def _strip_secrets(value: Any, prefix: str) -> _SecretScan:
 class AgentPackageBuilder:
     """把配置解析为 Definition，再冻结为 Package。
 
-    当前 AppConfig 只有一套模型选择，因此只填充 ``primary``；缺失的
-    ``worker``/``utility`` 明确保持 None，调用方必须选择显式策略。
+    Agent 的 primary/worker/utility 选择在此解析并一起冻结进 Package。
     """
 
     def __init__(
@@ -112,12 +111,29 @@ class AgentPackageBuilder:
             agent_id=resolved_id, workspace_path=agent_config.workspace_path
         )
         skills_path = self.resolve_skills_path(resolved_id)
-        primary_config = self._app_config.resolve_model_config(agent_config.llm)
+        primary_config = self._app_config.resolve_model_config(
+            agent_config.models.primary
+        )
+        worker_config = (
+            self._app_config.resolve_model_config(agent_config.models.worker)
+            if agent_config.models.worker is not None
+            else None
+        )
+        utility_config = (
+            self._app_config.resolve_model_config(agent_config.models.utility)
+            if agent_config.models.utility is not None
+            else None
+        )
+        model_policy = ModelPolicy(
+            primary=self._model_version(primary_config),
+            worker=(self._model_version(worker_config) if worker_config else None),
+            utility=(self._model_version(utility_config) if utility_config else None),
+        )
         definition = self._build_definition(
             resolved_id,
             agent_config,
             skills_path,
-            primary_config,
+            model_policy,
             loaded_extensions,
         )
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
@@ -154,7 +170,7 @@ class AgentPackageBuilder:
         agent_id: str,
         agent_config: Any,
         skills_path: Path | None,
-        primary_config: Any,
+        model_policy: ModelPolicy,
         extension_versions: Mapping[str, ExtensionVersion] | None,
     ) -> AgentDefinition:
         runtime = AgentRuntimePolicy(
@@ -174,7 +190,7 @@ class AgentPackageBuilder:
             extension_ids=self._extension_ids(
                 agent_config.extensions, extension_versions
             ),
-            model_policy=ModelPolicy(primary=self._model_version(primary_config)),
+            model_policy=model_policy,
             runtime_policy=runtime,
         )
 

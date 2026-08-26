@@ -193,6 +193,9 @@ class MigrateFromYamlTests(unittest.TestCase):
             agent_text = agent_yaml.read_text(encoding="utf-8")
             self.assertIn("workspace_path: pickle_workspace", agent_text)
             self.assertIn("${OPENVIKING_AGENT_ID}", agent_text)
+            self.assertIn("models:", agent_text)
+            self.assertIn("primary:", agent_text)
+            self.assertNotIn("llm:", agent_text)
             # 默认 behavior 省略
             self.assertNotIn("behavior_path", agent_text)
 

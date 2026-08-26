@@ -23,9 +23,11 @@ class ExtensionsConfigTests(unittest.TestCase):
                     "Pickle": {
                         "workspace_path": ".",
                         "behavior_path": ".",
-                        "llm": {
-                            "provider": "google/gemini",
-                            "model": "gemini-3-flash-preview",
+                        "models": {
+                            "primary": {
+                                "provider": "google/gemini",
+                                "model": "gemini-3-flash-preview",
+                            }
                         },
                     }
                 },
@@ -73,9 +75,11 @@ class ExtensionsConfigTests(unittest.TestCase):
                     "Pickle": {
                         "workspace_path": ".",
                         "behavior_path": ".",
-                        "llm": {
-                            "provider": "google/gemini",
-                            "model": "gemini-3-flash-preview",
+                        "models": {
+                            "primary": {
+                                "provider": "google/gemini",
+                                "model": "gemini-3-flash-preview",
+                            }
                         },
                     }
                 },

@@ -11,6 +11,7 @@ from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.agents.agent_package import ExtensionVersion, ImplementationRef
 from pickel.app.boot import Boot
 from pickel.config.app_config import AppConfig
+from pickel.shared.model_config import ModelSelection
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.tools.base import (
@@ -155,6 +156,35 @@ def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) ->
     assert first.extensions[0].extension_id == "openviking"
     assert first.skills[0].name == "research"
     assert "Use evidence." in first.skills[0].content
+
+
+def test_builder_freezes_and_loads_three_explicit_model_roles(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    catalog = config.providers["anthropic"].models
+    catalog["claude-worker"] = catalog["claude-test"].model_copy(deep=True)
+    catalog["claude-utility"] = catalog["claude-test"].model_copy(deep=True)
+    config.agents["Pickle"].models.worker = ModelSelection(
+        provider="anthropic", model="claude-worker"
+    )
+    config.agents["Pickle"].models.utility = ModelSelection(
+        provider="anthropic", model="claude-utility"
+    )
+    store = InMemoryRuntimeStore()
+
+    loaded = Boot(config, tool_bus=_tool_bus()).resolve_loaded_agent_package(
+        artifact_service=ArtifactService(
+            artifact_store=store,
+            blob_store=InMemoryBlobStore(),
+        )
+    )
+
+    assert loaded.version.model_policy.primary.model == "claude-test"
+    assert loaded.version.model_policy.worker is not None
+    assert loaded.version.model_policy.worker.model == "claude-worker"
+    assert loaded.version.model_policy.utility is not None
+    assert loaded.version.model_policy.utility.model == "claude-utility"
+    assert set(loaded.model_clients) == {"primary", "worker", "utility"}
 
 
 def test_rejects_missing_agent_workspace_before_runtime_starts(tmp_path: Path) -> None:

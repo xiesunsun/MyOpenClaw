@@ -35,7 +35,7 @@ _AGENT_YAML_FIELDS = (
     "tools",
     "extensions",
     "file_access_mode",
-    "llm",
+    "models",
     "remote_agent_id",
     "skills_path",
     "behavior_path",
@@ -269,6 +269,9 @@ def _write_agents(
 
         # 不碰 AGENT.md
         yaml_body: dict[str, Any] = {}
+        legacy_llm = agent_cfg.get("llm")
+        if isinstance(legacy_llm, dict) and "models" not in agent_cfg:
+            yaml_body["models"] = {"primary": legacy_llm}
         for field in _AGENT_YAML_FIELDS:
             if field not in agent_cfg or agent_cfg[field] is None:
                 continue

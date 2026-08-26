@@ -362,9 +362,16 @@ AgentPackageVersion。
 workspace_path: pickle_workspace   # 文件工具工作区，≠ 会话库
 tools: [list_directory, read_file, ...]
 file_access_mode: full
-llm:
-  provider: openai
-  model: gpt-5.6-luna
+models:
+  primary:
+    provider: opencode-go
+    model: kimi-k3
+  worker:
+    provider: opencode-go
+    model: deepseek-v4-flash
+  utility:
+    provider: opencode-go
+    model: mimo-v2.5
 remote_agent_id: ${OPENVIKING_AGENT_ID}
 skills_path: null
 ```
@@ -376,7 +383,7 @@ skills_path: null
 
 ```text
 Environ                 # 对齐 Unix process environment：属进程，不属于 Session 表
-├── llm: { provider, model } | null
+├── llm: { provider, model } | null  # 只覆盖未来 Operation 的 primary
 └── provider_options: { thinking: ... } 等
 ```
 
@@ -606,7 +613,7 @@ flowchart LR
 3. 文件锁  
 4. API 分离：`set_environ(...)` 只改进程覆盖；`set_settings(..., save=True)` 写入文件
 
-Environ 变化不修改 ConversationSession 或 active Operation。下一个 Operation 接受时，Package Builder 使用最新 Environ 冻结新的 AgentPackageVersion；waiting/resume Operation 继续使用原 package_version_id。
+Environ 变化不修改 ConversationSession 或 active Operation。下一个 Operation 接受时，Package Builder 使用最新 Environ 冻结新的 AgentPackageVersion；waiting/resume Operation 继续使用原 package_version_id。Agent `models.primary/worker/utility` 都会冻结并装载；角色缺失保持 `None`，不把 primary 隐式复制到其他角色。
 
 Agent 经工具改配置：第一期可不做；先做 CLI / 斜杠命令。密钥字段禁止 agent 随意写。
 
@@ -621,7 +628,7 @@ Agent 经工具改配置：第一期可不做；先做 CLI / 斜杠命令。密�
 | 默认项 / openviking 策略 | `settings.json` |
 | providers 能力 | `models.json` |
 | api_key / api_base / openviking 密钥 | `auth.json` |
-| `agents.<id>.*` | `agents/<id>/agent.yaml` |
+| `agents.<id>.*` | `agents/<id>/agent.yaml`；旧 `llm` 一次性迁为 `models.primary` |
 | behavior 路径 | `agents/<id>/AGENT.md` |
 
 ### 9.2 会话库

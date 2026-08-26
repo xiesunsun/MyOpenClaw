@@ -62,9 +62,10 @@ class AgentsScanTests(unittest.TestCase):
                     extensions:
                       - mcp
                     file_access_mode: full
-                    llm:
-                      provider: google/gemini
-                      model: gemini-3-flash-preview
+                    models:
+                      primary:
+                        provider: google/gemini
+                        model: gemini-3-flash-preview
                     """).strip(),
                 encoding="utf-8",
             )
@@ -77,6 +78,19 @@ class AgentsScanTests(unittest.TestCase):
             self.assertEqual(["read_file"], scanned["Foo"]["tools"])
             self.assertEqual(["mcp"], scanned["Foo"]["extensions"])
             self.assertEqual("agents/Foo", scanned["Foo"]["behavior_path"])
+
+    def test_legacy_llm_field_is_rejected_instead_of_silently_ignored(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            foo = root / "agents" / "Foo"
+            foo.mkdir(parents=True)
+            (foo / "agent.yaml").write_text(
+                "llm:\n  provider: openai\n  model: gpt-test\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "models.primary"):
+                scan_agents(root)
 
     def test_config_load_finds_directory_agent(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -93,9 +107,10 @@ class AgentsScanTests(unittest.TestCase):
                       - read_file
                       - write_file
                     file_access_mode: full
-                    llm:
-                      provider: google/gemini
-                      model: gemini-3-flash-preview
+                    models:
+                      primary:
+                        provider: google/gemini
+                        model: gemini-3-flash-preview
                     """).strip(),
                 encoding="utf-8",
             )
@@ -109,9 +124,9 @@ class AgentsScanTests(unittest.TestCase):
             self.assertEqual(project.resolve() / "agents" / "Foo", agent.behavior_path)
             self.assertEqual(["read_file", "write_file"], agent.tools)
             self.assertEqual("full", agent.file_access_mode.value)
-            assert agent.llm is not None
-            self.assertEqual("google/gemini", agent.llm.provider)
-            self.assertEqual("gemini-3-flash-preview", agent.llm.model)
+            assert agent.models.primary is not None
+            self.assertEqual("google/gemini", agent.models.primary.provider)
+            self.assertEqual("gemini-3-flash-preview", agent.models.primary.model)
 
     def test_directory_agent_is_sole_agent_source(self) -> None:
         with TemporaryDirectory() as tmpdir:

@@ -131,14 +131,19 @@ class Boot:
         """先冻结 Package，再解析当前 Generation 的可执行实现。"""
         version = self._agent_package_builder.build_agent_package_version(agent_id)
         resolved_id = agent_id or self.app_config.default_agent
-        model_config = self.app_config.resolve_model_config(
-            self.app_config.get_agent_config(resolved_id).llm
-        )
-        provider = self._provider_from_config(
-            model_config,
-            package_version_id=version.package_version_id,
-            artifact_service=artifact_service,
-        )
+        model_clients = {}
+        for role, model in (
+            ("primary", version.model_policy.primary),
+            ("worker", version.model_policy.worker),
+            ("utility", version.model_policy.utility),
+        ):
+            if model is None:
+                continue
+            model_clients[role] = self._provider_from_config(
+                self._model_config_from_version(model),
+                package_version_id=version.package_version_id,
+                artifact_service=artifact_service,
+            )
         snapshot = self.tool_bus.snapshot(
             ToolActivation(
                 allowed=frozenset(self.app_config.get_agent_config(resolved_id).tools)
@@ -152,7 +157,7 @@ class Boot:
         )
         return LoadedAgentPackage(
             version=version,
-            model_clients={"primary": provider},
+            model_clients=model_clients,
             tool_snapshot=snapshot,
             lifecycle_hooks=hooks,
             recall_sources=recalls,
