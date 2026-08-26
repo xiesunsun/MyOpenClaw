@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pickel.agents.agent_package import LoadedAgentPackage
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.artifacts.artifact_service import ArtifactService
 from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
@@ -43,11 +44,13 @@ from pickel.inbox.message import InboxMessage
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.errors import StorageConflictError
 from pickel.operations.operation_service import OperationService
+from pickel.operations.session_operation import SessionOperation
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
 from pickel.operations.agent_run_state import DelegateAgentIntent
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
+from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
@@ -221,6 +224,7 @@ class RuntimeHost:
         self._retired_generations: set[RuntimeGeneration] = set()
         self._agent_registry = AgentRegistry()
         self._headless_agents: dict[str, tuple[Agent, LoadedPackageHandle]] = {}
+        self._operation_package_handles: dict[str, LoadedPackageHandle] = {}
         self._artifact_services: dict[int, tuple[CompositionStore, ArtifactService]] = (
             {}
         )
@@ -304,6 +308,91 @@ class RuntimeHost:
         self._artifact_services[key] = (store, artifact_service)
         return artifact_service
 
+    def _load_operation_package(
+        self,
+        operation: SessionOperation,
+        *,
+        generation: RuntimeGeneration,
+        boot: Boot,
+        store: CompositionStore,
+        artifact_service: ArtifactService,
+        expected_agent_id: str,
+    ) -> LoadedAgentPackage:
+        """为非终态 Operation 获取并保留精确 Generation 引用。"""
+
+        existing = self._operation_package_handles.get(operation.operation_id)
+        if existing is not None:
+            if existing.package_version_id != operation.agent_package_version_id:
+                raise RuntimeError("Operation Package 引用与持久化版本不一致")
+            package = existing.package
+            if package.version.agent_id != expected_agent_id:
+                raise RuntimeError("Operation Package 引用与 Agent 不一致")
+            return package
+
+        loaded = boot.load_agent_package(
+            operation.agent_package_version_id,
+            store=store,
+            artifact_service=artifact_service,
+            expected_agent_id=expected_agent_id,
+        )
+        loaded = generation.cache_loaded_package(
+            loaded.version.package_version_id,
+            loaded,
+        )
+        handle = generation.acquire_loaded_package(loaded.version.package_version_id)
+        self._operation_package_handles[operation.operation_id] = handle
+        return handle.package
+
+    def _resolve_operation_effects(
+        self,
+        operation: SessionOperation,
+        *,
+        generation: RuntimeGeneration,
+        boot: Boot,
+        store: CompositionStore,
+        artifact_service: ArtifactService,
+        expected_agent_id: str,
+        delegation_control: _RuntimeDelegationControl,
+    ) -> RuntimeEffects:
+        loaded = self._load_operation_package(
+            operation,
+            generation=generation,
+            boot=boot,
+            store=store,
+            artifact_service=artifact_service,
+            expected_agent_id=expected_agent_id,
+        )
+        handle = self._operation_package_handles[operation.operation_id]
+        owner_boot = handle.generation.boot
+        if owner_boot is None:
+            raise RuntimeError("Operation 所属 RuntimeGeneration 缺少 Boot")
+        return owner_boot._build_effects(
+            loaded_agent_package=loaded,
+            artifact_service=artifact_service,
+            session_cwd=Path(operation.workspace_binding.working_directory),
+            delegation_control=delegation_control,
+        )
+
+    async def _release_operation_package(self, operation: SessionOperation) -> None:
+        handle = self._operation_package_handles.pop(operation.operation_id, None)
+        generations: set[RuntimeGeneration] = set()
+        if handle is not None:
+            generations.add(handle.generation)
+            await handle.close()
+
+        # 纯 headless Agent 在终态后没有继续绑定旧代的理由。未来消息会从
+        # 当前 Generation 重新激活；UI 已接管的 Agent 不再位于这张表中。
+        headless = self._headless_agents.pop(operation.session_id, None)
+        if headless is not None:
+            agent, headless_handle = headless
+            self._agent_registry.unregister(operation.session_id, agent)
+            generations.add(headless_handle.generation)
+            await headless_handle.close()
+
+        for generation in generations:
+            if generation.closed:
+                self._retired_generations.discard(generation)
+
     @property
     def active_generation(self) -> RuntimeGeneration:
         return self._active_generation
@@ -322,6 +411,7 @@ class RuntimeHost:
         if session.archived_at is not None:
             raise ValueError("归档 Session 不能激活 Agent")
         boot = self._active_generation_boot()
+        generation = self._active_generation
         artifact_service = self._artifact_service_for(store)
         package_id: str | None = None
         if session.active_operation_id is not None:
@@ -359,7 +449,41 @@ class RuntimeHost:
                         "Delegation parent ToolCall 缺少 DelegateAgentIntent"
                     )
                 package_id = call.execution_intent.child_package_version_id
-        if package_id is None:
+        if session.active_operation_id is not None:
+            try:
+                loaded = self._load_operation_package(
+                    operation,
+                    generation=generation,
+                    boot=boot,
+                    store=store,
+                    artifact_service=artifact_service,
+                    expected_agent_id=session.agent_id,
+                )
+            except PackageLoadError:
+                # Agent 外壳可先使用当前包；OperationDriver 会把精确装载失败
+                # 持久化为 retryable failed。
+                loaded = boot.resolve_loaded_agent_package(
+                    session.agent_id, artifact_service=artifact_service
+                )
+            else:
+                operation_handle = self._operation_package_handles[
+                    operation.operation_id
+                ]
+                if operation_handle.generation is not generation:
+                    # Agent 外壳属于当前代；实际 Operation Effects 仍从旧 lease
+                    # 解析，不能把旧 Package 对象塞进新代缓存并重复关闭。
+                    try:
+                        loaded = boot.load_agent_package(
+                            operation.agent_package_version_id,
+                            store=store,
+                            artifact_service=artifact_service,
+                            expected_agent_id=session.agent_id,
+                        )
+                    except PackageLoadError:
+                        loaded = boot.resolve_loaded_agent_package(
+                            session.agent_id, artifact_service=artifact_service
+                        )
+        elif package_id is None:
             loaded = boot.resolve_loaded_agent_package(
                 session.agent_id, artifact_service=artifact_service
             )
@@ -381,7 +505,6 @@ class RuntimeHost:
                 )
         if loaded.version.agent_id != session.agent_id:
             raise ValueError("LoadedAgentPackage.agent_id 与 Session 不匹配")
-        generation = self._active_generation
         loaded = generation.cache_loaded_package(
             loaded.version.package_version_id, loaded
         )
@@ -397,7 +520,27 @@ class RuntimeHost:
                 session_cwd=session.cwd,
                 operation_service=OperationService(store),
                 wake_callback=self._agent_registry.wake,
-                delegation_control=_RuntimeDelegationControl(self, store),
+                delegation_control=(
+                    delegation_control := _RuntimeDelegationControl(self, store)
+                ),
+                operation_package_loader=lambda operation: self._load_operation_package(
+                    operation,
+                    generation=generation,
+                    boot=boot,
+                    store=store,
+                    artifact_service=artifact_service,
+                    expected_agent_id=session.agent_id,
+                ),
+                operation_effects_resolver=lambda operation: self._resolve_operation_effects(
+                    operation,
+                    generation=generation,
+                    boot=boot,
+                    store=store,
+                    artifact_service=artifact_service,
+                    expected_agent_id=session.agent_id,
+                    delegation_control=delegation_control,
+                ),
+                release_operation_package=self._release_operation_package,
             )
             self._agent_registry.register(agent)
             registered = True
@@ -633,8 +776,10 @@ class RuntimeHost:
             if operation.session_id != session.session_id:
                 raise ValueError("Operation 与 Session 不匹配")
             try:
-                loaded = boot.load_agent_package(
-                    operation.agent_package_version_id,
+                loaded = self._load_operation_package(
+                    operation,
+                    generation=generation,
+                    boot=boot,
                     store=store,
                     artifact_service=artifact_service,
                     expected_agent_id=agent_id,
@@ -646,6 +791,24 @@ class RuntimeHost:
                 loaded = boot.resolve_loaded_agent_package(
                     agent_id, artifact_service=artifact_service
                 )
+            else:
+                operation_handle = self._operation_package_handles[
+                    operation.operation_id
+                ]
+                if operation_handle.generation is not generation:
+                    # UI/Host 外壳使用当前代的独立 Package；Operation 本身继续
+                    # 通过旧代 lease 执行。
+                    try:
+                        loaded = boot.load_agent_package(
+                            operation.agent_package_version_id,
+                            store=store,
+                            artifact_service=artifact_service,
+                            expected_agent_id=agent_id,
+                        )
+                    except PackageLoadError:
+                        loaded = boot.resolve_loaded_agent_package(
+                            agent_id, artifact_service=artifact_service
+                        )
         else:
             loaded = boot.resolve_loaded_agent_package(
                 agent_id, artifact_service=artifact_service
@@ -671,7 +834,27 @@ class RuntimeHost:
                     session_cwd=session.cwd,
                     operation_service=operation_service,
                     wake_callback=self._agent_registry.wake,
-                    delegation_control=_RuntimeDelegationControl(self, store),
+                    delegation_control=(
+                        delegation_control := _RuntimeDelegationControl(self, store)
+                    ),
+                    operation_package_loader=lambda operation: self._load_operation_package(
+                        operation,
+                        generation=generation,
+                        boot=boot,
+                        store=store,
+                        artifact_service=artifact_service,
+                        expected_agent_id=agent_id,
+                    ),
+                    operation_effects_resolver=lambda operation: self._resolve_operation_effects(
+                        operation,
+                        generation=generation,
+                        boot=boot,
+                        store=store,
+                        artifact_service=artifact_service,
+                        expected_agent_id=agent_id,
+                        delegation_control=delegation_control,
+                    ),
+                    release_operation_package=self._release_operation_package,
                 )
             conversation = ConversationRuntime(
                 loaded_agent_package=loaded,
@@ -711,6 +894,11 @@ class RuntimeHost:
                 self._agent_registry.register(previous_agent)
                 conversation.detach()
                 raise
+        headless = self._headless_agents.get(session.session_id)
+        if headless is not None and headless[0] is previous_agent:
+            # Conversation Handle 已接管 live Agent；移除 Host 的额外常驻引用。
+            self._headless_agents.pop(session.session_id, None)
+            headless[1].close_sync()
         self._conversations.add(conversation)
         return conversation
 
@@ -738,6 +926,9 @@ class RuntimeHost:
         for conversation in tuple(self._conversations):
             conversation.detach()
         self._conversations.clear()
+        for operation_id, handle in tuple(self._operation_package_handles.items()):
+            await handle.close()
+            self._operation_package_handles.pop(operation_id, None)
         generation = self._active_generation
         if not generation.closed and not generation.retired:
             generation.retire()
@@ -760,6 +951,7 @@ class RuntimeHost:
         generation = RuntimeGeneration(
             f"generation_{uuid4().hex}",
             extension_catalog=boot.extensions,
+            boot=boot,
         )
         for extension_id, host in result.hosts.items():
             generation.add_extension(

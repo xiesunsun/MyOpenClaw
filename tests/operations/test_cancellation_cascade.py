@@ -421,11 +421,11 @@ def test_service_has_no_wake_dependency_and_driver_wakes_cascade_targets() -> No
     driver = OperationDriver(
         operation_service=operations,
         conversation_service=conversations,
-        package_loader=lambda package_id: SimpleNamespace(
-            package_version_id=package_id,
+        package_loader=lambda candidate: SimpleNamespace(
+            package_version_id=candidate.agent_package_version_id,
             runtime_policy=SimpleNamespace(max_model_steps=3),
         ),
-        effects_resolver=lambda package_id: RuntimeEffects(provider=object()),
+        effects_resolver=lambda candidate: RuntimeEffects(provider=object()),
         wake_callback=wake_sessions.append,
     )
     result = asyncio.run(driver.drive_operation("child-operation"))

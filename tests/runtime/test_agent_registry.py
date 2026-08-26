@@ -93,3 +93,27 @@ def test_shutdown_waits_for_running_wake_task() -> None:
         assert agent.active == 0
 
     asyncio.run(scenario())
+
+
+def test_running_agent_can_unregister_itself_at_terminal_boundary() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        completed = asyncio.Event()
+
+        class SelfRemovingAgent:
+            session_id = "session-1"
+
+            async def when_idle(self) -> None:
+                assert registry.unregister(self.session_id, self)
+                completed.set()
+
+        agent = SelfRemovingAgent()
+        registry.register(agent)
+        registry.wake(agent.session_id)
+        await completed.wait()
+        await asyncio.sleep(0)
+
+        assert registry.get(agent.session_id) is None
+        assert agent.session_id not in registry._tasks
+
+    asyncio.run(scenario())

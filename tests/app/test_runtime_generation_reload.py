@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import textwrap
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,8 +15,19 @@ import pytest
 from pickel.app.boot import Boot
 from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import ConversationRequest
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.extensions_host.loader import LoadResult
 from pickel.app.runtime_generation import RuntimeGeneration, RuntimeGenerationState
+from pickel.inbox.message import UserMessageSource
+from pickel.operations.agent_run_state import (
+    ModelStepState,
+    ToolApproval,
+    ToolCallState,
+)
+from pickel.operations.operation_service import OperationService
+from pickel.workspaces.workspace_binding import WorkspaceBinding
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
@@ -205,3 +218,134 @@ def test_shutdown_waits_for_retired_generation_after_reload() -> None:
             asyncio.run(host.shutdown())
 
         assert old_generation.state is RuntimeGenerationState.CLOSED
+
+
+def test_waiting_operation_keeps_old_generation_until_terminal_after_reload() -> None:
+    async def scenario(root: Path) -> None:
+        host = RuntimeHost(_boot(root))
+        conversation = host.open_conversation(
+            ConversationRequest(agent_id="Pickle", cwd=root)
+        )
+        store = conversation.persistence_store
+        now = datetime.now(timezone.utc)
+        message = store.send_message(
+            message_id="message-waiting",
+            session_id=conversation.session.session_id,
+            delivery="followup",
+            message=UserMessage((TextBlock("wait"),)),
+            source=UserMessageSource(),
+            created_at=now,
+        )
+        accepted = OperationService(store).accept_pending_message(
+            message=message,
+            agent_package_version_id=conversation.agent_definition.package_version_id,
+            workspace_binding=WorkspaceBinding(
+                workspace_id=conversation.session.workspace_id,
+                working_directory=conversation.session.cwd,
+                allowed_root=conversation.session.cwd,
+            ),
+            expected_node_id=conversation.session.active_node_id,
+        )
+        assert accepted is not None
+        call = ToolCallState(
+            tool_call_id="tool-waiting",
+            tool_name="approval_tool",
+            arguments={},
+            status="waiting_approval",
+            approval=ToolApproval(
+                requested_at=now,
+                requested_by="hook",
+                reason="test",
+                decision=None,
+            ),
+            replay_policy="safe",
+            execution_intent=None,
+            decision_reason=None,
+            result_node_id=None,
+            is_error=None,
+        )
+        assistant_node = ConversationNode(
+            node_id="assistant-waiting",
+            session_id=conversation.session.session_id,
+            parent_node_id=accepted.operation.input_node_id,
+            content_type="agent_message",
+            content=AssistantMessage(
+                content=(
+                    ToolCallBlock(
+                        id=call.tool_call_id,
+                        name=call.tool_name,
+                        arguments=call.arguments,
+                    ),
+                )
+            ),
+            created_at=now,
+        )
+        waiting = replace(
+            accepted.state,
+            revision=accepted.state.revision + 1,
+            status="waiting",
+            waiting_reason="tool_approval",
+            current_step=ModelStepState(
+                step_id="step-waiting",
+                step_sequence=1,
+                phase="awaiting_tools",
+                request_attempt=1,
+                request_intent=None,
+                assistant_message_node_id=assistant_node.node_id,
+                tool_calls=(call,),
+            ),
+        )
+        assert store.commit_run_transition(
+            state=waiting,
+            expected_revision=accepted.state.revision,
+            node=assistant_node,
+            updated_at=now,
+        )
+
+        old_generation = host.active_generation
+        old_boot = host.boot
+        result = await conversation._agent.resume_operation(
+            accepted.operation.operation_id
+        )
+        assert result.status == "waiting"
+        operation_handle = host._operation_package_handles[
+            accepted.operation.operation_id
+        ]
+        assert operation_handle.generation is old_generation
+
+        reloaded = await host.reload(conversation, app_config=host.app_config)
+        assert old_generation.state is RuntimeGenerationState.RETIRED
+        assert old_generation.operation_ref_count == 1
+
+        new_agent = host.agent_registry.get(conversation.session.session_id)
+        assert new_agent is not None
+        new_boot = host.boot
+        with (
+            patch.object(
+                old_boot, "_build_effects", wraps=old_boot._build_effects
+            ) as old_effects,
+            patch.object(
+                new_boot, "_build_effects", wraps=new_boot._build_effects
+            ) as new_effects,
+        ):
+            assert OperationService(store).request_cancellation(
+                accepted.operation.operation_id,
+                reason="test terminal",
+            )
+            terminal = await new_agent._driver._operation_driver.drive_operation(
+                accepted.operation.operation_id
+            )
+
+        assert terminal.status == "cancelled"
+        assert old_effects.call_count == 1
+        assert new_effects.call_count == 0
+        assert accepted.operation.operation_id not in host._operation_package_handles
+        assert old_generation.state is RuntimeGenerationState.CLOSED
+        assert old_generation not in host._retired_generations
+        reloaded.conversation.detach()
+        await host.shutdown()
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            asyncio.run(scenario(root))

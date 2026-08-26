@@ -7,6 +7,7 @@ Operation，并严格执行 ``intent commit -> 外部副作用 -> 结果 commit`
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -56,6 +57,8 @@ from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class OperationDriveResult:
@@ -77,8 +80,11 @@ class OperationDriver:
         *,
         operation_service: OperationService,
         conversation_service: ConversationService,
-        package_loader: Callable[[str], AgentPackageVersion],
-        effects_resolver: Callable[[str], RuntimeEffects],
+        package_loader: Callable[[SessionOperation], AgentPackageVersion],
+        effects_resolver: Callable[[SessionOperation], RuntimeEffects],
+        release_operation_package: (
+            Callable[[SessionOperation], Awaitable[None]] | None
+        ) = None,
         model_context_builder: ModelContextBuilder | None = None,
         state_machine: AgentRunStateMachine | None = None,
         step_id_factory: Callable[[], str] | None = None,
@@ -90,6 +96,7 @@ class OperationDriver:
         self._conversations = conversation_service
         self._package_loader = package_loader
         self._effects_resolver = effects_resolver
+        self._release_operation_package = release_operation_package
         self._context_builder = model_context_builder or ModelContextBuilder()
         self._state_machine = state_machine or AgentRunStateMachine()
         self._step_id = step_id_factory or (lambda: str(uuid4()))
@@ -98,6 +105,33 @@ class OperationDriver:
         self._wake_callback = wake_callback
 
     async def drive_operation(
+        self,
+        operation_id: str,
+        *,
+        consume_delta: StreamDeltaConsumer | None = None,
+        host_calls=None,
+    ) -> OperationDriveResult:
+        result = await self._drive_operation(
+            operation_id,
+            consume_delta=consume_delta,
+            host_calls=host_calls,
+        )
+        if (
+            result.status in {"succeeded", "failed", "cancelled"}
+            and self._release_operation_package is not None
+        ):
+            operation = self._operations.load_operation(operation_id)
+            try:
+                await self._release_operation_package(operation)
+            except Exception:
+                # 业务终态已经提交；生命周期清理失败只能诊断，不能反转结果。
+                logger.exception(
+                    "释放 Operation Package 引用失败: operation_id=%s",
+                    operation_id,
+                )
+        return result
+
+    async def _drive_operation(
         self,
         operation_id: str,
         *,
@@ -117,8 +151,8 @@ class OperationDriver:
                 usage_leaf=(_AUTO_USAGE_LEAF if state.status == "succeeded" else None),
             )
         try:
-            package = self._package_loader(operation.agent_package_version_id)
-            effects = self._effects_resolver(operation.agent_package_version_id)
+            package = self._package_loader(operation)
+            effects = self._effects_resolver(operation)
         except PackageLoadError as exc:
             usage_leaf = self._current_reliable_leaf(operation)
             failed = replace(

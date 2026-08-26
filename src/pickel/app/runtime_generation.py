@@ -12,9 +12,12 @@ import threading
 import asyncio
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 from pickel.agents.agent_package import ExtensionVersion
+
+if TYPE_CHECKING:
+    from pickel.app.boot import Boot
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,7 @@ class RuntimeGeneration:
         extension_instances: Mapping[ExtensionId, ExtensionInstance] | None = None,
         extension_catalog: Mapping[str, Any] | Any = (),
         loaded_packages: Mapping[PackageVersionId, Any] | None = None,
+        boot: "Boot | None" = None,
     ) -> None:
         if not generation_id:
             raise ValueError("generation_id 不能为空")
@@ -212,6 +216,7 @@ class RuntimeGeneration:
         self.state = state
         self.scope = scope or _EmptyScope()
         self.extension_catalog = extension_catalog
+        self.boot = boot
         self.extension_instances: dict[ExtensionId, ExtensionInstance] = dict(
             extension_instances or {}
         )

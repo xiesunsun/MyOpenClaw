@@ -163,6 +163,31 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
         assert (root / "home" / "runtime.db").exists()
 
 
+def test_conversation_attach_takes_over_headless_agent_handle() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            session_id = conversation.session.session_id
+            store = conversation.persistence_store
+            conversation.detach()
+
+            headless_agent = asyncio.run(host.activate_agent(session_id, store))
+            headless_handle = host._headless_agents[session_id][1]
+            reopened = host.open_conversation(
+                ConversationRequest(session_id=session_id)
+            )
+
+            assert host.agent_registry.get(session_id) is headless_agent
+            assert session_id not in host._headless_agents
+            assert headless_handle.closed
+            reopened.detach()
+            asyncio.run(host.shutdown())
+
+
 def test_async_create_discovers_runnable_sessions_from_shared_store() -> None:
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -479,6 +504,40 @@ def test_headless_active_operation_package_wins_over_parent_intent() -> None:
                 artifact_service=host._artifact_service_for(store),
                 expected_agent_id="Pickle",
             )
+            conversation.detach()
+            asyncio.run(host.shutdown())
+
+
+def test_headless_agent_releases_session_and_operation_handles_at_terminal() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation, store, child_loaded, _child_package_id = _headless_fixture(
+                host, root, active_operation=True
+            )
+            built = SimpleNamespace(session_id="child-session-1")
+            with (
+                patch.object(
+                    host.boot, "load_agent_package", return_value=child_loaded
+                ),
+                patch.object(host.boot, "build_agent", return_value=built),
+                patch.object(host.agent_registry, "wake"),
+            ):
+                asyncio.run(host.activate_agent("child-session-1", store))
+
+            operation = store.load_operation("child-operation-1")
+            assert operation is not None
+            operation_handle = host._operation_package_handles[operation.operation_id]
+            headless_handle = host._headless_agents[operation.session_id][1]
+
+            asyncio.run(host._release_operation_package(operation))
+
+            assert operation_handle.closed
+            assert headless_handle.closed
+            assert operation.operation_id not in host._operation_package_handles
+            assert operation.session_id not in host._headless_agents
+            assert host.agent_registry.get(operation.session_id) is None
             conversation.detach()
             asyncio.run(host.shutdown())
 

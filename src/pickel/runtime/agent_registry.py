@@ -64,7 +64,7 @@ class AgentRegistry:
         self._agents.pop(session_id, None)
         self._wake_pending.discard(session_id)
         task = self._tasks.pop(session_id, None)
-        if task is not None and not task.done():
+        if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
         return True
 

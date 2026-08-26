@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from pickel.agents.agent_package import (
@@ -31,6 +31,7 @@ from pickel.shared.frozen_json import thaw_json
 from pickel.inbox.store import InboxStore
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
+from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
@@ -257,6 +258,15 @@ class Boot:
         operation_service: OperationService | None = None,
         wake_callback: Callable[[str], None] | None = None,
         delegation_control: DelegationControl | None = None,
+        operation_package_loader: (
+            Callable[[SessionOperation], LoadedAgentPackage] | None
+        ) = None,
+        operation_effects_resolver: (
+            Callable[[SessionOperation], RuntimeEffects] | None
+        ) = None,
+        release_operation_package: (
+            Callable[[SessionOperation], Awaitable[None]] | None
+        ) = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
@@ -271,7 +281,10 @@ class Boot:
         package_id = loaded_agent_package.version.package_version_id
         loaded_packages = {package_id: loaded_agent_package}
 
-        def loaded_for(requested: str) -> LoadedAgentPackage:
+        def loaded_for(operation: SessionOperation) -> LoadedAgentPackage:
+            if operation_package_loader is not None:
+                return operation_package_loader(operation)
+            requested = operation.agent_package_version_id
             cached = loaded_packages.get(requested)
             if cached is None:
                 cached = self.load_agent_package(
@@ -286,13 +299,18 @@ class Boot:
         operation_driver = OperationDriver(
             operation_service=operation_service,
             conversation_service=ConversationService(conversation_store),
-            package_loader=lambda requested: loaded_for(requested).version,
-            effects_resolver=lambda requested: self._build_effects(
-                loaded_agent_package=loaded_for(requested),
-                artifact_service=artifact_service,
-                session_cwd=session_cwd,
-                delegation_control=delegation_control,
+            package_loader=lambda operation: loaded_for(operation).version,
+            effects_resolver=(
+                operation_effects_resolver
+                if operation_effects_resolver is not None
+                else lambda operation: self._build_effects(
+                    loaded_agent_package=loaded_for(operation),
+                    artifact_service=artifact_service,
+                    session_cwd=session_cwd,
+                    delegation_control=delegation_control,
+                )
             ),
+            release_operation_package=release_operation_package,
             wake_callback=wake_callback,
         )
         agent_driver = AgentDriver(

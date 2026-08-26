@@ -326,6 +326,86 @@ async def test_waiting_projects_current_active_leaf_as_partial_usage():
 
 
 @_run_async
+async def test_waiting_keeps_operation_package_and_terminal_requests_idempotent_release():
+    operation = _operation()
+    waiting = replace(
+        _queued_state(),
+        status="waiting",
+        waiting_reason="tool_approval",
+        current_step=ModelStepState(
+            "step-1",
+            1,
+            "awaiting_tools",
+            1,
+            None,
+            "assistant-1",
+            (
+                ToolCallState(
+                    tool_call_id="tool-1",
+                    tool_name="run",
+                    arguments={},
+                    status="waiting_approval",
+                    approval=ToolApproval(
+                        requested_at=datetime.now(timezone.utc),
+                        requested_by="hook",
+                        reason=None,
+                        decision=None,
+                    ),
+                    replay_policy="safe",
+                    execution_intent=None,
+                    decision_reason=None,
+                    result_node_id=None,
+                    is_error=None,
+                ),
+            ),
+        ),
+    )
+    operations = _Operations(waiting)
+    loaded_for = []
+    effects_for = []
+    released = []
+
+    async def release(candidate):
+        released.append(candidate)
+
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda candidate: (
+            loaded_for.append(candidate) or _loaded_package().version
+        ),
+        effects_resolver=lambda candidate: (
+            effects_for.append(candidate) or RuntimeEffects(provider=_Provider([]))
+        ),
+        release_operation_package=release,
+    )
+
+    result = await driver.drive_operation(operation.operation_id)
+
+    assert result.status == "waiting"
+    assert [item.operation_id for item in loaded_for] == [operation.operation_id]
+    assert effects_for == loaded_for
+    assert released == []
+
+    operations.state = replace(
+        waiting,
+        revision=waiting.revision + 1,
+        status="failed",
+        waiting_reason=None,
+        current_step=None,
+        error=AgentRunError("test_failure", "failed", False),
+    )
+    result = await driver.drive_operation(operation.operation_id)
+    result = await driver.drive_operation(operation.operation_id)
+
+    assert result.status == "failed"
+    assert [item.operation_id for item in released] == [
+        operation.operation_id,
+        operation.operation_id,
+    ]
+
+
+@_run_async
 async def test_current_package_failure_captures_leaf_before_terminal_commit():
     conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
     operations = _Operations(_queued_state())
