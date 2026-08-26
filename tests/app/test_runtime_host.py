@@ -24,7 +24,7 @@ from pickel.extensions_host.loader import LoadResult
 from pickel.inbox.message import AgentMessageSource, InboxMessage, UserMessageSource
 from pickel.operations.operation_service import OperationService
 from pickel.operations.agent_delegation import AgentDelegation
-from pickel.operations.agent_run_state import DelegateAgentIntent
+from pickel.operations.agent_run_state import AgentRunError, DelegateAgentIntent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
@@ -238,6 +238,70 @@ def test_startup_recovery_isolates_candidate_failure(caplog) -> None:
 
         assert calls == ["bad", "good"]
         assert "启动恢复 Session 失败" in caplog.text
+
+
+def test_startup_recovery_marks_unloadable_operation_retryable_failed(caplog) -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            conversation = host.open_conversation(
+                ConversationRequest(agent_id="Pickle", cwd=root)
+            )
+            store = conversation.persistence_store
+            session_id = conversation.session.session_id
+            message = store.send_message(
+                message_id="message-1",
+                session_id=session_id,
+                delivery="followup",
+                message=UserMessage((TextBlock("resume"),)),
+                source=UserMessageSource(),
+                created_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            )
+            operation_service = OperationService(store)
+            accepted = operation_service.accept_pending_message(
+                message=message,
+                agent_package_version_id=conversation.agent_definition.package_version_id,
+                workspace_binding=WorkspaceBinding(
+                    workspace_id=conversation.session.workspace_id,
+                    working_directory=conversation.session.cwd,
+                    allowed_root=conversation.session.cwd,
+                ),
+                expected_node_id=conversation.session.active_node_id,
+            )
+            assert accepted is not None
+            current = accepted.state
+            for revision in range(2, 6):
+                running = replace(current, revision=revision, status="running")
+                assert operation_service.commit_state(
+                    state=running,
+                    expected_revision=current.revision,
+                )
+                current = running
+            conversation.detach()
+            error = PackageLoadError(
+                "tool_unavailable",
+                accepted.operation.agent_package_version_id,
+                "Tavily Tool 实现不可用",
+            )
+
+            with patch.object(host.boot, "load_agent_package", side_effect=error):
+                asyncio.run(host._recover_runnable_sessions())
+
+            state = store.load_run_state(accepted.operation.operation_id)
+            session = store.load_session(session_id)
+            assert state is not None
+            assert state.status == "failed"
+            assert state.revision == 6
+            assert state.error == AgentRunError(
+                code="tool_unavailable",
+                message=str(error),
+                retryable=True,
+            )
+            assert session is not None
+            assert session.active_operation_id is None
+            assert "Package 不可用，候选已隔离" in caplog.text
+            assert "Traceback" not in caplog.text
 
 
 def test_runtime_delegation_control_activates_accepted_child() -> None:
@@ -538,36 +602,6 @@ def test_headless_agent_releases_session_and_operation_handles_at_terminal() -> 
             assert operation.operation_id not in host._operation_package_handles
             assert operation.session_id not in host._headless_agents
             assert host.agent_registry.get(operation.session_id) is None
-            conversation.detach()
-            asyncio.run(host.shutdown())
-
-
-def test_active_operation_missing_package_uses_current_shell_only() -> None:
-    with TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
-            host = RuntimeHost(_boot(root))
-            conversation, store, current_loaded, child_package_id = _headless_fixture(
-                host, root, active_operation=True
-            )
-            missing = PackageLoadError("missing", child_package_id, "not found")
-            built = SimpleNamespace(session_id="child-session-1")
-            with (
-                patch.object(host.boot, "load_agent_package", side_effect=missing),
-                patch.object(
-                    host.boot,
-                    "resolve_loaded_agent_package",
-                    return_value=current_loaded,
-                ) as resolve,
-                patch.object(host.boot, "build_agent", return_value=built),
-                patch.object(host.agent_registry, "wake"),
-            ):
-                result = asyncio.run(host.activate_agent("child-session-1", store))
-
-            assert result is built
-            resolve.assert_called_once_with(
-                "Pickle", artifact_service=host._artifact_service_for(store)
-            )
             conversation.detach()
             asyncio.run(host.shutdown())
 

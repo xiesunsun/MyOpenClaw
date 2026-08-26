@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 import logging
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,7 @@ from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
-from pickel.operations.agent_run_state import DelegateAgentIntent
+from pickel.operations.agent_run_state import AgentRunError, DelegateAgentIntent
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -286,8 +287,47 @@ class RuntimeHost:
         for session_id in store.list_runnable_session_ids():
             try:
                 await self.activate_agent(session_id, store)
+            except PackageLoadError as exc:
+                logger.warning(
+                    "启动恢复 Package 不可用，候选已隔离: session_id=%s code=%s",
+                    session_id,
+                    exc.code,
+                )
             except Exception:
                 logger.exception("启动恢复 Session 失败: session_id=%s", session_id)
+
+    @staticmethod
+    def _fail_unloadable_operation(
+        *,
+        store: CompositionStore,
+        operation: SessionOperation,
+        error: PackageLoadError,
+    ) -> None:
+        """精确 Package 不可装载时，以一次 revision CAS 收敛 Operation。"""
+
+        service = OperationService(store)
+        state = service.load_agent_run_state(operation.operation_id)
+        if state.status in {"succeeded", "failed", "cancelled"}:
+            return
+        failed = replace(
+            state,
+            revision=state.revision + 1,
+            status="failed",
+            waiting_reason=None,
+            current_step=None,
+            error=AgentRunError(
+                code=error.code,
+                message=str(error),
+                retryable=True,
+            ),
+        )
+        if service.commit_state(state=failed, expected_revision=state.revision):
+            return
+        latest = service.load_agent_run_state(operation.operation_id)
+        if latest.status not in {"succeeded", "failed", "cancelled"}:
+            raise StorageConflictError(
+                "精确 Package 装载失败后的 AgentRunState CAS 冲突"
+            )
 
     def _artifact_service_for(self, store: CompositionStore) -> ArtifactService:
         """按 Store 对象复用唯一 ArtifactService 及其 BlobStore。"""
@@ -459,12 +499,13 @@ class RuntimeHost:
                     artifact_service=artifact_service,
                     expected_agent_id=session.agent_id,
                 )
-            except PackageLoadError:
-                # Agent 外壳可先使用当前包；OperationDriver 会把精确装载失败
-                # 持久化为 retryable failed。
-                loaded = boot.resolve_loaded_agent_package(
-                    session.agent_id, artifact_service=artifact_service
+            except PackageLoadError as exc:
+                self._fail_unloadable_operation(
+                    store=store,
+                    operation=operation,
+                    error=exc,
                 )
+                raise
             else:
                 operation_handle = self._operation_package_handles[
                     operation.operation_id
