@@ -402,7 +402,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 | Gemini Boot | 已明确未支持；新建与冻结 Package 恢复统一返回 `provider_unsupported`，Gemini Provider 仅保留直接调用适配器测试 |
 | 重复 ArtifactService 注入 | 已收敛；RuntimeHost 按 Store 复用唯一实例，Boot 显式转发给 Provider 与 RuntimeEffects/ToolServices |
 
-阶段 7 尚余一个独立批次：将 `ConversationRuntime._active_task`、执行互斥锁和中断控制下沉到 Agent/AgentDriver。该批次同时涉及前台 busy 语义、AgentRegistry wake 去重、精确取消以及 RuntimeGeneration handle 延迟释放，不能当作删除字段的小修。完成前 `ConversationRuntime` 仍是临时 Host/UI Adapter，本计划保持“实施中”。
+阶段 7 尚余一个独立批次：将 `ConversationRuntime._active_task` 与执行互斥锁下沉到 Agent/AgentDriver。无调用方且执行期间身份不可靠的 Runtime `interrupt()` 镜像已删除，持久化取消仍统一走 `Agent.cancel()`；剩余批次同时涉及前台 busy 语义、AgentRegistry wake 去重以及 RuntimeGeneration handle 延迟释放，不能当作删除字段的小修。完成前 `ConversationRuntime` 仍是临时 Host/UI Adapter，本计划保持“实施中”。
 
 最终校对本文引用的领域合同，更新原文，不创建同主题 v2/v3。
 
