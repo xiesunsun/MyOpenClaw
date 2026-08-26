@@ -1,7 +1,7 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**状态**：实施中；v10 Persistence、Runtime 执行核心、Context 唯一管道、统一执行身份与 AgentRegistry 已闭合
+**状态**：实施中；六项目标的核心链路已闭合，剩余 ConversationRuntime 执行控制下沉
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -85,17 +85,17 @@ OperationDriver
 | 6 | 完成 Multi-Agent 最小闭环 | child Session 可异步执行、取消和恢复 |
 | 7 | 清理和验收 | 删除未接线公共能力，代码与命中文档一致 |
 
-### 4.1 当前进度（2026-08-25）
+### 4.1 当前进度（2026-08-26）
 
 | 批次 | 状态 | 已完成 | 尚未进入 |
 | --- | --- | --- | --- |
 | 0.1 测试入口 | 完成 | `pytest`、`pytest-cov`、Coverage、Black 纳入 dev 依赖；新环境可直接执行测试 | — |
-| 0.2 架构护栏 | 部分完成 | Extension setup 回滚、冻结 Package 身份拒绝替换、实际 ModelContext/请求快照一致性、Session tree 删除、多 Approval 与 cancel 竞争使用 revision CAS | 后代级联取消随对应实现批次补齐 |
+| 0.2 架构护栏 | 完成 | Extension setup 回滚、冻结 Package 身份拒绝替换、实际 ModelContext/请求快照一致性、Session tree 删除、多 Approval 与 cancel 竞争使用 revision CAS、Parent Operation 后代级联取消 | — |
 | 1.1 Extension 隔离贡献集 | 完成 | setup 写入 draft，成功后统一发布；失败执行 LIFO disposer；Tool、Hook、Recall、Event Processor、Provider 和 MCP status 不残留半激活状态 | Registry Lease、ExtensionInstance 和 RuntimeGeneration 属于 1.2，不由本批次提前实现 |
 | 1.2 RuntimeGeneration reload | 完成 | 精确 Contribution Lease、ExtensionInstance、独立 ToolBus/Registry、原子切换、旧代引用保留与延迟关闭；MCP 删除模块级装载状态 | 跨进程恢复仍按阶段 2 使用冻结 Package 重建，不持久化 `generation_id` |
 | 1.3a SQLite v10 最小垂直切片 | 完成 | v10 schema、v9 一次性迁移、双 Store 领域合同、Session/Node、Inbox、Operation/AgentRunState、Package、Artifact、App 调用方切换 | v9 解析仅保留在一次性迁移模块 |
 | 1.3b Session 删除语义 | 完成 | 单 Session 与显式子树删除前置条件、双 Store 一致性；旧 Object/Reference 生产模块与测试已删除 | 后代取消属于阶段 6 |
-| 2.0 Agent Package v10 | Loader 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 当前 Config 仅能构建 primary，worker/utility 的配置来源归入配置升级批次 |
+| 2.0 Agent Package v10 | Runtime 范围完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；Provider/Tool 按冻结引用装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | worker/utility 的配置来源属于独立配置升级，不阻塞本轮 Runtime 闭环 |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
 | 2.4 Host 控制面 | 完成 | `Agent.resume_operation(operation_id)` 精确身份恢复；cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`；`ToolReconciliationService` 对 `completed/not_started/unknown` 做单次 revision CAS，取消中的已完成结果经可恢复的两步 CAS 收敛 | 完整交互界面和 AgentRegistry 调度不在本批次 |
 | 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 生产路径和 Gemini Provider 直接调用测试分别复用各自唯一的 request builder，后者不表示 Boot 已支持 Gemini；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
@@ -120,7 +120,7 @@ OperationDriver
 | 6.3c-e `cancel_delegation` direct-child cancel | 完成 | SQLite/InMemory 原子验证当前 `cancel_delegation` intent、丢弃 sender Session 发往目标 child 的 pending AgentMessage，并返回 child 当时 active Operation；RuntimeHost 的 DelegationControl 复用 OperationService cancellation，active child 由 Host activate/wake，idle child 不激活 | 不归档/删除 Session，不新增 Delegation 状态或取消实体 |
 | 6.3d Parent Operation 后代级联取消 | 完成 | OperationService 在 parent CAS 进入 `cancelling` 后沿 AgentDelegation 图幂等 CAS 所有非终态后代；双 Store 在 `cancelling → cancelled` 事务内检查后代终态及祖先来源 pending child 消息；只 discard 真实后代的 AgentMessage，child 收敛后唤醒 direct parent，重启继续 reconciliation | 不新增取消实体、Manager 或通用图缓存 |
 
-第三十五轮验收基线：`911 passed, 4 skipped`，整体覆盖率 78%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费、6.3a Delegation durable acceptance、6.3b headless 激活与启动恢复、6.3c-a `delegate_agent` durable start、6.3c-b `send_message` direct-child followup、6.3c-c `list_agents` child snapshot、6.3c-d `report` child-to-parent report、6.3c-e `cancel_delegation`、6.3d 后代级联取消已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的 `ActivationControl`、`tool_set_active` 与 `agent_disabled` 激活残影，删除未接线的 `AgentRunProgress` 进度通知模块，隐藏尚未实现 Package 切换语义的 `/model`、`/thinking`，将非 Anthropic Boot 与冻结 Package 恢复统一为稳定的 `provider_unsupported`，删除无调用方的 Provider factory，并由 RuntimeHost 按 Store 提供唯一 ArtifactService，Boot 只显式转发；实际请求统一由 `RequestSnapshotRecord` 记录。生产清理统一经过 `ContributionScope.close()`；旧 `AgentRuntime`、`RuntimeBindings`、`RuntimeStore`、`StorageTransaction`、`ImmutableObject`、`NamedReference`、`HookFeedback`、`EventIdentity` 和 `ObservationIdentity` 生产路径已删除。
+第三十六轮验收基线：`917 passed, 4 skipped`，整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted`、`ToolCallStarted`、`ToolCallCompleted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。
 
 ## 5. 阶段 0：回归基线
 
@@ -396,10 +396,13 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 | HostCallRecorder | 已移出公共 API；未接入真实观测路径 |
 | ActivationControl | 已删除；未接入 RuntimeHost/Boot |
 | AgentRunProgress | 已删除；仅有进度 DTO、没有生产发射或消费路径，不作为 Runtime 公共能力 |
-| AgentRunUsage | Provider 能提供则接通，否则暂不公开 |
+| ModelStepStarted / ToolCallStarted / ToolCallCompleted | 已删除；没有生产发射路径，连同专属 ToolRenderer 与无真实来源的 ToolTiming 一并移除 |
+| AgentRunUsage | 已接通；Provider metadata → 持久化 AssistantMessage → Operation 分支纯投影 → Event 与 App/CLI 结果；缺少稳定历史终点时明确返回 `None`，不误扫后续 Operation |
 | `/model`、`/thinking` | 已隐藏；未实现 Environ → 新 Package → 未来 Operation 的完整切换语义前不公开 |
 | Gemini Boot | 已明确未支持；新建与冻结 Package 恢复统一返回 `provider_unsupported`，Gemini Provider 仅保留直接调用适配器测试 |
 | 重复 ArtifactService 注入 | 已收敛；RuntimeHost 按 Store 复用唯一实例，Boot 显式转发给 Provider 与 RuntimeEffects/ToolServices |
+
+阶段 7 尚余一个独立批次：将 `ConversationRuntime._active_task`、执行互斥锁和中断控制下沉到 Agent/AgentDriver。该批次同时涉及前台 busy 语义、AgentRegistry wake 去重、精确取消以及 RuntimeGeneration handle 延迟释放，不能当作删除字段的小修。完成前 `ConversationRuntime` 仍是临时 Host/UI Adapter，本计划保持“实施中”。
 
 最终校对本文引用的领域合同，更新原文，不创建同主题 v2/v3。
 
@@ -416,15 +419,6 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 7. 对应领域合同与实现一致；存在冲突则停止合并。
 8. 提交只说明一个可独立理解的变化，并可以完整 revert。
 
-## 14. 第一轮实施范围
-
-第一轮只实施：
-
-1. 0.1 测试入口；
-2. 0.2 六组架构护栏；
-3. 1.1 Extension 隔离贡献集。
-
-第一轮不修改数据库结构、不修改 Operation 状态模型、不引入 Lane。完成后复盘批次大小和回归成本，再决定是否进入 RuntimeGeneration reload。
 
 ## 15. 已锁定的实施前置
 
