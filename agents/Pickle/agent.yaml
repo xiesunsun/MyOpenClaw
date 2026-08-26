@@ -14,6 +14,6 @@ extensions:
 file_access_mode: full
 models:
   primary:
-    provider: openai
-    model: gpt-5.6-luna
+    provider: opencode-go
+    model: ox-alpha-free
 remote_agent_id: ${OPENVIKING_AGENT_ID}
