@@ -7,6 +7,11 @@ tools:
   - edit
   - write
   - bash
+  - delegate_agent
+  - send_message
+  - list_agents
+  - cancel_delegation
+  - report
   - mcp__tavily__*
 extensions:
   - mcp
