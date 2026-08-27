@@ -2,7 +2,7 @@
 
 **初稿日期**：2026-07-12
 **更新日期**：2026-08-27
-**状态**：目标合同；SQLite v11 已实施，v10 仅作为一次性 Delegation 迁移来源
+**状态**：目标合同；SQLite v12 ModelCall 待实施，v11 为当前迁移来源
 **范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
 **不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 
@@ -20,6 +20,8 @@ erDiagram
     CONVERSATION_SESSION }o--o| SESSION_OPERATION : active_operation
     SESSION_OPERATION ||--|| AGENT_RUN_STATE : current_state
     SESSION_OPERATION }o--|| AGENT_PACKAGE_VERSION : freezes
+    CONVERSATION_SESSION ||--o{ MODEL_CALL : records
+    SESSION_OPERATION ||--o{ MODEL_CALL : invokes
     CONVERSATION_SESSION ||--o| AGENT_DELEGATION : child
     SESSION_OPERATION ||--o{ AGENT_DELEGATION : parent
 ```
@@ -36,6 +38,7 @@ session_operations
 agent_run_states
 artifacts
 agent_delegations
+model_calls
 ```
 
 不建立：
@@ -50,7 +53,7 @@ agent_delegations
 - `tool_approvals`
 - `runtime_events / observations / trace_spans`
 
-ModelStepState、ToolCallState 和 ToolApproval 嵌入 `agent_run_states.current_step_json`；ArtifactReference 嵌入 ConversationNode 消息内容；Trace 不进入业务数据库。
+ModelStepState、ToolCallState 和 ToolApproval 嵌入 `agent_run_states.current_step_json`；ArtifactReference 嵌入 ConversationNode 消息内容；Trace 不进入业务数据库。`model_calls` 是 Provider 外部调用前的可靠门禁和内容索引，不是通用 Observation/Event 表。
 
 跨表不变量：
 
@@ -266,9 +269,92 @@ followup InboxMessage。Child Operation 由自己的 AgentDriver 后续 claim �
 使用 AgentDelegation 绑定的 Package。该列不能从 parent current Step 或 child 首个
 Operation 反推：前者在 Parent 终态后清空，后者在 child 接受初始消息前尚不存在。
 
-## 11. 原子事务合同
+## 11. `model_calls`
 
-### 11.1 创建 Session
+`ModelCall` 表示一次真实 Provider 生成调用。AgentRun 的每次重试各有独立行；Title、历史
+压缩等 Session 级生成调用也必须记录，但不伪造 Operation 或 Step。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `model_call_id` | TEXT | PK |
+| `session_id` | TEXT | FK → conversation_sessions，NOT NULL |
+| `operation_id` | TEXT | NULL，同 Session FK → session_operations |
+| `step_id` | TEXT | NULL |
+| `step_sequence` | INTEGER | NULL，`>= 1` |
+| `request_attempt` | INTEGER | NOT NULL，`>= 1` |
+| `model_role` | TEXT | `primary` / `worker` / `utility` |
+| `purpose` | TEXT | `agent_step` / `title` / `history_compaction` |
+| `provider` | TEXT | NOT NULL |
+| `api_kind` | TEXT | NOT NULL |
+| `endpoint` | TEXT | NOT NULL |
+| `requested_model` | TEXT | NOT NULL |
+| `returned_model` | TEXT | NULL |
+| `status` | TEXT | 见下方枚举 |
+| `request_content_ref` | TEXT | NOT NULL |
+| `response_content_ref` | TEXT | NULL |
+| `context_fingerprint` | TEXT | NULL |
+| `provider_request_id` | TEXT | NULL |
+| `http_status` | INTEGER | NULL |
+| `error_json` | TEXT | NULL，合法 JSON object |
+| `created_at` | TEXT | NOT NULL |
+| `started_at` | TEXT | NULL |
+| `first_chunk_at` | TEXT | NULL |
+| `finished_at` | TEXT | NULL |
+
+```text
+status = prepared / in_flight / completed / failed / cancelled / incomplete
+```
+
+身份组合：
+
+```text
+purpose = agent_step
+→ operation_id、step_id、step_sequence、context_fingerprint 必填
+→ model_role = primary
+
+purpose = title/history_compaction
+→ operation_id、step_id、step_sequence 为空
+→ model_role 分别为 utility/worker
+```
+
+唯一约束：
+
+```sql
+CREATE UNIQUE INDEX uq_model_calls_operation_step_attempt
+ON model_calls(operation_id, step_id, request_attempt)
+WHERE operation_id IS NOT NULL;
+```
+
+状态字段组合：
+
+```text
+prepared
+→ started_at、finished_at、response_content_ref、error_json 为空
+
+in_flight
+→ started_at 必填；finished_at、response_content_ref 为空
+
+completed
+→ started_at、finished_at、response_content_ref 必填；error_json 为空
+
+failed
+→ started_at、finished_at、error_json 必填；response_content_ref 可保存 HTTP/Provider 错误正文
+
+cancelled/incomplete
+→ finished_at 必填；response_content_ref 可保存 partial response
+```
+
+状态转换通过 `WHERE model_call_id=? AND status=?` 做自然 CAS，不增加 revision。SQLite 负责
+枚举、NOT NULL、FK、时间和终态字段组合；Provider-specific Response schema 与
+RequestContent/ResponseContent 内容由 codec 校验。
+
+`request_content_ref/response_content_ref` 指向 ModelCallContentStore 中按 canonical bytes
+内容寻址的不可变文档。数据库提交引用前必须确认内容存在。ModelCallContentStore 不参加
+SQLite 事务，因此允许无引用孤儿内容，不允许已提交行引用缺失内容。
+
+## 12. 原子事务合同
+
+### 12.1 创建 Session
 
 ```text
 resolve/create Workspace
@@ -277,7 +363,7 @@ resolve/create Workspace
 
 初始 active_node_id、active_operation_id、title、title_source、archived_at 全为空。不创建空 Root Node。
 
-### 11.2 发送 InboxMessage
+### 12.2 发送 InboxMessage
 
 ```text
 确认 Session.archived_at IS NULL
@@ -287,7 +373,7 @@ resolve/create Workspace
 
 followup/steer 提交后 wake；inject 只持久化不单独 wake。
 
-### 11.3 接受 Operation
+### 12.3 接受 Operation
 
 ```text
 CAS 选中 InboxMessage 仍 pending
@@ -301,7 +387,7 @@ CAS 选中 InboxMessage 仍 pending
 
 前置条件：Session 未归档、`active_operation_id IS NULL`、active_node_id 仍等于调用方读取值。任一步失败全部回滚。
 
-### 11.4 Step 消息 claim
+### 12.4 Step 消息 claim
 
 ```text
 CAS AgentRunState.revision
@@ -312,9 +398,32 @@ CAS AgentRunState.revision
 + revision + 1
 ```
 
-### 11.5 Model/Tool Intent 与结果
+### 12.5 Model/Tool Intent 与结果
 
 ModelRequestIntent 必须在 Provider 调用前 CAS 写入 current_step_json。ToolExecutionIntent 必须在真实 Tool 副作用前 CAS 写入。完整 AssistantMessage、ToolResult ConversationNode、active_node_id 和对应 State 转换在各自同一事务提交。
+
+每次 AgentRun Provider 调用按以下顺序执行：
+
+```text
+先向 ModelCallContentStore 保存完整 RequestContent
+→ 同一数据库事务 CAS AgentRunState.request_attempt += 1
+  + insert ModelCall(status=prepared, request_content_ref)
+→ CAS ModelCall prepared → in_flight
+→ 调用 Provider
+```
+
+RequestContent 写入、State CAS、ModelCall insert 或 `prepared → in_flight` 任一步失败都不得
+调用 Provider。Provider 完整返回后先保存 ResponseContent，再由一个数据库事务完成：
+
+```text
+CAS ModelCall in_flight → completed + response_content_ref
++ insert Assistant ConversationNode
++ move active_node_id
++ commit AgentRunState response transition
+```
+
+ResponseContent 保存或 ModelCall 完成 CAS 失败时不得提交 AssistantMessage。明确失败、取消
+或流中断必须先收敛当前 ModelCall，再按冻结重试策略创建下一 attempt。
 
 Host 对 `intent_recorded` 的核对结果直接通过 AgentRunState revision CAS 提交，
 不新增 reconciliation 表、队列或状态。`completed` 同事务写 ToolResult；
@@ -322,7 +431,7 @@ Host 对 `intent_recorded` 的核对结果直接通过 AgentRunState revision CA
 `cancelling`，已完成结果先以 `cancelling → cancelling` 保存并被 current_step
 引用，再由 Driver 清空 Step 转入 `cancelled`。
 
-### 11.6 Operation 终态
+### 12.6 Operation 终态
 
 ```text
 CAS AgentRunState → succeeded / failed / cancelled
@@ -347,7 +456,7 @@ AgentDelegation 递归后代均已终态且没有这类 pending 消息。不新�
 
 Stopping check 与 pending next-step InboxMessage claim 同属该事务判断，避免消息落在终态边界丢失。
 
-## 12. Archive 与 Delete
+## 13. Archive 与 Delete
 
 Archive 要求 active_operation_id 为空、不存在 pending InboxMessage，且全部 delegated
 descendant 都不存在非终态 Operation 或 pending InboxMessage；提交 `archived_at=now`。
@@ -357,9 +466,9 @@ descendant 都不存在非终态 Operation 或 pending InboxMessage；提交 `ar
 
 公共 delete 要求 Session 已归档、空闲、无 pending Inbox 且无 AgentDelegation。显式 `delete_session_tree` 可删除完整 child 子树，但要求所有目标均归档、空闲且根没有外部 parent Delegation。
 
-删除 Session 级联删除其 Node、InboxMessage、Operation、AgentRunState 和子树内 Delegation；Artifact 交给 GC，Workspace 与 AgentPackageVersion 保留。
+删除 Session 级联删除其 Node、InboxMessage、Operation、AgentRunState、ModelCall 和子树内 Delegation；Artifact 与无引用 ModelCall Content 交给各自 GC，Workspace 与 AgentPackageVersion 保留。
 
-## 13. 恢复查询
+## 14. 恢复查询
 
 进程启动只查询：
 
@@ -384,9 +493,26 @@ ConversationSession.active_operation_id
 
 不扫描历史 Operation、Event 或 State revision。
 
-## 14. Schema 与迁移
+恢复到 `request_ready` Step 时额外读取该 Step 最新 ModelCall：
 
-当前 Runtime 只读写 SQLite v11，不保留 v10/v11 双读写。v10 → v11 事务迁移：
+```text
+prepared  → 请求明确未发送，读取同一 RequestContent 并继续同一 attempt
+in_flight → CAS 标记 incomplete，再创建新 attempt
+终态      → 按 frozen retry policy 判断下一动作
+不存在    → 还没有越过调用门禁，准备第一个 attempt
+```
+
+## 15. Schema 与迁移
+
+目标 Runtime 只读写 SQLite v12，不保留 v11/v12 双读写。v11 → v12 事务迁移：
+
+1. 创建 `model_calls` 表、CHECK、复合外键和 partial UNIQUE index；
+2. 既有历史没有可靠完整 Request/Response，不伪造 ModelCall，也不从 Trace 回填；
+3. v11 非终态 `request_ready` Operation 保持原恢复合同，第一个 v12 真实调用创建新的 ModelCall；
+4. 校验 v11 业务表不变后设置 schema version 12；
+5. 任一步失败回滚并保留 v11 备份。
+
+既有 v10 → v11 事务迁移保持为历史来源：
 
 1. 给 `agent_delegations` 增加 `child_package_version_id`；
 2. 旧 Delegation 使用其 parent Operation 的 `agent_package_version_id` 回填，因为 v10
@@ -407,7 +533,7 @@ ConversationSession.active_operation_id
 
 不在 Runtime 请求路径保留旧 schema 兼容分支。
 
-## 15. 验收
+## 16. 验收
 
 1. 接受 Operation 的七项事实原子成功或全部回滚。
 2. Session.active_operation_id 与 AgentRunState 终态始终一致。
@@ -419,3 +545,7 @@ ConversationSession.active_operation_id
 8. v10 中不存在 ImmutableObject、NamedReference、StorageCommit 和 ConversationEntry 生产路径。
 9. delegated child 的终态与 direct parent settled InboxMessage 原子成功或全部回滚；并行 child 按 Parent Inbox sequence 消费。
 10. v11 AgentDelegation 始终绑定精确 child Package，reload 和重启不能换成当前同名 Agent。
+11. 未可靠保存 RequestContent、ModelCall 和 request_attempt 时 Provider 调用次数为零。
+12. ResponseContent 与 AssistantMessage 原子可见，不出现已提交回答缺少 ModelCall 响应。
+13. prepared 恢复复用同一 attempt；in_flight 恢复先收敛 incomplete 再创建新 attempt。
+14. v11 → v12 不从可丢失 Trace 伪造历史 ModelCall。

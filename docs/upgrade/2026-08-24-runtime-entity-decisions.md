@@ -2,11 +2,11 @@
 
 **日期**：2026-08-24  
 **更新日期**：2026-08-27
-**状态**：实体设计已收口；Delegation 消息驱动与跨 Package 选择已实施
+**状态**：既有实体已实施；ModelCall 可靠数据底座已定稿、待阶段 10 实施
 **范围**：Agent Runtime 中持久化实体、值对象、状态、快照、运行时对象和服务的抽象边界  
 **不在范围**：实施排期、数据库迁移步骤、Provider 协议字段
 
-本文记录已经逐项确认的实体结论；实施顺序见 [`Agent Runtime 重构实施计划`](./2026-08-24-agent-runtime-refactoring-plan.md)。命名、数据库、配置和 Operation 恢复合同已于 2026-08-25 对齐，不再继续增加预期实体。
+本文记录已经逐项确认的实体结论；实施顺序见 [`Agent Runtime 重构实施计划`](./2026-08-24-agent-runtime-refactoring-plan.md)。既有 Runtime 实体已于 2026-08-25 对齐；2026-08-27 新增的 ModelCall 只解决完整模型调用数据的可靠承载，不提前引入 Eval、诊断规则、展示模型或自进化实体。
 
 ## 1. 实体关系总览
 
@@ -22,6 +22,7 @@ erDiagram
     CONVERSATION_SESSION }o--o| CONVERSATION_NODE : active_node
     CONVERSATION_SESSION ||--o| AGENT_DELEGATION : child
     SESSION_OPERATION ||--o{ AGENT_DELEGATION : parent
+    SESSION_OPERATION ||--o{ MODEL_CALL : invokes
     CONVERSATION_NODE }o--o{ ARTIFACT : references
 
     CONVERSATION_SESSION {
@@ -65,6 +66,16 @@ erDiagram
         string parent_tool_call_id UK
         string initial_message_id UK
         string child_package_version_id FK
+    }
+
+    MODEL_CALL {
+        string model_call_id PK
+        string operation_id FK
+        string step_id
+        integer request_attempt
+        string status
+        string request_content_ref
+        string response_content_ref
     }
 ```
 
@@ -548,21 +559,25 @@ flowchart LR
 sequenceDiagram
     participant D as OperationDriver
     participant S as AgentRunState
+    participant C as ModelCall Content
     participant P as Provider Stream
     participant E as EventBus / UI
     participant B as AssistantMessage Buffer
     participant N as ConversationNode
 
     D->>S: 持久化 Model Request Intent
-    D->>P: 发起模型请求
+    D->>C: 保存完整 ModelContext + wire request
+    D->>S: 原子递增 request_attempt + 创建 ModelCall
+    D->>P: 发起同一个 PreparedModelCall
     loop Provider Delta
         P-->>D: text / thinking / tool delta
         D-->>E: 实时发送
         D->>B: 内存拼接消息
     end
     P-->>D: response completed
-    D->>N: 持久化完整 AssistantMessage
-    D->>S: 推进 ModelStepState
+    D->>C: 保存聚合 Provider Response + AssistantMessage
+    D->>N: 原子完成 ModelCall + 持久化 AssistantMessage
+    D->>S: 同事务推进 ModelStepState
 ```
 
 | 数据 | 生命周期 | 是否持久化 |
@@ -571,11 +586,19 @@ sequenceDiagram
 | AssistantMessage Buffer | 当前 Provider 请求 | 否 |
 | 完整 AssistantMessage | ConversationNode | 是 |
 | Model Request Intent | ModelStepState | 是 |
+| ModelCall | 每次真实 Provider 调用 | 是，独立行 |
+| RequestContent / ResponseContent | 完整请求与聚合响应正文 | 是，内容寻址外部存储 |
 | ToolCall Intent | ToolCallState | 是 |
 
-流式过程中崩溃时，丢弃未完成内存 Buffer，根据已持久化的 Model Request Intent 重新发起完整请求。Tool 只能在模型响应完整且 ToolCall Intent 已提交后执行，半个流式 ToolCall 不得触发工具。
+流式过程中崩溃时，丢弃未完成内存 Buffer，把遗留 `in_flight` ModelCall 收敛为
+`incomplete`，再根据已持久化的 Model Request Intent 创建新的 attempt。Tool 只能在模型
+响应完整、ResponseContent 已保存且 ToolCall Intent 已提交后执行，半个流式 ToolCall
+不得触发工具。
 
-逐 Chunk 业务持久化和客户端断线后的 Token 重放不在当前需求内。`TraceMode.full` 可以把 Delta 异步写入可丢失诊断文件，但它不是恢复或合规审计事实；未来需要 durable stream 时应单独讨论，不写入 Conversation Tree。
+逐 Chunk 业务持久化和客户端断线后的 Token 重放不在当前需求内。`TraceMode.full` 可以把
+Delta 异步写入可丢失诊断文件，但 ModelCall 的完整 RequestContent 和聚合
+ResponseContent 不依赖 Trace mode。未来若要求进程崩溃后仍保留每个原始 Chunk，再增加
+ModelCall 专属 durable chunk journal；Chunk 不写入 Conversation Tree。
 
 ### 4.8 内存表示
 
@@ -1025,7 +1048,10 @@ Provider、Model 和请求设置来自 Operation 绑定的 AgentPackageVersion�
 
 ```text
 初始 request_attempt = 0
-每次真正调用 Provider 前 request_attempt += 1 并 CAS 提交
+每次真实调用 Provider 前：
+1. 保存完整 RequestContent
+2. request_attempt += 1 与 ModelCall(prepared) 原子提交
+3. ModelCall prepared → in_flight 成功后才越过 Provider 边界
 ```
 
 恢复和重试复用同一个 ModelRequestIntent，不重跑 Recall、Hook 和 Context 准备。短退避由 Runtime 内存处理；只有未来需要跨进程定时重试时才增加 `retry_at`。
@@ -1037,11 +1063,17 @@ Provider、Model 和请求设置来自 Operation 绑定的 AgentPackageVersion�
 错误立即失败。用尽次数后必须以 `retryable=true` 的稳定 AgentRunError 进入终态，
 不能依赖下一次偶然 wake 继续一个假 `running` Operation。
 
+同一 `operation_id + step_id + request_attempt` 只能有一个 ModelCall。`prepared` 表示请求
+内容已经可靠保存且尚未尝试发送，可以在恢复后继续同一个 attempt；`in_flight` 表示
+Provider 可能已经收到，崩溃恢复必须先把旧记录收敛为 `incomplete`，再创建新 attempt。
+
 ### 6.8 模型响应事务
 
 返回最终回答时，一个事务完成：
 
 ```text
+ModelCall.status = completed
+ModelCall.response_content_ref = 已存在的 ResponseContent
 insert Assistant ConversationNode
 move Session.active_node_id
 AgentRunState.status = succeeded
@@ -1055,6 +1087,8 @@ commit
 返回 ToolCalls 时，一个事务完成：
 
 ```text
+ModelCall.status = completed
+ModelCall.response_content_ref = 已存在的 ResponseContent
 insert Assistant ConversationNode
 move Session.active_node_id
 current_step.phase = awaiting_tools
@@ -1064,7 +1098,9 @@ current_step.tool_calls = parsed ToolCallStates
 commit
 ```
 
-Stream Delta 和 AssistantMessage Buffer 仍只存在内存；完整响应形成后才写入 ConversationNode。
+Stream Delta 和 AssistantMessage Buffer 仍只存在内存；完整响应形成后先保存聚合
+ResponseContent，再在同一数据库事务完成 ModelCall 与 ConversationNode。ResponseContent
+保存失败时不得提交 AssistantMessage，避免“模型已经回答但调用数据缺失”。
 
 ### 6.9 当前实现收敛
 
@@ -2997,6 +3033,7 @@ class ExecutionIdentity:
     operation_id: OperationId | None = None
     step_id: StepId | None = None
     step_sequence: int | None = None
+    model_call_id: ModelCallId | None = None
     tool_call_id: ToolCallId | None = None
     message_id: MessageId | None = None
 ```
@@ -3005,6 +3042,7 @@ class ExecutionIdentity:
 flowchart LR
     S[session_id] --> O[operation_id]
     O --> ST[step_id]
+    ST --> MC[model_call_id]
     ST --> T[tool_call_id]
     S --> M[message_id]
     M -.claim 后.-> O
@@ -3017,6 +3055,7 @@ flowchart LR
 operation_id  → session_id 必须存在
 step_id       → operation_id 必须存在
 step_sequence → step_id 必须存在
+model_call_id → AgentRun 请求时 step_id 必须存在；Session utility 请求只要求 session_id
 tool_call_id  → step_id 必须存在
 message_id    → 只要求 session_id；claim 后可同时携带 Operation/Step 身份
 ```
@@ -3032,6 +3071,7 @@ message_id    → 只要求 session_id；claim 后可同时携带 Operation/Step
 | Operation accepted | `session_id + operation_id` |
 | InboxMessage claimed | `session_id + operation_id + message_id`，Step claim 再加 step |
 | ModelStep started | `session_id + operation_id + step_id + step_sequence` |
+| Provider ModelCall | 再加 `model_call_id` |
 | ToolCall started/completed | 再加 `tool_call_id` |
 | AssistantMessage committed | 再加 `message_id` |
 | Text/Thinking Delta | 到 step |
@@ -3163,12 +3203,6 @@ class SpanRecord:
 class DiagnosticRecord:
     identity: ExecutionIdentity | None
     ...
-
-
-@dataclass(frozen=True)
-class RequestSnapshotRecord:
-    identity: ExecutionIdentity
-    ...
 ```
 
 operation/step/tool_call 描述“执行的是谁”；span_id/parent_span_id 只描述一次测量的调用层级。一个 ToolCall 可以拥有排队、批准、执行和重试多个 Span，不能用 span_id 代替 tool_call_id。
@@ -3181,13 +3215,13 @@ operation/step/tool_call 描述“执行的是谁”；span_id/parent_span_id �
 | --- | --- |
 | `off` | 不记录 |
 | `standard` | fact、lifecycle、Span、Diagnostic |
-| `full` | standard + delta + Provider Request Snapshot |
+| `full` | standard + 可丢失 delta |
 
-Trace 不进入业务数据库，不作为恢复来源，可以因容量限制丢失。Observer 错误不能进入执行路径。Request Snapshot 必须脱敏 Secret、Authorization 和敏感 Tool 参数。
+Trace 不进入业务数据库，不作为恢复来源，可以因容量限制丢失。Observer 错误不能进入执行路径。完整模型请求与聚合响应由第 20 节的 ModelCall 数据底座可靠保存，不再通过 `RequestSnapshotRecord` 旁路重建。
 
 `full` 模式中的 delta 可以由 TraceSink 异步追加到 JSONL 等诊断文件，并保留 `occurred_at` 与 ExecutionIdentity 以分析 TTFT 和流式中断；“记录”不提升其可靠性，丢帧或进程崩溃时不补发。企业合规审计若要求完整、可靠和可验证投递，必须另建事务性 Audit/Outbox，不能复用 Trace。
 
-当前不增加 observations、runtime_events、trace_spans 表，不引入 EventStore 或 Event-sourced AgentRunState；AgentRunState、ConversationNode、InboxMessage 和 ToolCall Intent 已经是恢复权威。
+当前不增加 observations、runtime_events、trace_spans 表，不引入 EventStore 或 Event-sourced AgentRunState。`model_calls` 是窄用途的 Provider 外部调用日志，承担调用前门禁和 attempt 恢复判断；它不是通用 Observation/Event 表，也不改变 AgentRunState、ConversationNode、InboxMessage 和 ToolCall Intent 的业务权威。
 
 ## 18. ContextProjection / ModelContext
 
@@ -3206,6 +3240,8 @@ flowchart LR
     B --> V[校验 + fingerprint]
     V --> I[持久化 ModelRequestIntent]
     I --> P[Provider Mapper]
+    P --> C[PreparedModelCall]
+    C --> M[持久化 ModelCall + RequestContent]
 ```
 
 | 组件 | 输入 | 输出 |
@@ -3215,7 +3251,7 @@ flowchart LR
 | `RuntimeEffects` | Visible Messages | Recall/Hook Contributions |
 | `ModelContextBuilder` | Package + Visible Messages + Contributions | 最终 ModelContext |
 | `OperationService` | ModelContext + expected revision | 持久化 Request Intent |
-| Provider Mapper | 已持久化 ModelContext | Provider wire request |
+| Provider Mapper | 已持久化 ModelContext | PreparedModelCall |
 
 OperationDriver 不读取或重组 ModelContext 内部字段；Hook 和 Provider 也不能成为第二个 Builder。
 
@@ -3389,11 +3425,11 @@ sequenceDiagram
 Intent 提交后崩溃：phase=request_ready；直接读取 intent，禁止重跑投影/Window/Recall/Hook
 ```
 
-Provider 调用前的 request_attempt CAS 仍按第 6.7 节执行。
+Provider 调用前的 RequestContent 保存、request_attempt CAS 与 ModelCall 创建按第 6.7 节和第 20 节执行。
 
 ### 18.11 Provider Mapper
 
-Provider Mapper 只做协议转换：
+Provider Mapper 只做协议转换并返回不可变的内存值：
 
 ```python
 class AnthropicRequestMapper:
@@ -3401,10 +3437,18 @@ class AnthropicRequestMapper:
         self,
         context: ModelContext,
         model: ModelVersion,
-    ) -> AnthropicRequest: ...
+    ) -> PreparedModelCall: ...
 ```
 
-它不能追加 System、遍历 Conversation Tree、执行 Recall/Hook、修改 Tool Definitions 或再次 Window。generate、stream、count_tokens 和 RequestSnapshot 必须复用同一个 Mapper，避免同一 Context 出现不同 wire 语义。
+`PreparedModelCall` 至少包含 provider、api_kind、endpoint、requested_model 和即将发送的
+完整 wire body。它不能持有 Client、连接、Secret Header 或回调。保存 RequestContent 和
+Provider 发送必须复用同一个 PreparedModelCall；Provider 不得通过
+`request_snapshot(ModelContext)` 再生成第二份请求。
+
+Mapper 不能追加 System、遍历 Conversation Tree、执行 Recall/Hook、修改 Tool Definitions
+或再次 Window。`count_tokens` 可以复用同一底层字段映射，但它不是生成调用，不创建
+ModelCall；所有 `generate/stream` 路径，包括 primary、worker 和 utility，必须经过同一个
+ModelCall 门禁。
 
 ### 18.12 `/context` 与 Trace
 
@@ -3414,7 +3458,9 @@ class AnthropicRequestMapper:
 | 尚未构建 Intent | 只展示 deterministic base projection，并标注不含 Recall/Hook |
 | Operation 已终态 | 展示最后可用 Intent 摘要或 Conversation projection |
 
-`/context` 不调用 Recall、Hook 或 Provider，不产生新请求决策。Trace RequestSnapshot 只能从已提交 Intent 经 Provider Mapper 生成，不能重新组装 ModelContext。
+`/context` 不调用 Recall、Hook 或 Provider，不产生新请求决策。历史实际请求从已保存的
+ModelCall RequestContent 读取；不能为了展示重新执行 Provider Mapper 或重新组装
+ModelContext。
 
 ### 18.13 最终抽象
 
@@ -3425,7 +3471,9 @@ ContextContributions   Recall/Hook 的受限追加结果
 ModelContextBuilder    唯一 ModelContext 创建入口
 ModelContext           深度不可变 Provider-neutral 输入
 ModelRequestIntent     ModelContext 的临时持久化恢复快照
-Provider Mapper        ModelContext → Provider wire
+Provider Mapper        ModelContext → PreparedModelCall
+PreparedModelCall      保存与发送共用的不可变 wire 请求
+ModelCall              每次真实 Provider 调用的可靠索引
 ```
 
 不增加 ContextAssembler、ContextPipeline 类、ContextManager、ContextCoordinator、PreparedContext 或 ProviderContext。
@@ -3585,7 +3633,234 @@ classDiagram
 
 结论：持久化 `ToolApproval`，不持久化普通 `HostCall`；审批决定通过 State CAS 改变执行，HostCall Outcome 只作用于当前调用栈。
 
-## 20. 实体设计收口
+## 20. ModelCall 可靠数据底座
+
+### 20.1 目标与边界
+
+ModelCall 只解决一个问题：可靠保存每次真实生成调用的完整输入、聚合输出、状态和执行
+身份，使后续展示、组合、诊断、Eval 或自进化可以从原始事实投影。当前不增加
+EvalCase、EvalRun、Score、FailureClassification、Trajectory 表或展示 DTO。
+
+```text
+业务恢复事实                     模型调用事实
+ModelRequestIntent              ModelCall
+ConversationNode                RequestContent
+AgentRunState                   ResponseContent
+AgentPackageVersion             可选 full Trace Delta
+```
+
+ModelCall 不是可丢失 Trace。它是窄用途持久化 Entity，也是 Provider 外部调用边界的可靠
+日志；Runtime 可以在恢复时读取其 `prepared/in_flight` 状态判断一次 attempt 是否可能已经
+越过外部边界。它不替代 ModelRequestIntent、AgentRunState 或 ConversationNode。
+
+### 20.2 三层抽象
+
+```mermaid
+erDiagram
+    MODEL_REQUEST_INTENT ||--o{ MODEL_CALL : attempts
+    MODEL_CALL ||--|| REQUEST_CONTENT : sends
+    MODEL_CALL ||--o| RESPONSE_CONTENT : receives
+```
+
+| 名称 | 类型 | 生命周期 | 持久化 |
+| --- | --- | --- | ---: |
+| `ModelRequestIntent` | Step 内值对象 | 请求决定至响应提交 | AgentRunState JSON |
+| `PreparedModelCall` | 深度不可变内存值 | Provider Mapper 至调用结束 | 否 |
+| `ModelCall` | 持久化 Entity | 请求准备至 Session 删除 | SQLite 独立行 |
+| `RequestContent` | schema-versioned 内容文档 | 与 ModelCall 同期 | ModelCallContentStore |
+| `ResponseContent` | schema-versioned 内容文档 | 完整或部分响应形成后 | ModelCallContentStore |
+
+AgentRun 的一个 Step 只有一个 ModelRequestIntent，但重试可产生多个 ModelCall。Title、历史
+压缩等 Session 级 `utility/worker` 生成调用没有 SessionOperation，仍必须创建 ModelCall；
+此时 identity 只携带 session_id + model_call_id，operation/step 字段为空。外部
+`count_tokens` 不是生成调用，不创建 ModelCall，只保留 Span/Diagnostic。
+
+### 20.3 PreparedModelCall
+
+```python
+@dataclass(frozen=True)
+class PreparedModelCall:
+    provider: str
+    api_kind: str
+    endpoint: str
+    requested_model: str
+    body: FrozenJSON
+```
+
+`body` 是将要传给 Provider Client 的完整协议请求，包含真实 `stream`、
+`stream_options`、messages、tools 和 provider options。认证 Header、API Key、Cookie、
+Client、连接与回调不得进入该对象。Mapper 返回后禁止修改 body；RequestContent 保存与
+Provider 发送必须消费同一个 PreparedModelCall。
+
+### 20.4 ModelCall 身份与字段
+
+```text
+ModelCall
+├── model_call_id
+├── ExecutionIdentity
+├── request_attempt
+├── model_role / purpose
+├── provider / api_kind / endpoint
+├── requested_model / returned_model
+├── status
+├── request_content_ref / response_content_ref
+├── context_fingerprint
+├── provider_request_id / http_status
+├── created_at / started_at / first_chunk_at / finished_at
+└── error
+```
+
+`model_call_id` 表示一次真实 Provider 调用；不能用 step_id 或 span_id 代替。Step 可以重试，
+同一个 ModelCall 又可以拥有 HTTP、Provider parse 和聚合等多个 Span。AgentRun 调用使用
+`UNIQUE(operation_id, step_id, request_attempt)`；Session 级 utility/worker 调用不伪造
+Operation 或 Step。
+
+`model_role` 固定为 `primary/worker/utility`。`purpose` 第一版只接受
+`agent_step/title/history_compaction`；出现新的真实内部生成用途时通过 schema migration
+增加明确枚举，不使用 `other` 资源袋。
+
+### 20.5 状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> prepared
+    prepared --> in_flight
+    prepared --> cancelled
+    in_flight --> completed
+    in_flight --> failed
+    in_flight --> cancelled
+    in_flight --> incomplete
+```
+
+| 状态 | 精确定义 |
+| --- | --- |
+| `prepared` | RequestContent 和 ModelCall 已提交，明确尚未尝试发送 |
+| `in_flight` | 已进入 Provider 调用边界，Provider 可能已经收到 |
+| `completed` | 完整 Provider 输出已聚合并可靠保存 |
+| `failed` | 得到明确失败，例如连接、HTTP 或协议错误 |
+| `cancelled` | Runtime 在请求完成前接受取消 |
+| `incomplete` | 崩溃或流中断，完整 Provider 输出不可确认 |
+
+状态更新用 `WHERE model_call_id=? AND status=?` 做自然 CAS，不增加 revision。终态不可返回
+非终态；相同终态与相同内容引用可以幂等成功，冲突终态必须拒绝。
+
+### 20.6 RequestContent 与 ResponseContent
+
+RequestContent 保存同一次请求的两层完整表示：
+
+```json
+{
+  "schema_version": 1,
+  "model_context": {
+    "system": [],
+    "messages": [],
+    "tools": []
+  },
+  "wire_request": {}
+}
+```
+
+ResponseContent 同时保存 Provider 语义和 Pickel 实际消费结果：
+
+```json
+{
+  "schema_version": 1,
+  "partial": false,
+  "provider_response": {},
+  "assistant_message": {}
+}
+```
+
+流式 Provider 必须聚合 text、thinking/reasoning、tool call id/name/arguments、finish reason、
+usage、provider response id、returned model 和 Provider 明确返回的其他字段。取消或可捕获的
+流中断可以保存 `partial=true` 的 ResponseContent；进程直接崩溃时允许只有
+`in_flight → incomplete`，不声称补回内存中尚未持久化的 Chunk。
+
+完整协议请求不等于保存 Secret：Authorization、API Key、Cookie 和 Secret Header 永不
+进入内容。多模态 wire body 必须可以从保存内容还原；大正文由内容寻址存储承载，不在
+SQLite 行内截断。
+
+### 20.7 ModelCallContentStore
+
+```python
+class ModelCallContentStore(Protocol):
+    def put(self, content: bytes) -> ModelCallContentRef: ...
+    def get(self, ref: ModelCallContentRef) -> bytes: ...
+    def exists(self, ref: ModelCallContentRef) -> bool: ...
+    def delete(self, ref: ModelCallContentRef) -> None: ...
+```
+
+ContentRef 由 canonical JSON bytes 的 SHA-256 派生，并记录 schema media type、encoding 与
+未压缩大小。文件实现采用同目录临时文件、flush/fsync 和原子 rename；可以使用 zstd 等
+无损压缩，但 digest 永远覆盖解压后的 canonical bytes。
+
+```text
+先写 Content，再提交 SQLite 引用
+
+有引用但无 Content → 禁止
+有 Content 但无引用 → 允许，GC 清理
+```
+
+该 Store 只保存 ModelCall 内容，不扩展为通用 ObjectStore，也不与 Conversation Artifact
+混成同一业务实体。GC 扫描 model_calls 的 request/response 引用，并为新写入的孤儿内容
+保留宽限期。
+
+### 20.8 请求门禁与响应提交
+
+```mermaid
+sequenceDiagram
+    participant D as RuntimeEffects
+    participant P as Provider Mapper
+    participant C as ModelCallContentStore
+    participant DB as Runtime Store
+    participant API as Provider
+
+    D->>P: map(persisted ModelContext)
+    P-->>D: PreparedModelCall
+    D->>C: put(RequestContent)
+    C-->>D: request_content_ref
+    D->>DB: CAS request_attempt + INSERT ModelCall(prepared)
+    D->>DB: prepared → in_flight
+    D->>API: stream(the same PreparedModelCall)
+    API-->>D: deltas / completed
+    D->>C: put(aggregated ResponseContent)
+    D->>DB: complete ModelCall + commit AssistantMessage/State
+```
+
+硬门禁：RequestContent 写入、request_attempt CAS、ModelCall 插入或
+`prepared → in_flight` 任一步失败，都不得调用 Provider。AgentRun 调用中，request_attempt
+递增和 ModelCall 插入属于同一个 SQLite/InMemory 领域事务。
+
+响应侧同样先写 Content，再在一个领域事务中完成 ModelCall、ConversationNode、
+active_node_id 和 AgentRunState。ResponseContent 保存失败时不得提交 AssistantMessage。
+Observer、Trace 或 HTML 失败不影响这条硬合同。
+
+### 20.9 重试、取消与崩溃恢复
+
+| 恢复时状态 | 动作 |
+| --- | --- |
+| `prepared` | 确认未发送，读取同一 RequestContent，继续同一个 model_call_id/attempt |
+| `in_flight` | Provider 是否收到未知，原记录 CAS 为 incomplete，再按策略创建新 attempt |
+| `completed` | 从 ResponseContent 与 ConversationNode 继续，不重发 |
+| `failed` | 按错误分类和冻结重试策略决定是否创建新 attempt |
+| `cancelled/incomplete` | 保留历史事实，不复用记录 |
+
+开始 Provider 调用前必须先把 `prepared` 更新为 `in_flight`；两者之间崩溃意味着仍可安全
+发送同一个 prepared call。`in_flight` 更新后、网络真正写出前崩溃仍不可区分，因此按
+“可能已发送”处理。模型生成的业务副作用仅为成本，当前策略允许从同一
+ModelRequestIntent 创建新 attempt；旧记录不能被改回 prepared。
+
+### 20.10 Trace、展示与未来组合
+
+Span/Event/Diagnostic 通过 model_call_id 关联 ModelCall，只保存耗时、状态和小型属性；完整
+内容通过 ContentRef 按需读取。Trace mode 只控制可丢失事件、Span 和 Delta，不控制
+RequestContent/ResponseContent 是否可靠保存。
+
+后续 SessionTrajectory、HTML、Eval Dataset 或诊断规则都从 Conversation、Operation、
+ModelCall、ToolCall 和 Trace 做只读投影；当前不把任何派生指标、评分或轨迹结构写回
+ModelCall。
+
+## 21. 实体设计收口
 
 本轮实体讨论到此收口。Session 生命周期的权威定义已经合并到第 2 节，不在末尾复制第二份合同。
 
@@ -3600,10 +3875,11 @@ flowchart LR
     T --> P[ToolApproval<br/>可恢复外部决定]
 ```
 
-后续实施只做三类校对和拆分：
+后续实施只做四类校对和拆分：
 
 1. 对照当前代码列出保留、重命名、删除和迁移项；
 2. 按实施计划小步替换旧 Runtime；
 3. 每个批次验收后反向校对命中的领域合同，不再为了预期能力增加新实体。
+4. 按阶段 10 实施 ModelCall 可靠数据底座，删除 RequestSnapshot 旁路后再重建展示投影。
 
 只有出现第二种必须被 Session 接受并独立恢复的工作、真正的跨进程可恢复 Host 交互、多进程 Session 驱动竞争或持久化并行分支需求时，才重新开启对应实体设计。

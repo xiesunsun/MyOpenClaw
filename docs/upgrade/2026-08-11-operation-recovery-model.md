@@ -2,8 +2,8 @@
 
 **日期**：2026-08-11  
 **更新日期**：2026-08-27
-**状态**：当前合同；v11 恢复主链、PreToolUse、Approval CAS、Delegation settlement 与 Host reconcile 已实施
-**范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
+**状态**：当前合同；v11 主链已实施，v12 ModelCall 调用门禁待实施
+**范围**：SessionOperation 接受、AgentRunState、ModelStepState、ModelCall、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
 命名遵循 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md)，表结构和原子事务遵循 [`数据库实体设计`](./2026-07-12-db-entities.md)。
@@ -19,12 +19,13 @@ ConversationSession.active_operation_id
     └── AgentRunState                        当前一行，revision CAS
         └── ModelStepState?                  current_step_json
             ├── ModelRequestIntent?
+            ├── ModelCall[]                  每次真实 Provider 调用
             └── ToolCallState[]
                 ├── ToolApproval?
                 └── ToolExecutionIntent?
 ```
 
-恢复只读取这条链，不扫描历史 State、Event、Trace 或 reducer。数据库保存“下一步判断所需事实”，不保存 Python 协程和 Provider stream buffer。
+恢复只读取这条链，不扫描历史 State、Event、Trace 或 reducer。数据库保存“下一步判断所需事实”，不保存 Python 协程和 Provider stream buffer。ModelCall 只补充 Provider 外部调用是否已进入 `in_flight` 的可靠判断，不替代 ModelRequestIntent。
 
 ## 2. Operation 接受
 
@@ -161,8 +162,11 @@ preparing_request
 → Recall / Hook ContextContributions
 → ModelContextBuilder
 → CAS commit request_ready + ModelRequestIntent
-→ CAS request_attempt += 1
-→ Provider Mapper / stream
+→ Provider Mapper 产生 PreparedModelCall
+→ 保存完整 RequestContent
+→ 同一事务 CAS request_attempt += 1 + insert ModelCall(prepared)
+→ CAS ModelCall prepared → in_flight
+→ Provider stream(the same PreparedModelCall)
 ```
 
 恢复：
@@ -170,14 +174,16 @@ preparing_request
 | 持久化状态 | 动作 |
 | --- | --- |
 | `preparing_request` | Provider 尚未调用，可重新投影并执行 Recall/Hook |
-| `request_ready` | 直接读取 Intent，不重跑 Context 管道；用相同输入重新发起 Provider 请求 |
-| stream 中断 | 丢弃内存 buffer，从持久化 Intent 重发完整请求 |
+| `request_ready`，无 ModelCall | 直接读取 Intent，不重跑 Context 管道；准备第一个调用 |
+| 最新 ModelCall=`prepared` | 已确认未发送；读取同一 RequestContent，继续同一 model_call_id/attempt |
+| 最新 ModelCall=`in_flight` | Provider 是否收到未知；先标记 incomplete，再创建新 attempt |
+| stream 中断 | 保存可得的 partial ResponseContent，旧调用收敛 incomplete，再按策略新建 attempt |
 | AssistantMessage 已提交 | 不重发 Provider；按 awaiting_tools 或 Step 完成继续 |
 
 模型请求重试由 `AgentRuntimePolicy` 冻结。默认最多 3 次真实调用（包含首次），
-以 1 秒为初始延迟做指数退避，单次延迟最多 4 秒。每次真实调用前都先以 revision
-CAS 递增 `request_attempt`；退避只存在于内存，不增加 `retry_at`、等待状态或定时
-任务实体。
+以 1 秒为初始延迟做指数退避，单次延迟最多 4 秒。每次真实调用前都先保存
+RequestContent，再以一个领域事务完成 revision CAS、`request_attempt` 递增和
+ModelCall(prepared) 插入；退避只存在于内存，不增加 `retry_at`、等待状态或定时任务实体。
 
 只有连接失败、超时、HTTP `408/409/425/429/5xx` 可自动重试。鉴权、参数、权限、
 模型不存在和 Provider 响应协议错误不得盲目重试。用尽次数后提交稳定
@@ -185,7 +191,10 @@ CAS 递增 `request_attempt`；退避只存在于内存，不增加 `retry_at`�
 `retryable=false` 失败。任何 Provider、解析或消费异常都必须收敛业务 State，不能
 只让前台或 AgentRegistry task 抛错并留下 `running` Operation。
 
-逐 Chunk 不进入业务数据库；full Trace 的副本不可用于恢复。
+Provider 完整返回后必须先可靠保存聚合 ResponseContent，再在同一事务完成 ModelCall、
+Assistant ConversationNode 和 AgentRunState 转换。ResponseContent 保存失败时不得提交
+AssistantMessage。逐 Chunk 不进入业务数据库；full Trace 的副本不可用于恢复，也不能
+替代 ModelCall 内容。
 
 ## 5. ToolCallState
 
@@ -419,4 +428,7 @@ waiting Operation 不轮询；批准、reconcile 或 cancel 必须先提交状�
 6. cancelling 可跨崩溃继续，未知 Tool 副作用不会被直接标记 cancelled。
 7. Parent 取消不会留下 running/waiting 的孤儿后代。
 8. 终态 State、Session.active_operation_id 清空与 delegated child settled Inbox 插入原子一致。
-9. settled 消息已持久化但 Parent 未被实时 wake 时，启动恢复会发现并驱动 Parent；不扫描历史终态补发通知。
+9. RequestContent、request_attempt 与 `ModelCall(prepared)` 未全部可靠提交前，Provider 调用次数必须为零。
+10. `prepared`、`in_flight` 和终态 ModelCall 在每个崩溃点都有确定恢复结论，终态调用不会重复发送。
+11. ResponseContent 保存失败时不提交 AssistantMessage；成功时 ModelCall、Node 与 State 原子可见。
+12. settled 消息已持久化但 Parent 未被实时 wake 时，启动恢复会发现并驱动 Parent；不扫描历史终态补发通知。

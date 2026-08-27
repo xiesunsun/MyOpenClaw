@@ -58,7 +58,7 @@
 | --- | --- |
 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 唯一术语、组件职责、历史名称迁移 |
 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 已确认实体、值对象和跨领域关系的决策理由 |
-| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v11 当前结构、v10 Delegation 迁移来源、字段、约束与迁移 |
+| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v12 ModelCall 目标结构、v11 迁移来源、字段、约束与迁移 |
 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | AgentRunState、Intent、审批、取消和恢复语义 |
 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | Pickel 配置来源、合并、SecretRef 和 Package 构建输入 |
 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 批次顺序和验收门槛 |

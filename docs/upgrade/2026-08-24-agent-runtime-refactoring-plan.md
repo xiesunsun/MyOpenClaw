@@ -2,8 +2,8 @@
 
 **日期**：2026-08-24  
 **更新日期**：2026-08-27
-**状态**：阶段 0–9 完成
-**范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期与 Agent Delegation 的分阶段重构  
+**状态**：阶段 0–9 完成；阶段 10 `ModelCall` 可靠数据底座待实施
+**范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期、Agent Delegation 与 Provider 调用可靠记录的分阶段重构
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
 本文只规定实施顺序、批次边界和验收门槛，不重复定义领域实体。具体名称和语义遵循：
@@ -16,7 +16,7 @@
 
 逐项确认的实体边界记录在 [`Runtime 实体决策`](./2026-08-24-runtime-entity-decisions.md)。
 
-领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v11 明确领域表，v10 只作为增加 child Package 稳定绑定的一次性迁移来源；当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
+领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v11 明确领域表，v12 是增加 `model_calls` 与完整调用内容引用的目标结构；v10 只作为增加 child Package 稳定绑定的一次性迁移来源。当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
 
 ## 1. 重构目标
 
@@ -87,6 +87,7 @@ OperationDriver
 | 7 | 清理和验收 | 删除未接线公共能力，代码与命中文档一致 |
 | 8 | 收敛 Tool 输出与 Delegation 控制契约 | Tool 输出单一模型可见内容；child 终态结果、report 和中断语义无歧义 |
 | 9 | 收敛 Multi-Agent 消息与 Package 选择 | child 终态主动投递；模型不依赖固定顺序等待；child Agent 选择可冻结、可恢复且不扩权 |
+| 10 | 建立 ModelCall 可靠数据底座 | 请求发出前保存完整请求；响应聚合后保存完整输出；恢复可判断 Provider 副作用边界 |
 
 ### 4.1 当前进度（2026-08-27）
 
@@ -133,8 +134,11 @@ OperationDriver
 | 9.4 Agent Package v3 | 完成 | 冻结 `AgentDelegationPolicy`、结果预算以及 `delegate_agent.agent_id` 枚举；缺省策略为仅允许自身 | — |
 | 9.5 SQLite v11 与跨 Package child | 完成 | Delegation 持久化 `child_package_version_id`；显式 v10→v11 迁移；child 按冻结 Agent Package 装载，Tool 权限沿完整祖先链取交集，Workspace 不扩权 | — |
 | 9.6 Multi-Agent 端到端验收 | 完成 | 并行 child 按实际完成顺序投递、重启恢复、report/send 方向、跨 Agent Package 和多层权限均有合同测试；Provider live smoke 通过 | — |
+| 10.1–10.4 ModelCall 可靠数据底座 | 待开始 | 目标合同已确认 | SQLite v12、内容存储、Provider Gate、流式聚合与恢复验收 |
 
 当前验收基线：全量离线测试为 `1035 passed, 4 skipped`；CPA 与 OpenCode Go Provider live smoke 为 `4 passed`。整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；CPA `gpt-5.6-luna` 的文本流、Function Tool 和结果回传已通过端到端测试。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。观测报告直接读取 `ConversationNode`，并以 Session 摘要、对话、执行事件和显式错误状态呈现 Trace，同时保留完整原始记录，不再引用旧 ConversationEntry/Object 字段。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
+
+上述基线描述的是当前 v11 实现。`RequestSnapshotRecord` 仍是过渡观测能力，不能作为完整请求/响应或恢复事实；阶段 10 完成后，由 `ModelCall + RequestContent + ResponseContent` 接管这一职责。
 
 ## 5. 阶段 0：回归基线
 
@@ -305,7 +309,7 @@ Provider Mapper
 - Provider 不读取 Session，不自行组装历史。
 - Recall 和请求前 Hook 在 Intent 提交后禁止再次执行。
 - 未完成请求的 `/context` 读取当前 ModelRequestIntent。
-- 模型响应提交后从恢复状态清除完整 ModelContext；历史完整请求只在显式启用 full trace 时保存，默认保留 fingerprint。
+- 模型响应提交后从恢复状态清除完整 ModelContext；阶段 10 完成后，历史完整请求与聚合响应由 `ModelCall` 内容存储可靠保存，不受 trace level 影响。
 - 未执行请求只能生成纯 preview，不执行带副作用的 Recall 或 Hook。
 - preview 与 actual 必须明确区分。
 
@@ -414,7 +418,7 @@ Parent Operation 进入 `cancelling` 后，必须沿 AgentDelegation 图查询�
 
 | 能力 | 处理原则 |
 | --- | --- |
-| RequestDigestEvent | 已删除；实际请求统一由 RequestSnapshotRecord 记录 |
+| RequestDigestEvent | 已删除；阶段 10 由 `ModelCall` 内容引用保存完整请求/响应；当前 `RequestSnapshotRecord` 仅为过渡观测实现 |
 | HostCallRecorder | 已移出公共 API；未接入真实观测路径 |
 | ActivationControl | 已删除；未接入 RuntimeHost/Boot |
 | AgentRunProgress | 已删除；仅有进度 DTO、没有生产发射或消费路径，不作为 Runtime 公共能力 |
@@ -532,6 +536,65 @@ send_message 触发 child 新 Operation、不同 Agent Package 组合和历史 P
 避免把外部 503 当成本地状态机失败。每批由 Luna 代理只领取一个编号，提交前报告修改文件、
 合同测试、全量测试与未解决风险；顶层代理校验不得提前实现下一批。
 
+## 12.3 阶段 10：ModelCall 可靠数据底座
+
+阶段 10 只建立后续观测、诊断、评测和自进化可以依赖的原始事实，不实现评分器、诊断规则、
+Prompt 优化、Benchmark 编排或新的 HTML 报告。`ModelRequestIntent` 继续表示逻辑请求与恢复
+状态；`ModelCall` 表示一次实际 Provider 尝试，两者不得合并。
+
+### 10.1 SQLite v12 与内容存储
+
+- 新增 `model_calls`，按 [`数据库实体设计`](./2026-07-12-db-entities.md) 实现字段、外键、
+  状态 CHECK、唯一索引和 v11 → v12 一次性迁移。
+- 实现窄接口 `ModelCallContentStore`；RequestContent 与 ResponseContent 使用不可变、内容寻址
+  存储，SQLite 只保存引用、fingerprint 和检索字段。
+- 内容存储写入成功后，必须在同一数据库事务中完成 `request_attempt + 1` 与
+  `ModelCall(status=prepared)` 插入；任一步失败都不得调用 Provider。
+
+验收：迁移可回滚；同一 `(operation_id, step_id, request_attempt)` 不能产生两次调用；内容
+缺失时明确失败，不把损坏记录伪装为完整调用。
+
+### 10.2 Provider Prepare 与发送闸门
+
+- 每个 Provider Mapper 只生成一个不可变 `PreparedModelCall`，其中的 Provider wire request
+  同时用于 RequestContent 持久化和真实网络发送，禁止第二次映射。
+- 发送前以 CAS 将 `prepared → in_flight`；CAS 失败时不得发送。
+- `primary`、`worker`、`utility` 的 `generate/stream` 均通过该闸门；纯本地 token count
+  不创建 ModelCall。
+- Session 级 utility 调用允许 `operation_id/step_id` 为空，但必须有 `session_id`、
+  `model_role` 和 `purpose`。
+
+验收：保存失败、CAS 竞争和进程在 prepared 后崩溃均不会产生未知外部调用；Provider 收到的
+请求与保存字节一致。
+
+### 10.3 流式聚合与响应提交
+
+- Runtime 继续实时转发 Provider-neutral `StreamDelta`；Delta Trace 仍允许丢帧，不进入恢复
+  事务。
+- 流结束时聚合完整 Provider 输出，包括文本、Thinking、ToolCall、usage、finish reason、
+  Provider metadata 与原始响应标识，写入不可变 ResponseContent。
+- ResponseContent 必须先持久化；随后在同一数据库事务中完成 ModelCall 终态、
+  AssistantMessage Node 与 AgentRunState 转换。响应内容保存失败时不得提交 AssistantMessage。
+- Provider HTTP/协议/超时错误写入 ModelCall 失败终态；本地持久化错误保持可区分，不能伪装
+  为 Provider 失败。
+
+验收：流式与非流式得到同构的完整 ResponseContent；工具调用参数增量可正确聚合；进程在响应
+内容写入和业务提交的任一边界崩溃后，恢复结果确定。
+
+### 10.4 恢复、清理与合同验收
+
+- 恢复按 `ModelRequestIntent + 最新 ModelCall` 判断：无调用或 `prepared` 可安全重试；
+  `in_flight` 视为外部副作用未知，进入明确协调/重试策略；终态调用不得重复发送。
+- `/context` 的历史 actual request 和后续观测导出读取 ModelCall 内容；preview 仍由
+  `ModelContextBuilder` 纯构建，不创建调用记录。
+- 删除生产路径对 `RequestSnapshotRecord` 的完整请求权威依赖；Trace/Event/Span 继续仅用于
+  导航、时序和诊断，不参与业务恢复。
+- 增加 SQLite/InMemory 合同测试、三种 Provider wire 映射测试、流式聚合测试、崩溃点测试和
+  至少一次配置环境下的 live smoke；外部 5xx 不得被误判为本地合同失败。
+
+提交顺序固定为 `10.1 → 10.2 → 10.3 → 10.4`。每个批次只引入当前所需窄接口，不增加
+`EvalRun`、`Diagnosis`、`EvolutionPlan`、通用 Telemetry Store 或第二套 Event Log。
+
 ## 13. 每个批次的完成标准
 
 一个批次必须同时满足：
@@ -550,7 +613,7 @@ send_message 触发 child 新 Operation、不同 Agent Package 组合和历史 P
 
 以下内容不再作为实现中的自由选择：
 
-1. Persistence 当前使用 SQLite v11 明确领域表；v10 只作为增加 `AgentDelegation.child_package_version_id` 的一次性迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
+1. Persistence 当前使用 SQLite v11 明确领域表，下一目标为 v12 `model_calls`；v10 只作为增加 `AgentDelegation.child_package_version_id` 的一次性迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
 2. 一个 ConversationSession 同时最多一个非终态 AgentRun，以 `active_operation_id` 和接受事务保证。
 3. Extension 贡献按 RuntimeGeneration 构建，ContributionScope 统一 LIFO rollback/close。
 4. Session 使用 `archived_at`；公共 delete 默认拒绝关系图，显式 delete_session_tree 删除完整 child 子树。

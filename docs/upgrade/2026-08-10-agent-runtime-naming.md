@@ -2,7 +2,7 @@
 
 **日期**：2026-08-10
 **更新日期**：2026-08-27
-**状态**：当前合同；Delegation 消息驱动收敛与跨 Package 选择已实施
+**状态**：当前合同；既有 Runtime 命名已实施，ModelCall 命名待阶段 10 实施
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -41,6 +41,8 @@ ConversationSession
 └── SessionOperation                 不可变执行身份
     └── AgentRunState                当前唯一执行状态
         └── ModelStepState?          当前模型步骤
+            ├── ModelRequestIntent?  已决定的 Provider-neutral 输入
+            ├── ModelCall[]          每次真实 Provider 调用
             └── ToolCallState[]      当前工具调用状态
 ```
 
@@ -50,6 +52,7 @@ ConversationSession
 | `SessionOperation` | Session 接受的一次不可变 AgentRun 身份与执行环境绑定 | 是 |
 | `AgentRunState` | 一个 Operation 的当前可恢复状态 | 是，一行 CAS 更新 |
 | `ModelStepState` | 当前模型请求、响应及工具批次 | 否，嵌入 AgentRunState |
+| `ModelCall` | 一次真实 Provider 生成调用及其完整请求、聚合响应引用 | 是，独立行 |
 | `ToolCallState` | 当前 ToolCall 的审批、Intent、执行与结果状态 | 否，嵌入 ModelStepState |
 
 当前只有一种 SessionOperation：AgentRun。因此不保存 `operation_type`，也不创建独立 `AgentRun` 表。只有第二种工作同时需要 Session 接受、持久化、恢复、resume/cancel 和明确终态时，才给 SessionOperation 增加类型判别。
@@ -124,6 +127,7 @@ flowchart LR
 | `InboxMessage` | `message_id` | 持久化输入、FIFO、delivery 和 claim 结果 |
 | `SessionOperation` | `operation_id` | 不可变执行身份、Package 与 Workspace 绑定 |
 | `AgentRunState` | `operation_id` | 当前可恢复执行状态 |
+| `ModelCall` | `model_call_id` | 一次真实 Provider 调用、重试身份和可靠内容引用 |
 | `AgentPackageVersion` | `package_version_id` | 内容寻址配置快照 |
 | `Artifact` | `artifact_id` | 内容寻址二进制元数据 |
 | `AgentDelegation` | `child_session_id` | Parent Operation 与长期 child Session 的因果关系 |
@@ -168,13 +172,12 @@ Provider Request Mapper
 | `ModelRequestIntent` | 当前 Step 已决定发送的完整 ModelContext 和 fingerprint |
 | `AnthropicRequestMapper` | ModelContext 到 Anthropic wire 的纯映射 |
 
-删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`PreparedContext` 和 Provider 周围的二次组装。`prepare()` 统一为 `build_model_context()`；generate、stream、count_tokens 和 RequestSnapshot 复用同一 Provider Mapper。
+删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`PreparedContext` 和 Provider 周围的二次组装。`prepare()` 作为旧 Context 动词删除；唯一 Context 入口仍是 `build_model_context()`。
 
-`Provider.request_snapshot(ModelContext)` 只返回实际 generate/stream 使用的 wire
-request，不混入 provider、model 或 cache order 包装。RuntimeEffects 使用 Provider
-声明的 `request_cache_order` 组装 RequestSnapshotRecord；不得靠字典字段猜测快照
-类型。Hook 不得返回另一份完整 ModelContext 覆盖 Builder 结果，只能在 Intent
-提交前提供受限 ContextContributions。
+Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedModelCall`；该对象
+包含即将发送的完整 wire body，保存和发送必须复用同一个不可变值。Provider 不再通过
+`request_snapshot()` 重新生成一份旁路请求。Hook 不得返回另一份完整 ModelContext 覆盖
+Builder 结果，只能在 Intent 提交前提供受限 ContextContributions。
 
 `/context` 是只读视图：当前 Step 有 ModelRequestIntent 时直接展示其中已提交的
 精确 ModelContext，source 为 `model_request_intent`；没有 Intent 时才执行不含
@@ -285,9 +288,11 @@ Root 与 Child 仍使用同一个 `Agent` 类型，只是可以执行不同的�
 | `ExecutionIdentity` | session/operation/step/tool/message 的统一引用 |
 | `RuntimeEvent` | fact/lifecycle/delta 的进程内 tagged union |
 | `EventEnvelope` | event_id、identity、时间和单 stream 顺序 |
+| `PreparedModelCall` | Provider Mapper 生成、保存与发送共用的不可变 wire 请求值 |
+| `ModelCall` | 每次真实 Provider 调用的可靠持久化日志；不是 Trace |
+| `ModelCallContentStore` | 内容寻址保存完整 ModelContext、wire request 和聚合 response |
 | `SpanRecord` | 一次调用或阶段的测量层级 |
 | `DiagnosticRecord` | 结构化诊断 |
-| `RequestSnapshotRecord` | 已提交 ModelContext 映射出的 Provider 请求快照 |
 | `TraceSink` | 可丢失诊断副本输出，不是恢复或审计权威 |
 
 ## 10. 动词合同
@@ -341,4 +346,5 @@ Root 与 Child 仍使用同一个 `Agent` 类型，只是可以执行不同的�
 7. Tool 外部副作用前必须提交 ToolExecutionIntent；未知结果不得静默重放。
 8. RuntimeGeneration reload 后旧 Operation 继续引用原 LoadedAgentPackage，所有贡献可逆序撤销。
 9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane；child 成功结果只由最终 AssistantMessage 表达，Runtime 以 agent_settled InboxMessage 自动通知 direct parent，report 仅为中间通信。
-10. 完成迁移的旧公共类型、表和兼容路径必须删除。
+10. Provider 调用前必须可靠保存 ModelCall 与完整 RequestContent；聚合 ResponseContent 保存失败时不得提交 AssistantMessage。
+11. 完成迁移的旧公共类型、表和兼容路径必须删除。
