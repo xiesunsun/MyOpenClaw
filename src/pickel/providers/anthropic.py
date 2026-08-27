@@ -26,13 +26,14 @@ from pickel.conversations.content_blocks import (
     thaw_json,
 )
 from pickel.providers.base import Provider
+from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.response_json import provider_response_json
 from pickel.providers.stream import (
     StreamCompleted,
     StreamDelta,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
-    accumulate,
 )
 from pickel.shared.model_config import ModelConfig
 
@@ -84,20 +85,30 @@ class AnthropicMessagesProvider(Provider):
             artifact_service=artifact_service,
         )
 
-    async def generate(self, context: ModelContext) -> AssistantMessage:
-        # 由 stream() 实现：同一个 provider 不得有两份解析逻辑
-        return await accumulate(self.stream(context))
+    def prepare(self, context: ModelContext) -> PreparedModelCall:
+        body = self._build_create_params(context)
+        body["stream"] = True
+        return PreparedModelCall(
+            provider=self.provider_name,
+            api_kind="anthropic-messages",
+            endpoint="messages",
+            requested_model=self.model,
+            body=body,
+        )
 
-    async def stream(self, context: ModelContext) -> AsyncIterator[StreamDelta]:
-        # input_json_delta 事件不带 tool_call id，须由 content_block_start 记下
+    async def stream_prepared(
+        self, prepared: PreparedModelCall
+    ) -> AsyncIterator[StreamDelta]:
+        if prepared.api_kind != "anthropic-messages":
+            raise ValueError("PreparedModelCall 不是 Anthropic Messages 请求")
+        body = thaw_json(prepared.body)
+        if not isinstance(body, dict) or body.pop("stream", None) is not True:
+            raise ValueError("Anthropic PreparedModelCall 必须显式包含 stream=true")
         tool_call_ids: dict[int, str] = {}
 
-        async with self.client.messages.stream(
-            **self._build_create_params(context)
-        ) as stream:
+        async with self.client.messages.stream(**body) as stream:
             async for event in stream:
                 event_type = getattr(event, "type", None)
-
                 if event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
                     if getattr(block, "type", None) == "tool_use":
@@ -106,21 +117,18 @@ class AnthropicMessagesProvider(Provider):
                         if index is not None and block_id is not None:
                             tool_call_ids[index] = str(block_id)
                     continue
-
                 if event_type != "content_block_delta":
                     continue
-
                 delta = getattr(event, "delta", None)
                 delta_type = getattr(delta, "type", None)
-
                 if delta_type == "text_delta":
-                    text = getattr(delta, "text", None)
-                    if text:
-                        yield TextDelta(text=str(text))
+                    value = getattr(delta, "text", None)
+                    if value:
+                        yield TextDelta(text=str(value))
                 elif delta_type == "thinking_delta":
-                    thinking = getattr(delta, "thinking", None)
-                    if thinking:
-                        yield ThinkingDelta(text=str(thinking))
+                    value = getattr(delta, "thinking", None)
+                    if value:
+                        yield ThinkingDelta(text=str(value))
                 elif delta_type == "input_json_delta":
                     partial = getattr(delta, "partial_json", None)
                     if partial:
@@ -130,12 +138,12 @@ class AnthropicMessagesProvider(Provider):
                             ),
                             partial_json=str(partial),
                         )
-                # signature_delta 不单独发：signature 由 SDK 累积进
-                # get_final_message()，自行拼装反而会漏
-
             final = await stream.get_final_message()
 
-        yield StreamCompleted(message=self._response_to_assistant_message(final))
+        yield StreamCompleted(
+            message=self._response_to_assistant_message(final),
+            provider_response=provider_response_json(final),
+        )
 
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         try:
@@ -146,10 +154,6 @@ class AnthropicMessagesProvider(Provider):
             return None
         input_tokens = getattr(response, "input_tokens", None)
         return int(input_tokens) if input_tokens is not None else None
-
-    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
-        """与 stream() 使用同一个 create wire request builder。"""
-        return self._build_create_params(context)
 
     def _build_create_params(self, context: ModelContext) -> dict[str, Any]:
         params = self._build_request_params(context)

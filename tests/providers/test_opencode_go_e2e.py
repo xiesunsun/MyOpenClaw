@@ -13,6 +13,7 @@ from pickel.conversations.content_blocks import TextBlock
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
+from pickel.providers.stream import accumulate
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("OPENCODE_GO_API_KEY"),
@@ -48,7 +49,9 @@ def test_opencode_go_text_stream(provider_type, model: str) -> None:
             provider_options={"timeout_seconds": 90},
         )
         try:
-            return await provider.generate(_context())
+            return await accumulate(
+                provider.stream_prepared(provider.prepare(_context()))
+            )
         finally:
             client = getattr(provider, "client", None)
             if client is not None and hasattr(client, "aclose"):

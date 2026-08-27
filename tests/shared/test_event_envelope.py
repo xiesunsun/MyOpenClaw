@@ -20,6 +20,18 @@ def test_execution_identity_承载_hook_执行身份():
     assert identity.step_sequence is None
 
 
+def test_execution_identity_可关联_model_call():
+    identity = ExecutionIdentity(
+        session_id="s1",
+        operation_id="o1",
+        step_id="step-1",
+        step_sequence=1,
+        model_call_id="model-call-1",
+    )
+
+    assert identity.model_call_id == "model-call-1"
+
+
 def test_envelope_默认_event_sequence_为未分配():
     assert EventEnvelope().event_sequence == -1
 

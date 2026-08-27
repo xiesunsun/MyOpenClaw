@@ -47,10 +47,20 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_service import OperationService
+from pickel.model_calls.service import (
+    ModelCallPrepareConflict,
+    ModelCallRecoveryError,
+    ModelCallRetryExhausted,
+    ModelCallService,
+)
+from pickel.runtime.model_call_send_gate import (
+    ModelCallSendConflict,
+    ModelCallSendFailure,
+    ModelCallSendGate,
+)
 from pickel.providers.stream import StreamDelta
-from pickel.providers.errors import classify_provider_error
+from pickel.providers.errors import ProviderRequestError, classify_provider_error
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
-from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import (
     RuntimeEventBase,
@@ -104,11 +114,11 @@ class OperationDriver:
         conversation_service: ConversationService,
         package_loader: Callable[[SessionOperation], AgentPackageVersion],
         effects_resolver: Callable[[SessionOperation], RuntimeEffects],
+        model_call_service: ModelCallService | None = None,
         release_operation_package: (
             Callable[[SessionOperation], Awaitable[None]] | None
         ) = None,
         model_context_builder: ModelContextBuilder | None = None,
-        state_machine: AgentRunStateMachine | None = None,
         step_id_factory: Callable[[], str] | None = None,
         node_id_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] | None = None,
@@ -122,9 +132,13 @@ class OperationDriver:
         self._conversations = conversation_service
         self._package_loader = package_loader
         self._effects_resolver = effects_resolver
+        if model_call_service is None:
+            candidate = getattr(operation_service, "_store", None)
+            if candidate is not None and hasattr(candidate, "model_call_content_store"):
+                model_call_service = ModelCallService(candidate)
+        self._model_calls = model_call_service
         self._release_operation_package = release_operation_package
         self._context_builder = model_context_builder or ModelContextBuilder()
-        self._state_machine = state_machine or AgentRunStateMachine()
         self._step_id = step_id_factory or (lambda: str(uuid4()))
         self._node_id = node_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -369,57 +383,91 @@ class OperationDriver:
                 continue
 
             if step.phase == "request_ready":
-                # 只读取持久化 intent；恢复时不重新执行 Context/Recall/Hook。
+                if self._model_calls is None:
+                    raise RuntimeError("OperationDriver 未配置 ModelCallService")
                 assert step.request_intent is not None
-                state = self._commit(
-                    replace(
-                        state,
-                        current_step=replace(
-                            step, request_attempt=step.request_attempt + 1
-                        ),
-                    ),
-                    state,
+                max_attempts = getattr(
+                    package.runtime_policy, "model_request_max_attempts", 3
                 )
-                step = state.current_step
-                assert step is not None and step.request_intent is not None
                 try:
-                    result = await effects.execute_model_request(
+                    prepared_call = self._model_calls.prepare_or_recover_agent_call(
                         operation=operation,
                         state=state,
-                        model_context=step.request_intent.model_context,
-                        consume_delta=consume_delta,
-                        context_fingerprint=step.request_intent.context_fingerprint,
+                        mapper=effects.provider,
+                        max_attempts=max_attempts,
                     )
-                except Exception as exc:
-                    error = classify_provider_error(exc)
-                    attempts = step.request_attempt
-                    max_attempts = getattr(
-                        package.runtime_policy, "model_request_max_attempts", 3
-                    )
-                    if error.retryable and attempts < max_attempts:
-                        delay_ms = min(
-                            getattr(
-                                package.runtime_policy,
-                                "model_request_retry_initial_delay_ms",
-                                1000,
-                            )
-                            * (2 ** (attempts - 1)),
-                            getattr(
-                                package.runtime_policy,
-                                "model_request_retry_max_delay_ms",
-                                4000,
+                except ModelCallRetryExhausted as exc:
+                    call_error = exc.call.error if exc.call is not None else None
+                    failed = replace(
+                        state,
+                        status="failed",
+                        current_step=None,
+                        error=AgentRunError(
+                            code=(
+                                call_error.code
+                                if call_error is not None
+                                else "provider_retry_exhausted"
                             ),
+                            message=(
+                                call_error.message
+                                if call_error is not None
+                                else str(exc)
+                            ),
+                            retryable=(
+                                bool(call_error.retryable)
+                                if call_error is not None
+                                else True
+                            ),
+                        ),
+                    )
+                    state = self._commit(failed, state)
+                    return self._result(
+                        operation,
+                        state,
+                        usage_leaf=self._current_reliable_leaf(operation),
+                    )
+                except (ModelCallPrepareConflict, ModelCallRecoveryError) as exc:
+                    raise RuntimeError(str(exc)) from exc
+
+                state = prepared_call.state
+                step = state.current_step
+                assert step is not None and step.request_intent is not None
+                retry_after = prepared_call.retry_after_attempt
+                if retry_after is not None:
+                    delay_ms = min(
+                        getattr(
+                            package.runtime_policy,
+                            "model_request_retry_initial_delay_ms",
+                            1000,
                         )
-                        logger.warning(
-                            "模型请求失败，将重试: operation_id=%s "
-                            "attempt=%s/%s delay_ms=%s code=%s",
-                            operation_id,
-                            attempts,
-                            max_attempts,
-                            delay_ms,
-                            error.code,
-                        )
-                        await self._sleep(delay_ms / 1000)
+                        * (2 ** (retry_after - 1)),
+                        getattr(
+                            package.runtime_policy,
+                            "model_request_retry_max_delay_ms",
+                            4000,
+                        ),
+                    )
+                    await self._sleep(delay_ms / 1000)
+
+                gate = ModelCallSendGate(
+                    self._model_calls.store,
+                    now=self._now,
+                )
+                try:
+                    response = await gate.send(
+                        call=prepared_call.model_call,
+                        prepared=prepared_call.prepared,
+                        effects=effects,
+                        consume_delta=consume_delta,
+                    )
+                except ModelCallSendFailure as exc:
+                    error = classify_provider_error(exc.cause)
+                    failed_call = self._model_calls.mark_failed(
+                        exc.call,
+                        error,
+                        first_chunk_at=exc.first_chunk_at,
+                    )
+                    if error.retryable and failed_call.request_attempt < max_attempts:
                         continue
                     failed = replace(
                         state,
@@ -437,60 +485,118 @@ class OperationDriver:
                         state,
                         usage_leaf=self._current_reliable_leaf(operation),
                     )
-                assistant_node_id = self._node_id()
-                tool_calls = await self._prepare_tool_calls(
-                    result.assistant_message,
-                    operation=operation,
-                    state=state,
-                    package=package,
-                    effects=effects,
-                )
-                if tool_calls:
-                    has_waiting_approval = any(
-                        call.status == "waiting_approval" for call in tool_calls
-                    )
-                    next_step = replace(
-                        step,
-                        phase="awaiting_tools",
-                        request_intent=None,
-                        assistant_message_node_id=assistant_node_id,
-                        tool_calls=tool_calls,
-                    )
-                    state = self._commit(
-                        replace(
-                            state,
-                            status="waiting" if has_waiting_approval else "running",
-                            waiting_reason=(
-                                "tool_approval" if has_waiting_approval else None
-                            ),
-                            current_step=next_step,
-                        ),
-                        state,
-                        message=result.assistant_message,
-                        node_id=assistant_node_id,
-                    )
-                    last_assistant = result.assistant_message
-                    continue
+                except ModelCallSendConflict as exc:
+                    raise RuntimeError(str(exc)) from exc
 
+                response_content_ref = None
+                save_response_content = getattr(
+                    self._model_calls, "save_response_content", None
+                )
+                if save_response_content is not None:
+                    response_content_ref = save_response_content(response)
+
+                assistant_node_id = self._node_id()
+                try:
+                    tool_calls = await self._prepare_tool_calls(
+                        response.assistant_message,
+                        operation=operation,
+                        state=state,
+                        package=package,
+                        effects=effects,
+                    )
+                except Exception as exc:
+                    # Provider 已经返回了完整结果；Hook/工具策略处理失败时，
+                    # 仍把结果和失败状态作为一个可靠事实提交，避免留下 in_flight。
+                    logger.exception(
+                        "处理模型响应失败，收敛 Operation: operation_id=%s",
+                        operation.operation_id,
+                    )
+                    failure = classify_provider_error(exc)
+                    session = self._conversations.load_conversation_session(
+                        operation.session_id
+                    )
+                    node = ConversationNode(
+                        node_id=assistant_node_id,
+                        session_id=operation.session_id,
+                        parent_node_id=session.active_node_id,
+                        content_type="agent_message",
+                        content=response.assistant_message,
+                        created_at=response.finished_at,
+                    )
+                    failed_state = replace(
+                        state,
+                        revision=state.revision + 1,
+                        status="failed",
+                        current_step=None,
+                        final_assistant_node_id=None,
+                        error=AgentRunError(
+                            code="model_response_processing_failed",
+                            message=f"模型响应处理失败: {exc}",
+                            retryable=False,
+                        ),
+                    )
+                    failure = ProviderRequestError(
+                        code="model_response_processing_failed",
+                        message=f"模型响应处理失败: {exc}",
+                        retryable=False,
+                        status_code=failure.status_code,
+                    )
+                    self._model_calls.commit_agent_processing_failure(
+                        call=prepared_call.model_call,
+                        response=response,
+                        state=failed_state,
+                        expected_revision=state.revision,
+                        node=node,
+                        error=failure,
+                        response_content_ref=response_content_ref,
+                    )
+                    state = failed_state
+                    return self._result(
+                        operation,
+                        state,
+                        response.assistant_message,
+                        usage_leaf=self._current_reliable_leaf(operation),
+                    )
+                has_waiting_approval = any(
+                    call.status == "waiting_approval" for call in tool_calls
+                )
                 next_step = replace(
                     step,
                     phase="awaiting_tools",
                     request_intent=None,
                     assistant_message_node_id=assistant_node_id,
-                    tool_calls=(),
+                    tool_calls=tool_calls,
                 )
-                state = self._commit(
-                    replace(
-                        state,
-                        status="running",
-                        waiting_reason=None,
-                        current_step=next_step,
-                    ),
+                next_state = replace(
                     state,
-                    message=result.assistant_message,
-                    node_id=assistant_node_id,
+                    revision=state.revision + 1,
+                    status="waiting" if has_waiting_approval else "running",
+                    waiting_reason=("tool_approval" if has_waiting_approval else None),
+                    current_step=next_step,
                 )
-                last_assistant = result.assistant_message
+                session = self._conversations.load_conversation_session(
+                    operation.session_id
+                )
+                node = ConversationNode(
+                    node_id=assistant_node_id,
+                    session_id=operation.session_id,
+                    parent_node_id=session.active_node_id,
+                    content_type="agent_message",
+                    content=response.assistant_message,
+                    created_at=response.finished_at,
+                )
+                commit_kwargs = {
+                    "call": prepared_call.model_call,
+                    "response": response,
+                    "state": next_state,
+                    "expected_revision": state.revision,
+                    "node": node,
+                }
+                if response_content_ref is not None:
+                    commit_kwargs["response_content_ref"] = response_content_ref
+                self._model_calls.commit_agent_response(**commit_kwargs)
+                state = next_state
+                last_assistant = response.assistant_message
                 continue
 
             if step.phase == "awaiting_tools" and not step.tool_calls:

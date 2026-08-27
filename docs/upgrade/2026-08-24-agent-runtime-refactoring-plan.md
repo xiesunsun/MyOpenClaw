@@ -2,7 +2,7 @@
 
 **日期**：2026-08-24  
 **更新日期**：2026-08-27
-**状态**：阶段 0–9 完成；阶段 10 `ModelCall` 可靠数据底座待实施
+**状态**：阶段 0–10 完成
 **范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期、Agent Delegation 与 Provider 调用可靠记录的分阶段重构
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
@@ -16,7 +16,7 @@
 
 逐项确认的实体边界记录在 [`Runtime 实体决策`](./2026-08-24-runtime-entity-decisions.md)。
 
-领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v11 明确领域表，v12 是增加 `model_calls` 与完整调用内容引用的目标结构；v10 只作为增加 child Package 稳定绑定的一次性迁移来源。当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
+领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v12 明确领域表，v11 是 `model_calls` 迁移来源，v10 是增加 child Package 稳定绑定的历史迁移来源。当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
 
 ## 1. 重构目标
 
@@ -87,7 +87,7 @@ OperationDriver
 | 7 | 清理和验收 | 删除未接线公共能力，代码与命中文档一致 |
 | 8 | 收敛 Tool 输出与 Delegation 控制契约 | Tool 输出单一模型可见内容；child 终态结果、report 和中断语义无歧义 |
 | 9 | 收敛 Multi-Agent 消息与 Package 选择 | child 终态主动投递；模型不依赖固定顺序等待；child Agent 选择可冻结、可恢复且不扩权 |
-| 10 | 建立 ModelCall 可靠数据底座 | 请求发出前保存完整请求；响应聚合后保存完整输出；恢复可判断 Provider 副作用边界 |
+| 10 | 建立 ModelCall 可靠数据底座 | 已完成：请求前保存、响应聚合、调用身份与恢复边界均已接通 |
 
 ### 4.1 当前进度（2026-08-27）
 
@@ -134,11 +134,11 @@ OperationDriver
 | 9.4 Agent Package v3 | 完成 | 冻结 `AgentDelegationPolicy`、结果预算以及 `delegate_agent.agent_id` 枚举；缺省策略为仅允许自身 | — |
 | 9.5 SQLite v11 与跨 Package child | 完成 | Delegation 持久化 `child_package_version_id`；显式 v10→v11 迁移；child 按冻结 Agent Package 装载，Tool 权限沿完整祖先链取交集，Workspace 不扩权 | — |
 | 9.6 Multi-Agent 端到端验收 | 完成 | 并行 child 按实际完成顺序投递、重启恢复、report/send 方向、跨 Agent Package 和多层权限均有合同测试；Provider live smoke 通过 | — |
-| 10.1–10.4 ModelCall 可靠数据底座 | 待开始 | 目标合同已确认 | SQLite v12、内容存储、Provider Gate、流式聚合与恢复验收 |
+| 10.1–10.4 ModelCall 可靠数据底座 | 完成 | SQLite v12、内容寻址存储、三种 Provider Mapper、发送 Gate、流式聚合、恢复与失败收敛已接通；utility/worker 基础链有双 Store 全链合同测试 | title/history-compaction 产品功能尚未启用，不属于本阶段新增范围 |
 
-当前验收基线：全量离线测试为 `1035 passed, 4 skipped`；CPA 与 OpenCode Go Provider live smoke 为 `4 passed`。整体覆盖率 79%，Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；CPA `gpt-5.6-luna` 的文本流、Function Tool 和结果回传已通过端到端测试。真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果；不新增 Usage 表、State 字段或内存累加器。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。观测报告直接读取 `ConversationNode`，并以 Session 摘要、对话、执行事件和显式错误状态呈现 Trace，同时保留完整原始记录，不再引用旧 ConversationEntry/Object 字段。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
+当前验收基线：全量测试为 `1070 passed, 4 skipped`；Ruff、Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果。阶段 10 已增加 SQLite v12 ModelCall、可靠内容存储、三种 Provider prepare/发送门禁、流式聚合和崩溃恢复，并移除受支持 Provider 的 `generate/stream` 绕过入口。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
 
-上述基线描述的是当前 v11 实现。`RequestSnapshotRecord` 仍是过渡观测能力，不能作为完整请求/响应或恢复事实；阶段 10 完成后，由 `ModelCall + RequestContent + ResponseContent` 接管这一职责。
+当前实现为 SQLite v12。`ModelCall + RequestContent + ResponseContent` 已接管完整请求、聚合响应与 Provider 调用恢复事实；`RequestSnapshotRecord` 不再是生产权威。
 
 ## 5. 阶段 0：回归基线
 
@@ -309,7 +309,7 @@ Provider Mapper
 - Provider 不读取 Session，不自行组装历史。
 - Recall 和请求前 Hook 在 Intent 提交后禁止再次执行。
 - 未完成请求的 `/context` 读取当前 ModelRequestIntent。
-- 模型响应提交后从恢复状态清除完整 ModelContext；阶段 10 完成后，历史完整请求与聚合响应由 `ModelCall` 内容存储可靠保存，不受 trace level 影响。
+- 模型响应提交后从恢复状态清除完整 ModelContext；历史完整请求与聚合响应由 `ModelCall` 内容存储可靠保存，不受 trace level 影响。
 - 未执行请求只能生成纯 preview，不执行带副作用的 Recall 或 Hook。
 - preview 与 actual 必须明确区分。
 
@@ -613,7 +613,7 @@ Prompt 优化、Benchmark 编排或新的 HTML 报告。`ModelRequestIntent` 继
 
 以下内容不再作为实现中的自由选择：
 
-1. Persistence 当前使用 SQLite v11 明确领域表，下一目标为 v12 `model_calls`；v10 只作为增加 `AgentDelegation.child_package_version_id` 的一次性迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
+1. Persistence 当前使用 SQLite v12 明确领域表；v11 是 `model_calls` 的一次性迁移来源，v10 是增加 `AgentDelegation.child_package_version_id` 的历史迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
 2. 一个 ConversationSession 同时最多一个非终态 AgentRun，以 `active_operation_id` 和接受事务保证。
 3. Extension 贡献按 RuntimeGeneration 构建，ContributionScope 统一 LIFO rollback/close。
 4. Session 使用 `archived_at`；公共 delete 默认拒绝关系图，显式 delete_session_tree 删除完整 child 子树。

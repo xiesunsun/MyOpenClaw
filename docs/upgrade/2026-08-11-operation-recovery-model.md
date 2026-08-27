@@ -2,7 +2,7 @@
 
 **日期**：2026-08-11  
 **更新日期**：2026-08-27
-**状态**：当前合同；v11 主链已实施，v12 ModelCall 调用门禁待实施
+**状态**：当前合同；v12 ModelCall 调用门禁与恢复主链已实施
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ModelCall、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 

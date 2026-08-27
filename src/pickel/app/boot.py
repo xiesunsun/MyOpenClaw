@@ -34,6 +34,8 @@ from pickel.shared.model_config import ModelConfig
 from pickel.inbox.store import InboxStore
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
+from pickel.model_calls.service import ModelCallService
+from pickel.model_calls.store import ModelCallStore
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
@@ -81,6 +83,7 @@ class CompositionStore(
     OperationStore,
     AgentPackageVersionStore,
     ArtifactStore,
+    ModelCallStore,
     Protocol,
 ):
     """Boot 所需的窄端口交集；不提供通用资源袋方法。"""
@@ -377,6 +380,7 @@ class Boot:
                     parent_allowed_root=parent_allowed_root,
                 )
             ),
+            model_call_service=ModelCallService(store),
             release_operation_package=release_operation_package,
             wake_callback=wake_callback,
             terminal_callback=terminal_callback,

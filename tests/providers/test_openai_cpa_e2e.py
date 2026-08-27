@@ -15,6 +15,7 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.providers.openai import OpenAIResponsesProvider
+from pickel.providers.stream import accumulate
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("CPA_BASE_URL") or not os.environ.get("CPA_API_KEY"),
@@ -45,37 +46,50 @@ def test_cpa_responses_streaming_tool_round_trip() -> None:
         {"type": "object"},
     )
 
-    first = asyncio.run(
-        provider.generate(
-            ModelContext(
-                system=SystemContent.from_text("严格遵循用户的工具调用要求。"),
-                messages=(user,),
-                tools=(tool,),
+    async def scenario() -> AssistantMessage:
+        try:
+            first = await accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text(
+                                "严格遵循用户的工具调用要求。"
+                            ),
+                            messages=(user,),
+                            tools=(tool,),
+                        )
+                    )
+                )
             )
-        )
-    )
-    call = next(block for block in first.content if isinstance(block, ToolCallBlock))
-    assert call.name == "lookup_value"
-    assert call.arguments["key"] == "pickel"
+            call = next(
+                block for block in first.content if isinstance(block, ToolCallBlock)
+            )
+            assert call.name == "lookup_value"
+            assert call.arguments["key"] == "pickel"
 
-    second = asyncio.run(
-        provider.generate(
-            ModelContext(
-                system=SystemContent.from_text("用工具结果回答。"),
-                messages=(
-                    user,
-                    AssistantMessage((call,)),
-                    ToolResultMessage(
-                        tool_call_id=call.id,
-                        tool_name=call.name,
-                        content=(TextBlock("CPA_TOOL_ROUND_TRIP_OK"),),
-                    ),
-                ),
-                tools=(tool,),
+            return await accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text("用工具结果回答。"),
+                            messages=(
+                                user,
+                                AssistantMessage((call,)),
+                                ToolResultMessage(
+                                    tool_call_id=call.id,
+                                    tool_name=call.name,
+                                    content=(TextBlock("CPA_TOOL_ROUND_TRIP_OK"),),
+                                ),
+                            ),
+                            tools=(tool,),
+                        ),
+                    )
+                )
             )
-        )
-    )
-    asyncio.run(provider.client.aclose())
+        finally:
+            await provider.client.aclose()
+
+    second = asyncio.run(scenario())
 
     text = "".join(
         block.text for block in second.content if isinstance(block, TextBlock)

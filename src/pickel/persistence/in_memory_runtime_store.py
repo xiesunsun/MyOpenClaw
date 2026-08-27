@@ -46,10 +46,11 @@ from pickel.operations.delegation_result import (
     project_settled_message,
 )
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
+from pickel.persistence.model_call_store_mixin import InMemoryModelCallStoreMixin
 from pickel.workspaces.workspace import Workspace
 
 
-class InMemoryRuntimeStore:
+class InMemoryRuntimeStore(InMemoryModelCallStoreMixin):
     """与 SQLite v10 遵循同一实体、CAS 和原子操作合同。"""
 
     def __init__(self) -> None:

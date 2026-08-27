@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import ast
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,21 +23,15 @@ from pickel.agents.agent_package import (
     WorkspacePolicy,
     build_agent_package_version,
 )
-from pickel.context.model_context import ModelContext, SystemContent
+from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.inbox.message import UserMessageSource
-from pickel.operations.agent_run_state import (
-    AgentRunState,
-    ModelRequestIntent,
-    ModelStepState,
-)
 from pickel.operations.operation_service import OperationService
-from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
-from pickel.observe.records import RequestSnapshotRecord, observation_scope
 from pickel.providers.base import Provider
+from pickel.model_calls.prepared import PreparedModelCall
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -47,6 +42,20 @@ def test_unwired_agent_run_progress_is_not_a_public_runtime_api() -> None:
     """未接线的 AgentRun 进度通知不能继续作为 Runtime 公共模块存在。"""
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("pickel.runtime.agent_run_progress")
+
+
+def test_supported_provider_modules_have_no_legacy_generation_entrypoints() -> None:
+    root = Path(__file__).parents[2] / "src" / "pickel" / "providers"
+    for path in root.glob("*.py"):
+        if path.name in {"gemini.py", "__init__.py"}:
+            continue
+        tree = ast.parse(path.read_text())
+        names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert not names.intersection({"generate", "stream"}), path
 
 
 class _Provider(Provider):
@@ -61,11 +70,18 @@ class _Provider(Provider):
     def from_config(cls, config):
         return cls()
 
-    async def generate(self, context: ModelContext) -> AssistantMessage:
-        raise AssertionError("合同测试要求 Runtime 使用 stream")
-
-    async def stream(self, context: ModelContext):
+    def prepare(self, context: ModelContext) -> PreparedModelCall:
         self.contexts.append(context)
+        return PreparedModelCall(
+            provider="anthropic",
+            api_kind="anthropic-messages",
+            endpoint="messages",
+            requested_model="claude-test",
+            body={"stream": True},
+        )
+
+    async def stream_prepared(self, prepared: PreparedModelCall):
+        assert prepared.api_kind == "anthropic-messages"
         yield StreamCompleted(message=AssistantMessage(content=(TextBlock("ok"),)))
 
     def request_snapshot(self, context: ModelContext) -> dict | None:
@@ -167,73 +183,7 @@ def test_resume_rejects_runtime_package_different_from_accepted_operation(
         asyncio.run(driver.drive_operation(accepted.operation.operation_id))
 
 
-def test_model_request_exposes_actual_context_and_full_request_snapshot() -> None:
-    """Provider 与 Observer 必须看到同一个已冻结 ModelContext。"""
-    provider = _Provider(snapshot=True)
-    context = ModelContext(
-        system=SystemContent.from_text("system contract"),
-        messages=(UserMessage(content=(TextBlock("actual input"),)),),
-    )
-    state = AgentRunState(
-        operation_id="operation-1",
-        revision=2,
-        status="running",
-        waiting_reason=None,
-        completed_step_count=0,
-        current_step=ModelStepState(
-            step_id="step-1",
-            step_sequence=1,
-            phase="request_ready",
-            request_attempt=0,
-            request_intent=ModelRequestIntent(context, "context-fingerprint"),
-            assistant_message_node_id=None,
-            tool_calls=(),
-        ),
-        final_assistant_node_id=None,
-        error=None,
-        cancellation=None,
-    )
-    operation = SessionOperation(
-        operation_id="operation-1",
-        session_id="session-1",
-        agent_package_version_id="agentpkg_" + "a" * 64,
-        workspace_binding=WorkspaceBinding(
-            workspace_id="workspace-1",
-            working_directory=Path.cwd(),
-            allowed_root=Path.cwd(),
-        ),
-        input_node_id="node-1",
-        accepted_at=datetime.now(timezone.utc),
-    )
-    effects = RuntimeEffects(
-        provider=provider,
-        provider_name="anthropic",
-        model_name="claude-test",
-    )
-    observer = _Observer()
-
-    with observation_scope(observer):
-        asyncio.run(
-            effects.execute_model_request(
-                operation=operation,
-                state=state,
-                model_context=context,
-            )
-        )
-
-    assert provider.contexts == [context]
-    snapshots = [
-        record
-        for record in observer.records
-        if isinstance(record, RequestSnapshotRecord)
-    ]
-    assert len(snapshots) == 1
-    snapshot = snapshots[0]
-    assert snapshot.provider == "anthropic"
-    assert snapshot.model == "claude-test"
-    assert snapshot.request == {"system": "system contract", "message_count": 1}
-    assert snapshot.cache_order == ("tools", "system", "messages")
-    assert snapshot.identity.session_id == "session-1"
-    assert snapshot.identity.operation_id == "operation-1"
-    assert snapshot.identity.step_id == "step-1"
-    assert snapshot.identity.step_sequence == 1
+def test_trace_is_not_model_request_authority() -> None:
+    """可靠 actual request 只能来自 ModelCall RequestContent。"""
+    assert not hasattr(RuntimeEffects, "execute_model_request")
+    assert not hasattr(Provider, "request_snapshot")

@@ -48,6 +48,7 @@ class RuntimeEventBase:
             "operation_id": envelope.identity.operation_id,
             "step_id": envelope.identity.step_id,
             "step_sequence": envelope.identity.step_sequence,
+            "model_call_id": envelope.identity.model_call_id,
             "tool_call_id": envelope.identity.tool_call_id,
             "message_id": envelope.identity.message_id,
             "event_sequence": envelope.event_sequence,

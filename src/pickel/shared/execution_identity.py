@@ -13,5 +13,6 @@ class ExecutionIdentity:
     operation_id: str | None = None
     step_id: str | None = None
     step_sequence: int | None = None
+    model_call_id: str | None = None
     tool_call_id: str | None = None
     message_id: str | None = None

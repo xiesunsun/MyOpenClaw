@@ -20,6 +20,7 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.gemini import GeminiProvider
+from pickel.providers.stream import accumulate
 
 
 def _sample_tool_history_context() -> ModelContext:
@@ -127,7 +128,9 @@ class ModelContextGenerateTests(unittest.TestCase):
             )
         )
 
-        a_result = asyncio.run(anthropic.generate(context))
+        a_result = asyncio.run(
+            accumulate(anthropic.stream_prepared(anthropic.prepare(context)))
+        )
         g_result = asyncio.run(gemini.generate(context))
         self.assertIsInstance(a_result, AssistantMessage)
         self.assertIsInstance(g_result, AssistantMessage)

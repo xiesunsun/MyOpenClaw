@@ -1,8 +1,4 @@
-"""RuntimeEffects：Provider、Tool、Hook 和 Recall 的窄副作用边界。
-
-该模块不持有 Store、Package 注册表或 Runtime 资源袋。执行身份和恢复状态由
-OperationDriver/OperationService 管理；本类只把已经冻结的输入交给外部实现。
-"""
+"""RuntimeEffects：Provider、Tool、Hook 和 Recall 的窄副作用边界。"""
 
 from __future__ import annotations
 
@@ -13,7 +9,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from pickel.context.model_context import ModelContext
 from pickel.conversations.agent_message import (
     AgentMessage,
     AssistantMessage,
@@ -22,16 +17,13 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock
+from pickel.model_calls.prepared import PreparedModelCall
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
-from pickel.observe.records import (
-    RequestSnapshotRecord,
-    observation_requested,
-    record_request_snapshot,
-)
 from pickel.providers.base import Provider
-from pickel.providers.stream import ToolCallArgsDelta, StreamCompleted, StreamDelta
+from pickel.providers.stream import StreamCompleted, StreamDelta, ToolCallArgsDelta
 from pickel.shared.execution_identity import ExecutionIdentity
+from pickel.shared.frozen_json import thaw_json
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 
@@ -57,20 +49,18 @@ class RecallEffect(Protocol):
     ) -> list[AgentMessage]: ...
 
 
-class ModelExecutionBoundaryError(RuntimeError):
-    """Provider 请求尚未满足 intent-before-effect 前置条件。"""
-
-
 @dataclass(frozen=True)
 class ModelRequestResult:
     assistant_message: AssistantMessage
+    provider_response: dict[str, Any]
     elapsed_ms: int
     first_delta_ms: float | None
+    http_status: int | None
 
 
 @dataclass(frozen=True)
 class RuntimeEffects:
-    """外部副作用门面；每项能力都是显式依赖，不能从 RuntimeStore 取。"""
+    """外部副作用门面；模型生成只能消费已冻结 PreparedModelCall。"""
 
     provider: Provider
     execute_tool: ToolEffect | None = None
@@ -105,42 +95,23 @@ class RuntimeEffects:
             messages.extend(result)
         return messages
 
-    async def execute_model_request(
+    async def execute_prepared_model_call(
         self,
         *,
-        operation: SessionOperation,
-        state: AgentRunState,
-        model_context: ModelContext,
+        prepared: PreparedModelCall,
+        identity: ExecutionIdentity,
         consume_delta: StreamDeltaConsumer | None = None,
         context_fingerprint: str | None = None,
         hook_injected_chars: int = 0,
     ) -> ModelRequestResult:
-        if operation.operation_id != state.operation_id:
-            raise ModelExecutionBoundaryError("Operation 与 AgentRunState 身份不一致")
-        step = state.current_step
-        if step is None or step.phase != "request_ready":
-            phase = step.phase if step is not None else "none"
-            raise ModelExecutionBoundaryError(
-                "Provider 请求必须先持久化 request_ready intent: " f"{phase}"
-            )
-        self._record_request_snapshot(
-            operation=operation,
-            state=state,
-            model_context=model_context,
-        )
-        identity = ExecutionIdentity(
-            session_id=operation.session_id,
-            operation_id=operation.operation_id,
-            step_id=step.step_id,
-            step_sequence=step.step_sequence,
-        )
+        """发送前的持久化/CAS 由 ModelCallSendGate 保证。"""
         started = time.perf_counter()
         first_delta: list[float | None] = [None]
 
-        async def request() -> AssistantMessage:
+        async def request() -> StreamCompleted:
             return await asyncio.wait_for(
-                self._consume_stream(
-                    model_context=model_context,
+                self._consume_prepared_stream(
+                    prepared=prepared,
                     consume_delta=consume_delta,
                     identity=identity,
                     started=started,
@@ -150,71 +121,45 @@ class RuntimeEffects:
             )
 
         if self.model_request_limiter is None:
-            message = await request()
+            completed = await request()
         else:
             async with self.model_request_limiter:
-                message = await request()
+                completed = await request()
+
         elapsed_ms = round((time.perf_counter() - started) * 1000)
+        message = completed.message
         if message.metadata is not None:
-            metadata = replace(
-                message.metadata,
-                # Runtime 实测耗时是后续 Usage 聚合的原始事实，覆盖 Provider
-                # 可能附带的 elapsed_ms；其余 Provider 响应字段保持不变。
-                elapsed_ms=elapsed_ms,
-                context_fingerprint=context_fingerprint,
-                hook_injected_chars=max(0, hook_injected_chars),
-            )
-            message = replace(message, metadata=metadata)
-        elif self.provider_name and self.model_name:
-            # Provider 没有返回 metadata 时，只有两个稳定身份都存在才创建
-            # Runtime metadata；不能用空字符串伪造 Provider/model 身份。
             message = replace(
                 message,
-                metadata=ModelResponseMetadata(
-                    provider=self.provider_name,
-                    model=self.model_name,
+                metadata=replace(
+                    message.metadata,
                     elapsed_ms=elapsed_ms,
                     context_fingerprint=context_fingerprint,
                     hook_injected_chars=max(0, hook_injected_chars),
                 ),
             )
-        return ModelRequestResult(
-            assistant_message=message,
-            elapsed_ms=elapsed_ms,
-            first_delta_ms=first_delta[0],
-        )
-
-    def _record_request_snapshot(
-        self,
-        *,
-        operation: SessionOperation,
-        state: AgentRunState,
-        model_context: ModelContext,
-    ) -> None:
-        """只在 Observer 明确请求时构建快照，观测失败不影响执行。"""
-        if not observation_requested("request_snapshot"):
-            return
-        try:
-            snapshot = self.provider.request_snapshot(model_context)
-        except Exception:
-            return
-        if snapshot is None:
-            return
-
-        step = state.current_step
-        record_request_snapshot(
-            RequestSnapshotRecord(
-                provider=self.provider_name,
-                model=self.model_name,
-                request=snapshot,
-                cache_order=tuple(self.provider.request_cache_order),
-                identity=ExecutionIdentity(
-                    session_id=operation.session_id,
-                    operation_id=operation.operation_id,
-                    step_id=step.step_id if step is not None else None,
-                    step_sequence=step.step_sequence if step is not None else None,
+        else:
+            provider_name = self.provider_name or prepared.provider
+            model_name = self.model_name or prepared.requested_model
+            message = replace(
+                message,
+                metadata=ModelResponseMetadata(
+                    provider=provider_name,
+                    model=model_name,
+                    elapsed_ms=elapsed_ms,
+                    context_fingerprint=context_fingerprint,
+                    hook_injected_chars=max(0, hook_injected_chars),
                 ),
             )
+        response = thaw_json(completed.provider_response or {})
+        if not isinstance(response, dict):
+            raise TypeError("StreamCompleted.provider_response 必须是 JSON object")
+        return ModelRequestResult(
+            assistant_message=message,
+            provider_response=response,
+            elapsed_ms=elapsed_ms,
+            first_delta_ms=first_delta[0],
+            http_status=completed.http_status,
         )
 
     async def execute_tool_call(
@@ -249,17 +194,17 @@ class RuntimeEffects:
             host_calls=host_calls,
         )
 
-    async def _consume_stream(
+    async def _consume_prepared_stream(
         self,
         *,
-        model_context: ModelContext,
+        prepared: PreparedModelCall,
         consume_delta: StreamDeltaConsumer | None,
         identity: ExecutionIdentity,
         started: float,
         first_delta: list[float | None],
-    ) -> AssistantMessage:
-        async for delta in self.provider.stream(model_context):
-            if first_delta[0] is None:
+    ) -> StreamCompleted:
+        async for delta in self.provider.stream_prepared(prepared):
+            if first_delta[0] is None and not isinstance(delta, StreamCompleted):
                 first_delta[0] = round((time.perf_counter() - started) * 1000, 3)
             if consume_delta is not None:
                 delta_identity = replace(
@@ -274,7 +219,7 @@ class RuntimeEffects:
                 if inspect.isawaitable(consumed):
                     await consumed
             if isinstance(delta, StreamCompleted):
-                return delta.message
+                return delta
         raise ValueError("Provider stream 未以 StreamCompleted 收尾")
 
 

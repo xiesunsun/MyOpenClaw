@@ -45,7 +45,8 @@ from pickel.operations.delegation_result import (
     project_settled_message,
 )
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
-from pickel.persistence.sqlite_schema_v11 import (
+from pickel.persistence.model_call_store_mixin import SQLiteModelCallStoreMixin
+from pickel.persistence.sqlite_schema_v12 import (
     SCHEMA_VERSION,
     UnsupportedSchemaVersionError,
     create_schema,
@@ -77,7 +78,7 @@ _LIST_BRANCH_NODES_SQL = """
 """
 
 
-class SQLiteRuntimeStore:
+class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
     """Conversation、Inbox、Operation 等 v10 实体的直接 SQLite 适配器。"""
 
     def __init__(self, db_path: Path) -> None:
@@ -2199,6 +2200,10 @@ class SQLiteRuntimeStore:
             elif version == 10:
                 raise UnsupportedStorageSchemaError(
                     "检测到 SQLite schema version 10；请先执行一次性 v10→v11 迁移"
+                )
+            elif version == 11:
+                raise UnsupportedStorageSchemaError(
+                    "检测到 SQLite schema version 11；请先执行一次性 v11→v12 迁移"
                 )
             elif version != SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(

@@ -262,6 +262,7 @@ class JsonlTraceSink:
             "operation_id": identity.operation_id or "",
             "step_id": identity.step_id,
             "step_sequence": identity.step_sequence,
+            "model_call_id": identity.model_call_id,
             "payload": observation.to_dict(),
         }
         self._enqueue(record, low_priority=False)

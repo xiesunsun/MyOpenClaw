@@ -147,7 +147,7 @@ class ContextInspection:
     tool_calls: int
     compactions: int
     tool_definitions: int
-    source: Literal["preview", "model_request_intent"] = "preview"
+    source: Literal["preview", "model_request_intent", "model_call"] = "preview"
 
 
 @dataclass(frozen=True)

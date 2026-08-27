@@ -22,7 +22,9 @@ from pickel.conversations.content_blocks import (
     ToolCallBlock,
 )
 from pickel.providers.anthropic import AnthropicMessagesProvider
+from pickel.shared.frozen_json import thaw_json
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.providers.stream import accumulate
 
 
 class FakeAsyncMessageStream:
@@ -323,22 +325,26 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            provider.generate(
-                ModelContext(
-                    system=SystemContent.from_text("You are Pickle."),
-                    messages=[UserMessage(content=[TextBlock(text="hello")])],
-                    tools=[
-                        ToolDefinition(
-                            name="echo",
-                            description="Echo text",
-                            input_schema={
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
-                            output_schema={"type": "object"},
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text("You are Pickle."),
+                            messages=[UserMessage(content=[TextBlock(text="hello")])],
+                            tools=[
+                                ToolDefinition(
+                                    name="echo",
+                                    description="Echo text",
+                                    input_schema={
+                                        "type": "object",
+                                        "properties": {"text": {"type": "string"}},
+                                        "required": ["text"],
+                                    },
+                                    output_schema={"type": "object"},
+                                )
+                            ],
                         )
-                    ],
+                    )
                 )
             )
         )
@@ -383,10 +389,14 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
             messages=SimpleNamespace(stream=stream, count_tokens=AsyncMock())
         )
         asyncio.run(
-            provider.generate(
-                ModelContext(
-                    system=SystemContent.from_text(""),
-                    messages=[UserMessage(content=[TextBlock(text="hello")])],
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text(""),
+                            messages=[UserMessage(content=[TextBlock(text="hello")])],
+                        )
+                    )
                 )
             )
         )
@@ -477,7 +487,7 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
         )
         self.assertNotIn("cache_control", params["tools"][-1])
 
-    def test_request_snapshot_preserves_wire_request_and_cache_order(self) -> None:
+    def test_prepare_preserves_wire_request_and_cache_order(self) -> None:
         provider = AnthropicMessagesProvider(
             model="claude-test",
             max_output_tokens=2048,
@@ -496,13 +506,13 @@ class AnthropicMessagesProviderTests(unittest.TestCase):
             ],
         )
 
-        snapshot = provider.request_snapshot(context)
-
+        snapshot = thaw_json(provider.prepare(context).body)
+        assert isinstance(snapshot, dict)
+        self.assertTrue(snapshot.pop("stream"))
         self.assertEqual(("tools", "system", "messages"), provider.request_cache_order)
         self.assertEqual(provider._build_create_params(context), snapshot)
         self.assertEqual(
-            "full user message",
-            snapshot["messages"][0]["content"][0]["text"],
+            "full user message", snapshot["messages"][0]["content"][0]["text"]
         )
         self.assertEqual("stable system", snapshot["system"][0]["text"])
         self.assertEqual("echo", snapshot["tools"][0]["name"])

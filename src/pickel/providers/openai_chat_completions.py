@@ -27,13 +27,13 @@ from pickel.conversations.content_blocks import (
     thaw_json,
 )
 from pickel.providers.base import Provider
+from pickel.model_calls.prepared import PreparedModelCall
 from pickel.providers.stream import (
     StreamCompleted,
     StreamDelta,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
-    accumulate,
 )
 from pickel.shared.model_config import ModelConfig
 
@@ -86,26 +86,41 @@ class OpenAIChatCompletionsProvider(Provider):
             artifact_service=artifact_service,
         )
 
-    async def generate(self, context: ModelContext) -> AssistantMessage:
-        return await accumulate(self.stream(context))
-
-    async def stream(self, context: ModelContext) -> AsyncIterator[StreamDelta]:
-        request = self._build_create_request(context)
-        request["stream"] = True
+    def prepare(self, context: ModelContext) -> PreparedModelCall:
+        body = self._build_create_request(context)
+        body["stream"] = True
         if self.provider_options.get("stream_usage", True):
-            request["stream_options"] = {"include_usage": True}
+            body["stream_options"] = {"include_usage": True}
+        return PreparedModelCall(
+            provider=self.provider_name,
+            api_kind="openai-chat-completions",
+            endpoint="chat/completions",
+            requested_model=self.model,
+            body=body,
+        )
 
-        text: list[str] = []
+    async def stream_prepared(
+        self, prepared: PreparedModelCall
+    ) -> AsyncIterator[StreamDelta]:
+        if prepared.api_kind != "openai-chat-completions":
+            raise ValueError("PreparedModelCall 不是 Chat Completions 请求")
+        request = thaw_json(prepared.body)
+        if not isinstance(request, dict) or request.get("stream") is not True:
+            raise ValueError("Chat Completions PreparedModelCall 缺少 stream=true")
+        text_parts: list[str] = []
         thinking: list[str] = []
         calls: dict[int, dict[str, str]] = {}
+        raw_events: list[dict[str, Any]] = []
         response_id = response_model = finish_reason = None
         usage = None
         completed = False
+        http_status: int | None = None
 
         async with self.client.stream(
             "POST", "chat/completions", json=request
         ) as response:
             response.raise_for_status()
+            http_status = response.status_code
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -116,6 +131,7 @@ class OpenAIChatCompletionsProvider(Provider):
                     completed = True
                     break
                 event = self._json_object(raw)
+                raw_events.append(dict(event))
                 response_id = self._string(event.get("id")) or response_id
                 response_model = self._string(event.get("model")) or response_model
                 usage = self._usage(event.get("usage")) or usage
@@ -138,11 +154,12 @@ class OpenAIChatCompletionsProvider(Provider):
                         yield ThinkingDelta(thought)
                     part = delta.get("content")
                     if isinstance(part, str) and part:
-                        text.append(part)
+                        text_parts.append(part)
                         yield TextDelta(part)
                     for item in self._call_deltas(delta.get("tool_calls")):
                         call = calls.setdefault(
-                            item["index"], {"id": "", "name": "", "arguments": ""}
+                            item["index"],
+                            {"id": "", "name": "", "arguments": ""},
                         )
                         call["id"] = item["id"] or call["id"]
                         call["name"] += item["name"]
@@ -155,8 +172,8 @@ class OpenAIChatCompletionsProvider(Provider):
         blocks: list[Any] = []
         if thinking:
             blocks.append(ThinkingBlock("".join(thinking)))
-        if text:
-            blocks.append(TextBlock("".join(text)))
+        if text_parts:
+            blocks.append(TextBlock("".join(text_parts)))
         for index in sorted(calls):
             call = calls[index]
             blocks.append(
@@ -166,23 +183,28 @@ class OpenAIChatCompletionsProvider(Provider):
                     self._arguments(call["arguments"]),
                 )
             )
-        yield StreamCompleted(
-            AssistantMessage(
-                tuple(blocks),
-                metadata=ModelResponseMetadata(
-                    provider=self.provider_name,
-                    model=self.model,
-                    provider_model_version=response_model,
-                    provider_response_id=response_id,
-                    finish_reason="tool_calls" if calls else finish_reason or "stop",
-                    finish_message=None,
-                    usage=usage,
-                ),
-            )
+        message = AssistantMessage(
+            tuple(blocks),
+            metadata=ModelResponseMetadata(
+                provider=self.provider_name,
+                model=self.model,
+                provider_model_version=response_model,
+                provider_response_id=response_id,
+                finish_reason="tool_calls" if calls else finish_reason or "stop",
+                finish_message=None,
+                usage=usage,
+            ),
         )
-
-    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
-        return self._build_create_request(context)
+        yield StreamCompleted(
+            message=message,
+            provider_response={
+                "events": raw_events,
+                "id": response_id,
+                "model": response_model,
+                "finish_reason": finish_reason,
+            },
+            http_status=http_status,
+        )
 
     def _build_create_request(self, context: ModelContext) -> dict[str, Any]:
         request: dict[str, Any] = {

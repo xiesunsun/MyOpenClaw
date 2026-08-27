@@ -16,7 +16,13 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
-from pickel.providers.stream import StreamCompleted, TextDelta, ToolCallArgsDelta
+from pickel.shared.frozen_json import thaw_json
+from pickel.providers.stream import (
+    StreamCompleted,
+    TextDelta,
+    ToolCallArgsDelta,
+    accumulate,
+)
 
 
 def _context() -> ModelContext:
@@ -54,7 +60,10 @@ def _sse(*events: dict) -> bytes:
 def test_snapshot_maps_full_context_and_tools() -> None:
     provider = OpenAIChatCompletionsProvider(model="kimi-k3")
 
-    snapshot = provider.request_snapshot(_context())
+    snapshot = thaw_json(provider.prepare(_context()).body)
+    assert isinstance(snapshot, dict)
+    assert snapshot.pop("stream") is True
+    snapshot.pop("stream_options", None)
     asyncio.run(provider.client.aclose())
 
     assert snapshot["messages"] == [
@@ -146,16 +155,15 @@ def test_stream_builds_provider_neutral_tool_call_and_usage() -> None:
     )
 
     async def collect():
-        return [delta async for delta in provider.stream(_context())]
+        return [
+            delta
+            async for delta in provider.stream_prepared(provider.prepare(_context()))
+        ]
 
     deltas = asyncio.run(collect())
     asyncio.run(client.aclose())
 
-    assert captured == {
-        **provider.request_snapshot(_context()),
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
+    assert captured == thaw_json(provider.prepare(_context()).body)
     assert isinstance(deltas[0], TextDelta)
     assert deltas[1] == ToolCallArgsDelta("call-2", '{"q":')
     assert deltas[2] == ToolCallArgsDelta("call-2", '"next"}')
@@ -187,6 +195,10 @@ def test_stream_rejects_truncated_response() -> None:
 
     with pytest.raises(ValueError, match="完成标志"):
         asyncio.run(
-            provider.generate(ModelContext(system=SystemContent(), messages=()))
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(ModelContext(system=SystemContent(), messages=()))
+                )
+            )
         )
     asyncio.run(client.aclose())

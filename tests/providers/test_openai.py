@@ -24,11 +24,13 @@ from pickel.conversations.content_blocks import (
     ToolCallBlock,
 )
 from pickel.providers.openai import OpenAIResponsesProvider
+from pickel.shared.frozen_json import thaw_json
 from pickel.providers.stream import (
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
+    accumulate,
 )
 
 
@@ -113,7 +115,9 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
         },
     )
 
-    snapshot = provider.request_snapshot(_context())
+    snapshot = thaw_json(provider.prepare(_context()).body)
+    assert isinstance(snapshot, dict)
+    assert snapshot.pop("stream") is True
     asyncio.run(provider.client.aclose())
 
     assert snapshot["store"] is False
@@ -189,13 +193,18 @@ def test_stream_and_generate_share_response_parser() -> None:
     provider = OpenAIResponsesProvider(model="gpt-5.6-luna", client=client)
 
     async def collect():
-        return [delta async for delta in provider.stream(_context())]
+        return [
+            delta
+            async for delta in provider.stream_prepared(provider.prepare(_context()))
+        ]
 
     deltas = asyncio.run(collect())
-    message = asyncio.run(provider.generate(_context()))
+    message = asyncio.run(
+        accumulate(provider.stream_prepared(provider.prepare(_context())))
+    )
     asyncio.run(client.aclose())
 
-    assert captured == {**provider.request_snapshot(_context()), "stream": True}
+    assert captured == thaw_json(provider.prepare(_context()).body)
     assert isinstance(deltas[0], ThinkingDelta)
     assert isinstance(deltas[1], TextDelta)
     assert deltas[2] == ToolCallArgsDelta("call-2", '{"query":')
@@ -237,7 +246,7 @@ def test_generate_rejects_invalid_function_arguments() -> None:
     provider = OpenAIResponsesProvider(model="test", client=client)
 
     with pytest.raises(ValueError, match="arguments"):
-        asyncio.run(provider.generate(_context()))
+        asyncio.run(accumulate(provider.stream_prepared(provider.prepare(_context()))))
     asyncio.run(client.aclose())
 
 
@@ -263,5 +272,5 @@ def test_failed_stream_is_not_mistaken_for_completed_response() -> None:
     provider = OpenAIResponsesProvider(model="test", client=client)
 
     with pytest.raises(RuntimeError, match="gateway failed"):
-        asyncio.run(provider.generate(_context()))
+        asyncio.run(accumulate(provider.stream_prepared(provider.prepare(_context()))))
     asyncio.run(client.aclose())

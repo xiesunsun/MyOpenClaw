@@ -2,7 +2,7 @@
 
 **初稿日期**：2026-07-12
 **更新日期**：2026-08-27
-**状态**：目标合同；SQLite v12 ModelCall 待实施，v11 为当前迁移来源
+**状态**：当前合同；SQLite v12 ModelCall 已实施，v11 为一次性迁移来源
 **范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
 **不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 

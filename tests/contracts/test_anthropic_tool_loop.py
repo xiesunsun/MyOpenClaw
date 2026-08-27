@@ -28,6 +28,7 @@ from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted
+from pickel.model_calls.prepared import PreparedModelCall
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.shared.execution_identity import ExecutionIdentity
@@ -95,8 +96,22 @@ class _AnthropicContractProvider(Provider):
     async def generate(self, context):
         raise AssertionError("运行时合同必须使用 Provider stream")
 
-    async def stream(self, context):
-        messages = AnthropicMessagesProvider._build_messages(context.messages)
+    def prepare(self, context):
+        return PreparedModelCall(
+            provider="anthropic",
+            api_kind="anthropic-messages",
+            endpoint="messages",
+            requested_model="claude-test",
+            body={
+                "model": "claude-test",
+                "stream": True,
+                "messages": AnthropicMessagesProvider._build_messages(context.messages),
+            },
+        )
+
+    async def stream_prepared(self, prepared):
+        assert prepared.api_kind == "anthropic-messages"
+        messages = prepared.body["messages"]
         self.request_messages.append(messages)
         yield StreamCompleted(message=self.replies.pop(0))
 

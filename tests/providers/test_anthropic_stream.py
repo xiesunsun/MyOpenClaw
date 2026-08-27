@@ -1,4 +1,4 @@
-"""anthropic 真流式：SSE 事件翻译与 generate/stream 的一致性。"""
+"""Anthropic 真流式：SSE 事件翻译与聚合一致性。"""
 
 from __future__ import annotations
 
@@ -120,7 +120,9 @@ def _context() -> ModelContext:
 
 
 async def _collect(provider):
-    return [delta async for delta in provider.stream(_context())]
+    return [
+        delta async for delta in provider.stream_prepared(provider.prepare(_context()))
+    ]
 
 
 def test_thinking_增量被翻译():
@@ -171,33 +173,32 @@ def test_usage_进入最终消息():
     assert usage.output_tokens == 20
 
 
-def test_generate_与_accumulate_stream_逐字段相等():
-    """契约：真流式 provider 的 generate 必须由自己的 stream 实现。
-
-    两条独立解析路径必然漂移——这条测试是唯一的护栏。
-    """
+def test_聚合结果与真流式_completed_逐字段相等():
     provider = _provider()
 
-    from_generate = asyncio.run(provider.generate(_context()))
-    from_stream = asyncio.run(accumulate(_provider().stream(_context())))
-
-    assert [type(b).__name__ for b in from_generate.content] == [
-        type(b).__name__ for b in from_stream.content
-    ]
-    assert from_generate.content[1].text == from_stream.content[1].text
-    assert from_generate.content[0].signature == from_stream.content[0].signature
-    assert (
-        from_generate.metadata.usage.input_tokens
-        == from_stream.metadata.usage.input_tokens
+    from_stream = asyncio.run(
+        accumulate(provider.stream_prepared(provider.prepare(_context())))
     )
-    assert from_generate.metadata.finish_reason == from_stream.metadata.finish_reason
+    from_aggregate = asyncio.run(
+        accumulate(_provider().stream_prepared(_provider().prepare(_context())))
+    )
+
+    assert [type(b).__name__ for b in from_stream.content] == [
+        type(b).__name__ for b in from_aggregate.content
+    ]
+    assert from_stream.content[1].text == from_aggregate.content[1].text
+    assert from_stream.content[0].signature == from_aggregate.content[0].signature
+    assert (
+        from_stream.metadata.usage.input_tokens
+        == from_aggregate.metadata.usage.input_tokens
+    )
+    assert from_stream.metadata.finish_reason == from_aggregate.metadata.finish_reason
 
 
-def test_generate_只发起一次请求():
-    """generate 由 stream 实现，不得变成两次 API 调用。"""
+def test_prepared_stream_只发起一次请求():
     provider = _provider()
 
-    asyncio.run(provider.generate(_context()))
+    asyncio.run(accumulate(provider.stream_prepared(provider.prepare(_context()))))
 
     assert provider.client.messages.calls == 1
 

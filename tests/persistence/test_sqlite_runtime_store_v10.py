@@ -196,11 +196,11 @@ def test_list_branch_nodes_query_uses_node_lookup_index(tmp_path: Path) -> None:
     assert not any("scan parent" in detail for detail in details), details
 
 
-def test_store_creates_only_v11_and_rejects_v9_and_v10(tmp_path: Path) -> None:
+def test_store_creates_only_v12_and_rejects_older_versions(tmp_path: Path) -> None:
     store = SQLiteRuntimeStore(tmp_path / "runtime.db")
     _session(store, tmp_path)
     with sqlite3.connect(store.db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
         tables = {
             row[0]
             for row in connection.execute(

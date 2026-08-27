@@ -33,6 +33,7 @@ from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.operations.operation_service import OperationService
+from pickel.model_calls.service import ModelCallService
 from pickel.runtime.conversation_output_bus import ConversationOutputBus
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_bus import RuntimeBus
@@ -456,10 +457,32 @@ class ConversationRuntime:
                 source = "model_request_intent"
 
         if context is None:
+            calls = tuple(
+                call
+                for call in self._persistence_store.list_model_calls(
+                    session_id=self._session.session_id
+                )
+                if call.purpose == "agent_step"
+            )
+            if operation_id is not None:
+                current_calls = tuple(
+                    call for call in calls if call.operation_id == operation_id
+                )
+                calls = current_calls or calls
+            if calls:
+                request = ModelCallService(self._persistence_store).request_content(
+                    calls[-1]
+                )
+                context = request.model_context
+                source = "model_call"
+
+        if context is None:
             messages = ConversationProjector().project_conversation_messages(nodes)
             visible = apply_window(
                 messages,
-                turn_window=self._loaded_agent_package.version.runtime_policy.context_turn_window,
+                turn_window=(
+                    self._loaded_agent_package.version.runtime_policy.context_turn_window
+                ),
             )
             context = ModelContextBuilder().build_model_context(
                 package=self._loaded_agent_package.version,

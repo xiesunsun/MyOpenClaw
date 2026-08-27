@@ -27,13 +27,13 @@ from pickel.conversations.content_blocks import (
     thaw_json,
 )
 from pickel.providers.base import Provider
+from pickel.model_calls.prepared import PreparedModelCall
 from pickel.providers.stream import (
     StreamCompleted,
     StreamDelta,
     TextDelta,
     ThinkingDelta,
     ToolCallArgsDelta,
-    accumulate,
 )
 from pickel.shared.model_config import ModelConfig
 
@@ -87,18 +87,32 @@ class OpenAIResponsesProvider(Provider):
             artifact_service=artifact_service,
         )
 
-    async def generate(self, context: ModelContext) -> AssistantMessage:
-        # 与其他真流式 Provider 一样，只保留一份响应解析路径。
-        return await accumulate(self.stream(context))
+    def prepare(self, context: ModelContext) -> PreparedModelCall:
+        body = self._build_create_request(context)
+        body["stream"] = True
+        return PreparedModelCall(
+            provider=self.provider_name,
+            api_kind="openai-responses",
+            endpoint="responses",
+            requested_model=self.model,
+            body=body,
+        )
 
-    async def stream(self, context: ModelContext) -> AsyncIterator[StreamDelta]:
-        request = self._build_create_request(context)
-        request["stream"] = True
+    async def stream_prepared(
+        self, prepared: PreparedModelCall
+    ) -> AsyncIterator[StreamDelta]:
+        if prepared.api_kind != "openai-responses":
+            raise ValueError("PreparedModelCall 不是 OpenAI Responses 请求")
+        request = thaw_json(prepared.body)
+        if not isinstance(request, dict) or request.get("stream") is not True:
+            raise ValueError("OpenAI Responses PreparedModelCall 缺少 stream=true")
         tool_call_ids: dict[str, str] = {}
         final_response: Mapping[str, Any] | None = None
+        http_status: int | None = None
 
         async with self.client.stream("POST", "responses", json=request) as response:
             response.raise_for_status()
+            http_status = response.status_code
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -111,7 +125,6 @@ class OpenAIResponsesProvider(Provider):
                     raise ValueError("OpenAI Responses 流事件不是合法 JSON") from exc
                 if not isinstance(event, Mapping):
                     raise TypeError("OpenAI Responses 流事件必须是 JSON object")
-
                 event_type = event.get("type")
                 if event_type == "response.output_item.added":
                     item = event.get("item")
@@ -162,11 +175,11 @@ class OpenAIResponsesProvider(Provider):
 
         if final_response is None:
             raise ValueError("OpenAI Responses 流结束时没有 response.completed")
-        yield StreamCompleted(self._response_to_assistant_message(final_response))
-
-    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
-        """返回 stream() 使用的 create request；HTTP stream 标志不属于模型输入。"""
-        return self._build_create_request(context)
+        yield StreamCompleted(
+            message=self._response_to_assistant_message(final_response),
+            provider_response=dict(final_response),
+            http_status=http_status,
+        )
 
     def _build_create_request(self, context: ModelContext) -> dict[str, Any]:
         request: dict[str, Any] = {

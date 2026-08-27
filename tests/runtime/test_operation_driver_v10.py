@@ -35,6 +35,10 @@ from pickel.operations.agent_run_state import (
 from pickel.operations.session_operation import SessionOperation
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.providers.stream import StreamCompleted
+from pickel.model_calls.model_call import ModelCall, ModelCallError
+from pickel.model_calls.prepared import PreparedModelCall
+from pickel.model_calls.service import AgentPreparedModelCall
+from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import ToolCallCompleted, ToolCallStarted
@@ -157,13 +161,23 @@ class _Provider:
         self.calls = 0
         self.contexts = []
 
-    async def stream(self, context):
-        self.calls += 1
+    def prepare(self, context):
         self.contexts.append(context)
+        return PreparedModelCall(
+            provider="test",
+            api_kind="test-wire",
+            endpoint="responses",
+            requested_model="model",
+            body={"model": "model", "stream": True},
+        )
+
+    async def stream_prepared(self, prepared):
+        del prepared
+        self.calls += 1
         item = self.messages.pop(0)
         if isinstance(item, Exception):
             raise item
-        yield StreamCompleted(item)
+        yield StreamCompleted(item, provider_response={"attempt": self.calls})
 
 
 class _Operations:
@@ -206,6 +220,118 @@ class _Operations:
         self.state = state
         self.pending = ()
         return True
+
+
+class _FakeModelCallService:
+    def __init__(self, operations):
+        self.operations = operations
+        self.store = self
+        self.calls = {}
+        self.sequence = 0
+
+    def prepare_or_recover_agent_call(self, *, operation, state, mapper, max_attempts):
+        del max_attempts
+        step = state.current_step
+        assert step is not None and step.request_intent is not None
+        self.sequence += 1
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(step, request_attempt=step.request_attempt + 1),
+        )
+        prepared = mapper.prepare(step.request_intent.model_context)
+        call = ModelCall(
+            model_call_id=f"model-call-{self.sequence}",
+            identity=ExecutionIdentity(
+                session_id=operation.session_id,
+                operation_id=operation.operation_id,
+                step_id=step.step_id,
+                step_sequence=step.step_sequence,
+            ),
+            request_attempt=next_state.current_step.request_attempt,
+            model_role="primary",
+            purpose="agent_step",
+            provider=prepared.provider,
+            api_kind=prepared.api_kind,
+            endpoint=prepared.endpoint,
+            requested_model=prepared.requested_model,
+            returned_model=None,
+            status="prepared",
+            request_content_ref="test-content",
+            response_content_ref=None,
+            context_fingerprint=step.request_intent.context_fingerprint,
+            provider_request_id=None,
+            http_status=None,
+            error=None,
+            created_at=datetime.now(timezone.utc),
+            started_at=None,
+            first_chunk_at=None,
+            finished_at=None,
+        )
+        self.calls[call.model_call_id] = call
+        self.operations.transition_calls.append((next_state, None))
+        self.operations.state = next_state
+        retry_after = (
+            next_state.current_step.request_attempt - 1
+            if next_state.current_step.request_attempt > 1
+            else None
+        )
+        return AgentPreparedModelCall(
+            state=next_state,
+            model_call=call,
+            prepared=prepared,
+            reused=False,
+            retry_after_attempt=retry_after,
+        )
+
+    def transition_model_call(self, *, model_call, expected_status):
+        current = self.calls.get(model_call.model_call_id)
+        if current is None or current.status != expected_status:
+            return False
+        self.calls[model_call.model_call_id] = model_call
+        return True
+
+    def mark_failed(self, call, error, *, first_chunk_at=None):
+        failed = replace(
+            call,
+            status="failed",
+            first_chunk_at=first_chunk_at,
+            finished_at=datetime.now(timezone.utc),
+            error=ModelCallError(error.code, str(error), retryable=error.retryable),
+            http_status=error.status_code,
+        )
+        self.calls[call.model_call_id] = failed
+        return failed
+
+    def commit_agent_response(self, *, call, response, state, expected_revision, node):
+        del call, response, expected_revision
+        self.operations.transition_calls.append((state, node))
+        self.operations.state = state
+        return None
+
+    def commit_agent_processing_failure(
+        self,
+        *,
+        call,
+        response,
+        state,
+        expected_revision,
+        node,
+        error,
+        response_content_ref=None,
+    ):
+        del expected_revision, node, error, response_content_ref
+        self.calls[call.model_call_id] = replace(
+            call,
+            status="completed",
+            response_content_ref="test-response",
+            started_at=response.started_at,
+            first_chunk_at=response.first_chunk_at,
+            finished_at=response.finished_at,
+        )
+        self.operations.transition_calls.append((state, None))
+        self.operations.state = state
+        return self.calls[call.model_call_id]
 
 
 def _operation() -> SessionOperation:
@@ -702,6 +828,7 @@ def _driver(
             tool_name=tool_name,
         ).version,
         effects_resolver=lambda package_version_id: effects,
+        model_call_service=_FakeModelCallService(operations),
         model_context_builder=model_context_builder or _ContextBuilder(),
         step_id_factory=lambda: "step-1",
         node_id_factory=lambda: "node-result",
@@ -1221,6 +1348,34 @@ async def test_pre_tool_ask_freezes_updated_arguments_and_waits_for_approval():
     assert call.approval is not None
     assert call.approval.requested_by == "hook"
     assert call.approval.reason == "需要确认"
+
+
+@_run_async
+async def test_pre_tool_hook_failure_converges_model_call_and_operation():
+    tool_message = AssistantMessage(
+        content=(ToolCallBlock(id="tool-1", name="run", arguments={}),)
+    )
+
+    async def invoke_hook(name, _event):
+        if name == "before_request":
+            return ContextContributions()
+        raise RuntimeError("hook exploded")
+
+    operations = _Operations(_queued_state())
+    driver = _driver(
+        operations,
+        _Provider([tool_message]),
+        invoke_hook=invoke_hook,
+    )
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.status == "failed"
+    assert result.state.final_assistant_node_id is None
+    assert driver._model_calls.calls
+    assert all(
+        call.status == "completed" for call in driver._model_calls.calls.values()
+    )
 
 
 @_run_async
