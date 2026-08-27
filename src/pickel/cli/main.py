@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -17,10 +18,20 @@ from pickel.app.runtime_models import (
     AgentRunRequest,
 )
 from pickel.config.loader import Config
-from pickel.conversations.conversation_service import ConversationNotFoundError
+from pickel.config.paths import runtime_db_path
+from pickel.conversations.conversation_service import (
+    ConversationNotFoundError,
+    ConversationService,
+)
 from pickel.extensions_host.loader import load_extensions
 from pickel.tools.bus import ToolBus
 from pickel.tools.catalog import install_builtin_tools
+from pickel.persistence.sqlite_runtime_store import (
+    SQLiteRuntimeStore,
+    UnsupportedStorageSchemaError,
+)
+from pickel.persistence.sqlite_schema_v12 import UnsupportedSchemaVersionError
+from pickel.persistence.errors import StorageIntegrityError
 
 app = typer.Typer(invoke_without_command=True)
 sessions_app = typer.Typer(invoke_without_command=True)
@@ -210,8 +221,14 @@ def chat(
     _run_chat(agent=agent, session_id=session_id)
 
 
-@app.command()
+observe_app = typer.Typer(
+    invoke_without_command=True, help="可观测系统与故障诊断数据工作台"
+)
+
+
+@observe_app.callback()
 def observe(
+    ctx: typer.Context = None,  # type: ignore[assignment]
     session: list[str] = typer.Option([], "--session", help="指定 session_id，可多次"),
     out: Path | None = typer.Option(
         None,
@@ -223,39 +240,132 @@ def observe(
     ),
 ) -> None:
     """导出会话执行轨迹为自包含 HTML 观测平台。"""
+    if ctx is not None and ctx.invoked_subcommand is not None:
+        return
+
     from pickel.observe.operation_report import export_operation_report
 
-    boot = _boot()
-    service = boot.build_conversation_service(store=boot.runtime_store())
-    if session:
-        loaded_sessions = []
-        for session_id in session:
-            try:
-                loaded_sessions.append(service.load_conversation_session(session_id))
-            except ConversationNotFoundError:
-                continue
-    else:
-        loaded_sessions = [
-            service.load_conversation_session(preview.session_id)
-            for preview in service.list_conversation_previews(
-                limit=limit,
-                all_sessions=True,
-            )
-            if preview.message_count > 0
-        ]
-    if not loaded_sessions:
-        typer.echo("没有可导出的会话", err=True)
-        raise typer.Exit(code=1)
+    try:
+        # 观测是只读查询，不应装载 Config、Provider、MCP 或 Extension。
+        store = SQLiteRuntimeStore(runtime_db_path())
+        service = ConversationService(store)
+        if session:
+            loaded_sessions = []
+            for session_id in session:
+                try:
+                    loaded_sessions.append(
+                        service.load_conversation_session(session_id)
+                    )
+                except ConversationNotFoundError:
+                    continue
+        else:
+            loaded_sessions = [
+                service.load_conversation_session(preview.session_id)
+                for preview in service.list_conversation_previews(
+                    limit=limit,
+                    all_sessions=True,
+                )
+                if preview.message_count > 0
+            ]
+        if not loaded_sessions:
+            typer.echo("没有可导出的会话", err=True)
+            raise typer.Exit(code=1)
 
-    typer.echo(
-        str(
-            export_operation_report(
-                conversation_service=service,
-                sessions=tuple(loaded_sessions),
-                out=out,
+        typer.echo(
+            str(
+                export_operation_report(
+                    conversation_service=service,
+                    sessions=tuple(loaded_sessions),
+                    store=store,
+                    content_store=store.model_call_content_store,
+                    out=out,
+                )
             )
         )
-    )
+    except (
+        UnsupportedStorageSchemaError,
+        UnsupportedSchemaVersionError,
+        StorageIntegrityError,
+        sqlite3.DatabaseError,
+        ValueError,
+        OSError,
+    ) as exc:
+        typer.echo(f"无法读取观测数据：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@observe_app.command("operation")
+def observe_operation(
+    operation_id: str = typer.Argument(..., help="要诊断的 Operation ID"),
+    format: str = typer.Option("html", "--format", "-f", help="输出格式：html 或 json"),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        "--out",
+        help="输出文件路径；默认保存至 ~/.pickel/observations/<op_id>.<format>",
+    ),
+) -> None:
+    """导出单个 Operation 的诊断数据工作台 (HTML 或 JSON)。"""
+    if format not in ("html", "json"):
+        typer.echo("--format 必须是 html 或 json", err=True)
+        raise typer.Exit(code=2)
+
+    from pickel.observe.operation_report import export_operation_observation
+
+    # 观测是只读查询，不应装载 Config、Provider、MCP 或 Extension。
+    store = SQLiteRuntimeStore(runtime_db_path())
+    try:
+        exported_path = export_operation_observation(
+            operation_id=operation_id,
+            store=store,
+            content_store=store.model_call_content_store,
+            out=output,
+            format=format,  # type: ignore[arg-type]
+        )
+    except (
+        UnsupportedStorageSchemaError,
+        UnsupportedSchemaVersionError,
+        StorageIntegrityError,
+        sqlite3.DatabaseError,
+        ValueError,
+        OSError,
+    ) as exc:
+        typer.echo(f"无法读取观测数据：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(str(exported_path))
+
+
+@observe_app.command("serve")
+def observe_serve(
+    session: str = typer.Option(..., "--session", help="要查看的 Session ID"),
+    port: int = typer.Option(8765, "--port", min=0, max=65535, help="本地监听端口"),
+) -> None:
+    """在 127.0.0.1 提供只读观测 API 与工作台数据。"""
+
+    # 这里故意不调用 _boot()：观测服务只能打开 SQLiteRuntimeStore 与
+    # ModelCallContentStore，不能装载 Config、Provider、MCP 或 Extension。
+    from pickel.observe.http_server import serve_observation
+
+    try:
+        store = SQLiteRuntimeStore(runtime_db_path())
+        serve_observation(
+            store=store,
+            content_store=store.model_call_content_store,
+            session_id=session,
+            port=port,
+        )
+    except (
+        UnsupportedStorageSchemaError,
+        UnsupportedSchemaVersionError,
+        StorageIntegrityError,
+        sqlite3.DatabaseError,
+        ValueError,
+        OSError,
+    ) as exc:
+        typer.echo(f"无法启动观测服务：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @sessions_app.callback()
@@ -377,6 +487,7 @@ def config_set_default_model(
 
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
+app.add_typer(observe_app, name="observe")
 
 
 if __name__ == "__main__":

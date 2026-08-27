@@ -229,6 +229,7 @@ class JsonlTraceSink:
             {
                 "schema_version": self.SCHEMA_VERSION,
                 "record_type": "runtime_event",
+                "mode": self._options.mode,
                 "recorded_at": _iso_now(),
             }
         )
@@ -257,6 +258,7 @@ class JsonlTraceSink:
         record = {
             "schema_version": self.SCHEMA_VERSION,
             "record_type": record_type,
+            "mode": self._options.mode,
             "recorded_at": _iso_now(),
             "session_id": identity.session_id,
             "operation_id": identity.operation_id or "",
@@ -299,6 +301,9 @@ class JsonlTraceSink:
         identity: ExecutionIdentity | None = None,
         event_type: str | None = None,
     ) -> None:
+        # 将累计丢弃数附在后续成功落盘的记录上，使 reader 不依赖进程内
+        # health 状态也能呈现 Trace 的可丢失边界。
+        record["dropped_records"] = self._dropped
         with self._sequence_lock:
             record["trace_seq"] = self._next_trace_seq
             self._next_trace_seq += 1

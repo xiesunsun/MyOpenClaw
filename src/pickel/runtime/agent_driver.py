@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -62,6 +63,7 @@ class AgentDriver:
         session_id: str,
         consume_delta=None,
         consume_tool_event=None,
+        consume_operation_accepted=None,
         host_calls=None,
     ) -> AgentDriveResult:
         session = self._load_session(session_id)
@@ -94,6 +96,10 @@ class AgentDriver:
         if accepted is None:
             # 竞争失败不重放副作用；下一次 wake 会重新读取事实。
             return AgentDriveResult(None)
+        if consume_operation_accepted is not None:
+            callback_result = consume_operation_accepted(accepted)
+            if inspect.isawaitable(callback_result):
+                await callback_result
         result = await self._operation_driver.drive_operation(
             accepted.operation.operation_id,
             consume_delta=consume_delta,
@@ -108,6 +114,7 @@ class AgentDriver:
         session_id: str,
         consume_delta=None,
         consume_tool_event=None,
+        consume_operation_accepted=None,
         host_calls=None,
     ) -> AgentDriveResult:
         """连续 drain Session FIFO，直到真正空闲或进入等待点。"""
@@ -117,6 +124,7 @@ class AgentDriver:
                 session_id=session_id,
                 consume_delta=consume_delta,
                 consume_tool_event=consume_tool_event,
+                consume_operation_accepted=consume_operation_accepted,
                 host_calls=host_calls,
             )
             if current.operation_result is None:

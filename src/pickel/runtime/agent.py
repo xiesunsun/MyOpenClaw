@@ -54,6 +54,7 @@ class Agent:
         *,
         consume_delta=None,
         consume_tool_event=None,
+        consume_operation_accepted=None,
         host_calls=None,
     ) -> AgentDriveResult:
         """原子写入前台 followup 并立即驱动一次。
@@ -65,11 +66,16 @@ class Agent:
             raise AgentBusyError("Agent 当前正在驱动，不能接受前台 followup")
         async with self._drive_lock:
             await self._inbox.send(message, delivery="followup")
+            kwargs = {
+                "session_id": self._session_id,
+                "consume_delta": consume_delta,
+                "consume_tool_event": consume_tool_event,
+                "host_calls": host_calls,
+            }
+            if consume_operation_accepted is not None:
+                kwargs["consume_operation_accepted"] = consume_operation_accepted
             return await self._driver.when_idle(
-                session_id=self._session_id,
-                consume_delta=consume_delta,
-                consume_tool_event=consume_tool_event,
-                host_calls=host_calls,
+                **kwargs,
             )
 
     async def steer(self, message: UserMessage) -> str:

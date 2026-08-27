@@ -115,8 +115,8 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
         SlashCommand("context", "Show context usage", "/context", "_command_context"),
         SlashCommand(
             "observe",
-            "Export current session observability HTML",
-            "/observe [path]",
+            "Open current session observability workspace",
+            "/observe [port|export [path]]",
             "_command_observe",
         ),
         SlashCommand("session", "Show session details", "/session", "_command_session"),

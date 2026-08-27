@@ -86,6 +86,7 @@ def test_写出的每行都是合法_json(tmp_path: Path):
         "assistant_message",
     ]
     assert all(record["record_type"] == "runtime_event" for record in records)
+    assert all(record["mode"] == "standard" for record in records)
     assert [record["trace_seq"] for record in records] == [0, 1]
 
 

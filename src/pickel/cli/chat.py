@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import traceback
+import webbrowser
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -62,6 +63,7 @@ class ChatLoop:
         self._fallback_message_count = self._read_session_message_count()
         self._slash_registry = BUILTIN_SLASH_COMMANDS
         self._slash_completer = SlashCompleter(self._slash_registry, self)
+        self._observation_server = None
 
     @classmethod
     def from_host(
@@ -252,6 +254,7 @@ class ChatLoop:
                 self._conversation,
                 agent_id,
             )
+            self._close_observation_server()
             self._attach_host_call_handlers()
             self._attach_audio_output_handler()
             self._fallback_message_count = 0
@@ -266,6 +269,7 @@ class ChatLoop:
             self._render_error_message("RuntimeHost 未提供，无法创建新会话")
             return
         self._conversation = self._host.new_session(self._conversation)
+        self._close_observation_server()
         self._attach_host_call_handlers()
         self._attach_audio_output_handler()
         self._fallback_message_count = 0
@@ -360,15 +364,66 @@ class ChatLoop:
         return True
 
     def _command_observe(self, arg: str | None) -> bool:
+        argument = (arg or "").strip()
+        if argument == "export" or argument.startswith("export "):
+            raw_path = argument.removeprefix("export").strip()
+            try:
+                path = self._conversation.export_observation(
+                    Path(raw_path).expanduser() if raw_path else None
+                )
+            except (OSError, ValueError) as exc:
+                self._render_error_message(f"导出观测报告失败: {exc}")
+                return True
+            self._render_system_message(f"Observation report: {path}")
+            return True
+
         try:
-            path = self._conversation.export_observation(
-                Path(arg).expanduser() if arg is not None else None
+            port = int(argument) if argument else 0
+        except ValueError:
+            self._render_error_message(
+                "用法：/observe [port] 或 /observe export [path]"
+            )
+            return True
+        if not 0 <= port <= 65535:
+            self._render_error_message("观测端口必须在 0 到 65535 之间")
+            return True
+
+        session_id = self.session.session_id
+        if (
+            self._observation_server is not None
+            and self._observation_server.session_id == session_id
+        ):
+            webbrowser.open(self._observation_server.url)
+            self._render_system_message(
+                f"Observation workspace: {self._observation_server.url}"
+            )
+            return True
+
+        self._close_observation_server()
+        try:
+            from pickel.observe.http_server import start_observation_server
+
+            store = self._conversation.persistence_store
+            self._observation_server = start_observation_server(
+                store=store,
+                content_store=store.model_call_content_store,
+                session_id=session_id,
+                port=port,
             )
         except (OSError, ValueError) as exc:
-            self._render_error_message(f"导出观测报告失败: {exc}")
+            self._render_error_message(f"启动动态观测站点失败: {exc}")
             return True
-        self._render_system_message(f"Observation report: {path}")
+        webbrowser.open(self._observation_server.url)
+        self._render_system_message(
+            f"Observation workspace: {self._observation_server.url}"
+        )
         return True
+
+    def _close_observation_server(self) -> None:
+        if self._observation_server is None:
+            return
+        self._observation_server.close()
+        self._observation_server = None
 
     def _command_session(self, _arg: str | None) -> bool:
         self._render_session_summary()
@@ -584,6 +639,7 @@ class ChatLoop:
             self._render_header()
             await self._loop()
         finally:
+            self._close_observation_server()
             self._close_audio_output_handler()
             if not self._conversation.closed:
                 self._conversation.detach()

@@ -217,6 +217,45 @@ def test_idle_accepts_followup_after_inject_without_accepting_inject():
     assert operations.message.message_id == "followup"
 
 
+def test_drive_once_notifies_operation_identity_after_accept_before_drive():
+    order = []
+
+    class InboxStore:
+        def list_pending(self, *, session_id):
+            return (SimpleNamespace(message_id="followup", delivery="followup"),)
+
+    class Operations:
+        def accept_pending_message(self, **kwargs):
+            order.append("accept")
+            return SimpleNamespace(
+                operation=SimpleNamespace(operation_id="operation-real")
+            )
+
+    class OperationDriver:
+        async def drive_operation(self, operation_id, **kwargs):
+            order.append(("drive", operation_id))
+            return SimpleNamespace(status="succeeded")
+
+    accepted = []
+    driver = AgentDriver(
+        conversation_store=_ConversationStore(_session(active_operation_id=None)),
+        inbox_store=InboxStore(),
+        operation_service=Operations(),
+        operation_driver=OperationDriver(),
+        package_resolver=lambda **_: ("package-1", None),
+    )
+
+    asyncio.run(
+        driver.drive_once(
+            session_id="session-1",
+            consume_operation_accepted=lambda value: accepted.append(value),
+        )
+    )
+
+    assert accepted[0].operation.operation_id == "operation-real"
+    assert order == ["accept", ("drive", "operation-real")]
+
+
 def test_when_idle_drains_next_followup_after_terminal_operation():
     session = _session(active_operation_id="operation-1")
 

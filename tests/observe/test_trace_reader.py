@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from pickel.observe.trace_reader import read_trace
+from pickel.observe.trace_reader import read_operation_trace, read_trace
 
 
 def _write_trace(path: Path) -> None:
@@ -184,3 +184,136 @@ def test_rotated_segments_are_read_before_active_file(tmp_path):
     enhancement = read_trace(active)
 
     assert enhancement.agent_run_markers[0].failed["error_type"] == "RuntimeError"
+
+
+def test_operation_trace_filter_excludes_global_and_other_operation_records(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    records = [
+        {
+            "record_type": "span",
+            "operation_id": "op-a",
+            "payload": {"name": "pickel.tool.execute", "duration_ms": 5},
+        },
+        {
+            "record_type": "span",
+            "operation_id": "op-b",
+            "payload": {"name": "pickel.tool.execute", "duration_ms": 7},
+        },
+        {
+            "record_type": "runtime_event",
+            "payload": {"name": "global"},
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    data = read_operation_trace(trace_file, operation_id="op-a")
+
+    assert len(data.spans) == 1
+    assert data.spans[0]["duration_ms"] == 5
+    assert data.runtime_events == []
+
+
+def test_dropped_delta_count_uses_maximum_cumulative_value(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    records = [
+        {
+            "record_type": "diagnostic",
+            "operation_id": "op-a",
+            "payload": {
+                "name": "trace_delta_dropped",
+                "attributes": {"delta_records_dropped": 2},
+            },
+        },
+        {
+            "record_type": "diagnostic",
+            "operation_id": "op-a",
+            "payload": {
+                "name": "trace_delta_dropped",
+                "attributes": {"delta_records_dropped": 9},
+            },
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    data = read_operation_trace(trace_file, operation_id="op-a")
+
+    assert data.dropped_deltas_count == 9
+
+
+def test_trace_status_记录模式并配对工具时序(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    records = [
+        {
+            "record_type": "runtime_event",
+            "mode": "standard",
+            "trace_seq": 4,
+            "operation_id": "op-a",
+            "event_type": "tool_call_started",
+            "tool_call_id": "call-1",
+            "occurred_at": "2026-07-31T00:00:00+00:00",
+        },
+        {
+            "record_type": "runtime_event",
+            "mode": "standard",
+            "trace_seq": 5,
+            "operation_id": "op-a",
+            "event_type": "tool_call_completed",
+            "tool_call_id": "call-1",
+            "occurred_at": "2026-07-31T00:00:01.250000+00:00",
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    data = read_operation_trace(trace_file, operation_id="op-a")
+
+    assert data.trace_status == {
+        "mode": "standard",
+        "available": True,
+        "last_sequence": 5,
+        "dropped_records": 0,
+        "stream_deltas_captured": False,
+        "status_text": "Standard Trace 已读取 · 未报告丢弃",
+    }
+    assert data.tool_timings["call-1"] == {
+        "tool_call_id": "call-1",
+        "source": "trace",
+        "started_at": "2026-07-31T00:00:00+00:00",
+        "finished_at": "2026-07-31T00:00:01.250000+00:00",
+        "duration_ms": 1250.0,
+        "missing": [],
+        "partial": False,
+    }
+
+
+def test_tool_timing_缺少结束事件时明确_partial(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    trace_file.write_text(
+        json.dumps(
+            {
+                "record_type": "runtime_event",
+                "mode": "standard",
+                "operation_id": "op-a",
+                "event_type": "tool_call_started",
+                "tool_call_id": "call-1",
+                "occurred_at": "2026-07-31T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    timing = read_operation_trace(trace_file, operation_id="op-a").tool_timings[
+        "call-1"
+    ]
+
+    assert timing["partial"] is True
+    assert timing["missing"] == ["finished_at"]

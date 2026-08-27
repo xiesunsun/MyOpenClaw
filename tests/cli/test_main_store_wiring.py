@@ -24,26 +24,35 @@ class _Boot:
         return self.service
 
 
-def test_observe_passes_runtime_store_to_conversation_service(
-    monkeypatch, tmp_path: Path
-) -> None:
+class _ObserveStore:
+    model_call_content_store = object()
+
+
+def test_observe_uses_storage_only_path(monkeypatch, tmp_path: Path) -> None:
     session = SimpleNamespace(session_id="session-1")
     service = MagicMock()
     service.load_conversation_session.return_value = session
-    boot = _Boot(service)
+    store = _ObserveStore()
     out = tmp_path / "report.html"
     export = MagicMock(return_value=out)
-    monkeypatch.setattr(main, "_boot", lambda: boot)
+    monkeypatch.setattr(
+        main,
+        "_boot",
+        lambda: (_ for _ in ()).throw(AssertionError("observe 不应启动 Runtime")),
+    )
+    monkeypatch.setattr(main, "SQLiteRuntimeStore", lambda _path: store)
+    monkeypatch.setattr(main, "ConversationService", lambda _store: service)
     monkeypatch.setattr(
         "pickel.observe.operation_report.export_operation_report", export
     )
 
     main.observe(session=["session-1"], out=out, limit=20)
 
-    assert boot.received_store is boot.store
     export.assert_called_once_with(
         conversation_service=service,
         sessions=(session,),
+        store=store,
+        content_store=store.model_call_content_store,
         out=out,
     )
 
@@ -67,10 +76,9 @@ def test_observe_without_exportable_session_still_uses_current_store(
 ) -> None:
     service = MagicMock()
     service.list_conversation_previews.return_value = []
-    boot = _Boot(service)
-    monkeypatch.setattr(main, "_boot", lambda: boot)
+    store = _ObserveStore()
+    monkeypatch.setattr(main, "SQLiteRuntimeStore", lambda _path: store)
+    monkeypatch.setattr(main, "ConversationService", lambda _store: service)
 
     with pytest.raises(typer.Exit):
         main.observe(session=[], out=None, limit=20)
-
-    assert boot.received_store is boot.store

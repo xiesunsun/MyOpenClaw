@@ -1,29 +1,100 @@
-"""从 Conversation 事实与 Operation Event 轨迹导出自包含报告。"""
+"""从可靠事实、ModelCall 不可变内容与 Trace 轨迹导出诊断工作台报告。"""
 
 from __future__ import annotations
 
 import html
 import json
 from pathlib import Path
+from typing import Literal
 
 from pickel.config.paths import home_dir
 from pickel.conversations.agent_message import agent_message_to_dict
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
+from pickel.model_calls.content_store import ModelCallContentStore
 from pickel.observe.jsonl_trace_sink import trace_path
+from pickel.observe.model_call_content_reader import ModelCallContentReader
+from pickel.observe.operation_fact_reader import FactStore, OperationFactReader
+from pickel.observe.operation_projector import OperationObservationProjector
+from pickel.observe.operation_report_renderer import OperationReportRenderer
+from pickel.observe.trace_reader import read_operation_trace
+
+
+def export_operation_observation(
+    operation_id: str,
+    *,
+    store: FactStore,
+    content_store: ModelCallContentStore,
+    trace_path_override: Path | None = None,
+    out: Path | None = None,
+    format: Literal["html", "json"] = "html",
+) -> Path:
+    """按 Unix 管道组合导出单个 Operation 的诊断数据或工作台 HTML。"""
+    fact_reader = OperationFactReader(store)
+    operation = fact_reader.read_operation(operation_id)
+    if operation is None:
+        raise ValueError(f"未找到 Operation: {operation_id}")
+
+    content_reader = ModelCallContentReader(content_store)
+
+    tp = trace_path_override or trace_path(operation.session_id)
+    trace_data = read_operation_trace(tp, operation_id=operation_id)
+
+    projector = OperationObservationProjector(
+        fact_reader=fact_reader,
+        content_reader=content_reader,
+    )
+    doc = projector.project_operation(operation_id, trace_data=trace_data)
+
+    target = out or (home_dir() / "observations" / f"{operation_id}.{format}")
+    target = target.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if format == "json":
+        target.write_text(doc.to_json(), encoding="utf-8")
+    else:
+        renderer = OperationReportRenderer()
+        target.write_text(renderer.render(doc), encoding="utf-8")
+
+    return target
 
 
 def export_operation_report(
     *,
     conversation_service: ConversationService,
     sessions: tuple[ConversationSession, ...],
+    store: FactStore | None = None,
+    content_store: ModelCallContentStore | None = None,
     out: Path | None = None,
 ) -> Path:
+    """导出会话报告；有 Operation 时必须使用显式事实与内容依赖。"""
     if not sessions:
         raise ValueError("至少需要一个 ConversationSession")
-    target = out or (home_dir() / "observations" / f"{sessions[0].session_id}.html")
+
+    main_session = sessions[0]
+    # 尝试找到该 Session 的活动或最近 Operation
+    target_op_id = main_session.active_operation_id
+    if target_op_id is None and store is not None:
+        ops = store.list_operations(session_id=main_session.session_id)
+        if ops:
+            target_op_id = ops[-1].operation_id
+
+    target = out or (home_dir() / "observations" / f"{main_session.session_id}.html")
     target = target.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_op_id is not None:
+        if store is None or content_store is None:
+            raise ValueError("导出 Operation 报告需要显式提供 store 和 content_store")
+        return export_operation_observation(
+            target_op_id,
+            store=store,
+            content_store=content_store,
+            out=target,
+            format="html",
+        )
+
+    # 通用会话报告降级
     payload = []
     for session in sessions:
         nodes = conversation_service.list_active_branch_nodes(

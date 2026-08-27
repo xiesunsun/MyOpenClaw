@@ -202,15 +202,44 @@ class ConversationRuntime:
             temporary_package_handle = self._runtime_generation.acquire_loaded_package(
                 self._loaded_agent_package.version.package_version_id
             )
-        operation_id = self._session.active_operation_id or "pending"
+        # 新 Operation 的身份只有在接受事务提交后才可靠。没有 active
+        # Operation 时禁止用 pending 等占位符创建 Span 或事件。
+        operation_id = self._session.active_operation_id or ""
         started = time.perf_counter()
-        timer = SpanTimer(
-            "pickel.agent_run",
-            ExecutionIdentity(
-                session_id=self._session.session_id,
-                operation_id=operation_id,
-            ),
-        )
+        timer: SpanTimer | None = None
+
+        async def consume_operation_accepted(accepted) -> None:
+            """在接受事务后建立真实身份的 AgentRun 观测。"""
+
+            nonlocal operation_id, timer
+            accepted_operation_id = (
+                accepted
+                if isinstance(accepted, str)
+                else getattr(accepted, "operation_id", None)
+            )
+            if accepted_operation_id is None and hasattr(accepted, "operation"):
+                accepted_operation_id = accepted.operation.operation_id
+            if not accepted_operation_id or timer is not None:
+                return
+            operation_id = str(accepted_operation_id)
+            timer = SpanTimer(
+                "pickel.agent_run",
+                ExecutionIdentity(
+                    session_id=self._session.session_id,
+                    operation_id=operation_id,
+                ),
+            )
+            await self._events.emit(
+                AgentRunStarted(
+                    envelope=EventEnvelope(
+                        identity=ExecutionIdentity(
+                            session_id=self._session.session_id,
+                            operation_id=operation_id,
+                        )
+                    ),
+                    user_text=self._user_text(request),
+                )
+            )
 
         async def consume_delta(delta, identity: ExecutionIdentity) -> None:
             envelope = EventEnvelope(identity=identity)
@@ -231,10 +260,15 @@ class ConversationRuntime:
                 )
 
         try:
+            # active_operation_id 是恢复路径上的可靠身份；新 Operation 则由
+            # AgentDriver 在 accept transaction 后调用上面的 callback。
+            if operation_id:
+                await consume_operation_accepted(operation_id)
             result = await self._agent.followup_and_wait(
                 request.message,
                 consume_delta=consume_delta,
                 consume_tool_event=self._events.emit,
+                consume_operation_accepted=consume_operation_accepted,
                 host_calls=self._runtime_bus.host_calls.client,
             )
             if result.accepted is not None:
@@ -244,11 +278,8 @@ class ConversationRuntime:
             envelope = EventEnvelope(
                 identity=ExecutionIdentity(
                     session_id=self._session.session_id,
-                    operation_id=operation_id,
+                    operation_id=operation_id or None,
                 )
-            )
-            await self._events.emit(
-                AgentRunStarted(envelope=envelope, user_text=self._user_text(request))
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             operation_result = result.operation_result
@@ -292,16 +323,17 @@ class ConversationRuntime:
                         message=error.message,
                     )
                 )
-                timer.finish(
-                    status="error",
-                    attributes={"outcome": app_status},
-                    error=ErrorInfo(
-                        kind="agent_run",
-                        type=error.error_type,
-                        message=error.message,
-                        retryable=getattr(state_error, "retryable", None),
-                    ),
-                )
+                if timer is not None:
+                    timer.finish(
+                        status="error",
+                        attributes={"outcome": app_status},
+                        error=ErrorInfo(
+                            kind="agent_run",
+                            type=error.error_type,
+                            message=error.message,
+                            retryable=getattr(state_error, "retryable", None),
+                        ),
+                    )
                 self._refresh_session()
                 return AgentRunResult(
                     status=app_status,
@@ -321,10 +353,11 @@ class ConversationRuntime:
                     outcome=app_status,
                 )
             )
-            timer.finish(
-                status="cancelled" if app_status == "cancelled" else "ok",
-                attributes={"outcome": app_status},
-            )
+            if timer is not None:
+                timer.finish(
+                    status="cancelled" if app_status == "cancelled" else "ok",
+                    attributes={"outcome": app_status},
+                )
             self._refresh_session()
             return AgentRunResult(
                 status=app_status,
@@ -339,16 +372,17 @@ class ConversationRuntime:
             envelope = EventEnvelope(
                 identity=ExecutionIdentity(
                     session_id=self._session.session_id,
-                    operation_id=operation_id,
+                    operation_id=operation_id or None,
                 )
             )
             await self._events.emit(
                 AgentRunInterrupted(envelope=envelope, at_step=0, partial_text="")
             )
-            timer.finish(
-                status="cancelled",
-                attributes={"outcome": "cancelled"},
-            )
+            if timer is not None:
+                timer.finish(
+                    status="cancelled",
+                    attributes={"outcome": "cancelled"},
+                )
             self._refresh_session()
             raise
         except AgentBusyError as exc:
@@ -360,7 +394,7 @@ class ConversationRuntime:
             envelope = EventEnvelope(
                 identity=ExecutionIdentity(
                     session_id=self._session.session_id,
-                    operation_id=operation_id,
+                    operation_id=operation_id or None,
                 )
             )
             await self._events.emit(
@@ -370,11 +404,12 @@ class ConversationRuntime:
                     message=str(exc),
                 )
             )
-            timer.finish(
-                status="error",
-                attributes={"outcome": "failed"},
-                error=ErrorInfo.from_exception(exc, kind="agent_run"),
-            )
+            if timer is not None:
+                timer.finish(
+                    status="error",
+                    attributes={"outcome": "failed"},
+                    error=ErrorInfo.from_exception(exc, kind="agent_run"),
+                )
             self._refresh_session()
             return AgentRunResult(
                 status="failed",
@@ -630,6 +665,8 @@ class ConversationRuntime:
         return export_operation_report(
             conversation_service=self._conversation_service,
             sessions=(self._session,),
+            store=self._persistence_store,
+            content_store=self._persistence_store.model_call_content_store,
             out=out,
         )
 
