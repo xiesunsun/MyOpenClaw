@@ -51,7 +51,7 @@ from pickel.tools.validation import (
     validate_tool_output,
 )
 from pickel.shared.execution_identity import ExecutionIdentity
-from pickel.tools.bus import ToolActivation, ToolBus
+from pickel.tools.bus import ToolActivation, ToolBus, ToolSnapshot
 from pickel.tools.catalog import install_builtin_tools
 from pickel.tools.file_service import WorkspaceFileService
 from pickel.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
@@ -59,6 +59,20 @@ from pickel.tools.sandbox import SandboxPolicy
 from pickel.tools.services import DelegationControl, ToolServices
 from pickel.tools.shell import LocalBashOperations
 from pickel.workspaces.workspace_binding import WorkspaceBinding
+
+
+def _effective_workspace_root(
+    *,
+    session_cwd: Path,
+    child_scope: str,
+    parent_allowed_root: Path | None,
+) -> Path | None:
+    """计算 child Package 与 Parent Operation 的实际文件边界。"""
+    if child_scope == "workspace":
+        return Path(session_cwd).resolve()
+    if parent_allowed_root is not None:
+        return Path(parent_allowed_root).resolve()
+    return None
 
 
 class CompositionStore(
@@ -302,6 +316,7 @@ class Boot:
         session_cwd: Path,
         operation_service: OperationService | None = None,
         wake_callback: Callable[[str], None] | None = None,
+        terminal_callback: Callable[[str], None] | None = None,
         delegation_control: DelegationControl | None = None,
         operation_package_loader: (
             Callable[[SessionOperation], LoadedAgentPackage] | None
@@ -312,19 +327,24 @@ class Boot:
         release_operation_package: (
             Callable[[SessionOperation], Awaitable[None]] | None
         ) = None,
+        delegation_package_resolver: (
+            Callable[[SessionOperation, AgentPackageVersion, str], AgentPackageVersion]
+            | None
+        ) = None,
+        allowed_tool_names: frozenset[str] | None = None,
+        parent_allowed_root: Path | None = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
         inbox_store = store
         operation_service = operation_service or OperationService(store)
-        effects = self._build_effects(
-            loaded_agent_package=loaded_agent_package,
-            artifact_service=artifact_service,
-            session_cwd=session_cwd,
-            delegation_control=delegation_control,
-        )
         package_id = loaded_agent_package.version.package_version_id
         loaded_packages = {package_id: loaded_agent_package}
+        effective_allowed_root = _effective_workspace_root(
+            session_cwd=session_cwd,
+            child_scope=loaded_agent_package.version.workspace_policy.file_scope,
+            parent_allowed_root=parent_allowed_root,
+        )
 
         def loaded_for(operation: SessionOperation) -> LoadedAgentPackage:
             if operation_package_loader is not None:
@@ -353,10 +373,15 @@ class Boot:
                     artifact_service=artifact_service,
                     session_cwd=session_cwd,
                     delegation_control=delegation_control,
+                    allowed_tool_names=allowed_tool_names,
+                    parent_allowed_root=parent_allowed_root,
                 )
             ),
             release_operation_package=release_operation_package,
             wake_callback=wake_callback,
+            terminal_callback=terminal_callback,
+            delegation_package_resolver=delegation_package_resolver,
+            allowed_tool_names=allowed_tool_names,
         )
         agent_driver = AgentDriver(
             conversation_store=conversation_store,
@@ -368,12 +393,7 @@ class Boot:
                 WorkspaceBinding(
                     workspace_id=session.workspace_id,
                     working_directory=session.cwd,
-                    allowed_root=(
-                        session.cwd
-                        if loaded_agent_package.version.workspace_policy.file_scope
-                        == "workspace"
-                        else None
-                    ),
+                    allowed_root=(effective_allowed_root),
                 ),
             ),
             cancel_operation=operation_service.request_cancellation,
@@ -405,18 +425,34 @@ class Boot:
         artifact_service: ArtifactService,
         session_cwd: Path,
         delegation_control: DelegationControl | None = None,
+        allowed_tool_names: frozenset[str] | None = None,
+        parent_allowed_root: Path | None = None,
     ) -> RuntimeEffects:
         agent_id = loaded_agent_package.version.agent_id
         provider = loaded_agent_package.model_clients["primary"]
         workspace_root = Path(session_cwd).resolve()
+        tool_snapshot = loaded_agent_package.tool_snapshot
+        if allowed_tool_names is not None:
+            tool_snapshot = ToolSnapshot(
+                entries=tuple(
+                    entry
+                    for entry in tool_snapshot.entries
+                    if entry.name in allowed_tool_names
+                )
+            )
+        file_scope = loaded_agent_package.version.workspace_policy.file_scope
+        effective_allowed_root = _effective_workspace_root(
+            session_cwd=workspace_root,
+            child_scope=file_scope,
+            parent_allowed_root=parent_allowed_root,
+        )
         services = ToolServices(
             workspace_files=WorkspaceFileService(
                 workspace_root=workspace_root,
                 access_policy=(
                     FullAccessPathPolicy()
-                    if loaded_agent_package.version.workspace_policy.file_scope
-                    == "full"
-                    else WorkspacePathAccessPolicy()
+                    if file_scope == "full" and effective_allowed_root is None
+                    else WorkspacePathAccessPolicy(allowed_root=effective_allowed_root)
                 ),
             ),
             bash=LocalBashOperations(sandbox=self.sandbox_policy),
@@ -446,7 +482,7 @@ class Boot:
                 for item in state.current_step.tool_calls
                 if item.tool_call_id == tool_call_id
             )
-            entry = loaded_agent_package.tool_snapshot.get(call.tool_name)
+            entry = tool_snapshot.get(call.tool_name)
             if entry is None:
                 return ToolResultMessage(
                     tool_call_id=tool_call_id,

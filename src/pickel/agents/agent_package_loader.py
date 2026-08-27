@@ -11,15 +11,74 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from pickel.agents.agent_package import (
-    AgentPackageVersion,
     ExtensionVersion,
     LoadedAgentPackage,
     ModelVersion,
     ToolVersion,
 )
 from pickel.agents.agent_package_store import AgentPackageVersionStore
+from pickel.conversations.agent_message import agent_message_to_dict
 from pickel.tools.bus import ToolBus, ToolEntry, ToolSnapshot
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 from pickel.tools.cancel_delegation import cancel_delegation
+
+
+@tool(
+    name="wait_delegation",
+    description=(
+        "Wait for a durable direct child agent for a bounded time. Returns its "
+        "persisted final assistant response when terminal; timeout does not cancel it."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "child_session_id": {"type": "string"},
+            "timeout_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 600,
+            },
+        },
+        "required": ["child_session_id", "timeout_seconds"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "timed_out": {"type": "boolean"},
+            "agent": {"type": "object"},
+            "assistant_message": {"type": ["object", "null"]},
+        },
+        "required": ["timed_out", "agent", "assistant_message"],
+        "additionalProperties": False,
+    },
+    replay_policy="safe",
+)
+async def _legacy_wait_delegation(
+    arguments: dict[str, Any], context: ToolExecutionContext
+) -> dict[str, object]:
+    """仅供 format 1/2 恢复的旧 wait_delegation 语义。"""
+    control = context.services.delegation
+    if control is None:
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
+    child_session_id = str(arguments["child_session_id"])
+    timeout_seconds = float(arguments["timeout_seconds"])
+    if not child_session_id.strip():
+        raise ToolExecutionError("wait_delegation 的 child_session_id 不能为空。")
+    snapshot, assistant, timed_out = await control.wait_delegation(
+        sender_operation_id=context.identity.operation_id or "",
+        sender_step_id=context.identity.step_id or "",
+        sender_tool_call_id=context.identity.tool_call_id or "",
+        target_child_session_id=child_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return {
+        "timed_out": timed_out,
+        "agent": snapshot.to_dict(),
+        "assistant_message": (
+            agent_message_to_dict(assistant) if assistant is not None else None
+        ),
+    }
 
 
 class PackageLoadError(RuntimeError):
@@ -133,19 +192,21 @@ class AgentPackageLoader:
             model_clients[role] = client
 
         entries: list[ToolEntry] = []
-        for tool in version.tools:
-            if not isinstance(getattr(tool, "output_schema", None), Mapping):
+        for tool_version in version.tools:
+            if not isinstance(getattr(tool_version, "output_schema", None), Mapping):
                 raise PackageLoadError(
                     "package_invalid",
                     package_version_id,
-                    f"Tool {getattr(tool, 'name', '<unknown>')} 缺少 output_schema",
+                    f"Tool {getattr(tool_version, 'name', '<unknown>')} 缺少 output_schema",
                 )
-            entry = self._tool_bus_entry(tool)
+            entry = self._tool_bus_entry(
+                tool_version, package_format_version=version.format_version
+            )
             if entry is None:
                 raise PackageLoadError(
                     "tool_unavailable",
                     package_version_id,
-                    f"Tool implementation 不可用或版本不匹配: {tool.name}",
+                    f"Tool implementation 不可用或版本不匹配: {tool_version.name}",
                 )
             entries.append(entry)
 
@@ -177,27 +238,49 @@ class AgentPackageLoader:
             recall_sources=tuple(recalls),
         )
 
-    def _tool_bus_entry(self, version: ToolVersion) -> ToolEntry | None:
-        try:
-            entry = self._tool_bus.get(version.name)
-        except KeyError:
-            # 迁移兼容：旧的冻结 Package 可能仍引用 cancel_delegation。
-            # 不把它注册回 ToolBus，避免新 Package/snapshot 重新公开旧名称；
-            # 仅在精确恢复该旧版本时提供一次隐藏的本地实现。
-            if (
-                version.name == "cancel_delegation"
-                and version.source.value == "builtin"
-            ):
-                entry = ToolEntry(
-                    name=version.name,
-                    tool=cancel_delegation,
-                    source=version.source,
-                    version=version.version,
-                    origin=None,
-                    enabled=True,
-                )
-            else:
-                return None
+    def _tool_bus_entry(
+        self, version: ToolVersion, *, package_format_version: int
+    ) -> ToolEntry | None:
+        if (
+            package_format_version in {1, 2}
+            and version.name == "wait_delegation"
+            and version.source.value == "builtin"
+        ):
+            entry = ToolEntry(
+                name=version.name,
+                tool=_legacy_wait_delegation,
+                source=version.source,
+                version=version.version,
+                origin=None,
+                enabled=True,
+            )
+        else:
+            try:
+                entry = self._tool_bus.get(version.name)
+            except KeyError:
+                # 迁移兼容：旧的冻结 Package 可能仍引用已经从新 ToolBus
+                # 隐藏的兼容工具。不把它注册回 ToolBus，避免新 Package/snapshot
+                # 重新公开旧名称；仅在精确恢复旧版本时提供本地实现。
+                if (
+                    package_format_version in {1, 2}
+                    and version.source.value == "builtin"
+                ):
+                    legacy_tools = {
+                        "cancel_delegation": cancel_delegation,
+                    }
+                    legacy_tool = legacy_tools.get(version.name)
+                    if legacy_tool is None:
+                        return None
+                    entry = ToolEntry(
+                        name=version.name,
+                        tool=legacy_tool,
+                        source=version.source,
+                        version=version.version,
+                        origin=None,
+                        enabled=True,
+                    )
+                else:
+                    return None
         ref = version.implementation_ref
         expected_origin = None if entry.source.value == "builtin" else ref.name
         if (

@@ -220,6 +220,7 @@ class DelegationService:
         )
         delegation = AgentDelegation(
             child_session_id=child_session_id,
+            child_package_version_id=child_package.package_version_id,
             parent_operation_id=parent_operation_id,
             parent_step_id=parent_step_id,
             parent_tool_call_id=parent_tool_call_id,

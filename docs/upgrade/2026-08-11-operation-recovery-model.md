@@ -1,8 +1,8 @@
 # Operation 持久化与恢复模型
 
 **日期**：2026-08-11  
-**更新日期**：2026-08-26
-**状态**：目标合同；v10 恢复主链、PreToolUse、Approval CAS 与 Host reconcile 控制面已实施
+**更新日期**：2026-08-27
+**状态**：当前合同；v11 恢复主链、PreToolUse、Approval CAS、Delegation settlement 与 Host reconcile 已实施
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
@@ -255,6 +255,11 @@ ready
 
 `intent_recorded` 表示工具可能未开始、正在执行或已完成但结果未提交。重启不能从该状态推断“尚未执行”。
 
+`DelegateAgentIntent` 必须在执行外部效果前把 Parent Package 允许的 `agent_id` 解析为
+确定的 `child_package_version_id`。随后创建 child Session 时，同时把该值写入
+AgentDelegation；恢复不得再次用当前 Agent 配置解析，也不得默认替换为 Parent Package。
+`delegate_agent` 不接受原始 provider、model、Tool、endpoint 或 Secret 参数。
+
 恢复决策：
 
 ```mermaid
@@ -358,10 +363,26 @@ Intent reconciliation 收敛；其创建的非终态后代继续遵守既有 Par
 ```text
 CAS AgentRunState → succeeded / failed / cancelled
 + ConversationSession.active_operation_id = NULL
++ 若该 Session 是 delegated child：向 direct Parent 插入 pending settled steer
 + updated_at = now
 ```
 
 `succeeded` 必须引用 final_assistant_node_id；`failed` 必须保存稳定 AgentRunError；`cancelled` 必须保存 Cancellation。失败和取消不回滚已提交 ConversationNode。
+
+delegated child 的 settled 消息必须与终态在同一事务提交，消息 ID 由
+`("agent_settled", child_session_id, child_operation_id)` 规范派生，source 记录 child
+Session/Operation。成功结果只从 `final_assistant_node_id` 投影 TextBlock 与 ArtifactBlock；
+正文首个 TextBlock 是稳定 envelope，标明 `type=agent_settled`、`child_session_id` 与终态
+`status`，供 Parent Context 识别来源；该 envelope 不得包含 Operation、Node、State、Provider
+或 usage 身份。
+失败和取消投影稳定 Error/Cancellation 摘要。不得复制 ThinkingBlock、ToolCallBlock、
+Provider metadata、usage 或内部状态 ID；文本使用创建 Delegation 的 Parent Package 所冻结
+`delegation_result_max_chars` 截断。该消息不是第二份结果权威，也不新增 Settlement/Result
+实体。
+
+同一 child Session 后续接受的每个 Operation 终态都产生各自的幂等通知。并行 child 按
+Parent Inbox 分配到的 sequence 消费，不等待固定回收顺序。事务提交后 RuntimeHost wake
+Parent；wake 失败不回滚，启动恢复从 durable pending Inbox 继续。
 
 Driver 在提交 succeeded 前执行 stopping check：若存在 pending steer/inject，则 claim 并继续当前 Operation；否则终态并释放 active_operation_id。与终态并发到达的消息由事务顺序明确归入当前或下一 Operation，不丢失。
 
@@ -397,4 +418,5 @@ waiting Operation 不轮询；批准、reconcile 或 cancel 必须先提交状�
 5. rejected ToolResult 保持 Provider 原始 ToolCall 顺序；Tool 输出必须经 output_schema 验证并 render 为唯一模型可见 content。
 6. cancelling 可跨崩溃继续，未知 Tool 副作用不会被直接标记 cancelled。
 7. Parent 取消不会留下 running/waiting 的孤儿后代。
-8. 终态 State 与 Session.active_operation_id 清空原子一致。
+8. 终态 State、Session.active_operation_id 清空与 delegated child settled Inbox 插入原子一致。
+9. settled 消息已持久化但 Parent 未被实时 wake 时，启动恢复会发现并驱动 Parent；不扫描历史终态补发通知。

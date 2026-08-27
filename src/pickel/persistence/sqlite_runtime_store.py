@@ -18,15 +18,20 @@ from pickel.agents.agent_package import (
     package_version_id_for_content,
 )
 from pickel.artifacts.artifact import Artifact
-from pickel.conversations.agent_message import UserMessage
-from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
+from pickel.conversations.content_blocks import (
+    ArtifactBlock,
+    TextBlock,
+)
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import (
     AgentMessageSource,
+    AgentSettledMessageSource,
     InboxMessage,
     MessageDelivery,
     MessageSource,
+    agent_settled_message_id,
 )
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import (
@@ -35,8 +40,12 @@ from pickel.operations.agent_run_state import (
     agent_run_state_from_content,
 )
 from pickel.operations.session_operation import SessionOperation
+from pickel.operations.delegation_result import (
+    delegation_result_max_chars,
+    project_settled_message,
+)
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
-from pickel.persistence.sqlite_schema_v10 import (
+from pickel.persistence.sqlite_schema_v11 import (
     SCHEMA_VERSION,
     UnsupportedSchemaVersionError,
     create_schema,
@@ -353,6 +362,10 @@ class SQLiteRuntimeStore:
             existing = self._require_session(connection, session_id)
             if existing["archived_at"] is not None:
                 return
+            if self._has_busy_descendants(connection, session_id):
+                raise StorageIntegrityError(
+                    "delegated descendant 仍在运行或有 pending InboxMessage，不能归档"
+                )
             cursor = connection.execute(
                 """
                 UPDATE conversation_sessions
@@ -381,6 +394,7 @@ class SQLiteRuntimeStore:
             existing = self._require_session(connection, session_id)
             if existing["archived_at"] is None:
                 return
+            self._assert_ancestors_active(connection, session_id)
             cursor = connection.execute(
                 "UPDATE conversation_sessions SET archived_at = NULL, updated_at = ? WHERE session_id = ?",
                 (updated_at.isoformat(), session_id),
@@ -566,6 +580,7 @@ class SQLiteRuntimeStore:
                 ).fetchone()
                 if target_row is None:
                     raise StorageIntegrityError("target child Session 不存在")
+                self._assert_ancestors_active(connection, target_child_session_id)
                 expected_source = AgentMessageSource(
                     sender_session_id=str(operation_row["session_id"]),
                     sender_operation_id=sender_operation_id,
@@ -876,6 +891,7 @@ class SQLiteRuntimeStore:
                 ).fetchone()
                 if parent_session_row is None:
                     raise StorageIntegrityError("report 的 parent Session 不存在")
+                self._assert_ancestors_active(connection, parent_session_id)
                 expected_source = AgentMessageSource(
                     sender_session_id=str(operation_row["session_id"]),
                     sender_operation_id=sender_operation_id,
@@ -1406,6 +1422,14 @@ class SQLiteRuntimeStore:
                     state.operation_id,
                 ),
             )
+            if state.status in {"succeeded", "failed", "cancelled"}:
+                self._insert_settled_message_in_transaction(
+                    connection=connection,
+                    child_session_id=str(session["session_id"]),
+                    state=state,
+                    node=node,
+                    created_at=updated_at,
+                )
         return True
 
     def claim_step_messages(
@@ -1568,10 +1592,33 @@ class SQLiteRuntimeStore:
         self._ensure_schema()
         try:
             with self._connect() as connection:
+                child = connection.execute(
+                    "SELECT agent_id FROM conversation_sessions WHERE session_id = ?",
+                    (delegation.child_session_id,),
+                ).fetchone()
+                package = connection.execute(
+                    "SELECT agent_id FROM agent_package_versions WHERE package_version_id = ?",
+                    (delegation.child_package_version_id,),
+                ).fetchone()
+                if child is None:
+                    raise StorageIntegrityError("child Session 不存在")
+                if package is None:
+                    raise StorageIntegrityError("child AgentPackageVersion 不存在")
+                if str(child["agent_id"]) != str(package["agent_id"]):
+                    raise StorageIntegrityError(
+                        "child Session.agent_id 不匹配 child Package"
+                    )
                 connection.execute(
-                    "INSERT INTO agent_delegations VALUES (?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO agent_delegations (
+                        child_session_id, child_package_version_id,
+                        parent_operation_id, parent_step_id,
+                        parent_tool_call_id, initial_message_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         delegation.child_session_id,
+                        delegation.child_package_version_id,
                         delegation.parent_operation_id,
                         delegation.parent_step_id,
                         delegation.parent_tool_call_id,
@@ -1718,6 +1765,8 @@ class SQLiteRuntimeStore:
                         or existing.parent_operation_id != parent_operation_id
                         or existing.parent_step_id != parent_step_id
                         or existing.parent_tool_call_id != parent_tool_call_id
+                        or existing.child_package_version_id
+                        != child_package.package_version_id
                         or str(existing_session["agent_id"]) != child_package.agent_id
                         or str(existing_session["workspace_id"])
                         != str(parent_row["workspace_id"])
@@ -1802,9 +1851,16 @@ class SQLiteRuntimeStore:
                     ),
                 )
                 connection.execute(
-                    "INSERT INTO agent_delegations VALUES (?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO agent_delegations (
+                        child_session_id, child_package_version_id,
+                        parent_operation_id, parent_step_id,
+                        parent_tool_call_id, initial_message_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         delegation.child_session_id,
+                        delegation.child_package_version_id,
                         delegation.parent_operation_id,
                         delegation.parent_step_id,
                         delegation.parent_tool_call_id,
@@ -1837,6 +1893,123 @@ class SQLiteRuntimeStore:
             content=_object(row["content_json"]),
             created_at=_time(row["created_at"]),
         )
+
+    def _insert_settled_message_in_transaction(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        child_session_id: str,
+        state: AgentRunState,
+        node: ConversationNode | None,
+        created_at: datetime,
+    ) -> None:
+        """在终态 CAS 的同一 SQLite 事务中追加 direct parent 通知。"""
+        delegation = connection.execute(
+            """
+            SELECT d.parent_operation_id, op.session_id, op.agent_package_version_id
+            FROM agent_delegations AS d
+            JOIN session_operations AS op ON op.operation_id = d.parent_operation_id
+            WHERE d.child_session_id = ?
+            """,
+            (child_session_id,),
+        ).fetchone()
+        if delegation is None:
+            return
+        parent = connection.execute(
+            "SELECT * FROM conversation_sessions WHERE session_id = ?",
+            (delegation["session_id"],),
+        ).fetchone()
+        if parent is None:
+            raise StorageIntegrityError("settled 消息的 parent Session 不存在")
+        if parent["archived_at"] is not None:
+            raise StorageConflictError("归档 parent Session 不能接收 settled 消息")
+
+        final_message = None
+        if state.status == "succeeded":
+            final_row = None
+            if node is not None and node.node_id == state.final_assistant_node_id:
+                final_message = node.content
+            elif state.final_assistant_node_id is not None:
+                final_row = connection.execute(
+                    "SELECT * FROM conversation_nodes WHERE node_id = ?",
+                    (state.final_assistant_node_id,),
+                ).fetchone()
+                if final_row is not None:
+                    final_message = self._node_from_row(final_row).content
+            if not isinstance(final_message, AssistantMessage):
+                raise StorageIntegrityError(
+                    "succeeded child 必须引用最终 AssistantMessage"
+                )
+        package = self._load_package_in_transaction(
+            connection, str(delegation["agent_package_version_id"])
+        )
+        message = project_settled_message(
+            child_session_id=child_session_id,
+            status=state.status,
+            assistant_message=final_message,
+            error=state.error,
+            cancellation=state.cancellation,
+            max_chars=delegation_result_max_chars(package),
+        )
+        self._validate_message_artifacts(connection, message)
+        message_id = agent_settled_message_id(child_session_id, state.operation_id)
+        existing_row = connection.execute(
+            "SELECT * FROM agent_inbox_messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        source = AgentSettledMessageSource(
+            sender_session_id=child_session_id,
+            sender_operation_id=state.operation_id,
+        )
+        if existing_row is not None:
+            existing = self._message_from_row(existing_row)
+            if (
+                existing.session_id != str(parent["session_id"])
+                or existing.delivery != "steer"
+                or existing.message != message
+                or existing.source != source
+            ):
+                raise StorageConflictError("settled 消息 ID 的语义冲突")
+            return
+        sequence = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_inbox_messages WHERE session_id = ?",
+                (parent["session_id"],),
+            ).fetchone()[0]
+        )
+        settled = InboxMessage(
+            message_id=message_id,
+            session_id=str(parent["session_id"]),
+            sequence=sequence,
+            delivery="steer",
+            message=message,
+            source=source,
+            created_at=created_at,
+        )
+        try:
+            connection.execute(
+                """
+                INSERT INTO agent_inbox_messages (
+                    message_id, session_id, sequence, delivery, message_json,
+                    status, claimed_operation_id, claimed_step_id, outcome_reason,
+                    created_at, handled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settled.message_id,
+                    settled.session_id,
+                    settled.sequence,
+                    settled.delivery,
+                    settled.message_payload_json(),
+                    settled.status,
+                    settled.claimed_operation_id,
+                    settled.claimed_step_id,
+                    settled.outcome_reason,
+                    settled.created_at.isoformat(),
+                    _iso(settled.handled_at),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise StorageIntegrityError("settled InboxMessage 写入失败") from exc
 
     @staticmethod
     def _delegation_depth_in_transaction(connection, session_id: str) -> int:
@@ -1880,6 +2053,8 @@ class SQLiteRuntimeStore:
             raise StorageIntegrityError("delegation parent_operation_id 不匹配")
         if delegation.child_session_id != child_session.session_id:
             raise StorageIntegrityError("delegation child_session_id 不匹配")
+        if delegation.child_package_version_id != child_package.package_version_id:
+            raise StorageIntegrityError("delegation child_package_version_id 不匹配")
         if (
             delegation.parent_step_id != parent_step_id
             or delegation.parent_tool_call_id != parent_tool_call_id
@@ -2021,6 +2196,10 @@ class SQLiteRuntimeStore:
                 raise UnsupportedStorageSchemaError(
                     "检测到 SQLite schema version 9；请先执行一次性 v9→v10 迁移"
                 )
+            elif version == 10:
+                raise UnsupportedStorageSchemaError(
+                    "检测到 SQLite schema version 10；请先执行一次性 v10→v11 迁移"
+                )
             elif version != SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(
                     f"不支持的 SQLite schema version: {version}"
@@ -2126,6 +2305,7 @@ class SQLiteRuntimeStore:
     def _delegation_from_row(row: sqlite3.Row) -> AgentDelegation:
         return AgentDelegation(
             child_session_id=str(row["child_session_id"]),
+            child_package_version_id=str(row["child_package_version_id"]),
             parent_operation_id=str(row["parent_operation_id"]),
             parent_step_id=str(row["parent_step_id"]),
             parent_tool_call_id=str(row["parent_tool_call_id"]),
@@ -2324,7 +2504,106 @@ class SQLiteRuntimeStore:
         row = cls._require_session(connection, session_id)
         if row["archived_at"] is not None:
             raise StorageIntegrityError("归档 Session 不能接受新的 InboxMessage")
+        cls._assert_ancestors_active(connection, session_id)
         return row
+
+    @classmethod
+    def _assert_ancestors_active(
+        cls, connection: sqlite3.Connection, session_id: str
+    ) -> None:
+        """后台 child 只有在整条 direct parent 链未归档时才能继续。"""
+        seen: set[str] = set()
+        current = session_id
+        while current not in seen:
+            seen.add(current)
+            delegation = connection.execute(
+                "SELECT parent_operation_id FROM agent_delegations WHERE child_session_id = ?",
+                (current,),
+            ).fetchone()
+            if delegation is None:
+                return
+            parent_operation = connection.execute(
+                "SELECT session_id FROM session_operations WHERE operation_id = ?",
+                (delegation["parent_operation_id"],),
+            ).fetchone()
+            if parent_operation is None:
+                raise StorageIntegrityError("delegation parent Operation 不存在")
+            parent = cls._require_session(
+                connection, str(parent_operation["session_id"])
+            )
+            if parent["archived_at"] is not None:
+                raise StorageIntegrityError("delegated descendant 的 ancestor 已归档")
+            current = str(parent["session_id"])
+        raise StorageIntegrityError("delegation parent 链存在环")
+
+    @staticmethod
+    def _has_busy_descendants(connection: sqlite3.Connection, session_id: str) -> bool:
+        """检查 root 之外的递归 delegated descendant 是否仍有工作。"""
+        # SQLite 不允许 compound SELECT 的第二个分支再次声明 WITH；执行两条
+        # 等价查询保持语义清晰，并且仍在 archive 的同一连接事务中。
+        active = connection.execute(
+            """
+            WITH RECURSIVE descendants(session_id) AS (
+                SELECT ?
+                UNION
+                SELECT d.child_session_id
+                FROM descendants AS tree
+                JOIN session_operations AS op ON op.session_id = tree.session_id
+                JOIN agent_delegations AS d ON d.parent_operation_id = op.operation_id
+            )
+            SELECT 1 FROM conversation_sessions AS s
+            WHERE s.session_id IN (SELECT session_id FROM descendants)
+              AND s.session_id <> ? AND s.active_operation_id IS NOT NULL
+            LIMIT 1
+            """,
+            (session_id, session_id),
+        ).fetchone()
+        if active is not None:
+            return True
+        nonterminal = connection.execute(
+            """
+            WITH RECURSIVE descendants(session_id) AS (
+                SELECT ?
+                UNION
+                SELECT d.child_session_id
+                FROM descendants AS tree
+                JOIN session_operations AS op ON op.session_id = tree.session_id
+                JOIN agent_delegations AS d ON d.parent_operation_id = op.operation_id
+            )
+            SELECT 1
+            FROM session_operations AS op
+            LEFT JOIN agent_run_states AS state
+              ON state.operation_id = op.operation_id
+            WHERE op.session_id IN (SELECT session_id FROM descendants)
+              AND op.session_id <> ?
+              AND (
+                  state.operation_id IS NULL
+                  OR state.status NOT IN ('succeeded', 'failed', 'cancelled')
+              )
+            LIMIT 1
+            """,
+            (session_id, session_id),
+        ).fetchone()
+        if nonterminal is not None:
+            return True
+        pending = connection.execute(
+            """
+            WITH RECURSIVE descendants(session_id) AS (
+                SELECT ?
+                UNION
+                SELECT d.child_session_id
+                FROM descendants AS tree
+                JOIN session_operations AS op ON op.session_id = tree.session_id
+                JOIN agent_delegations AS d ON d.parent_operation_id = op.operation_id
+            )
+            SELECT 1 FROM agent_inbox_messages AS m
+            WHERE m.session_id IN (SELECT session_id FROM descendants)
+              AND m.session_id <> ? AND m.status = 'pending'
+            LIMIT 1
+            """,
+            (session_id, session_id),
+        ).fetchone()
+        return pending is not None
 
     @classmethod
     def _validate_operation_refs(

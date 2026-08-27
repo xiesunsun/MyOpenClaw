@@ -199,7 +199,7 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 ```
 
 - `AgentDefinition` 保存现有设置解析后的来源和选择。
-- `AgentPackageVersion` 冻结 behavior、`primary/worker/utility` ModelPolicy、无密钥模型参数、AgentRuntimePolicy、WorkspacePolicy、Skill 全文、ToolVersion 与 ExtensionVersion；ID 为规范内容 digest。
+- `AgentPackageVersion` 冻结 behavior、`primary/worker/utility` ModelPolicy、无密钥模型参数、AgentRuntimePolicy、WorkspacePolicy、AgentDelegationPolicy、Skill 全文、ToolVersion 与 ExtensionVersion；ID 为规范内容 digest。
 - `LoadedAgentPackage` 持有进程内 ToolSnapshot、SkillManifest 和现阶段运行对象，不能直接持久化。
 - `api_key`、token、password、authorization 等秘密不得进入 AgentPackageVersion；只记录所需 SecretRef。
 - 相同 Pickel 设置和文件内容必须得到相同 `package_version_id`，创建时间不参与 digest。
@@ -256,6 +256,7 @@ flowchart LR
   "model_request_retry_initial_delay_ms": 1000,
   "model_request_retry_max_delay_ms": 4000,
   "max_parallel_model_requests": 2,
+  "delegation_result_max_chars": 8000,
   "openviking": {
     "enabled": false,
     "timeout_seconds": 30,
@@ -271,6 +272,7 @@ flowchart LR
 |------|----------------|
 | `default_*` / `react_*` / `context_*` | 同名 |
 | `model_request_*` / `max_parallel_model_requests` | 冻结进 AgentRuntimePolicy 的模型请求可靠性与资源边界 |
+| `delegation_result_max_chars` | 冻结进 Parent AgentRuntimePolicy，限制 child 终态自动投递给 Parent Context 的文本长度 |
 | `openviking.*` 策略 | 同名（密钥除外） |
 
 **Settings 第一批可写字段**：`default_llm`、`default_agent`、`react_max_steps`
@@ -377,12 +379,26 @@ models:
   utility:
     provider: opencode-go
     model: mimo-v2.5
+delegation:
+  default_agent: Pickle
+  allowed_agents: [Pickle, Explorer, Reviewer, Worker]
 remote_agent_id: ${OPENVIKING_AGENT_ID}
 skills_path: null
 ```
 
 行为文案固定读同目录 `AGENT.md`。  
 发现：项目下 `agents/*/` 含 `AGENT.md` 或 `agent.yaml` 即注册。
+
+`delegation` 只允许选择已注册 Agent 身份。Package Builder 必须解析
+`default_agent` 与去重后的 `allowed_agents`，确认默认值在允许集合中，并把它们冻结为
+`AgentDelegationPolicy`；`delegate_agent.agent_id` 的 input schema 同时冻结为该集合的
+枚举。模型不能通过 Delegation 参数临时指定 provider、model、Tool、endpoint 或 Secret。
+未配置时兼容默认仅允许当前 Agent 自身；未暴露 `delegate_agent` Tool 的 Agent 仍冻结该
+默认值对象，但不会把 Tool 暴露给模型。
+
+所选 child 使用自己的 AgentDefinition 构建 Package，因此其 primary/worker/utility、
+behavior 与 Tool 集可以和 Parent 不同。实际 Workspace 与 Tool 权限仍取 Parent 已授权边界
+和 child Package 策略的交集，delegated child 不得通过 approval 扩权。
 
 ### 5.5 Environ（进程运行态，内存）
 
@@ -618,7 +634,7 @@ flowchart LR
 3. 文件锁  
 4. API 分离：`set_environ(...)` 只改进程覆盖；`set_settings(..., save=True)` 写入文件
 
-Environ 变化不修改 ConversationSession 或 active Operation。下一个 Operation 接受时，Package Builder 使用最新 Environ 冻结新的 AgentPackageVersion；waiting/resume Operation 继续使用原 package_version_id。Agent `models.primary/worker/utility` 都会冻结并装载；角色缺失保持 `None`，不把 primary 隐式复制到其他角色。
+Environ 变化不修改 ConversationSession 或 active Operation。下一个 Operation 接受时，Package Builder 使用最新 Environ 冻结新的 AgentPackageVersion；waiting/resume Operation 继续使用原 package_version_id。Agent `models.primary/worker/utility` 都会冻结并装载；角色缺失保持 `None`，不把 primary 隐式复制到其他角色。Agent 文件中的 delegation 变化也只影响未来构建的 Parent Package；既有 Delegation 继续使用已冻结的 child_package_version_id。
 
 Agent 经工具改配置：第一期可不做；先做 CLI / 斜杠命令。密钥字段禁止 agent 随意写。
 

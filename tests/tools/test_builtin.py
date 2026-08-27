@@ -33,7 +33,6 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "list_agents",
                 "interrupt_agent",
                 "report",
-                "wait_delegation",
             },
             set(definitions),
         )

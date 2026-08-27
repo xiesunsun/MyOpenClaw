@@ -5,7 +5,6 @@ from pickel.tools.bus import (
     ToolActivation,
     ToolBus,
     ToolNameConflictError,
-    ToolSnapshot,
     ToolSource,
 )
 

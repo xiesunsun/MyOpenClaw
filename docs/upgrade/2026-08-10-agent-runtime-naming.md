@@ -1,8 +1,8 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**更新日期**：2026-08-26
-**状态**：当前合同；Tool 与 Delegation 控制面已经收敛
+**更新日期**：2026-08-27
+**状态**：当前合同；Delegation 消息驱动收敛与跨 Package 选择已实施
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -108,6 +108,7 @@ flowchart LR
 | `LoadedPackageHandle` | Operation 对 LoadedAgentPackage 和 Generation 的引用 |
 | `ModelPolicy` | `primary / worker / utility` 三层模型选择 |
 | `AgentRuntimePolicy` | 最大 Step、Context Window、Delegation 深度等执行限制 |
+| `AgentDelegationPolicy` | Parent Package 允许委派的 Agent ID 与默认 Agent |
 | `WorkspacePolicy` | Package 声明的文件访问范围 |
 | `WorkspaceBinding` | Operation 接受时冻结的实际执行目录和安全边界 |
 
@@ -257,17 +258,25 @@ Agent.resume_operation(operation_id)
 Agent.when_idle()
 
 start_delegation() -> child_session_id
-wait_delegation()
 interrupt_agent()
 ```
 
-`wait_delegation()` 等待 child Operation 的终态，并从其
-`final_assistant_node_id` 读取唯一终态 AssistantMessage。child 的 `report` 只发送
-中间通信，不是终态结果，也不能填充 `final_assistant_node_id`。`interrupt_agent`
-是模型工具名：只选择目标 direct child 当前的 active Operation，随后按普通
-Operation cancellation 合同处理该 Operation 创建的非终态后代；调用方不能任意选择
-非后代 Operation。child Session 与 AgentDelegation 保留，不归档、删除、重建关系，
-也不把报告当作结果。
+child Operation 进入任一终态时，终态事务从 `final_assistant_node_id`、`error` 或
+`cancellation` 投影一条 `agent_settled` InboxMessage，原子投递给 direct parent。
+`final_assistant_node_id` 仍是成功结果的唯一权威；settled 消息只是持久化通知，不是
+新的 Result/Settlement Entity。通知按 Parent Inbox 接受顺序进入当前 Step 或下一
+Operation，因此并行 child 按实际完成提交顺序被消费，不由 Parent 固定顺序 join。
+
+child 的 `report` 只发送主动选择的中间通信，不是终态结果，也不能填充
+`final_assistant_node_id`。`send_message` 只向 direct child 追加 followup；
+`list_agents` 只读 direct child 快照；`interrupt_agent` 只选择目标 direct child 当前的
+active Operation，并按普通 cancellation 合同处理其非终态后代。`wait_delegation` 不再
+是默认模型工具，只作为 Host/SDK 同步查询能力和冻结旧 Package 的兼容实现保留。
+
+`delegate_agent` 只允许选择 Parent 冻结 `AgentDelegationPolicy` 中列出的
+`agent_id`，不能接收原始 provider/model/tool 列表。选中的 child
+`AgentPackageVersion` 在 Tool Intent 前解析并冻结，由 AgentDelegation 持久化绑定；
+Root 与 Child 仍使用同一个 `Agent` 类型，只是可以执行不同的冻结 Package。
 
 ## 9. Observation 与生命周期
 
@@ -331,5 +340,5 @@ Operation cancellation 合同处理该 Operation 创建的非终态后代；调�
 6. 当前 Operation 通过 Session.active_operation_id 恢复，不扫描历史 Operation。
 7. Tool 外部副作用前必须提交 ToolExecutionIntent；未知结果不得静默重放。
 8. RuntimeGeneration reload 后旧 Operation 继续引用原 LoadedAgentPackage，所有贡献可逆序撤销。
-9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane；child 终态结果只由最终 AssistantMessage 表达，report 仅为中间通信。
+9. Root/Child 共用 Agent、Inbox、Operation 和 Driver，不引入 Lane；child 成功结果只由最终 AssistantMessage 表达，Runtime 以 agent_settled InboxMessage 自动通知 direct parent，report 仅为中间通信。
 10. 完成迁移的旧公共类型、表和兼容路径必须删除。

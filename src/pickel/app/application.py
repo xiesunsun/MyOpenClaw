@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import RuntimeLaunchRequest
 from pickel.config.loader import Config

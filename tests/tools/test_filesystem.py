@@ -8,6 +8,7 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.file_formatter import FileToolFormatter
 from pickel.tools.file_service import WorkspaceFileService
+from pickel.tools.file_errors import PathOutsideWorkspaceError
 from pickel.tools.file_tools import (
     EditTool,
     GlobTool,
@@ -302,6 +303,25 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
+    async def test_workspace_policy_respects_frozen_parent_allowed_root(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            parent_root = Path(tmpdir)
+            child_workspace = parent_root / "workspace"
+            child_workspace.mkdir()
+            (parent_root / "sibling.txt").write_text("inside", encoding="utf-8")
+            service = WorkspaceFileService(
+                workspace_root=child_workspace,
+                access_policy=WorkspacePathAccessPolicy(allowed_root=parent_root),
+            )
+
+            result = service.read_file(path="../sibling.txt")
+
+            self.assertEqual(["inside"], result.lines)
+            with self.assertRaisesRegex(
+                PathOutsideWorkspaceError, "outside the workspace"
+            ):
+                service.read_file(path="../../outside.txt")
+
     async def test_write_tool_can_create_and_replace_text(self) -> None:
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -313,7 +333,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 access_policy=WorkspacePathAccessPolicy(),
             )
 
-            create_result = await write_tool.execute(
+            await write_tool.execute(
                 {
                     "path": "nested/note.txt",
                     "content": "hello world",

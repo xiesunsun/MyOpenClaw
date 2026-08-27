@@ -299,8 +299,7 @@ def test_run_state_cas_requires_active_operation_and_uses_explicit_time(
     )
 
 
-def test_package_identity_is_content_addressed(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_package_identity_is_content_addressed() -> None:
     version = _package()
     with pytest.raises(ValueError, match="canonical Package"):
         AgentPackageVersion(
@@ -315,6 +314,7 @@ def test_package_identity_is_content_addressed(tmp_path: Path) -> None:
             tools=version.tools,
             extensions=version.extensions,
             created_at=version.created_at,
+            delegation_policy=version.delegation_policy,
         )
 
 

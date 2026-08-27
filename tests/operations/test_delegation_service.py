@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -198,6 +198,7 @@ def test_start_delegation_accepts_three_facts_and_is_idempotent(
     initial = store.load_message(first.initial_message_id)
     assert child is not None
     assert child.agent_id == "child-agent"
+    assert first.child_package_version_id == child_package.package_version_id
     assert child.workspace_id == "workspace-1"
     assert child.cwd == tmp_path / "workspace"
     assert initial is not None
@@ -1013,7 +1014,7 @@ def test_send_child_report_is_steer_and_idempotent(
     )
 
 
-def test_send_child_report_replays_after_claim_and_parent_archive(
+def test_send_child_report_replays_after_claim_and_archive_is_blocked(
     store: Store, tmp_path: Path
 ) -> None:
     _, child_package = _setup(store, tmp_path / "workspace")
@@ -1042,7 +1043,8 @@ def test_send_child_report_replays_after_claim_and_parent_archive(
     )
     assert retry == store.load_message(first.message_id)
     _clear_active_operation(store, "session-1")
-    store.archive_session(session_id="session-1", archived_at=NOW)
+    with pytest.raises(StorageIntegrityError):
+        store.archive_session(session_id="session-1", archived_at=NOW)
     archived_retry = service.send_child_report(
         "child-operation", "report-step", "report-tool", "finding"
     )
@@ -1057,7 +1059,7 @@ def test_send_child_report_rejects_root_sender(store: Store, tmp_path: Path) -> 
         )
 
 
-def test_send_child_report_rejects_new_report_to_archived_parent(
+def test_archive_parent_is_rejected_while_child_can_report(
     store: Store, tmp_path: Path
 ) -> None:
     _, child_package = _setup(store, tmp_path / "workspace")
@@ -1072,11 +1074,8 @@ def test_send_child_report_rejects_new_report_to_archived_parent(
     )
     _switch_child_call_to_report(store)
     _clear_active_operation(store, "session-1")
-    store.archive_session(session_id="session-1", archived_at=NOW)
-    with pytest.raises(StorageConflictError):
-        DelegationService(store=store).send_child_report(
-            "child-operation", "report-step", "report-tool", "finding"
-        )
+    with pytest.raises(StorageIntegrityError):
+        store.archive_session(session_id="session-1", archived_at=NOW)
 
 
 def test_send_child_report_reaches_only_the_direct_parent(

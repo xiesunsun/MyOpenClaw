@@ -92,7 +92,7 @@ class ShellToolTests(unittest.IsolatedAsyncioTestCase):
                 services=ToolServices(bash=bash),
             )
             try:
-                first = await tool.execute({"command": "cd nested"}, context)
+                await tool.execute({"command": "cd nested"}, context)
                 second = await tool.execute({"command": "pwd"}, context)
             finally:
                 bash.close(context.identity.session_id)
@@ -424,6 +424,6 @@ class DangerousCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 await tool.execute({"command": "mkdir -p ./build"}, context)
-                result = await tool.execute({"command": "rm -rf ./build"}, context)
+                await tool.execute({"command": "rm -rf ./build"}, context)
             finally:
                 manager.close(context.identity.session_id)

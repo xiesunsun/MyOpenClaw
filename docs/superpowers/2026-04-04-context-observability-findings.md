@@ -10,9 +10,9 @@ This note summarizes the current `/context` observation approach, the problems f
 
 The current `/context` implementation is split across:
 
-- [src/myopenclaw/runs/context_usage.py](/Users/ssunxie/code/myopenclaw/src/myopenclaw/runs/context_usage.py)
-- [src/myopenclaw/providers/gemini.py](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/gemini.py)
-- [src/myopenclaw/cli/context_renderer.py](/Users/ssunxie/code/myopenclaw/src/myopenclaw/cli/context_renderer.py)
+- src/myopenclaw/runs/context_usage.py
+- src/myopenclaw/providers/gemini.py
+- src/myopenclaw/cli/context_renderer.py
 
 The current snapshot model is:
 
@@ -100,7 +100,7 @@ In both versions, the Gemini Developer API path in the Python SDK still rejects:
 
 The rejection is explicit in the installed SDK source:
 
-- [models.py](/Users/ssunxie/code/myopenclaw/.venv/lib/python3.12/site-packages/google/genai/models.py#L337)
+- models.py
 
 The current SDK behavior for Gemini Developer API is effectively:
 

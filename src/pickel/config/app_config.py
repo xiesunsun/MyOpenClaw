@@ -13,6 +13,7 @@ from pickel.shared.model_config import (
     ModelSelection,
     ProviderModelConfig,
 )
+from pickel.tools.sandbox import SandboxSettings
 
 _DEFAULT_WIRE_PROTOCOLS = {
     "anthropic": "anthropic-messages",
@@ -22,7 +23,6 @@ _DEFAULT_WIRE_PROTOCOLS = {
 _PROVIDER_DEFAULT_API_BASES = {
     "opencode-go": "https://opencode.ai/zen/go/v1",
 }
-from pickel.tools.sandbox import SandboxSettings
 
 
 class ProviderCatalog(BaseModel):
@@ -35,6 +35,13 @@ class AgentModels(BaseModel):
     utility: ModelSelection | None = None
 
 
+class AgentDelegationConfig(BaseModel):
+    """agent.yaml 中可委托 Agent 的声明。"""
+
+    default_agent: str | None = None
+    allowed_agents: list[str] = Field(default_factory=list)
+
+
 class AgentConfig(BaseModel):
     workspace_path: Path
     behavior_path: Path
@@ -45,6 +52,7 @@ class AgentConfig(BaseModel):
     file_access_mode: FileAccessMode | None = None
     skills_path: Path | None = None
     remote_agent_id: str | None = None
+    delegation: AgentDelegationConfig | None = None
 
 
 def expand_env_vars(value: Any) -> Any:
@@ -99,6 +107,7 @@ class AppConfig(BaseModel):
     model_request_retry_initial_delay_ms: int = Field(default=1000, ge=0)
     model_request_retry_max_delay_ms: int = Field(default=4000, ge=0)
     max_parallel_model_requests: int = Field(default=2, ge=1)
+    delegation_result_max_chars: int = Field(default=8000, ge=0)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     providers: dict[str, ProviderCatalog]
     agents: dict[str, AgentConfig]

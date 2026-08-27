@@ -21,6 +21,7 @@ def _run_async(function):
 class _DelegationControl:
     def __init__(self) -> None:
         self.calls = []
+        self.agent_ids = []
 
     async def start_delegation(
         self,
@@ -29,7 +30,9 @@ class _DelegationControl:
         parent_step_id,
         parent_tool_call_id,
         message,
+        agent_id=None,
     ):
+        self.agent_ids.append(agent_id)
         self.calls.append(
             (
                 parent_operation_id,
@@ -40,6 +43,7 @@ class _DelegationControl:
         )
         return AgentDelegation(
             child_session_id="child-session",
+            child_package_version_id="child-package",
             parent_operation_id=parent_operation_id,
             parent_step_id=parent_step_id,
             parent_tool_call_id=parent_tool_call_id,
@@ -83,6 +87,29 @@ async def test_delegate_agent_returns_durable_acceptance_handle() -> None:
         "tool-1",
     )
     assert message.content[0].text == "Find the answer."
+
+
+@_run_async
+async def test_delegate_agent_passes_optional_target_agent_to_control() -> None:
+    control = _DelegationControl()
+
+    await delegate_agent.execute(
+        {
+            "description": "review",
+            "prompt": "Check the change.",
+            "agent_id": "Reviewer",
+        },
+        _context(control),
+    )
+
+    assert control.agent_ids == ["Reviewer"]
+
+
+def test_delegate_agent_schema_has_optional_agent_id_only() -> None:
+    properties = delegate_agent.spec.input_schema["properties"]
+    assert properties["agent_id"] == {"type": "string"}
+    assert "agent_id" not in delegate_agent.spec.input_schema["required"]
+    assert delegate_agent.spec.input_schema["additionalProperties"] is False
 
 
 @_run_async

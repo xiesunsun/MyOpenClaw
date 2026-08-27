@@ -11,6 +11,7 @@ from typing import Any
 @dataclass(frozen=True)
 class AgentDelegation:
     child_session_id: str
+    child_package_version_id: str
     parent_operation_id: str
     parent_step_id: str
     parent_tool_call_id: str
@@ -20,6 +21,7 @@ class AgentDelegation:
     def __post_init__(self) -> None:
         for name in (
             "child_session_id",
+            "child_package_version_id",
             "parent_operation_id",
             "parent_step_id",
             "parent_tool_call_id",
@@ -31,6 +33,7 @@ class AgentDelegation:
     def to_dict(self) -> dict[str, Any]:
         return {
             "child_session_id": self.child_session_id,
+            "child_package_version_id": self.child_package_version_id,
             "parent_operation_id": self.parent_operation_id,
             "parent_step_id": self.parent_step_id,
             "parent_tool_call_id": self.parent_tool_call_id,

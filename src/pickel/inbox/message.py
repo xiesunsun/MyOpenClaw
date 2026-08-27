@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,15 @@ class AgentMessageSource:
 
 
 @dataclass(frozen=True)
+class AgentSettledMessageSource:
+    """Runtime 投递的 child Operation 终态通知来源。"""
+
+    sender_session_id: str
+    sender_operation_id: str
+    kind: Literal["agent_settled"] = "agent_settled"
+
+
+@dataclass(frozen=True)
 class HookMessageSource:
     hook_id: str
     kind: Literal["hook"] = "hook"
@@ -51,10 +61,21 @@ class RuntimeMessageSource:
 MessageSource = (
     UserMessageSource
     | AgentMessageSource
+    | AgentSettledMessageSource
     | HookMessageSource
     | HostMessageSource
     | RuntimeMessageSource
 )
+
+
+def agent_settled_message_id(child_session_id: str, child_operation_id: str) -> str:
+    """按 child Session/Operation 生成终态通知的幂等 Inbox ID。"""
+    payload = json.dumps(
+        ["agent_settled", child_session_id, child_operation_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return "message_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -180,6 +201,7 @@ def _validate_source(source: MessageSource) -> None:
     values = [
         isinstance(source, UserMessageSource),
         isinstance(source, AgentMessageSource),
+        isinstance(source, AgentSettledMessageSource),
         isinstance(source, HookMessageSource),
         isinstance(source, HostMessageSource),
         isinstance(source, RuntimeMessageSource),
@@ -191,6 +213,9 @@ def _validate_source(source: MessageSource) -> None:
             raise ValueError("agent source 必须有 sender session 和 operation")
         if source.form not in ("followup", "steer", "inject"):
             raise ValueError("agent source.form 无效")
+    if isinstance(source, AgentSettledMessageSource):
+        if not source.sender_session_id or not source.sender_operation_id:
+            raise ValueError("agent_settled source 必须有 sender session 和 operation")
     for attr in ("hook_id", "call_id", "reason"):
         if hasattr(source, attr) and not getattr(source, attr):
             raise ValueError(f"source.{attr} 不能为空")
@@ -205,6 +230,12 @@ def _source_to_dict(source: MessageSource) -> dict[str, Any]:
             "sender_session_id": source.sender_session_id,
             "sender_operation_id": source.sender_operation_id,
             "form": source.form,
+        }
+    if isinstance(source, AgentSettledMessageSource):
+        return {
+            "kind": "agent_settled",
+            "sender_session_id": source.sender_session_id,
+            "sender_operation_id": source.sender_operation_id,
         }
     if isinstance(source, HookMessageSource):
         return {"kind": "hook", "hook_id": source.hook_id}
@@ -230,6 +261,12 @@ def _source_from_dict(value: Any) -> MessageSource:
             sender_session_id=_string(value, "sender_session_id"),
             sender_operation_id=_string(value, "sender_operation_id"),
             form=_literal(value, "form", ("followup", "steer", "inject")),
+        )
+    if kind == "agent_settled":
+        _require_keys(value, {"kind", "sender_session_id", "sender_operation_id"})
+        return AgentSettledMessageSource(
+            sender_session_id=_string(value, "sender_session_id"),
+            sender_operation_id=_string(value, "sender_operation_id"),
         )
     if kind == "hook":
         _require_keys(value, {"kind", "hook_id"})

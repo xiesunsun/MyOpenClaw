@@ -25,6 +25,7 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.tools.bus import ToolSource, ToolActivation
 from pickel.tools.cancel_delegation import cancel_delegation
+from pickel.tools.wait_delegation import wait_delegation
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
 
@@ -102,7 +103,8 @@ def test_legacy_cancel_tool_is_hidden_from_new_snapshot_but_loadable(
     )
     legacy = build_agent_package_version(
         agent_id=current.agent_id,
-        format_version=current.format_version,
+        # 固定为历史格式；新 Package 升级到 format 3 后仍需覆盖隐藏兼容装载。
+        format_version=2,
         behavior_instruction=current.behavior_instruction,
         model_policy=current.model_policy,
         runtime_policy=current.runtime_policy,
@@ -124,6 +126,80 @@ def test_legacy_cancel_tool_is_hidden_from_new_snapshot_but_loadable(
         store, _tool_bus(), provider_loader=lambda model: object()
     ).load(legacy.package_version_id)
     assert loaded.tool_snapshot.names == ("cancel_delegation",)
+
+
+def test_legacy_wait_tool_is_hidden_from_new_snapshot_but_loadable(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].extensions = []
+    boot = Boot(config, tool_bus=_tool_bus())
+    store = InMemoryRuntimeStore()
+    current = boot.resolve_loaded_agent_package(
+        artifact_service=_artifact_service(store)
+    ).version
+    legacy_tool = ToolVersion(
+        name="wait_delegation",
+        source=ToolSource.BUILTIN,
+        implementation_ref=ImplementationRef("builtin", "wait_delegation"),
+        version=None,
+        description=wait_delegation.spec.description,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "child_session_id": {"type": "string"},
+                "timeout_seconds": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 600,
+                },
+            },
+            "required": ["child_session_id", "timeout_seconds"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "timed_out": {"type": "boolean"},
+                "agent": {"type": "object"},
+                "assistant_message": {"type": ["object", "null"]},
+            },
+            "required": ["timed_out", "agent", "assistant_message"],
+            "additionalProperties": False,
+        },
+        replay_policy="safe",
+    )
+    legacy = build_agent_package_version(
+        agent_id=current.agent_id,
+        # 固定为历史格式；新 Package 不应重新公开 wait_delegation。
+        format_version=2,
+        behavior_instruction=current.behavior_instruction,
+        model_policy=current.model_policy,
+        runtime_policy=current.runtime_policy,
+        workspace_policy=current.workspace_policy,
+        skills=current.skills,
+        tools=(legacy_tool,),
+        extensions=current.extensions,
+        created_at=current.created_at,
+    )
+    store.insert_agent_package_version(legacy)
+
+    assert "wait_delegation" not in {
+        entry.name
+        for entry in _tool_bus()
+        .snapshot(ToolActivation(allowed=frozenset({"wait_delegation"})))
+        .entries
+    }
+    loaded = AgentPackageLoader(
+        store, _tool_bus(), provider_loader=lambda model: object()
+    ).load(legacy.package_version_id)
+    assert loaded.tool_snapshot.names == ("wait_delegation",)
+    loaded_wait = loaded.tool_snapshot.entries[0].tool
+    assert set(loaded_wait.spec.output_schema["properties"]) == {
+        "timed_out",
+        "agent",
+        "assistant_message",
+    }
 
 
 def test_loader_rejects_tool_without_output_schema(tmp_path: Path) -> None:
@@ -310,7 +386,7 @@ def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
     )
     version = build_agent_package_version(
         agent_id=current.agent_id,
-        format_version=current.format_version,
+        format_version=2,
         behavior_instruction=current.behavior_instruction,
         model_policy=replace(current.model_policy, primary=primary),
         runtime_policy=current.runtime_policy,
@@ -404,7 +480,7 @@ def test_provider_version_that_cannot_be_verified_is_rejected(tmp_path: Path) ->
     )
     version = build_agent_package_version(
         agent_id=current.agent_id,
-        format_version=current.format_version,
+        format_version=2,
         behavior_instruction=current.behavior_instruction,
         model_policy=replace(current.model_policy, primary=primary),
         runtime_policy=current.runtime_policy,

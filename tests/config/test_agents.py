@@ -66,6 +66,9 @@ class AgentsScanTests(unittest.TestCase):
                       primary:
                         provider: google/gemini
                         model: gemini-3-flash-preview
+                    delegation:
+                      default_agent: Foo
+                      allowed_agents: [Foo, Bar]
                     """).strip(),
                 encoding="utf-8",
             )
@@ -77,6 +80,10 @@ class AgentsScanTests(unittest.TestCase):
             self.assertEqual("foo_ws", scanned["Foo"]["workspace_path"])
             self.assertEqual(["read_file"], scanned["Foo"]["tools"])
             self.assertEqual(["mcp"], scanned["Foo"]["extensions"])
+            self.assertEqual(
+                {"default_agent": "Foo", "allowed_agents": ["Foo", "Bar"]},
+                scanned["Foo"]["delegation"],
+            )
             self.assertEqual("agents/Foo", scanned["Foo"]["behavior_path"])
 
     def test_legacy_llm_field_is_rejected_instead_of_silently_ignored(self) -> None:

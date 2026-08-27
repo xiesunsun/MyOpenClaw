@@ -20,7 +20,7 @@ from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_node import ConversationNode
-from pickel.inbox.message import InboxMessage, UserMessageSource
+from pickel.inbox.message import UserMessageSource
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,

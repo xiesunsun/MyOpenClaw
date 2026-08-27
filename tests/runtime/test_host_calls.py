@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from pickel.runtime.host_calls import (
     HostCallCancelled,
-    HostCallCompleted,
     HostCallContext,
     HostCallDeadlineExceeded,
     HostCallFailed,

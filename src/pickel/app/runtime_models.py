@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.runtime.agent_run_usage import AgentRunUsage
@@ -175,9 +175,6 @@ class ConversationClosedError(RuntimeApplicationError):
 class OperationInProgressError(RuntimeApplicationError):
     pass
 
-
-# 仅供类型检查，避免运行时循环导入。
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pickel.app.conversation_runtime import ConversationRuntime

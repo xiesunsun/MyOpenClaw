@@ -67,6 +67,7 @@ class AgentRuntimePolicy:
     model_request_retry_initial_delay_ms: int = 1000
     model_request_retry_max_delay_ms: int = 4000
     max_parallel_model_requests: int = 2
+    delegation_result_max_chars: int = 8000
 
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
@@ -88,6 +89,30 @@ class AgentRuntimePolicy:
             raise ValueError("模型请求重试上限不能小于初始延迟")
         if self.max_parallel_model_requests < 1:
             raise ValueError("max_parallel_model_requests 必须大于 0")
+        if self.delegation_result_max_chars < 0:
+            raise ValueError("delegation_result_max_chars 不能小于 0")
+
+
+@dataclass(frozen=True)
+class AgentDelegationPolicy:
+    """Agent 可委托目标的冻结 allowlist。"""
+
+    default_agent_id: str
+    allowed_agent_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.default_agent_id.strip():
+            raise ValueError("default_agent_id 不能为空")
+        allowed = tuple(self.allowed_agent_ids)
+        if not allowed:
+            raise ValueError("allowed_agent_ids 不能为空")
+        if any(not agent_id.strip() for agent_id in allowed):
+            raise ValueError("allowed_agent_ids 不能包含空值")
+        if len(set(allowed)) != len(allowed):
+            raise ValueError("allowed_agent_ids 必须先去重")
+        if self.default_agent_id not in allowed:
+            raise ValueError("default_agent_id 必须包含在 allowed_agent_ids 中")
+        object.__setattr__(self, "allowed_agent_ids", allowed)
 
 
 @dataclass(frozen=True)
@@ -190,6 +215,7 @@ class AgentDefinition:
     extension_ids: tuple[str, ...]
     model_policy: ModelPolicy
     runtime_policy: AgentRuntimePolicy
+    delegation_policy: AgentDelegationPolicy
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
@@ -209,6 +235,7 @@ class AgentPackageVersion:
     tools: tuple[ToolVersion, ...]
     extensions: tuple[ExtensionVersion, ...]
     created_at: datetime
+    delegation_policy: AgentDelegationPolicy
 
     def __post_init__(self) -> None:
         if self.format_version < 1:
@@ -217,6 +244,8 @@ class AgentPackageVersion:
             raise ValueError("agent_id 不能为空")
         if not _PACKAGE_ID.fullmatch(self.package_version_id):
             raise ValueError("package_version_id 必须是 agentpkg_<sha256>")
+        if not isinstance(self.delegation_policy, AgentDelegationPolicy):
+            raise TypeError("delegation_policy 必须是 AgentDelegationPolicy")
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "extensions", tuple(self.extensions))
@@ -237,6 +266,7 @@ class AgentPackageVersion:
             skills=self.skills,
             tools=self.tools,
             extensions=self.extensions,
+            delegation_policy=self.delegation_policy,
         )
 
 
@@ -252,8 +282,14 @@ def build_agent_package_version(
     tools: tuple[ToolVersion, ...],
     extensions: tuple[ExtensionVersion, ...],
     created_at: datetime,
+    delegation_policy: AgentDelegationPolicy | None = None,
 ) -> AgentPackageVersion:
     """通过唯一 canonical codec 创建 Package。"""
+    effective_delegation_policy = delegation_policy or AgentDelegationPolicy(
+        agent_id, (agent_id,)
+    )
+    if format_version < 3:
+        effective_delegation_policy = AgentDelegationPolicy(agent_id, (agent_id,))
     content = _content_dict(
         format_version=format_version,
         agent_id=agent_id,
@@ -264,6 +300,7 @@ def build_agent_package_version(
         skills=skills,
         tools=tools,
         extensions=extensions,
+        delegation_policy=effective_delegation_policy,
     )
     return AgentPackageVersion(
         package_version_id=package_version_id_for_content(content),
@@ -277,6 +314,7 @@ def build_agent_package_version(
         tools=tools,
         extensions=extensions,
         created_at=created_at,
+        delegation_policy=effective_delegation_policy,
     )
 
 
@@ -327,8 +365,8 @@ def decode_agent_package_content(
     *, package_version_id: str, content: Mapping[str, Any], created_at: datetime
 ) -> AgentPackageVersion:
     """解码当前格式；旧格式必须经过显式 ``decode_legacy_agent_package``。"""
-    if int(content.get("format_version", 0)) not in {1, 2}:
-        raise ValueError("只支持 AgentPackageVersion.format_version=1/2")
+    if int(content.get("format_version", 0)) not in {1, 2, 3}:
+        raise ValueError("只支持 AgentPackageVersion.format_version=1/2/3")
     return _version_from_target_content(content, created_at, package_version_id)
 
 
@@ -401,14 +439,28 @@ def _version_from_target_content(
 ) -> AgentPackageVersion:
     if package_version_id != package_version_id_for_content(content):
         raise ValueError("package_version_id 与 canonical Package 内容不一致")
+    format_version = int(content["format_version"])
+    runtime_policy = dict(content["runtime_policy"])
+    if format_version >= 3:
+        if "delegation_result_max_chars" not in runtime_policy:
+            raise ValueError("format 3 缺少 delegation_result_max_chars")
+        if "delegation_policy" not in content:
+            raise ValueError("format 3 缺少 delegation_policy")
     policy = dict(content["model_policy"])
+    delegation_policy = (
+        _delegation_policy_from_dict(content["delegation_policy"])
+        if format_version >= 3
+        else AgentDelegationPolicy(
+            str(content["agent_id"]), (str(content["agent_id"]),)
+        )
+    )
     return AgentPackageVersion(
         package_version_id=package_version_id,
         agent_id=str(content["agent_id"]),
-        format_version=int(content["format_version"]),
+        format_version=format_version,
         behavior_instruction=str(content["behavior_instruction"]),
         model_policy=_policy_from_dict(policy),
-        runtime_policy=AgentRuntimePolicy(**dict(content["runtime_policy"])),
+        runtime_policy=AgentRuntimePolicy(**runtime_policy),
         workspace_policy=WorkspacePolicy(**dict(content["workspace_policy"])),
         skills=tuple(_skill_from_dict(item) for item in content.get("skills") or ()),
         tools=tuple(_tool_from_dict(item) for item in content.get("tools") or ()),
@@ -416,6 +468,7 @@ def _version_from_target_content(
             _extension_from_dict(item) for item in content.get("extensions") or ()
         ),
         created_at=created_at,
+        delegation_policy=delegation_policy,
     )
 
 
@@ -430,8 +483,9 @@ def _content_dict(
     skills: tuple[SkillVersion, ...],
     tools: tuple[ToolVersion, ...],
     extensions: tuple[ExtensionVersion, ...],
+    delegation_policy: AgentDelegationPolicy | None = None,
 ) -> dict[str, Any]:
-    return {
+    content = {
         "format_version": format_version,
         "agent_id": agent_id,
         "behavior_instruction": behavior_instruction,
@@ -442,6 +496,11 @@ def _content_dict(
         "tools": [_tool_dict(item) for item in tools],
         "extensions": [_extension_dict(item) for item in extensions],
     }
+    if format_version >= 3:
+        content["delegation_policy"] = _delegation_policy_dict(
+            delegation_policy or AgentDelegationPolicy(agent_id, (agent_id,))
+        )
+    return content
 
 
 def _ref_dict(ref: ImplementationRef) -> dict[str, Any]:
@@ -503,7 +562,24 @@ def _runtime_policy_dict(
                 "max_parallel_model_requests": policy.max_parallel_model_requests,
             }
         )
+    if format_version >= 3:
+        content["delegation_result_max_chars"] = policy.delegation_result_max_chars
     return content
+
+
+def _delegation_policy_dict(policy: AgentDelegationPolicy) -> dict[str, Any]:
+    return {
+        "default_agent_id": policy.default_agent_id,
+        "allowed_agent_ids": list(policy.allowed_agent_ids),
+    }
+
+
+def _delegation_policy_from_dict(value: Mapping[str, Any]) -> AgentDelegationPolicy:
+    data = dict(value)
+    return AgentDelegationPolicy(
+        default_agent_id=str(data["default_agent_id"]),
+        allowed_agent_ids=tuple(str(item) for item in data["allowed_agent_ids"]),
+    )
 
 
 def _skill_dict(skill: SkillVersion) -> dict[str, Any]:

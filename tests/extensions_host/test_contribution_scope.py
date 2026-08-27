@@ -12,8 +12,6 @@ from pickel.extensions_host.registry import (
     ExtensionRegistry,
 )
 from pickel.extensions_host.host import ExtensionHost
-from pickel.runtime.runtime_events import AssistantMessageEvent
-from pickel.tools.base import BaseTool, ToolSpec
 from pickel.tools.bus import ToolBus, ToolSource
 
 

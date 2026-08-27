@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from pickel.agents.agent_package import (
+    AgentDelegationPolicy,
     AgentPackageVersion,
     AgentRuntimePolicy,
     ImplementationRef,
@@ -90,6 +91,7 @@ def test_package_id_is_the_only_digest_and_created_at_is_not_content() -> None:
         tools=(),
         extensions=(),
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
     )
     second = AgentPackageVersion(
         **{
@@ -139,6 +141,47 @@ def test_v1_codec_keeps_legacy_hash_shape_and_uses_policy_defaults() -> None:
     assert loaded.content_dict() == content
     assert loaded.runtime_policy.model_request_max_attempts == 3
     assert loaded.runtime_policy.max_parallel_model_requests == 2
+    assert loaded.runtime_policy.delegation_result_max_chars == 8000
+    assert loaded.delegation_policy == AgentDelegationPolicy("Pickle", ("Pickle",))
+
+
+def test_format_3_codec_freezes_delegation_policy_and_result_budget() -> None:
+    content = _content()
+    content["format_version"] = 3
+    content["runtime_policy"].update(
+        {
+            "model_request_max_attempts": 3,
+            "model_request_retry_initial_delay_ms": 1000,
+            "model_request_retry_max_delay_ms": 4000,
+            "max_parallel_model_requests": 2,
+        }
+    )
+    content["runtime_policy"]["delegation_result_max_chars"] = 1234
+    content["delegation_policy"] = {
+        "default_agent_id": "Worker",
+        "allowed_agent_ids": ["Pickle", "Worker"],
+    }
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    assert loaded.format_version == 3
+    assert loaded.runtime_policy.delegation_result_max_chars == 1234
+    assert loaded.delegation_policy == AgentDelegationPolicy(
+        "Worker", ("Pickle", "Worker")
+    )
+    assert loaded.content_dict() == content
+
+
+def test_delegation_policy_requires_unique_non_empty_allowlist() -> None:
+    with pytest.raises(ValueError, match="allowed_agent_ids"):
+        AgentDelegationPolicy("Pickle", ())
+    with pytest.raises(ValueError, match="去重"):
+        AgentDelegationPolicy("Pickle", ("Pickle", "Pickle"))
+    with pytest.raises(ValueError, match="default_agent_id"):
+        AgentDelegationPolicy("Worker", ("Pickle",))
 
 
 @pytest.mark.parametrize(
@@ -246,7 +289,7 @@ def test_builder_freezes_existing_app_config_without_role_fallback(
     package = AgentPackageBuilder(
         app_config=config, tool_bus=ToolBus()
     ).build_agent_package_version()
-    assert package.format_version == 2
+    assert package.format_version == 3
     assert package.runtime_policy.model_request_max_attempts == 3
     assert package.runtime_policy.max_parallel_model_requests == 2
     assert package.model_policy.worker is None

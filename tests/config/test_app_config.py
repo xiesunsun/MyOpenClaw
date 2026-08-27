@@ -4,7 +4,6 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
-from pickel.config.app_config import AppConfig
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 

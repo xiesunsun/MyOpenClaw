@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -28,7 +28,6 @@ from pickel.conversations.agent_message import (
     AgentMessage,
     AssistantMessage,
     ToolResultMessage,
-    UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
@@ -65,6 +64,9 @@ from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
 RuntimeEventConsumer = Callable[[RuntimeEventBase], None | Awaitable[None]]
+DelegationPackageResolver = Callable[
+    [SessionOperation, AgentPackageVersion, str], AgentPackageVersion
+]
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +113,10 @@ class OperationDriver:
         node_id_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] | None = None,
         wake_callback: Callable[[str], None] | None = None,
+        terminal_callback: Callable[[str], None] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        delegation_package_resolver: DelegationPackageResolver | None = None,
+        allowed_tool_names: frozenset[str] | None = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
@@ -124,7 +129,10 @@ class OperationDriver:
         self._node_id = node_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._wake_callback = wake_callback
+        self._terminal_callback = terminal_callback
         self._sleep = sleep or asyncio.sleep
+        self._delegation_package_resolver = delegation_package_resolver
+        self._allowed_tool_names = allowed_tool_names
 
     async def drive_operation(
         self,
@@ -140,6 +148,8 @@ class OperationDriver:
             consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
+        if result.status in {"succeeded", "failed", "cancelled"}:
+            self._wake_parent(operation_id)
         if (
             result.status in {"succeeded", "failed", "cancelled"}
             and self._release_operation_package is not None
@@ -166,10 +176,6 @@ class OperationDriver:
         operation = self._operations.load_operation(operation_id)
         state = self._operations.load_agent_run_state(operation_id)
         if state.status in {"succeeded", "failed", "cancelled"}:
-            if state.status == "cancelled":
-                # Tool reconciliation 可能已经提交 child 终态；恢复 Driver 时仍要
-                # 推动 direct parent 重新检查后代门槛。
-                self._wake_parent(operation_id)
             return self._result(
                 operation,
                 state,
@@ -202,8 +208,6 @@ class OperationDriver:
 
         while True:
             if state.status in {"succeeded", "failed", "cancelled"}:
-                if state.status == "cancelled":
-                    self._wake_parent(operation_id)
                 return self._result(operation, state, last_assistant)
             if state.status == "waiting":
                 return self._result(operation, state, last_assistant)
@@ -244,7 +248,6 @@ class OperationDriver:
                         continue
                     return self._result(operation, state, last_assistant)
                 state = replace(cancelled, revision=state.revision + 1)
-                self._wake_parent(operation_id)
                 return self._result(
                     operation,
                     state,
@@ -579,16 +582,32 @@ class OperationDriver:
             executable: ToolCallState | None = None
             if ready is not None:
                 # 保留 Provider 原始顺序，不能用只含当前调用的列表覆盖批次。
+                intent_error: Exception | None = None
+                execution_intent = ready.execution_intent
+                if ready.tool_name == "delegate_agent":
+                    try:
+                        execution_intent = self._resolve_delegation_intent(
+                            operation=operation,
+                            package=package,
+                            call=ready,
+                        )
+                    except Exception as exc:
+                        intent_error = exc
                 next_calls = tuple(
                     (
-                        replace(
-                            call,
-                            status="intent_recorded",
-                            execution_intent=(
-                                DelegateAgentIntent(operation.agent_package_version_id)
-                                if call.tool_name == "delegate_agent"
-                                else call.execution_intent
-                            ),
+                        (
+                            replace(
+                                call,
+                                status="rejected",
+                                execution_intent=None,
+                                decision_reason=f"delegate_agent 目标不可用: {intent_error}",
+                            )
+                            if intent_error is not None
+                            else replace(
+                                call,
+                                status="intent_recorded",
+                                execution_intent=execution_intent,
+                            )
                         )
                         if call.tool_call_id == ready.tool_call_id
                         else call
@@ -599,6 +618,8 @@ class OperationDriver:
                     replace(state, current_step=replace(step, tool_calls=next_calls)),
                     state,
                 )
+                if intent_error is not None:
+                    continue
                 assert state.current_step is not None
                 executable = next(
                     call
@@ -718,6 +739,12 @@ class OperationDriver:
         if step is None or step.phase != "request_ready":
             raise RuntimeError("PreToolUse 必须发生在 request_ready ModelStep")
         tools = {tool.name: tool for tool in package.tools}
+        if self._allowed_tool_names is not None:
+            tools = {
+                name: tool
+                for name, tool in tools.items()
+                if name in self._allowed_tool_names
+            }
         calls: list[ToolCallState] = []
         for block in message.content:
             if not isinstance(block, ToolCallBlock):
@@ -876,7 +903,7 @@ class OperationDriver:
         )
         # report 是 child→parent 的中间通信工具。它可以保留在冻结 Package
         # 中供 delegated Session 执行，但 Root 的 ModelContext 不应暴露它。
-        # 这里仅收窄模型可见工具；执行端仍使用完整冻结 Package 做校验。
+        # 这里仅收窄模型可见工具；执行端也由同一 allowlist 做校验。
         load_delegation = getattr(self._operations, "load_delegation", None)
         is_delegated = callable(load_delegation) and (
             load_delegation(operation.session_id) is not None
@@ -888,7 +915,54 @@ class OperationDriver:
                     tool for tool in model_context.tools if tool.name != "report"
                 ),
             )
+        if self._allowed_tool_names is not None:
+            model_context = replace(
+                model_context,
+                tools=tuple(
+                    tool
+                    for tool in model_context.tools
+                    if tool.name in self._allowed_tool_names
+                ),
+            )
         return model_context
+
+    def _resolve_delegation_intent(
+        self,
+        *,
+        operation: SessionOperation,
+        package: AgentPackageVersion,
+        call: ToolCallState,
+    ) -> DelegateAgentIntent:
+        delegation_policy = package.delegation_policy
+        target_agent_id = str(
+            call.arguments.get("agent_id") or delegation_policy.default_agent_id
+        )
+        if target_agent_id not in delegation_policy.allowed_agent_ids:
+            raise ValueError(f"Agent '{target_agent_id}' 不在 Parent allowlist")
+
+        if package.format_version in {1, 2}:
+            if target_agent_id != package.agent_id:
+                raise ValueError("历史格式 Delegation 只能使用 same-package")
+            return DelegateAgentIntent(package.package_version_id)
+        if package.format_version != 3:
+            raise ValueError("不支持的 Agent Package format")
+        if self._delegation_package_resolver is None:
+            raise ValueError("format 3 Delegation 必须提供 child Package 解析器")
+        child_package = self._delegation_package_resolver(
+            operation, package, target_agent_id
+        )
+        if child_package.format_version != 3:
+            raise ValueError("Delegation child Package 必须是 format 3")
+        if child_package.agent_id != target_agent_id:
+            raise ValueError("Delegation child Package 与目标 Agent 不一致")
+        parent_tools = (
+            self._allowed_tool_names
+            if self._allowed_tool_names is not None
+            else frozenset(tool.name for tool in package.tools)
+        )
+        if not parent_tools.intersection(tool.name for tool in child_package.tools):
+            raise ValueError("Delegation Parent 与 child 的 Tool 权限交集为空")
+        return DelegateAgentIntent(child_package.package_version_id)
 
     def _pending_step_messages(self, session_id: str) -> tuple[InboxMessage, ...]:
         return self._operations.list_pending_step_messages(session_id=session_id)
@@ -938,11 +1012,27 @@ class OperationDriver:
             self._wake_callback(session_id)
 
     def _wake_parent(self, operation_id: str) -> None:
-        if self._wake_callback is None:
+        if self._wake_callback is None and self._terminal_callback is None:
             return
         parent_session_id = self._operations.parent_session_id(operation_id)
-        if parent_session_id is not None:
-            self._wake_callback(parent_session_id)
+        if parent_session_id is None:
+            return
+        if self._terminal_callback is not None:
+            try:
+                self._terminal_callback(parent_session_id)
+            except Exception:
+                logger.exception(
+                    "调度 settled Parent 激活失败: session_id=%s", parent_session_id
+                )
+            return
+        if self._wake_callback is not None:
+            try:
+                self._wake_callback(parent_session_id)
+            except Exception:
+                # 终态已经持久化；唤醒失败由恢复扫描兜底，不能反转结果。
+                logger.exception(
+                    "唤醒 settled Parent 失败: session_id=%s", parent_session_id
+                )
 
     def _claim_step_messages(
         self,

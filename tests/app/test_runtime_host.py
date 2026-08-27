@@ -54,6 +54,7 @@ def _boot(root: Path) -> Boot:
               Pickle:
                 workspace_path: workspace
                 behavior_path: agents/Pickle
+                tools: [report]
             """).strip(),
         encoding="utf-8",
     )
@@ -92,6 +93,11 @@ def _headless_fixture(host: RuntimeHost, root: Path, *, active_operation: bool =
         operation_id="parent-operation-1",
         session_id=conversation.session.session_id,
         agent_package_version_id=conversation.agent_definition.package_version_id,
+        workspace_binding=WorkspaceBinding(
+            workspace_id=conversation.session.workspace_id,
+            working_directory=conversation.session.cwd,
+            allowed_root=conversation.session.cwd,
+        ),
     )
     parent_state = SimpleNamespace(
         current_step=SimpleNamespace(
@@ -119,10 +125,11 @@ def _headless_fixture(host: RuntimeHost, root: Path, *, active_operation: bool =
             return self.sessions.get(session_id)
 
         def load_delegation(self, session_id):
-            if active_operation:
+            if active_operation or session_id != child_session.session_id:
                 return None
             return SimpleNamespace(
                 child_session_id=session_id,
+                child_package_version_id=child_package_id,
                 parent_operation_id=parent_operation.operation_id,
                 parent_step_id="parent-step-1",
                 parent_tool_call_id="parent-tool-1",
@@ -133,6 +140,13 @@ def _headless_fixture(host: RuntimeHost, root: Path, *, active_operation: bool =
                 return parent_operation
             if operation_id == child_operation.operation_id:
                 return child_operation
+            return None
+
+        def load_agent_package_version(self, package_version_id):
+            if package_version_id == parent_loaded.version.package_version_id:
+                return parent_loaded.version
+            if package_version_id == child_loaded.version.package_version_id:
+                return child_loaded.version
             return None
 
         def load_run_state(self, operation_id):
@@ -165,6 +179,68 @@ def test_runtime_host_creates_and_resumes_persistent_conversation() -> None:
         assert host.agent_registry.get(session_id) is live_agent
         assert live_agent._driver._wake_callback == host.agent_registry.wake
         assert (root / "home" / "runtime.db").exists()
+
+
+def test_settled_parent_wake_activates_missing_parent_and_is_failure_tolerant() -> None:
+    async def exercise(host: RuntimeHost, root: Path) -> None:
+        store = host.boot.runtime_store()
+        wake = Mock()
+        host.agent_registry.wake = wake
+
+        live = host.open_conversation(ConversationRequest(agent_id="Pickle", cwd=root))
+        host._schedule_settled_parent_wake(store, live.session.session_id)
+        await asyncio.sleep(0)
+        wake.assert_called_once_with(live.session.session_id)
+
+        activate = AsyncMock()
+        host.activate_agent = activate
+        wake.reset_mock()
+
+        host._schedule_settled_parent_wake(store, "parent-session")
+        await asyncio.sleep(0)
+        activate.assert_awaited_once_with("parent-session", store)
+        wake.assert_called_once_with("parent-session")
+
+        activate.reset_mock()
+        wake.reset_mock()
+        activate.side_effect = RuntimeError("activation failed")
+        host._schedule_settled_parent_wake(store, "parent-session")
+        await asyncio.sleep(0)
+        activate.assert_awaited_once_with("parent-session", store)
+        wake.assert_not_called()
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            asyncio.run(exercise(host, root))
+            asyncio.run(host.shutdown())
+
+
+def test_settled_parent_wake_tasks_merge_and_shutdown_cancels_them() -> None:
+    async def exercise(host: RuntimeHost, store: object) -> None:
+        release = asyncio.Event()
+
+        async def blocked_activation(*_args) -> None:
+            await release.wait()
+
+        host.activate_agent = AsyncMock(side_effect=blocked_activation)
+        host._schedule_settled_parent_wake(store, "parent-session")
+        host._schedule_settled_parent_wake(store, "parent-session")
+        await asyncio.sleep(0)
+
+        host.activate_agent.assert_awaited_once_with("parent-session", store)
+        task = host._settled_parent_tasks["parent-session"]
+        await host.shutdown()
+
+        assert task.cancelled()
+        assert host._settled_parent_tasks == {}
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, {"PICKEL_HOME": str(root / "home")}):
+            host = RuntimeHost(_boot(root))
+            asyncio.run(exercise(host, host.boot.runtime_store()))
 
 
 def test_conversation_attach_takes_over_headless_agent_handle() -> None:
@@ -314,6 +390,7 @@ def test_runtime_delegation_control_activates_accepted_child() -> None:
     host = SimpleNamespace(activate_agent=AsyncMock(), agent_registry=registry)
     delegation = AgentDelegation(
         child_session_id="child-session",
+        child_package_version_id="child-package",
         parent_operation_id="parent-operation",
         parent_step_id="parent-step",
         parent_tool_call_id="parent-tool",
@@ -349,6 +426,7 @@ def test_runtime_delegation_control_preserves_acceptance_on_activation_failure(
     )
     delegation = AgentDelegation(
         child_session_id="child-session",
+        child_package_version_id="child-package",
         parent_operation_id="parent-operation",
         parent_step_id="parent-step",
         parent_tool_call_id="parent-tool",
@@ -492,6 +570,58 @@ def test_headless_activation_is_idempotent_and_shutdown_releases_handle() -> Non
             asyncio.run(host.shutdown())
             assert generation.operation_ref_count == 0
             assert generation.closed
+
+
+def test_delegated_boundaries_keep_ancestor_tool_restrictions() -> None:
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        host = RuntimeHost(_boot(root))
+        root_operation = SimpleNamespace(
+            operation_id="root-operation",
+            session_id="root-session",
+            agent_package_version_id="root-package",
+            workspace_binding=WorkspaceBinding("workspace", root, root),
+        )
+        parent_operation = SimpleNamespace(
+            operation_id="parent-operation",
+            session_id="parent-session",
+            agent_package_version_id="parent-package",
+            workspace_binding=WorkspaceBinding("workspace", root, root),
+        )
+        delegations = {
+            "grandchild-session": SimpleNamespace(
+                parent_operation_id="parent-operation"
+            ),
+            "parent-session": SimpleNamespace(parent_operation_id="root-operation"),
+        }
+        operations = {
+            "root-operation": root_operation,
+            "parent-operation": parent_operation,
+        }
+        packages = {
+            "root-package": SimpleNamespace(
+                tools=(
+                    SimpleNamespace(name="shared"),
+                    SimpleNamespace(name="root-only"),
+                )
+            ),
+            "parent-package": SimpleNamespace(
+                tools=(
+                    SimpleNamespace(name="shared"),
+                    SimpleNamespace(name="parent-only"),
+                )
+            ),
+        }
+        store = SimpleNamespace(
+            load_delegation=lambda session_id: delegations.get(session_id),
+            load_operation=lambda operation_id: operations.get(operation_id),
+            load_agent_package_version=lambda package_id: packages.get(package_id),
+        )
+
+        allowed, allowed_root = host._delegated_boundaries(store, "grandchild-session")
+
+        assert allowed == frozenset({"shared"})
+        assert allowed_root == root.resolve()
 
 
 def test_headless_delegation_uses_intent_package_registers_before_wake() -> None:

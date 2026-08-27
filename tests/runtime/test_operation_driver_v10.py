@@ -40,6 +40,7 @@ from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import ToolCallCompleted, ToolCallStarted
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.workspaces.workspace_binding import WorkspaceBinding
+from pickel.agents.agent_package import AgentDelegationPolicy
 
 
 def _run_async(function):
@@ -258,6 +259,66 @@ async def test_recovered_cancelled_child_wakes_direct_parent():
 
     assert result.status == "cancelled"
     assert woken == ["parent-session"]
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])
+@_run_async
+async def test_terminal_parent_callback_runs_once_with_wake_fallback(status: str):
+    state = replace(
+        _queued_state(),
+        status=status,
+        error=(
+            AgentRunError("failed", "failed", False) if status == "failed" else None
+        ),
+        cancellation=(
+            SimpleNamespace(cause="cancelled") if status == "cancelled" else None
+        ),
+        final_assistant_node_id=("final-node" if status == "succeeded" else None),
+    )
+    operations = _Operations(state)
+    operations.parent_session_id = lambda operation_id: "parent-session"
+    woken: list[str] = []
+    terminal: list[str] = []
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: pytest.fail("终态恢复不应加载 Package"),
+        effects_resolver=lambda _: pytest.fail("终态恢复不应解析 Effects"),
+        wake_callback=woken.append,
+        terminal_callback=terminal.append,
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == status
+    assert terminal == ["parent-session"]
+    assert woken == []
+
+
+@_run_async
+async def test_terminal_wake_callback_failure_does_not_change_result():
+    state = replace(
+        _queued_state(),
+        status="failed",
+        error=AgentRunError("failed", "failed", False),
+    )
+    operations = _Operations(state)
+    operations.parent_session_id = lambda operation_id: "parent-session"
+
+    def fail_wake(session_id: str) -> None:
+        raise RuntimeError(session_id)
+
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: pytest.fail("终态恢复不应加载 Package"),
+        effects_resolver=lambda _: pytest.fail("终态恢复不应解析 Effects"),
+        wake_callback=fail_wake,
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
 
 
 @_run_async
@@ -591,7 +652,10 @@ def _loaded_package(
     output_schema = output_schema or {"type": "string"}
     version = SimpleNamespace(
         package_version_id="agentpkg_" + "a" * 64,
+        agent_id="Pickle",
+        format_version=1,
         behavior_instruction="behavior",
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
         skills=(),
         runtime_policy=SimpleNamespace(max_model_steps=8, context_turn_window=8),
         tools=(
@@ -650,6 +714,69 @@ def _tool_result(tool_call_id: str, tool_name: str, text: str) -> ToolResultMess
         tool_name=tool_name,
         content=(TextBlock(text),),
     )
+
+
+def test_delegation_intent_resolves_allowed_child_package_before_effect() -> None:
+    parent_tool = SimpleNamespace(name="read")
+    parent = SimpleNamespace(
+        agent_id="Pickle",
+        package_version_id="agentpkg_" + "p" * 64,
+        format_version=3,
+        delegation_policy=AgentDelegationPolicy("Worker", ("Pickle", "Worker")),
+        tools=(parent_tool,),
+    )
+    child = SimpleNamespace(
+        agent_id="Worker",
+        package_version_id="agentpkg_" + "c" * 64,
+        format_version=3,
+        tools=(SimpleNamespace(name="read"),),
+    )
+    driver = _driver(
+        _Operations(_queued_state()),
+        _Provider([]),
+    )
+    driver._delegation_package_resolver = lambda _operation, _parent, target: child
+    call = SimpleNamespace(arguments={"agent_id": "Worker"})
+
+    intent = driver._resolve_delegation_intent(
+        operation=_operation(), package=parent, call=call
+    )
+
+    assert intent == DelegateAgentIntent(child.package_version_id)
+
+
+def test_historical_delegation_is_exact_same_package_without_resolver() -> None:
+    package = SimpleNamespace(
+        agent_id="Pickle",
+        format_version=2,
+        package_version_id="agentpkg_" + "h" * 64,
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
+        tools=(),
+    )
+    driver = _driver(_Operations(_queued_state()), _Provider([]))
+    call = SimpleNamespace(arguments={})
+
+    intent = driver._resolve_delegation_intent(
+        operation=_operation(), package=package, call=call
+    )
+
+    assert intent == DelegateAgentIntent(package.package_version_id)
+
+
+def test_format3_delegation_requires_package_resolver() -> None:
+    package = SimpleNamespace(
+        agent_id="Pickle",
+        format_version=3,
+        package_version_id="agentpkg_" + "f" * 64,
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
+        tools=(),
+    )
+    driver = _driver(_Operations(_queued_state()), _Provider([]))
+
+    with pytest.raises(ValueError, match="必须提供 child Package 解析器"):
+        driver._resolve_delegation_intent(
+            operation=_operation(), package=package, call=SimpleNamespace(arguments={})
+        )
 
 
 @_run_async

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pickel.agents.agent_package import LoadedAgentPackage
+from pickel.agents.agent_package import AgentPackageVersion, LoadedAgentPackage
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.artifacts.artifact_service import ArtifactService
 from pickel.artifacts.filesystem_blob_store import FilesystemBlobStore
@@ -166,6 +166,7 @@ class _RuntimeDelegationControl:
         parent_step_id: str,
         parent_tool_call_id: str,
         message: UserMessage,
+        agent_id: str | None = None,
     ) -> AgentDelegation:
         delegation = DelegationService(store=self._store).start_delegation(
             parent_operation_id,
@@ -405,6 +406,8 @@ class RuntimeHost:
         self._artifact_services: dict[int, tuple[CompositionStore, ArtifactService]] = (
             {}
         )
+        self._settled_parent_tasks: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
 
     @property
     def agent_registry(self) -> AgentRegistry:
@@ -524,6 +527,47 @@ class RuntimeHost:
         self._artifact_services[key] = (store, artifact_service)
         return artifact_service
 
+    def _schedule_settled_parent_wake(
+        self, store: CompositionStore, session_id: str
+    ) -> None:
+        """终态提交后确保 Parent 已装配，再交给 Registry 唤醒。"""
+
+        if self._shutting_down:
+            return
+        existing = self._settled_parent_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return
+
+        async def activate_and_wake() -> None:
+            try:
+                await self.activate_agent(session_id, store)
+                self._agent_registry.wake(session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "settled Parent 激活失败，将由下次启动恢复兜底: session_id=%s",
+                    session_id,
+                )
+
+        task = asyncio.create_task(activate_and_wake())
+        self._settled_parent_tasks[session_id] = task
+        task.add_done_callback(
+            lambda completed: self._settled_parent_task_finished(session_id, completed)
+        )
+
+    def _settled_parent_task_finished(
+        self, session_id: str, task: asyncio.Task[None]
+    ) -> None:
+        if self._settled_parent_tasks.get(session_id) is task:
+            self._settled_parent_tasks.pop(session_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("settled Parent 唤醒任务异常: session_id=%s", session_id)
+
     def _load_operation_package(
         self,
         operation: SessionOperation,
@@ -582,12 +626,70 @@ class RuntimeHost:
         owner_boot = handle.generation.boot
         if owner_boot is None:
             raise RuntimeError("Operation 所属 RuntimeGeneration 缺少 Boot")
+        (
+            allowed_tool_names,
+            parent_allowed_root,
+        ) = self._delegated_boundaries(store, operation.session_id)
         return owner_boot._build_effects(
             loaded_agent_package=loaded,
             artifact_service=artifact_service,
             session_cwd=Path(operation.workspace_binding.working_directory),
             delegation_control=delegation_control,
+            allowed_tool_names=allowed_tool_names,
+            parent_allowed_root=parent_allowed_root,
         )
+
+    def _delegated_boundaries(
+        self, store: CompositionStore, session_id: str
+    ) -> tuple[frozenset[str] | None, Path | None]:
+        """沿父子图求有效 Tool 集；工作区只读取冻结 WorkspaceBinding。"""
+        current_session_id = session_id
+        allowed_tool_names: frozenset[str] | None = None
+        parent_allowed_root: Path | None = None
+        seen: set[str] = set()
+        while current_session_id not in seen:
+            seen.add(current_session_id)
+            delegation = store.load_delegation(current_session_id)
+            if delegation is None:
+                return allowed_tool_names, parent_allowed_root
+            parent_operation = store.load_operation(delegation.parent_operation_id)
+            if parent_operation is None:
+                raise ValueError("Delegation parent Operation 不存在")
+            parent_package = store.load_agent_package_version(
+                parent_operation.agent_package_version_id
+            )
+            if parent_package is None:
+                raise ValueError("Delegation parent Package 不存在")
+            package_tools = frozenset(tool.name for tool in parent_package.tools)
+            allowed_tool_names = (
+                package_tools
+                if allowed_tool_names is None
+                else allowed_tool_names.intersection(package_tools)
+            )
+            if parent_allowed_root is None:
+                parent_allowed_root = parent_operation.workspace_binding.allowed_root
+            current_session_id = parent_operation.session_id
+        raise ValueError("Delegation parent 链存在环")
+
+    def _resolve_delegation_package(
+        self,
+        *,
+        boot: Boot,
+        store: CompositionStore,
+        operation: SessionOperation,
+        parent_package: AgentPackageVersion,
+        target_agent_id: str,
+    ) -> AgentPackageVersion:
+        """在 DelegateAgentIntent 提交前冻结目标 Agent 的 format 3 Package。"""
+        if target_agent_id not in boot.app_config.agents:
+            raise ValueError(f"Delegation 目标 Agent 未注册: {target_agent_id}")
+        child_package = boot._agent_package_builder.build_agent_package_version(
+            target_agent_id
+        )
+        if child_package.format_version != 3:
+            raise ValueError("Delegation child Package 必须是 format 3")
+        store.insert_agent_package_version(child_package)
+        return child_package
 
     async def _release_operation_package(self, operation: SessionOperation) -> None:
         handle = self._operation_package_handles.pop(operation.operation_id, None)
@@ -621,21 +723,24 @@ class RuntimeHost:
         generation = self._active_generation
         artifact_service = self._artifact_service_for(store)
         package_id: str | None = None
+        delegation = store.load_delegation(session_id)
+        parent_operation = None
+        if delegation is not None:
+            parent_operation = store.load_operation(delegation.parent_operation_id)
+            if parent_operation is None:
+                raise ValueError("Delegation parent Operation 不存在")
         if session.active_operation_id is not None:
             operation = store.load_operation(session.active_operation_id)
             if operation is None or operation.session_id != session_id:
                 raise ValueError("Session.active_operation_id 指向无效 Operation")
             package_id = operation.agent_package_version_id
         else:
-            delegation = store.load_delegation(session_id)
             if delegation is not None:
-                parent_operation = store.load_operation(delegation.parent_operation_id)
-                if parent_operation is None:
-                    raise ValueError("Delegation parent Operation 不存在")
-                # 当前 delegate_agent 只能创建同 Package child。Parent
-                # Operation 的不可变绑定在终态后仍然可恢复，不能再依赖
-                # 已清空的 current_step / DelegateAgentIntent。
-                package_id = parent_operation.agent_package_version_id
+                package_id = delegation.child_package_version_id
+        (
+            allowed_tool_names,
+            parent_allowed_root,
+        ) = self._delegated_boundaries(store, session_id)
         if session.active_operation_id is not None:
             try:
                 loaded = self._load_operation_package(
@@ -668,6 +773,8 @@ class RuntimeHost:
                             expected_agent_id=session.agent_id,
                         )
                     except PackageLoadError:
+                        if delegation is not None:
+                            raise
                         loaded = boot.resolve_loaded_agent_package(
                             session.agent_id, artifact_service=artifact_service
                         )
@@ -691,6 +798,10 @@ class RuntimeHost:
                 loaded = boot.resolve_loaded_agent_package(
                     session.agent_id, artifact_service=artifact_service
                 )
+        if allowed_tool_names is not None and not any(
+            tool.name in allowed_tool_names for tool in loaded.version.tools
+        ):
+            raise ValueError("Delegation Parent 与 child 的 Tool 权限交集为空")
         if loaded.version.agent_id != session.agent_id:
             raise ValueError("LoadedAgentPackage.agent_id 与 Session 不匹配")
         loaded = generation.cache_loaded_package(
@@ -710,9 +821,23 @@ class RuntimeHost:
                 session_cwd=session.cwd,
                 operation_service=OperationService(store),
                 wake_callback=self._agent_registry.wake,
+                terminal_callback=lambda parent_session_id: self._schedule_settled_parent_wake(
+                    store, parent_session_id
+                ),
                 delegation_control=(
                     delegation_control := _RuntimeDelegationControl(self, store)
                 ),
+                delegation_package_resolver=(
+                    lambda operation, parent_package, target_agent_id: self._resolve_delegation_package(
+                        boot=boot,
+                        store=store,
+                        operation=operation,
+                        parent_package=parent_package,
+                        target_agent_id=target_agent_id,
+                    )
+                ),
+                allowed_tool_names=allowed_tool_names,
+                parent_allowed_root=parent_allowed_root,
                 operation_package_loader=lambda operation: self._load_operation_package(
                     operation,
                     generation=generation,
@@ -987,6 +1112,11 @@ class RuntimeHost:
         # ConversationRuntime 绕过窄服务直接读取 Operation 状态。
         operation_service = OperationService(store)
         artifact_service = self._artifact_service_for(store)
+        delegation = store.load_delegation(session.session_id)
+        (
+            allowed_tool_names,
+            parent_allowed_root,
+        ) = self._delegated_boundaries(store, session.session_id)
         if session.active_operation_id is not None:
             try:
                 operation = operation_service.load_operation(
@@ -1009,6 +1139,8 @@ class RuntimeHost:
                     expected_agent_id=agent_id,
                 )
             except PackageLoadError:
+                if delegation is not None:
+                    raise
                 # Host 仍需要构建 Agent，由 OperationDriver 将同一装载
                 # 失败以 revision CAS 持久化为 retryable failed。此处的
                 # 当前 Package 只用于组合 UI/Host，不会执行旧 Operation。
@@ -1030,13 +1162,27 @@ class RuntimeHost:
                             expected_agent_id=agent_id,
                         )
                     except PackageLoadError:
+                        if delegation is not None:
+                            raise
                         loaded = boot.resolve_loaded_agent_package(
                             agent_id, artifact_service=artifact_service
                         )
         else:
-            loaded = boot.resolve_loaded_agent_package(
-                agent_id, artifact_service=artifact_service
-            )
+            if delegation is None:
+                loaded = boot.resolve_loaded_agent_package(
+                    agent_id, artifact_service=artifact_service
+                )
+            else:
+                parent_operation = store.load_operation(delegation.parent_operation_id)
+                if parent_operation is None:
+                    raise ValueError("Delegation parent Operation 不存在")
+                package_id = delegation.child_package_version_id
+                loaded = boot.load_agent_package(
+                    package_id,
+                    store=store,
+                    artifact_service=artifact_service,
+                    expected_agent_id=agent_id,
+                )
         loaded = generation.cache_loaded_package(
             loaded.version.package_version_id,
             loaded,
@@ -1058,9 +1204,23 @@ class RuntimeHost:
                     session_cwd=session.cwd,
                     operation_service=operation_service,
                     wake_callback=self._agent_registry.wake,
+                    terminal_callback=lambda parent_session_id: self._schedule_settled_parent_wake(
+                        store, parent_session_id
+                    ),
                     delegation_control=(
                         delegation_control := _RuntimeDelegationControl(self, store)
                     ),
+                    delegation_package_resolver=(
+                        lambda operation, parent_package, target_agent_id: self._resolve_delegation_package(
+                            boot=boot,
+                            store=store,
+                            operation=operation,
+                            parent_package=parent_package,
+                            target_agent_id=target_agent_id,
+                        )
+                    ),
+                    allowed_tool_names=allowed_tool_names,
+                    parent_allowed_root=parent_allowed_root,
                     operation_package_loader=lambda operation: self._load_operation_package(
                         operation,
                         generation=generation,
@@ -1145,6 +1305,14 @@ class RuntimeHost:
             conversation.add_event_processor(resolved.processor, resolved.event_types)
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
+        settled_tasks = tuple(self._settled_parent_tasks.values())
+        for task in settled_tasks:
+            if not task.done():
+                task.cancel()
+        if settled_tasks:
+            await asyncio.gather(*settled_tasks, return_exceptions=True)
+        self._settled_parent_tasks.clear()
         await self._agent_registry.shutdown()
         for _session_id, (_agent, handle, trace_driver) in tuple(
             self._headless_agents.items()

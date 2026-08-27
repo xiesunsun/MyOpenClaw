@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,12 +23,17 @@ from pickel.agents.agent_package import (
     build_agent_package_version,
 )
 from pickel.artifacts.artifact import Artifact, ArtifactReference
-from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.context.model_context import ModelContext, SystemContent
-from pickel.inbox.message import InboxMessage, UserMessageSource
+from pickel.inbox.message import (
+    AgentSettledMessageSource,
+    InboxMessage,
+    UserMessageSource,
+    agent_settled_message_id,
+)
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import (
     AgentRunError,
@@ -37,7 +43,7 @@ from pickel.operations.agent_run_state import (
     ModelStepState,
 )
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.errors import StorageIntegrityError
+from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.workspaces.workspace import Workspace
@@ -568,6 +574,445 @@ def test_three_terminal_states_clear_active_operation(
     assert store.load_session("session-1").active_operation_id is None
 
 
+def test_delegated_terminal_transition_appends_settled_message_atomically(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    parent_root = tmp_path / "parent"
+    child_root = tmp_path / "child"
+    _create_session(store, "parent", "workspace-parent", parent_root)
+    _create_session(store, "child", "workspace-child", child_root)
+    package = _package()
+    store.insert_agent_package_version(package)
+
+    parent_input = _send(store, "parent", "parent-input")
+    parent_operation = _operation(
+        "parent-operation",
+        "parent",
+        package,
+        parent_input.message_id,
+        "workspace-parent",
+        parent_root,
+    )
+    assert store.accept_operation(
+        operation=parent_operation,
+        state=_queued(parent_operation.operation_id),
+        expected_node_id=None,
+    )
+    child_input = _send(store, "child", "child-input")
+    store.insert_delegation(
+        AgentDelegation(
+            child_session_id="child",
+            child_package_version_id=package.package_version_id,
+            parent_operation_id=parent_operation.operation_id,
+            parent_step_id="step-1",
+            parent_tool_call_id="tool-1",
+            initial_message_id=child_input.message_id,
+            created_at=NOW,
+        )
+    )
+    child_operation = _operation(
+        "child-operation",
+        "child",
+        package,
+        child_input.message_id,
+        "workspace-child",
+        child_root,
+    )
+    child_state = _queued(child_operation.operation_id)
+    assert store.accept_operation(
+        operation=child_operation, state=child_state, expected_node_id=None
+    )
+    running = replace(child_state, revision=2, status="running")
+    assert store.commit_run_transition(
+        state=running, expected_revision=1, node=None, updated_at=NOW
+    )
+    final_node = ConversationNode(
+        "child-final",
+        "child",
+        "child-input",
+        "agent_message",
+        AssistantMessage((TextBlock("done"),)),
+        NOW,
+    )
+    terminal = replace(
+        running,
+        revision=3,
+        status="succeeded",
+        final_assistant_node_id=final_node.node_id,
+    )
+    assert store.commit_run_transition(
+        state=terminal,
+        expected_revision=2,
+        node=final_node,
+        updated_at=NOW,
+    )
+    pending = store.list_pending(session_id="parent")
+    assert len(pending) == 1
+    assert pending[0].message_id == agent_settled_message_id("child", "child-operation")
+    assert pending[0].delivery == "steer"
+    assert pending[0].source == AgentSettledMessageSource("child", "child-operation")
+    assert isinstance(pending[0].message.content[0], TextBlock)
+    assert json.loads(pending[0].message.content[0].text) == {
+        "child_session_id": "child",
+        "status": "succeeded",
+        "type": "agent_settled",
+    }
+    assert pending[0].message.content[1] == TextBlock("done")
+    assert store.load_session("child").active_operation_id is None
+
+
+def test_agent_settled_source_codec_is_strict() -> None:
+    message = InboxMessage(
+        message_id="settled-message",
+        session_id="parent",
+        sequence=1,
+        delivery="steer",
+        message=UserMessage((TextBlock("done"),)),
+        source=AgentSettledMessageSource("child", "child-operation"),
+        created_at=NOW,
+    )
+    restored = InboxMessage.from_json(message.to_json())
+    assert restored.source == message.source
+    assert restored.message_id == message.message_id
+
+
+def _setup_running_delegated_child(store: Store, root: Path, suffix: str = ""):
+    parent_root = root / f"parent{suffix}"
+    child_root = root / f"child{suffix}"
+    _create_session(store, f"parent{suffix}", f"workspace-parent{suffix}", parent_root)
+    _create_session(store, f"child{suffix}", f"workspace-child{suffix}", child_root)
+    package = _package()
+    store.insert_agent_package_version(package)
+    parent_input = _send(store, f"parent{suffix}", f"parent-input{suffix}")
+    parent_operation = _operation(
+        f"parent-operation{suffix}",
+        f"parent{suffix}",
+        package,
+        parent_input.message_id,
+        f"workspace-parent{suffix}",
+        parent_root,
+    )
+    parent_state = _queued(parent_operation.operation_id)
+    assert store.accept_operation(
+        operation=parent_operation, state=parent_state, expected_node_id=None
+    )
+    child_input = _send(store, f"child{suffix}", f"child-input{suffix}")
+    store.insert_delegation(
+        AgentDelegation(
+            child_session_id=f"child{suffix}",
+            child_package_version_id=package.package_version_id,
+            parent_operation_id=parent_operation.operation_id,
+            parent_step_id=f"step{suffix}",
+            parent_tool_call_id=f"tool{suffix}",
+            initial_message_id=child_input.message_id,
+            created_at=NOW,
+        )
+    )
+    child_operation = _operation(
+        f"child-operation{suffix}",
+        f"child{suffix}",
+        package,
+        child_input.message_id,
+        f"workspace-child{suffix}",
+        child_root,
+    )
+    child_state = _queued(child_operation.operation_id)
+    assert store.accept_operation(
+        operation=child_operation, state=child_state, expected_node_id=None
+    )
+    running = replace(child_state, revision=2, status="running")
+    assert store.commit_run_transition(
+        state=running, expected_revision=1, node=None, updated_at=NOW
+    )
+    return parent_operation, child_operation, running
+
+
+@pytest.mark.parametrize(
+    ("status", "kwargs", "expected"),
+    (
+        (
+            "failed",
+            {"error": AgentRunError("child_failed", "bad child", False)},
+            '"code":"child_failed"',
+        ),
+        (
+            "cancelled",
+            {"cancellation": Cancellation("parent requested", NOW)},
+            '"message":"parent requested"',
+        ),
+    ),
+)
+def test_settled_failed_and_cancelled_messages_have_stable_summary(
+    store_factory: StoreFactory,
+    tmp_path: Path,
+    status: str,
+    kwargs: dict[str, Any],
+    expected: str,
+) -> None:
+    store = store_factory(tmp_path)
+    _, child_operation, running = _setup_running_delegated_child(store, tmp_path)
+    terminal = replace(running, revision=3, status=status, **kwargs)
+    assert store.commit_run_transition(
+        state=terminal, expected_revision=2, node=None, updated_at=NOW
+    )
+    pending = store.list_pending(session_id="parent")
+    assert len(pending) == 1
+    assert isinstance(pending[0].message.content[0], TextBlock)
+    assert json.loads(pending[0].message.content[0].text) == {
+        "child_session_id": "child",
+        "status": status,
+        "type": "agent_settled",
+    }
+    assert isinstance(pending[0].message.content[1], TextBlock)
+    assert expected in pending[0].message.content[1].text
+    assert child_operation.operation_id in pending[0].source.sender_operation_id
+
+
+def test_stale_terminal_cas_does_not_append_settled_message(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _, _, running = _setup_running_delegated_child(store, tmp_path)
+    stale = replace(
+        running,
+        revision=1,
+        status="failed",
+        error=AgentRunError("stale", "stale", False),
+    )
+    assert not store.commit_run_transition(
+        state=stale, expected_revision=0, node=None, updated_at=NOW
+    )
+    assert store.load_run_state(running.operation_id) == running
+    assert store.list_pending(session_id="parent") == ()
+
+
+def test_settled_construction_failure_rolls_back_state_session_and_inbox(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _, _, running = _setup_running_delegated_child(store, tmp_path)
+    invalid_success = replace(
+        running,
+        revision=3,
+        status="succeeded",
+        final_assistant_node_id="missing-final",
+    )
+    with pytest.raises(StorageIntegrityError):
+        store.commit_run_transition(
+            state=invalid_success, expected_revision=2, node=None, updated_at=NOW
+        )
+    assert store.load_run_state(running.operation_id) == running
+    assert store.load_session("child").active_operation_id == running.operation_id
+    assert store.list_pending(session_id="parent") == ()
+
+
+def test_archived_parent_failure_rolls_back_terminal_transition(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _, _, running = _setup_running_delegated_child(store, tmp_path)
+    if isinstance(store, InMemoryRuntimeStore):
+        store._sessions["parent"] = replace(
+            store._sessions["parent"], active_operation_id=None, archived_at=NOW
+        )
+    else:
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE conversation_sessions SET active_operation_id = NULL, archived_at = ? WHERE session_id = ?",
+                (NOW.isoformat(), "parent"),
+            )
+    terminal = replace(
+        running,
+        revision=3,
+        status="failed",
+        error=AgentRunError("failed", "failed", False),
+    )
+    with pytest.raises(StorageConflictError):
+        store.commit_run_transition(
+            state=terminal, expected_revision=2, node=None, updated_at=NOW
+        )
+    assert store.load_run_state(running.operation_id) == running
+    assert store.load_session("child").active_operation_id == running.operation_id
+    assert store.list_pending(session_id="parent") == ()
+
+
+def test_archive_rechecks_descendant_run_state_without_active_pointer(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _, _, running = _setup_running_delegated_child(store, tmp_path)
+    if isinstance(store, InMemoryRuntimeStore):
+        store._sessions["parent"] = replace(
+            store._sessions["parent"], active_operation_id=None
+        )
+        store._sessions["child"] = replace(
+            store._sessions["child"], active_operation_id=None
+        )
+    else:
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE conversation_sessions SET active_operation_id = NULL WHERE session_id IN (?, ?)",
+                ("parent", "child"),
+            )
+    assert store.load_run_state(running.operation_id) == running
+    with pytest.raises(StorageIntegrityError):
+        store.archive_session(session_id="parent", archived_at=NOW)
+    assert store.load_session("parent").archived_at is None
+
+
+def test_parallel_children_use_parent_sequence_in_actual_terminal_order(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    parent_root = tmp_path / "parent"
+    _create_session(store, "parent", "workspace-parent", parent_root)
+    package = _package()
+    store.insert_agent_package_version(package)
+    parent_input = _send(store, "parent", "parent-input")
+    parent_operation = _operation(
+        "parent-operation",
+        "parent",
+        package,
+        parent_input.message_id,
+        "workspace-parent",
+        parent_root,
+    )
+    assert store.accept_operation(
+        operation=parent_operation,
+        state=_queued(parent_operation.operation_id),
+        expected_node_id=None,
+    )
+    children = []
+    for index in (1, 2):
+        child_root = tmp_path / f"child-{index}"
+        _create_session(store, f"child-{index}", f"workspace-child-{index}", child_root)
+        child_input = _send(store, f"child-{index}", f"child-input-{index}")
+        store.insert_delegation(
+            AgentDelegation(
+                child_session_id=f"child-{index}",
+                child_package_version_id=package.package_version_id,
+                parent_operation_id=parent_operation.operation_id,
+                parent_step_id=f"step-{index}",
+                parent_tool_call_id=f"tool-{index}",
+                initial_message_id=child_input.message_id,
+                created_at=NOW,
+            )
+        )
+        operation = _operation(
+            f"child-operation-{index}",
+            f"child-{index}",
+            package,
+            child_input.message_id,
+            f"workspace-child-{index}",
+            child_root,
+        )
+        state = _queued(operation.operation_id)
+        assert store.accept_operation(
+            operation=operation, state=state, expected_node_id=None
+        )
+        running = replace(state, revision=2, status="running")
+        assert store.commit_run_transition(
+            state=running, expected_revision=1, node=None, updated_at=NOW
+        )
+        children.append(running)
+    for running in reversed(children):
+        terminal = replace(
+            running,
+            revision=3,
+            status="failed",
+            error=AgentRunError("failed", running.operation_id, False),
+        )
+        assert store.commit_run_transition(
+            state=terminal, expected_revision=2, node=None, updated_at=NOW
+        )
+    pending = store.list_pending(session_id="parent")
+    assert [item.sequence for item in pending] == [2, 3]
+    assert [item.source.sender_operation_id for item in pending] == [
+        "child-operation-2",
+        "child-operation-1",
+    ]
+
+
+def test_archived_ancestor_rejects_child_send_and_accept(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _, child_operation, running = _setup_running_delegated_child(store, tmp_path)
+    if isinstance(store, InMemoryRuntimeStore):
+        store._sessions["parent"] = replace(
+            store._sessions["parent"], active_operation_id=None, archived_at=NOW
+        )
+        store._sessions["child"] = replace(
+            store._sessions["child"], active_operation_id=None
+        )
+    else:
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE conversation_sessions SET active_operation_id = NULL, archived_at = ? WHERE session_id = ?",
+                (NOW.isoformat(), "parent"),
+            )
+            connection.execute(
+                "UPDATE conversation_sessions SET active_operation_id = NULL WHERE session_id = ?",
+                ("child",),
+            )
+    with pytest.raises(StorageIntegrityError):
+        _send(store, "child", "after-archive")
+
+    # 模拟恢复扫描已发现的 pending Inbox；accept 仍必须重新检查 ancestor。
+    pending = InboxMessage(
+        message_id="pending-after-archive",
+        session_id="child",
+        sequence=2,
+        delivery="followup",
+        message=UserMessage((TextBlock("pending"),)),
+        source=UserMessageSource(),
+        created_at=NOW,
+    )
+    if isinstance(store, InMemoryRuntimeStore):
+        store._inbox[pending.message_id] = pending
+    else:
+        with store._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_inbox_messages (
+                    message_id, session_id, sequence, delivery, message_json,
+                    status, claimed_operation_id, claimed_step_id, outcome_reason,
+                    created_at, handled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pending.message_id,
+                    pending.session_id,
+                    pending.sequence,
+                    pending.delivery,
+                    pending.message_payload_json(),
+                    pending.status,
+                    None,
+                    None,
+                    None,
+                    pending.created_at.isoformat(),
+                    None,
+                ),
+            )
+    next_operation = _operation(
+        "child-after-archive",
+        "child",
+        _package(),
+        pending.message_id,
+        "workspace-child",
+        tmp_path / "child",
+    )
+    with pytest.raises(StorageIntegrityError):
+        store.accept_operation(
+            operation=next_operation,
+            state=_queued(next_operation.operation_id),
+            expected_node_id=store.load_session("child").active_node_id,
+        )
+    assert store.load_run_state(running.operation_id) == running
+    assert child_operation.operation_id == running.operation_id
+
+
 def test_cross_session_operation_and_artifact_references_are_rejected(
     store_factory: StoreFactory, tmp_path: Path
 ) -> None:
@@ -666,6 +1111,7 @@ def test_delete_and_delete_tree_enforce_delegation_preconditions(
     store.insert_delegation(
         AgentDelegation(
             child_session_id="child",
+            child_package_version_id=package.package_version_id,
             parent_operation_id="parent-operation",
             parent_step_id="step-1",
             parent_tool_call_id="tool-call-1",

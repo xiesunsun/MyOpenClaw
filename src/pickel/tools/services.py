@@ -36,6 +36,7 @@ class DelegationControl(Protocol):
         parent_step_id: str,
         parent_tool_call_id: str,
         message: UserMessage,
+        agent_id: str | None = None,
     ) -> "AgentDelegation": ...
 
     async def send_parent_followup(

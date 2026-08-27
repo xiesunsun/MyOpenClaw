@@ -58,7 +58,7 @@
 | --- | --- |
 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 唯一术语、组件职责、历史名称迁移 |
 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 已确认实体、值对象和跨领域关系的决策理由 |
-| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v10 表、字段、约束、事务和 v9 迁移 |
+| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v11 当前结构、v10 Delegation 迁移来源、字段、约束与迁移 |
 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | AgentRunState、Intent、审批、取消和恢复语义 |
 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | Pickel 配置来源、合并、SecretRef 和 Package 构建输入 |
 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 批次顺序和验收门槛 |
@@ -85,7 +85,7 @@
 
 | 任务范围 | 必读文档 | 用途 |
 | --- | --- | --- |
-| Session 树、消息持久化、Artifact、Inbox、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 SQLite v10 领域表、字段、CAS、原子事务和 v9 迁移 |
+| Session 树、消息持久化、Artifact、Inbox、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 SQLite v10 当前领域表、v11 Delegation 目标、CAS、原子事务和迁移 |
 | 实体是否持久化、跨领域所有权、过度抽象评审 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 查询已拍板理由；字段与状态以命中的窄领域合同为准 |
 | Tool Loop、Runtime/Host 边界、实体与方法命名 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 约束当前组件职责与唯一术语 |
 | Config、Settings、Environ、Agent Package 输入 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 约束 Pickel 设置来源、合并、SecretRef；Runtime 名称以命名合同为准 |

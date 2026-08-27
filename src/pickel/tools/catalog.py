@@ -14,7 +14,6 @@ from pickel.tools.interrupt_agent import interrupt_agent
 from pickel.tools.send_message import send_message
 from pickel.tools.list_agents import list_agents
 from pickel.tools.report import report
-from pickel.tools.wait_delegation import wait_delegation
 from pickel.tools.shell import BashTool
 
 
@@ -33,7 +32,6 @@ def builtin_tools() -> list[BaseTool]:
         list_agents,
         interrupt_agent,
         report,
-        wait_delegation,
     ]
 
 

@@ -1,8 +1,8 @@
 import asyncio
 from pathlib import Path
 
-from pickel.conversations.agent_message import AssistantMessage
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.agent_message import AssistantMessage, ModelResponseMetadata
+from pickel.conversations.content_blocks import TextBlock, ThinkingBlock
 from pickel.operations.delegation_service import ChildAgentSnapshot
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.base import ToolExecutionContext
@@ -30,7 +30,12 @@ class _Control:
                 final_assistant_node_id="assistant-1",
                 error=None,
             ),
-            AssistantMessage(content=(TextBlock("final report"),)),
+            AssistantMessage(
+                content=(ThinkingBlock("private"), TextBlock("final report")),
+                metadata=ModelResponseMetadata(
+                    provider="provider", model="model", provider_response_id="secret"
+                ),
+            ),
             False,
         )
 
@@ -55,7 +60,10 @@ def test_wait_delegation_returns_persisted_assistant_message() -> None:
     )
 
     assert result["timed_out"] is False
-    assert result["agent"]["status"] == "succeeded"
-    assert result["assistant_message"]["content"] == [
-        {"type": "text", "text": "final report"}
-    ]
+    assert result == {
+        "timed_out": False,
+        "child_session_id": "child-1",
+        "status": "succeeded",
+        "result": [{"type": "text", "text": "final report"}],
+        "error": None,
+    }

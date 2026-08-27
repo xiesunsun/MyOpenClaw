@@ -1,8 +1,8 @@
 # Runtime 实体决策
 
 **日期**：2026-08-24  
-**更新日期**：2026-08-26
-**状态**：实体设计已收口，当前合同已对齐  
+**更新日期**：2026-08-27
+**状态**：实体设计已收口；Delegation 消息驱动与跨 Package 选择已实施
 **范围**：Agent Runtime 中持久化实体、值对象、状态、快照、运行时对象和服务的抽象边界  
 **不在范围**：实施排期、数据库迁移步骤、Provider 协议字段
 
@@ -64,6 +64,7 @@ erDiagram
         string parent_step_id
         string parent_tool_call_id UK
         string initial_message_id UK
+        string child_package_version_id FK
     }
 ```
 
@@ -1376,9 +1377,24 @@ class AgentDefinition:
     extension_ids: tuple[str, ...]
     model_policy: ModelPolicy
     runtime_policy: AgentRuntimePolicy
+    delegation_policy: AgentDelegationPolicy
 ```
 
 AgentDefinition 由配置合并、路径规范化和默认值解析产生。配置文件变化后整体重建，不写入 Session 数据库。
+
+`AgentDelegationPolicy` 只表达 Parent 模型能选择哪些已注册 Agent，不接收原始
+Provider、model 或 Tool 列表：
+
+```python
+@dataclass(frozen=True)
+class AgentDelegationPolicy:
+    default_agent_id: str
+    allowed_agent_ids: tuple[str, ...]
+```
+
+`default_agent_id` 必须位于非空且去重的 `allowed_agent_ids`。没有
+`delegate_agent` Tool 的 Agent 也保留同样的非空值对象，只是 Tool 不可见；不增加
+`None/EmptyDelegationPolicy` 分支。默认兼容配置只允许当前 Agent 自身。
 
 当前字段收敛：
 
@@ -1430,6 +1446,7 @@ classDiagram
         model_policy
         runtime_policy
         workspace_policy
+        delegation_policy
         skills
         tools
         extensions
@@ -1468,6 +1485,7 @@ AgentPackageVersion
 ├── behavior_instruction
 ├── model_policy
 ├── runtime_policy
+├── delegation_policy
 ├── workspace_policy
 ├── skills[]
 ├── tools[]
@@ -1509,6 +1527,11 @@ AgentPackageVersion 格式升级 → 新 format_version，旧 Package 保持不�
 ```
 
 `format_version` 参与 Package 内容摘要。
+
+本轮 DelegationPolicy 与 `delegation_result_max_chars` 进入 Package 内容后，目标格式为
+`format_version=3`。Loader 继续兼容读取 format 1/2；旧 Package 不回写、不补字段，缺失
+DelegationPolicy 时按“只允许自身 Agent”解释，缺失结果预算时使用该旧格式的固定兼容值
+8000。新 Operation 一律绑定按 format 3 构建的 Package。
 
 ### 8.7 ModelVersion 与 SecretRef
 
@@ -1613,12 +1636,17 @@ class AgentRuntimePolicy:
     model_request_retry_initial_delay_ms: int
     model_request_retry_max_delay_ms: int
     max_parallel_model_requests: int
+    delegation_result_max_chars: int
 ```
 
 `max_delegation_depth` 默认 3。模型请求默认最多 3 次，退避为 1 秒起、4 秒封顶；
 同一 LoadedAgentPackage 默认最多并行执行 2 个模型请求。并发限制是 Generation 内
 资源门槛，不产生 Lane、Scheduler 或持久化排队实体。这里只保存影响执行、Context
 和委派安全边界的设置；UI 样式、日志级别和 CLI 展示设置不进入 Package。
+
+`delegation_result_max_chars` 默认 8000，由创建 Delegation 的 Parent Package 冻结，
+只限制自动 settled 消息进入 Parent Context 的文本长度；完整 Child AssistantMessage
+仍保留在 child Conversation Tree。ArtifactBlock 不按文本字符截断。
 
 ### 8.13 LoadedAgentPackage
 
@@ -1932,7 +1960,7 @@ agent_inbox_messages
 UNIQUE(session_id, sequence)
 ```
 
-`message_json` 保存带类型来源的 Provider-neutral UserMessage。来源第一版包含 `user`、`agent(sender_session_id, sender_operation_id, form)`、`hook(hook_id)`、`host(call_id)` 和 `runtime(reason)`。Agent-to-Agent 消息必须记录产生它的 sender Operation，使级联取消能够只 discard 被取消祖先产生的 pending 消息；来源用于因果归因、Context 投影、UI 和 Trace，本身不授予权限。
+`message_json` 保存带类型来源的 Provider-neutral UserMessage。来源第一版包含 `user`、`agent(sender_session_id, sender_operation_id, form)`、`agent_settled(sender_session_id, sender_operation_id)`、`hook(hook_id)`、`host(call_id)` 和 `runtime(reason)`。`agent` 表示模型主动发送的中间消息；`agent_settled` 表示 Runtime 从 child Operation 终态事实投影出的自动通知。Agent-to-Agent 消息必须记录产生它的 sender Operation，使级联取消能够只 discard 被取消祖先产生的 pending 消息；来源用于因果归因、Context 投影、UI 和 Trace，本身不授予权限。
 
 InboxMessage 被 claim 后创建 `ConversationNode.node_id = InboxMessage.message_id`，复用同一消息身份，不增加 `claimed_node_id`。被 discard 的消息不会进入 Conversation Tree。
 
@@ -2059,6 +2087,7 @@ erDiagram
         string parent_operation_id FK
         string parent_step_id
         string parent_tool_call_id UK
+        string child_package_version_id FK
         string initial_message_id UK
         datetime created_at
     }
@@ -2070,55 +2099,123 @@ agent_delegations
 - parent_operation_id    FK
 - parent_step_id
 - parent_tool_call_id    UNIQUE
+- child_package_version_id FK
 - initial_message_id     UNIQUE FK
 - created_at
 ```
 
 不保存 `delegation_id`、`child_operation_id`、重复的 parent_session_id、created_commit_sequence 或独立 status。初始 child Operation 可通过 `initial_message_id → InboxMessage.claimed_operation_id` 定位；child Session 后续接受的 Operation 不重复建立 Delegation。
 
-### 12.2 创建与运行
+### 12.2 Package 选择与创建事务
 
-父 ToolCall 的执行 intent 先冻结目标 `child_package_version_id`。当前
-`delegate_agent` 只创建同 Package 的平等 Agent，因此该值必须等于不可变
-`parent_operation.agent_package_version_id`；Delegation 后续重新激活直接从 parent
-Operation 读取这项稳定绑定，不再依赖终态后已清空的 parent current Step。只有未来
-允许选择不同 child Package 时，才给 AgentDelegation 增加
-`child_package_version_id`。随后一个数据库事务创建 child Session、AgentDelegation
-和初始 pending followup InboxMessage；child Session 继承 parent 的 `workspace_id`
-和 Session `cwd`。
+`delegate_agent` 接收可选 `agent_id`，默认值来自 Parent Package 冻结的
+`AgentDelegationPolicy.default_agent_id`。Parent 模型只能从
+`allowed_agent_ids` 中选择已注册 Agent；Tool schema 应在 Package 构建时把该集合冻结为
+枚举。模型不得提交原始 `provider`、`model`、Tool 列表、API 地址或 Secret。
 
-Root 与 Child 使用相同 Agent、Inbox、Operation 和 Conversation Tree。多个 child 各自拥有隔离 Session，可以并行运行，不需要 Lane。
+父 ToolCall 的 `DelegateAgentIntent` 先解析并冻结目标 `child_package_version_id`，随后一个
+数据库事务创建 child Session、AgentDelegation 和初始 pending followup InboxMessage。
+`AgentDelegation.child_package_version_id` 是恢复权威：不能只从 parent current Step 读取，
+因为 Tool Intent 会在父 Operation 终态后离开 current state，而 child 首个 Operation 可能
+尚未接受。child Session 继承 Parent 的 `workspace_id` 与 Session `cwd`，但使用所选 Agent
+自己的 behavior、ModelPolicy、ToolPolicy 和 RuntimePolicy。
 
-### 12.3 Agent-to-Agent 消息与权限
+Root 与 Child 使用同一个 Agent、Inbox、Operation 和 Conversation Tree 抽象，只是绑定了
+不同或相同的不可变 AgentPackageVersion。多个 child 各自拥有隔离 Session，可以并行运行，
+不引入 Lane。
 
-parent 后续任务使用 child `followup/steer`；child 报告使用 parent `steer` 或安静的 `inject`；进程内中断调用统一的 `Agent.cancel(keep_inbox=True)`。模型工具名为
-`interrupt_agent`，只选择目标 direct child 当前的 active Operation，随后按普通
-Operation cancellation 合同级联该 Operation 创建的非终态后代；调用方不能任意选择
-非后代 Operation。它不归档或删除 child Session，不修改或删除 AgentDelegation。Agent 消息
-source 记录 `sender_session_id + sender_operation_id` 形成因果来源；发送和控制权限
-仍通过 AgentDelegation 图校验，不能因 source 字段存在而跳过授权。
+### 12.3 工具方向与消息语义
 
-父 Operation 的 `send_message` Tool 只向 sender Session 的 direct child 追加 `followup`，不等待 child 回答。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生；ToolCall 的冻结 arguments 与 `intent_recorded` 状态已经是完整决定，不新增 `SendAgentMessageIntent`。Store 在同一事务中校验 sender Operation/Session、当前 ToolCall、AgentDelegation 直接父关系、目标 Session 和 `AgentMessageSource`，再分配目标 Session FIFO sequence。相同 message ID 且 target、delivery、message、source 完全一致时，即使消息已 claim 或 child 已归档，也返回已有 InboxMessage；新消息禁止写入归档 child。
+| Tool | 可见方 | 方向 | 语义 |
+| --- | --- | --- | --- |
+| `delegate_agent` | Parent | Parent → new Child | 创建 direct child，不等待 |
+| `send_message` | Parent | Parent → direct Child | 追加 followup，不等待回答 |
+| `list_agents` | Parent | Parent 本地读取 | direct child 状态快照，不轮询 |
+| `interrupt_agent` | Parent | Parent → direct Child | 取消 child 当前 Operation，不归档 Session |
+| `report` | Child | Child → direct Parent | 模型主动发送中间 steer，不表示完成 |
 
-父 Operation 的 `list_agents` Tool 只读当前 sender Session 的 direct child 快照，列举该 Session 历史所有 Operation 创建的 `AgentDelegation`，不暴露 descendants 或全局 Registry。它必须是当前 running/awaiting_tools 的 `intent_recorded` ToolCall，立即返回结构化快照，不轮询、不等待；状态优先取 archived，其次取 child 当前 active Operation 的 AgentRunState，再取 pending followup/steer 的 `ready`，最后取历史终态或无历史的 `idle`。快照补充 `updated_at`、当前 Step phase、request attempt 和 pending message count，避免把失去驱动的 `running` 或尚未处理的 `ready` 误报为正常完成。
+`send_message` 的消息身份由 `(sender_operation_id, sender_step_id,
+sender_tool_call_id)` 的 canonical hash 稳定派生。Store 在同一事务中校验当前 ToolCall、
+AgentDelegation 直接父关系、目标 Session 和 source，再分配目标 FIFO sequence。相同 ID 且
+内容完全一致时幂等返回 existing；新消息禁止写入归档 child。
 
-`wait_delegation` 是显式、有界等待接口：校验 direct child，等待目标进入终态或达到
-timeout，并从 `final_assistant_node_id` 返回已持久化的最终 AssistantMessage。对成功
-的 child Operation，这个 final AssistantMessage 是唯一终态结果；它不改变 child
-状态、不把 Registry task 当 Future，也不要求 child 必须调用 `report`。`report` 继续
-承担 child 主动向 parent 发送中间 steer 的职责，永远不填充
-`final_assistant_node_id`，不结束 child Operation，也不构成 `wait_delegation` 的
-终态结果。
+`list_agents` 列举当前 sender Session 历史所有 Operation 创建的 direct child，不暴露
+descendants 或全局 Registry。状态优先取 archived，其次取 active Operation 的
+AgentRunState，再取 runnable Inbox 的 `ready`，最后取历史终态或 `idle`；快照包含
+`updated_at`、当前 Step phase、request attempt 和 pending message count。
 
-child 的 `report` Tool 只接收必填 `output` 字符串，报告以 `Background subagent <child_session_id> reported:` 前缀包装为 parent 的 `steer` InboxMessage；不接收 parent、delivery 或终态参数，不结束 child 当前 Turn，也不代表 child 已完成。Store 从 sender Operation 得到 child Session，再沿该 Session 唯一 AgentDelegation 找到 direct parent；后续 child Operation 仍沿同一关系发送，不能越过一层。消息身份由 `(sender_operation_id, sender_step_id, sender_tool_call_id)` 的 canonical hash 稳定派生，重复请求在 target、delivery、message、source 一致时返回 existing，即使消息已处理或 parent 已归档；新消息写入归档 parent 被拒绝。首个接受事务校验当前 `report` ToolCall 的冻结 `output`，但 report 不绑定 child 终态，不新增 result/settlement 实体。durable append 后由 RuntimeHost activate 并显式 wake parent，激活失败保留已接受 Inbox，交由启动恢复兜底。
+`report` 只接收必填 `output` 字符串，沿 child Session 唯一 AgentDelegation 向 direct
+Parent 追加 `steer`。它不接收 parent、delivery 或终态参数，不结束 child Operation，
+不写 `final_assistant_node_id`，也不构成 child 最终结果。Parent 需要 child 主动汇报时，
+使用 `send_message` 下达要求，不增加 `request_report` Tool。
 
-child 的有效权限只能收窄：Parent 执行边界、child AgentPackage WorkspacePolicy 和 ToolPolicy 取交集；delegated child 第一阶段不允许通过交互式 approval 扩大权限。
+`interrupt_agent` 只选择 direct child 当前 active Operation，随后按普通取消合同级联该
+Operation 创建的非终态后代；它不归档或删除 child Session，也不修改 AgentDelegation。
 
-Delegation 深度从不可变父子图递归推导，并受 AgentRuntimePolicy.max_delegation_depth 约束，不在 Session 或 Delegation 重复保存 depth。
+### 12.4 Child 终态自动投递
 
-深度只在创建 Delegation 和校验控制权限时查询；第一版链深上限很小，不增加派生 `delegation_depth` 列。数据库常量 CHECK 既不能证明 `child = parent + 1`，也不能表达冻结 Package 中每个 Operation 的不同 `max_delegation_depth`。若真实性能数据要求缓存，缓存只能是可校验的派生索引，不能成为权限权威。
+child Session 的任一 Operation 进入 `succeeded/failed/cancelled` 时，终态提交事务必须同时
+向 direct Parent Session 插入一条 pending `steer` InboxMessage：
 
-### 12.4 当前不引入的 DSH 层级
+```text
+source.kind = agent_settled
+source.sender_session_id = child_session_id
+source.sender_operation_id = child_operation_id
+message_id = canonical_hash("agent_settled", child_session_id, child_operation_id)
+```
+
+这条消息是终态事实的 Context 投影，不是新的 Settlement、Result 或 Event 实体。Root
+Session 没有 Delegation，不产生通知；child 后续 followup 形成的新 Operation 每次终态也
+各产生一条。消息写入与 child 终态、清除 `active_operation_id` 必须原子提交；提交后
+RuntimeHost 激活并 wake Parent。wake 失败不回滚业务事务，持久化 Inbox 与启动恢复负责兜底。
+
+为保证 Parent 始终是合法目标，Parent 归档必须拒绝仍有非终态 Operation 或 pending Inbox
+的 delegated descendants；任一祖先 Session 已归档时，delegated child 也不得接受新消息。
+解除 Parent 归档后才可继续 child。不能通过允许 settled 消息写入 archived Session 制造
+永远不会被 Driver 消费的 pending Inbox。
+
+Parent 仍在执行时，settled steer 在最近 Step 边界被 claim；Parent 已空闲时，它触发新的
+Operation。并行 child 按 settled 消息实际数据库提交后取得的 Parent Inbox sequence 消费，
+不按创建顺序或调用 `wait_delegation` 的固定顺序回收。
+
+### 12.5 最终结果权威与投影预算
+
+成功 Operation 的唯一结果权威仍是 `final_assistant_node_id` 指向的 AssistantMessage。
+自动 settled 消息只投影该消息中的 TextBlock 与 ArtifactBlock；不得复制 ThinkingBlock、
+ToolCallBlock、Provider metadata、usage、Conversation node ID 或 AgentRunState。文本按创建
+Delegation 的 Parent Package 所冻结 `delegation_result_max_chars` 截断，默认 8000；
+ArtifactBlock 不按字符截断，完整结果始终保留在 child Conversation Tree。
+
+失败和取消分别投影稳定的 Error 与 Cancellation 摘要，不暴露异常栈。投影结果必须使用
+稳定 schema，以便 CLI、ContextProjector 和测试共享同一合同。
+
+### 12.6 `wait_delegation` 的降级与兼容
+
+`wait_delegation` 不再是模型协作的主路径。过渡期先把输出收敛为：
+
+```text
+{timed_out, child_session_id, status, result, error}
+```
+
+它只读取 direct child 已持久化终态，`result` 使用与 settled 消息相同的投影器；不得返回
+完整 AgentMessage DTO、ThinkingBlock 或 Provider metadata。随后从新构建 Package 的默认
+模型可见 Tool 集和 Pickle 默认配置移除，只保留 Host/SDK、测试以及历史冻结 Package 的
+兼容实现。旧 Package 恢复时不得因为当前默认 Tool 已移除而失去其冻结实现。
+
+### 12.7 权限、深度与不引入的层级
+
+child 的有效权限只能收窄：Parent 已授权 Workspace 边界与 child Package 的
+WorkspacePolicy/ToolPolicy 取交集；delegated child 不允许通过交互式 approval 扩大权限。
+若交集使 child Package 必需 Tool 不可用，创建 Delegation 必须在外部副作用前失败。
+
+Delegation 深度从不可变父子图递归推导，并受 Parent 冻结 Package 的
+`max_delegation_depth` 约束，不在 Session 或 Delegation 重复保存 depth。第一版链深上限
+很小；若真实性能数据要求缓存，缓存只能是可校验派生索引，不能成为权限权威。
+
+当前采用统一 Agent、持久化 Inbox、Delivery、claim 和终态投递机制；不实现通用 Inbox
+splice、Activation 所有权森林、SubagentProvider 注册表、one-shot/continuable 双模式、
+Agent Teams 或 Lane。第二种执行后端或长期后台驻留成为真实需求时，再从现有
+Agent/Session 边界提取。
 
 当前采用统一 Agent、持久化 Inbox、Delivery 和 claim 机制；不实现通用 Inbox splice、Activation 所有权森林、SubagentProvider 注册表、one-shot/continuable 双模式或 Agent Teams。第二种执行后端或长期后台驻留成为真实需求时，再从现有 Agent/Session 边界提取。
 

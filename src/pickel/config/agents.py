@@ -24,6 +24,7 @@ _YAML_FIELDS = frozenset(
         "remote_agent_id",
         "skills_path",
         "behavior_path",
+        "delegation",
     }
 )
 

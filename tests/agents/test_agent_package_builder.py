@@ -148,7 +148,7 @@ def test_tool_version_rejects_null_output_schema(tmp_path: Path) -> None:
         replace(package.tools[0], output_schema=None)
 
 
-def test_pickel_package_uses_interrupt_tools_and_waits_without_legacy_cancel(
+def test_pickel_package_uses_interrupt_tools_without_wait_or_legacy_cancel(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -175,10 +175,51 @@ def test_pickel_package_uses_interrupt_tools_and_waits_without_legacy_cancel(
         "list_agents",
         "interrupt_agent",
         "report",
-        "wait_delegation",
     } <= names
     assert "cancel_delegation" not in names
+    assert "wait_delegation" not in names
     assert all(tool.output_schema is not None for tool in package.tools)
+
+
+def test_builder_freezes_delegation_policy_into_package_and_tool_schema(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.agents["Worker"] = config.agents["Pickle"].model_copy(deep=True)
+    config.agents["Pickle"].delegation = {
+        "default_agent": "Worker",
+        "allowed_agents": ["Pickle", "Worker", "Pickle"],
+    }
+    config.agents["Pickle"].tools = ["delegate_agent"]
+    bus = ToolBus()
+    install_builtin_tools(bus)
+
+    package = AgentPackageBuilder(
+        app_config=config, tool_bus=bus
+    ).build_agent_package_version()
+
+    assert package.delegation_policy.default_agent_id == "Worker"
+    assert package.delegation_policy.allowed_agent_ids == ("Pickle", "Worker")
+    delegate = package.tools[0]
+    assert delegate.input_schema["properties"]["agent_id"] == {
+        "type": "string",
+        "enum": ("Pickle", "Worker"),
+    }
+    assert "provider" not in delegate.input_schema
+    assert "agent_id" not in delegate.input_schema["required"]
+
+
+def test_builder_rejects_unregistered_delegation_target(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agents["Pickle"].delegation = {
+        "default_agent": "Missing",
+        "allowed_agents": ["Pickle", "Missing"],
+    }
+
+    with pytest.raises(ValueError, match="未注册 Agent"):
+        AgentPackageBuilder(
+            app_config=config, tool_bus=_tool_bus()
+        ).build_agent_package_version()
 
 
 def test_builds_stable_snapshot_from_existing_pickel_settings(tmp_path: Path) -> None:

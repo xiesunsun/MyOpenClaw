@@ -318,7 +318,7 @@ The following are working on our deployed server as of 2026-04-13:
 - We created an account `myopenclaw` and user `ssunxie` for testing.
 - We verified the official Python SDK with `SyncHTTPClient`.
 - We added a local non-production SDK smoke test example:
-  - [examples/openviking_sdk/smoke_test.py](/Users/ssunxie/code/myopenclaw/examples/openviking_sdk/smoke_test.py)
+  - [examples/openviking_sdk/smoke_test.py](../../examples/openviking_sdk/smoke_test.py)
 
 ## Notable Observations
 
@@ -430,5 +430,5 @@ Official references:
 
 Local references:
 
-- [SDK smoke test](/Users/ssunxie/code/myopenclaw/examples/openviking_sdk/smoke_test.py)
-- [SDK smoke test README](/Users/ssunxie/code/myopenclaw/examples/openviking_sdk/README.md)
+- [SDK smoke test](../../examples/openviking_sdk/smoke_test.py)
+- [SDK smoke test README](../../examples/openviking_sdk/README.md)

@@ -208,9 +208,7 @@ def test_shutdown_waits_for_retired_generation_after_reload() -> None:
             first = host.open_conversation(
                 ConversationRequest(agent_id="Pickle", cwd=root)
             )
-            second = host.open_conversation(
-                ConversationRequest(agent_id="Pickle", cwd=root)
-            )
+            host.open_conversation(ConversationRequest(agent_id="Pickle", cwd=root))
             old_generation = host.active_generation
             host._attach = Mock(return_value=Mock())
             asyncio.run(host.reload(first, app_config=host.app_config))

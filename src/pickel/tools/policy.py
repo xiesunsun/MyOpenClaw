@@ -30,16 +30,25 @@ class FileAccessPolicy(ABC):
 
 
 class WorkspacePathAccessPolicy(FileAccessPolicy):
+    def __init__(self, allowed_root: Path | None = None) -> None:
+        """限制在 workspace 内，必要时再套用 Operation 冻结的根目录。"""
+        self._allowed_root = (
+            Path(allowed_root).expanduser().resolve(strict=False)
+            if allowed_root is not None
+            else None
+        )
+
     def resolve_path(self, path: str, workspace_path: Path) -> Path:
         candidate = Path(path)
         resolved_workspace = workspace_path.resolve()
+        boundary = self._allowed_root or resolved_workspace
         resolved_path = (
             candidate.resolve()
             if candidate.is_absolute()
             else (resolved_workspace / candidate).resolve()
         )
         try:
-            resolved_path.relative_to(resolved_workspace)
+            resolved_path.relative_to(boundary)
         except ValueError as exc:
             raise PathOutsideWorkspaceError(
                 f"Path '{path}' is outside the workspace"

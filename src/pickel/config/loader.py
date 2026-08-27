@@ -29,6 +29,7 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
     "model_request_retry_initial_delay_ms": 1000,
     "model_request_retry_max_delay_ms": 4000,
     "max_parallel_model_requests": 2,
+    "delegation_result_max_chars": 8000,
     "observability": {
         "trace": {
             "mode": "standard",

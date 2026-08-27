@@ -2,6 +2,7 @@
 
 from pickel.inbox.message import (
     AgentMessageSource,
+    AgentSettledMessageSource,
     HostMessageSource,
     HookMessageSource,
     InboxMessage,
@@ -10,11 +11,13 @@ from pickel.inbox.message import (
     MessageStatus,
     RuntimeMessageSource,
     UserMessageSource,
+    agent_settled_message_id,
 )
 from pickel.inbox.store import InboxStore
 
 __all__ = [
     "AgentMessageSource",
+    "AgentSettledMessageSource",
     "HostMessageSource",
     "HookMessageSource",
     "InboxMessage",
@@ -24,4 +27,5 @@ __all__ = [
     "MessageStatus",
     "RuntimeMessageSource",
     "UserMessageSource",
+    "agent_settled_message_id",
 ]

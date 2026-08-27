@@ -26,6 +26,9 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
                 "type": "string",
                 "description": "Complete initial task for the child agent.",
             },
+            "agent_id": {
+                "type": "string",
+            },
         },
         "required": ["description", "prompt"],
         "additionalProperties": False,
@@ -51,11 +54,16 @@ async def delegate_agent(
     prompt = str(arguments["prompt"])
     if not description.strip() or not prompt.strip():
         raise ToolExecutionError("delegate_agent 的 description 和 prompt 不能为空。")
+    delegation_kwargs = {
+        "parent_operation_id": context.identity.operation_id,
+        "parent_step_id": context.identity.step_id,
+        "parent_tool_call_id": context.identity.tool_call_id,
+        "message": UserMessage((TextBlock(prompt),)),
+    }
+    if "agent_id" in arguments:
+        delegation_kwargs["agent_id"] = str(arguments["agent_id"])
     delegation = await control.start_delegation(
-        parent_operation_id=context.identity.operation_id,
-        parent_step_id=context.identity.step_id,
-        parent_tool_call_id=context.identity.tool_call_id,
-        message=UserMessage((TextBlock(prompt),)),
+        **delegation_kwargs,
     )
     payload = {
         "child_session_id": delegation.child_session_id,

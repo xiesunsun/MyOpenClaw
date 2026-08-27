@@ -19,19 +19,32 @@ from pickel.agents.agent_package import (
     package_version_id_for_content,
 )
 from pickel.artifacts.artifact import Artifact
-from pickel.conversations.agent_message import AgentMessage, UserMessage
-from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
+from pickel.conversations.agent_message import (
+    AgentMessage,
+    AssistantMessage,
+    UserMessage,
+)
+from pickel.conversations.content_blocks import (
+    ArtifactBlock,
+    TextBlock,
+)
 from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import (
     AgentMessageSource,
+    AgentSettledMessageSource,
     InboxMessage,
     MessageDelivery,
     MessageSource,
+    agent_settled_message_id,
 )
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import AgentRunState, DelegateAgentIntent
 from pickel.operations.session_operation import SessionOperation
+from pickel.operations.delegation_result import (
+    delegation_result_max_chars,
+    project_settled_message,
+)
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.workspaces.workspace import Workspace
 
@@ -261,6 +274,28 @@ class InMemoryRuntimeStore:
                 raise StorageIntegrityError(
                     "存在 pending InboxMessage，不能归档 Session"
                 )
+            descendants = self._descendant_sessions_unlocked(session_id) - {session_id}
+            if (
+                any(
+                    self._sessions[descendant].active_operation_id is not None
+                    for descendant in descendants
+                )
+                or any(
+                    item.session_id in descendants and item.status == "pending"
+                    for item in self._inbox.values()
+                )
+                or any(
+                    operation.session_id in descendants
+                    and (
+                        (state := self._run_states.get(operation.operation_id)) is None
+                        or state.status not in {"succeeded", "failed", "cancelled"}
+                    )
+                    for operation in self._operations.values()
+                )
+            ):
+                raise StorageIntegrityError(
+                    "delegated descendant 仍在运行或有 pending InboxMessage，不能归档"
+                )
             self._sessions[session_id] = replace(
                 session, archived_at=archived_at, updated_at=archived_at
             )
@@ -270,6 +305,7 @@ class InMemoryRuntimeStore:
             session = self._require_session_unlocked(session_id)
             if session.archived_at is None:
                 return
+            self._assert_ancestors_active_unlocked(session_id)
             self._sessions[session_id] = replace(
                 session, archived_at=None, updated_at=updated_at
             )
@@ -328,6 +364,7 @@ class InMemoryRuntimeStore:
             session = self._require_session_unlocked(session_id)
             if session.archived_at is not None:
                 raise StorageIntegrityError("归档 Session 不能接收 InboxMessage")
+            self._assert_ancestors_active_unlocked(session_id)
             if message_id in self._inbox:
                 raise StorageIntegrityError(f"InboxMessage ID 已存在: {message_id}")
             self._validate_content_artifacts_unlocked(message)
@@ -384,6 +421,7 @@ class InMemoryRuntimeStore:
                 raise StorageConflictError("target 不是 sender Session 的 direct child")
             if target is None:
                 raise StorageIntegrityError("target child Session 不存在")
+            self._assert_ancestors_active_unlocked(target_child_session_id)
             if source != AgentMessageSource(
                 sender_session_id=operation.session_id,
                 sender_operation_id=sender_operation_id,
@@ -613,6 +651,7 @@ class InMemoryRuntimeStore:
                 raise StorageIntegrityError("report 的 parent Operation/Session 不存在")
             if parent.session_id != parent_session_id:
                 raise StorageIntegrityError("report parent Session 路由不匹配")
+            self._assert_ancestors_active_unlocked(parent_session_id)
             expected_source = AgentMessageSource(
                 sender_session_id=operation.session_id,
                 sender_operation_id=sender_operation_id,
@@ -938,6 +977,17 @@ class InMemoryRuntimeStore:
                     "新 ConversationNode 必须被 AgentRunState 引用"
                 )
 
+            settled = None
+            if state.status in {"succeeded", "failed", "cancelled"}:
+                # InMemory 没有数据库 rollback；必须在改动任何领域集合前完成
+                # settled 的全部读取、投影和约束校验。
+                settled = self._build_settled_message_unlocked(
+                    child_session_id=session.session_id,
+                    state=state,
+                    node=node,
+                    created_at=updated_at,
+                )
+
             if node is not None:
                 self._nodes[node.node_id] = node
             self._run_states[state.operation_id] = state
@@ -953,6 +1003,8 @@ class InMemoryRuntimeStore:
                 ),
                 updated_at=updated_at,
             )
+            if settled is not None:
+                self._inbox[settled.message_id] = settled
             return True
 
     def claim_step_messages(
@@ -1227,6 +1279,8 @@ class InMemoryRuntimeStore:
             raise StorageIntegrityError("delegation parent_operation_id 不匹配")
         if delegation.child_session_id != child_session.session_id:
             raise StorageIntegrityError("delegation child_session_id 不匹配")
+        if delegation.child_package_version_id != child_package.package_version_id:
+            raise StorageIntegrityError("delegation child_package_version_id 不匹配")
         if (
             delegation.parent_step_id != parent_step_id
             or delegation.parent_tool_call_id != parent_tool_call_id
@@ -1274,6 +1328,7 @@ class InMemoryRuntimeStore:
             or existing.parent_operation_id != parent_operation_id
             or existing.parent_step_id != parent_step_id
             or existing.parent_tool_call_id != parent_tool_call_id
+            or existing.child_package_version_id != child_package.package_version_id
             or child.agent_id != child_package.agent_id
             or child.workspace_id != workspace_id
             or child.cwd != cwd
@@ -1329,6 +1384,7 @@ class InMemoryRuntimeStore:
                 or session.active_operation_id is not None
             ):
                 return False
+            self._assert_ancestors_active_unlocked(session_id)
             if session.active_node_id != expected_node_id:
                 return False
             message = self._inbox.get(operation.input_node_id)
@@ -1381,6 +1437,83 @@ class InMemoryRuntimeStore:
             return True
 
     # Validation/deletion helpers --------------------------------------
+    def _build_settled_message_unlocked(
+        self,
+        *,
+        child_session_id: str,
+        state: AgentRunState,
+        node: ConversationNode | None,
+        created_at: datetime,
+    ) -> InboxMessage | None:
+        """在终态 CAS 写入前完整构造 direct parent 通知。"""
+        delegation = self._delegations.get(child_session_id)
+        if delegation is None:
+            return None
+        parent_operation = self._operations.get(delegation.parent_operation_id)
+        if parent_operation is None:
+            raise StorageIntegrityError("settled 消息的 parent Operation 不存在")
+        parent = self._require_session_unlocked(parent_operation.session_id)
+        if parent.archived_at is not None:
+            raise StorageConflictError("归档 parent Session 不能接收 settled 消息")
+
+        final_message = None
+        if state.status == "succeeded":
+            if node is not None and node.node_id == state.final_assistant_node_id:
+                final_message = node.content
+            elif state.final_assistant_node_id is not None:
+                final_node = self._nodes.get(state.final_assistant_node_id)
+                if final_node is not None:
+                    final_message = final_node.content
+            if not isinstance(final_message, AssistantMessage):
+                raise StorageIntegrityError(
+                    "succeeded child 必须引用最终 AssistantMessage"
+                )
+        package = self._packages.get(parent_operation.agent_package_version_id)
+        message = project_settled_message(
+            child_session_id=child_session_id,
+            status=state.status,
+            assistant_message=final_message,
+            error=state.error,
+            cancellation=state.cancellation,
+            max_chars=delegation_result_max_chars(package),
+        )
+        self._validate_content_artifacts_unlocked(message)
+        message_id = agent_settled_message_id(child_session_id, state.operation_id)
+        source = AgentSettledMessageSource(
+            sender_session_id=child_session_id,
+            sender_operation_id=state.operation_id,
+        )
+        existing = self._inbox.get(message_id)
+        if existing is not None:
+            if (
+                existing.session_id != parent.session_id
+                or existing.delivery != "steer"
+                or existing.message != message
+                or existing.source != source
+            ):
+                raise StorageConflictError("settled 消息 ID 的语义冲突")
+            return None
+        sequence = (
+            max(
+                (
+                    item.sequence
+                    for item in self._inbox.values()
+                    if item.session_id == parent.session_id
+                ),
+                default=0,
+            )
+            + 1
+        )
+        return InboxMessage(
+            message_id=message_id,
+            session_id=parent.session_id,
+            sequence=sequence,
+            delivery="steer",
+            message=message,
+            source=source,
+            created_at=created_at,
+        )
+
     def _require_session_unlocked(self, session_id: str) -> ConversationSession:
         session = self._sessions.get(session_id)
         if session is None:
@@ -1574,10 +1707,16 @@ class InMemoryRuntimeStore:
                 )
 
     def _validate_delegation_unlocked(self, delegation: AgentDelegation) -> None:
-        if delegation.child_session_id not in self._sessions:
+        child_session = self._sessions.get(delegation.child_session_id)
+        if child_session is None:
             raise StorageIntegrityError("child Session 不存在")
         if delegation.parent_operation_id not in self._operations:
             raise StorageIntegrityError("parent Operation 不存在")
+        child_package = self._packages.get(delegation.child_package_version_id)
+        if child_package is None:
+            raise StorageIntegrityError("child AgentPackageVersion 不存在")
+        if child_session.agent_id != child_package.agent_id:
+            raise StorageIntegrityError("child Session.agent_id 不匹配 child Package")
         message = self._inbox.get(delegation.initial_message_id)
         if message is None or message.session_id != delegation.child_session_id:
             raise StorageIntegrityError("initial_message_id 不属于 child Session")
@@ -1613,6 +1752,24 @@ class InMemoryRuntimeStore:
                     result.add(delegation.child_session_id)
                     changed = True
         return result
+
+    def _assert_ancestors_active_unlocked(self, session_id: str) -> None:
+        """后台 child 只有在整条 direct parent 链未归档时才能继续。"""
+        seen: set[str] = set()
+        current = session_id
+        while current not in seen:
+            seen.add(current)
+            delegation = self._delegations.get(current)
+            if delegation is None:
+                return
+            parent_operation = self._operations.get(delegation.parent_operation_id)
+            if parent_operation is None:
+                raise StorageIntegrityError("delegation parent Operation 不存在")
+            parent = self._require_session_unlocked(parent_operation.session_id)
+            if parent.archived_at is not None:
+                raise StorageIntegrityError("delegated descendant 的 ancestor 已归档")
+            current = parent.session_id
+        raise StorageIntegrityError("delegation parent 链存在环")
 
     def _operation_has_session_unlocked(
         self, delegation: AgentDelegation, session_id: str

@@ -26,6 +26,7 @@ class GeminiProviderTests(unittest.TestCase):
                 provider="google/gemini",
                 model="gemini-test",
                 wire_protocol="gemini-generate-content",
+                api_key="fake-api-key",
                 temperature=None,
             )
         )
@@ -231,7 +232,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(17, usage.total_tokens)
 
     def test_count_context_tokens_uses_generate_content_request_shape(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
                 async_request=AsyncMock(
@@ -255,7 +256,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertIn("systemInstruction", request_dict["generateContentRequest"])
 
     def test_count_context_tokens_serializes_tools_and_thought_signatures(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
                 async_request=AsyncMock(
@@ -305,7 +306,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertTrue(contents)
 
     def test_count_context_tokens_returns_zero_for_empty_request(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
                 async_request=AsyncMock(
@@ -321,7 +322,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(0, total)
 
     def test_count_context_tokens_retries_after_transient_failure(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
                 async_request=AsyncMock(
@@ -350,6 +351,7 @@ class GeminiProviderTests(unittest.TestCase):
     def test_build_generate_config_reads_provider_options_thinking(self) -> None:
         provider = GeminiProvider(
             model="gemini-test",
+            api_key="fake-api-key",
             provider_options={"thinking": "high"},
         )
         config = provider._build_generate_config(
@@ -361,7 +363,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertIsNotNone(config.thinking_config)
 
     def test_request_snapshot_matches_serialized_generate_content_request(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             aio=SimpleNamespace(
                 models=SimpleNamespace(
@@ -439,7 +441,7 @@ class GeminiProviderTests(unittest.TestCase):
         )
 
     def test_generate_returns_assistant_message(self) -> None:
-        provider = GeminiProvider(model="gemini-test")
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             aio=SimpleNamespace(
                 models=SimpleNamespace(

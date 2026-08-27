@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pickel.agents.agent_package import (
+    AgentDelegationPolicy,
     AgentDefinition,
     AgentPackageVersion,
     AgentRuntimePolicy,
@@ -26,6 +27,7 @@ from pickel.agents.behavior_loader import BehaviorLoader
 from pickel.agents.skills import SkillManifest, SkillRegistry
 from pickel.config.app_config import AppConfig
 from pickel.shared.file_access import FileAccessMode
+from pickel.shared.frozen_json import thaw_json
 from pickel.tools.bus import ToolActivation, ToolBus, ToolSnapshot
 
 _SECRET_MARKERS = ("api_key", "token", "secret", "password", "authorization")
@@ -185,7 +187,9 @@ class AgentPackageBuilder:
                 self._app_config.model_request_retry_max_delay_ms
             ),
             max_parallel_model_requests=(self._app_config.max_parallel_model_requests),
+            delegation_result_max_chars=self._app_config.delegation_result_max_chars,
         )
+        delegation_policy = self._delegation_policy(agent_id, agent_config)
         return AgentDefinition(
             agent_id=agent_id,
             default_workspace_path=agent_config.workspace_path,
@@ -200,6 +204,7 @@ class AgentPackageBuilder:
             ),
             model_policy=model_policy,
             runtime_policy=runtime,
+            delegation_policy=delegation_policy,
         )
 
     def _build_version(
@@ -212,14 +217,17 @@ class AgentPackageBuilder:
         extension_versions: Mapping[str, ExtensionVersion] | None,
     ) -> AgentPackageVersion:
         skills = tuple(self._skill_version(manifest) for manifest in skill_manifests)
-        tools = tuple(self._tool_version(entry) for entry in tool_snapshot.entries)
+        tools = tuple(
+            self._tool_version(entry, delegation_policy=definition.delegation_policy)
+            for entry in tool_snapshot.entries
+        )
         extensions = tuple(
             self._extension_version(extension_id, extension_versions)
             for extension_id in definition.extension_ids
         )
         return build_agent_package_version(
             agent_id=definition.agent_id,
-            format_version=2,
+            format_version=3,
             behavior_instruction=behavior_instruction,
             model_policy=definition.model_policy,
             runtime_policy=definition.runtime_policy,
@@ -228,6 +236,7 @@ class AgentPackageBuilder:
             tools=tools,
             extensions=extensions,
             created_at=self._now(),
+            delegation_policy=definition.delegation_policy,
         )
 
     def _model_version(self, config: Any) -> ModelVersion:
@@ -250,7 +259,22 @@ class AgentPackageBuilder:
             required_secret_refs=tuple(refs),
         )
 
-    def _tool_version(self, entry: Any) -> ToolVersion:
+    def _tool_version(
+        self,
+        entry: Any,
+        *,
+        delegation_policy: AgentDelegationPolicy,
+    ) -> ToolVersion:
+        input_schema = thaw_json(entry.tool.spec.input_schema)
+        if entry.name == "delegate_agent":
+            properties = dict(input_schema.get("properties") or {})
+            properties["agent_id"] = {
+                "type": "string",
+                "enum": list(delegation_policy.allowed_agent_ids),
+            }
+            input_schema["properties"] = properties
+            required = list(input_schema.get("required") or ())
+            input_schema["required"] = [name for name in required if name != "agent_id"]
         return ToolVersion(
             name=entry.name,
             source=entry.source,
@@ -259,10 +283,37 @@ class AgentPackageBuilder:
             ),
             version=entry.version,
             description=entry.tool.spec.description,
-            input_schema=entry.tool.spec.input_schema,
+            input_schema=input_schema,
             output_schema=entry.tool.spec.output_schema,
             replay_policy=entry.tool.spec.replay_policy,
         )
+
+    def _delegation_policy(
+        self, agent_id: str, agent_config: Any
+    ) -> AgentDelegationPolicy:
+        config = agent_config.delegation
+        if isinstance(config, Mapping):
+            configured_default = config.get("default_agent")
+            raw_allowed = config.get("allowed_agents") or []
+        else:
+            configured_default = getattr(config, "default_agent", None)
+            raw_allowed = getattr(config, "allowed_agents", None) or []
+        default_agent_id = configured_default or agent_id
+        candidates = raw_allowed or [agent_id]
+        allowed_agent_ids: list[str] = []
+        for candidate in candidates:
+            if candidate not in allowed_agent_ids:
+                allowed_agent_ids.append(candidate)
+        unknown = [
+            candidate
+            for candidate in allowed_agent_ids
+            if candidate not in self._app_config.agents
+        ]
+        if unknown:
+            raise ValueError(
+                "delegation allowed_agents 包含未注册 Agent: " + ", ".join(unknown)
+            )
+        return AgentDelegationPolicy(default_agent_id, tuple(allowed_agent_ids))
 
     @staticmethod
     def _skill_version(manifest: SkillManifest) -> SkillVersion:

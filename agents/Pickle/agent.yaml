@@ -12,7 +12,6 @@ tools:
   - list_agents
   - interrupt_agent
   - report
-  - wait_delegation
   - mcp__tavily__*
 extensions:
   - mcp
@@ -21,5 +20,5 @@ file_access_mode: full
 models:
   primary:
     provider: opencode-go
-    model: ox-alpha-free
+    model: glm-5.3-flash
 remote_agent_id: ${OPENVIKING_AGENT_ID}

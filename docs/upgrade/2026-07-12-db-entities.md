@@ -1,8 +1,8 @@
 # 数据库实体设计
 
 **初稿日期**：2026-07-12
-**更新日期**：2026-08-25
-**状态**：目标合同；SQLite v10、InMemory 同合同实现与 v9 一次性迁移已完成
+**更新日期**：2026-08-27
+**状态**：目标合同；SQLite v11 已实施，v10 仅作为一次性 Delegation 迁移来源
 **范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
 **不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 
@@ -161,7 +161,7 @@ claimed   → claimed_operation_id、handled_at 必填，outcome_reason 为空
 discarded → claim 字段为空，handled_at、outcome_reason 必填
 ```
 
-`message_json.source` 是判别联合：`user`、`agent(sender_session_id, sender_operation_id, form)`、`hook(hook_id)`、`host(call_id)`、`runtime(reason)`。source 用于因果归因和级联取消，不授予权限。
+`message_json.source` 是判别联合：`user`、`agent(sender_session_id, sender_operation_id, form)`、`agent_settled(sender_session_id, sender_operation_id)`、`hook(hook_id)`、`host(call_id)`、`runtime(reason)`。`agent_settled` 表示 Runtime 对 delegated child Operation 终态的陈述，不冒充 child 主动发送的 `report`。source 用于因果归因、Context 投影和级联取消，不授予权限。
 
 Message 被 claim 后创建 `ConversationNode.node_id = message_id`；discarded Message 不进入 Conversation Tree。状态本身是自然 CAS，写入带 `WHERE status = 'pending'`，不增加 revision。
 
@@ -179,7 +179,7 @@ Session 内 sequence 在插入事务中使用 `MAX(sequence)+1` 或等价原子 
 
 不保存独立 `digest`。相同规范内容得到相同 ID，重复插入必须幂等；相同 ID 内容不同视为损坏。
 
-`content_json` 冻结 behavior、ModelPolicy、AgentRuntimePolicy、WorkspacePolicy、Skill 全文、ToolVersion 和 ExtensionVersion。只保存 SecretRef，不保存 Secret；Package 子对象不单独建表。
+`content_json` 冻结 behavior、ModelPolicy、AgentRuntimePolicy、AgentDelegationPolicy、WorkspacePolicy、Skill 全文、ToolVersion 和 ExtensionVersion。只保存 SecretRef，不保存 Secret；Package 子对象不单独建表。
 
 ## 7. `session_operations`
 
@@ -255,11 +255,16 @@ Blob 先写，Artifact 元数据后写，ConversationNode 引用最后提交。�
 | `parent_step_id` | TEXT | NOT NULL |
 | `parent_tool_call_id` | TEXT | UNIQUE NOT NULL |
 | `initial_message_id` | TEXT | UNIQUE FK → agent_inbox_messages，NOT NULL |
+| `child_package_version_id` | TEXT | FK → agent_package_versions，NOT NULL |
 | `created_at` | TEXT | NOT NULL |
 
 不保存 `delegation_id`、`child_operation_id`、parent_session_id、status、created_commit_sequence 或 delegation_depth。Depth 从不可变关系图推导，并与父 Operation 冻结 Package 中的 max_delegation_depth 比较。
 
-父 ToolCall Intent 先冻结 `child_package_version_id`；随后一个事务创建 child Session、Delegation 和初始 pending followup InboxMessage。Child Operation 由自己的 AgentDriver 后续 claim 产生。
+父 ToolCall Intent 根据 Parent Package 的 AgentDelegationPolicy 解析并冻结
+`child_package_version_id`；随后一个事务创建 child Session、Delegation 和初始 pending
+followup InboxMessage。Child Operation 由自己的 AgentDriver 后续 claim 产生，并且必须
+使用 AgentDelegation 绑定的 Package。该列不能从 parent current Step 或 child 首个
+Operation 反推：前者在 Parent 终态后清空，后者在 child 接受初始消息前尚不存在。
 
 ## 11. 原子事务合同
 
@@ -323,7 +328,17 @@ Host 对 `intent_recorded` 的核对结果直接通过 AgentRunState revision CA
 CAS AgentRunState → succeeded / failed / cancelled
 + ConversationSession.active_operation_id = NULL
 + ConversationSession.updated_at = now
++ 若 Session 是 delegated child：
+  - 从 AgentDelegation 定位 direct parent Session
+  - 插入确定性 message_id 的 pending steer InboxMessage
+  - source = agent_settled(child session/operation)
 ```
+
+上述事实属于同一个 SQLite/InMemory 事务。settled message ID 由
+`child_session_id + child_operation_id` 规范派生；重复终态提交只能命中同一消息。
+成功通知只投影最终 AssistantMessage 的 Text/Artifact Block，并按 Parent 冻结策略有界
+截断；Thinking、ToolCall、Provider metadata、usage、Node ID 和内部 State 字段不得进入
+消息正文。失败和取消分别投影稳定 AgentRunError 或 Cancellation。
 
 取消 reconciliation 先原子 discard 来源属于取消祖先、目标属于真实后代且仍
 pending 的 AgentMessage；`cancelling → cancelled` 再在同一终态事务重新检查
@@ -334,7 +349,11 @@ Stopping check 与 pending next-step InboxMessage claim 同属该事务判断，
 
 ## 12. Archive 与 Delete
 
-Archive 要求 active_operation_id 为空且不存在 pending InboxMessage；提交 `archived_at=now`。归档后拒绝 send、accept 和 active node move。Unarchive 清空 archived_at。
+Archive 要求 active_operation_id 为空、不存在 pending InboxMessage，且全部 delegated
+descendant 都不存在非终态 Operation 或 pending InboxMessage；提交 `archived_at=now`。
+归档后拒绝自身 send、accept 和 active node move；delegated descendant 接受新消息时也
+必须确认祖先 Session 均未归档。Unarchive 清空 archived_at。该门槛保证 child 最终一定能
+向未归档 parent 持久化 settled 通知，不留下已归档 Parent 下的新后台执行。
 
 公共 delete 要求 Session 已归档、空闲、无 pending Inbox 且无 AgentDelegation。显式 `delete_session_tree` 可删除完整 child 子树，但要求所有目标均归档、空闲且根没有外部 parent Delegation。
 
@@ -367,7 +386,17 @@ ConversationSession.active_operation_id
 
 ## 14. Schema 与迁移
 
-目标 schema 为 SQLite v10。Runtime 最终只读写 v10 领域表，不保留 v9 双读/双写。迁移批次必须提供一次性、事务化的 v9 → v10 转换：
+当前 Runtime 只读写 SQLite v11，不保留 v10/v11 双读写。v10 → v11 事务迁移：
+
+1. 给 `agent_delegations` 增加 `child_package_version_id`；
+2. 旧 Delegation 使用其 parent Operation 的 `agent_package_version_id` 回填，因为 v10
+   合同只允许同 Package child；
+3. 校验 Package 存在且 agent_id 与 child Session 一致；
+4. 升级 InboxMessage source codec，使其接受 `agent_settled`；
+5. 不为已经终态的历史 child Operation 补发 settled 消息，避免升级时制造历史对话；
+6. 任一步失败回滚并保留 v10 备份。
+
+既有 v9 → v10 一次性转换规则保持为历史迁移来源：
 
 1. 将 active NamedReference 投影为 ConversationSession.active_node_id；
 2. 将 Node + ImmutableObject 压平为 ConversationNode；
@@ -388,3 +417,5 @@ ConversationSession.active_operation_id
 6. 多审批、Approval/Cancel 和 stopping check 并发不丢更新。
 7. Conversation 分叉与 1,000/10,000 Node 长分支查询计划通过基准。
 8. v10 中不存在 ImmutableObject、NamedReference、StorageCommit 和 ConversationEntry 生产路径。
+9. delegated child 的终态与 direct parent settled InboxMessage 原子成功或全部回滚；并行 child 按 Parent Inbox sequence 消费。
+10. v11 AgentDelegation 始终绑定精确 child Package，reload 和重启不能换成当前同名 Agent。

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pickel.conversations.agent_message import agent_message_to_dict
+from pickel.operations.delegation_result import project_delegation_result
 from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 
 
@@ -31,10 +31,18 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
         "type": "object",
         "properties": {
             "timed_out": {"type": "boolean"},
-            "agent": {"type": "object"},
-            "assistant_message": {"type": ["object", "null"]},
+            "child_session_id": {"type": "string"},
+            "status": {"type": "string"},
+            "result": {"type": ["array", "null"]},
+            "error": {"type": ["object", "null"]},
         },
-        "required": ["timed_out", "agent", "assistant_message"],
+        "required": [
+            "timed_out",
+            "child_session_id",
+            "status",
+            "result",
+            "error",
+        ],
         "additionalProperties": False,
     },
     replay_policy="safe",
@@ -58,9 +66,14 @@ async def wait_delegation(
     )
     payload = {
         "timed_out": timed_out,
-        "agent": snapshot.to_dict(),
-        "assistant_message": (
-            agent_message_to_dict(assistant) if assistant is not None else None
-        ),
+        "child_session_id": snapshot.child_session_id,
+        "status": snapshot.status,
     }
+    payload.update(
+        project_delegation_result(
+            status=snapshot.status,
+            assistant_message=assistant,
+            error=snapshot.error,
+        )
+    )
     return payload

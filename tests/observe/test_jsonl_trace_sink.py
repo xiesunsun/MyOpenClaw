@@ -283,8 +283,13 @@ def test_delta成功入队后开启新的拥塞周期(tmp_path: Path):
         TraceOptions(mode="full", queue_capacity=1),
         diagnostic_callback=diagnostics.append,
     )
-    reject = lambda _item: (False, None)
-    accept = lambda item: (True, None)
+
+    def reject(_item):
+        return (False, None)
+
+    def accept(item):
+        return (True, None)
+
     _replace_put(sink, reject)
     sink(_delta_event("call-1"))
     assert sink.flush() is True

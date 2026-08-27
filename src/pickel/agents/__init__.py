@@ -2,6 +2,7 @@
 
 from pickel.agents.agent_package import (
     AgentDefinition,
+    AgentDelegationPolicy,
     AgentPackageVersion,
     AgentRuntimePolicy,
     ExtensionVersion,
@@ -19,6 +20,7 @@ from pickel.agents.agent_package import (
 
 __all__ = [
     "AgentDefinition",
+    "AgentDelegationPolicy",
     "AgentPackageVersion",
     "AgentRuntimePolicy",
     "ExtensionVersion",

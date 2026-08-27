@@ -317,6 +317,7 @@ def test_parent_cancel_recurses_to_grandchild_and_discards_child_message(
     store.insert_delegation(
         AgentDelegation(
             "grandchild-session",
+            child_package.package_version_id,
             "child-operation",
             "child-step",
             "child-tool",

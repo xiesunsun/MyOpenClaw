@@ -98,7 +98,7 @@ class ModelContextGenerateTests(unittest.TestCase):
                 )
             )
         )
-        gemini = GeminiProvider(model="gemini-test")
+        gemini = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         gemini.client = SimpleNamespace(
             aio=SimpleNamespace(
                 models=SimpleNamespace(
