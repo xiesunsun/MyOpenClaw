@@ -25,7 +25,7 @@ class FileToolFormatter:
             )
         return self._bound(
             "\n".join(lines) if lines else "(empty directory)",
-            reference="repeat ls with a narrower path or a larger limit",
+            reference="repeat ls with a narrower path",
         )
 
     def format_glob_search(self, result: GlobSearchResult) -> str:
@@ -39,7 +39,7 @@ class FileToolFormatter:
             )
         return self._bound(
             "\n".join(lines) if lines else "(no matches)",
-            reference="repeat glob with a narrower pattern/path or a larger limit",
+            reference="repeat glob with a narrower pattern/path",
         )
 
     def format_grep_search(self, result: GrepSearchResult) -> str:
@@ -53,7 +53,7 @@ class FileToolFormatter:
             )
         return self._bound(
             "\n".join(lines) if lines else "(no matches)",
-            reference="repeat grep with a narrower pattern/path or a larger limit",
+            reference="repeat grep with a narrower pattern/path",
         )
 
     def format_file_read(self, result: FileReadResult) -> str:
@@ -85,4 +85,8 @@ class FileToolFormatter:
             f"\n[Output truncated; truncated=true; preview capped at "
             f"{DEFAULT_FILE_RESULT_MAX_CHARS} characters. Full result: {reference}.]"
         )
-        return text[: DEFAULT_FILE_RESULT_MAX_CHARS - len(marker)] + marker
+        prefix = text[: DEFAULT_FILE_RESULT_MAX_CHARS - len(marker)]
+        boundary = prefix.rfind("\n")
+        if boundary >= 0:
+            prefix = prefix[:boundary]
+        return prefix + marker

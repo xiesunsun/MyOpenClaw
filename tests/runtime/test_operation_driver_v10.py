@@ -112,6 +112,35 @@ class _RecoveredCompactionConversation(_Conversation):
         ]
 
 
+class _CompactionConversation(_Conversation):
+    def __init__(self):
+        self.nodes = [
+            ConversationNode(
+                node_id="node-1",
+                session_id="session-1",
+                parent_node_id=None,
+                content_type="agent_message",
+                content=UserMessage(),
+                created_at=datetime.now(timezone.utc),
+            )
+        ]
+
+    def list_active_branch_nodes(self, *, session_id):
+        return tuple(self.nodes)
+
+    def append_history_compaction(self, *, session_id, content):
+        node = ConversationNode(
+            node_id="compaction-1",
+            session_id=session_id,
+            parent_node_id=self.nodes[-1].node_id,
+            content_type="history_compaction",
+            content=content,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.nodes.append(node)
+        return node
+
+
 class _UsageConversation:
     def __init__(self, nodes, *, active_leaf):
         self.nodes = {node.node_id: node for node in nodes}
@@ -197,6 +226,10 @@ class _Provider:
             requested_model="model",
             body={"model": "model", "stream": True},
         )
+
+    async def count_context_tokens(self, context):
+        del context
+        return 0
 
     async def stream_prepared(self, prepared):
         del prepared
@@ -753,7 +786,7 @@ async def test_preflight_runs_on_final_context_before_model_request_intent():
     assert len(seen) == 1
     assert seen[0]["context"] == provider.contexts[0]
     assert seen[0]["provider"] is provider
-    assert seen[0]["effective_input_capacity"] is None
+    assert seen[0]["compaction_threshold"] is None
 
 
 @_run_async
@@ -765,7 +798,7 @@ async def test_preflight_compaction_signal_does_not_create_intent_or_provider_ca
 
         async def count_context_tokens(self, context):
             self.count_calls += 1
-            return 90
+            return 100
 
     provider = _CountingProvider()
     package = _loaded_package().version
@@ -787,10 +820,26 @@ async def test_preflight_compaction_signal_does_not_create_intent_or_provider_ca
     result = await driver.drive_operation("operation-1")
 
     assert result.status == "failed"
-    assert result.state.error.code == "history_compaction_worker_unavailable"
+    assert result.state.error.code == "history_compaction_unavailable"
     assert provider.count_calls == 1
     assert provider.calls == 0
     assert operations.state.current_step is None
+
+
+@_run_async
+async def test_unavailable_token_count_falls_back_and_continues_model_request():
+    class _UnavailableProvider(_Provider):
+        async def count_context_tokens(self, context):
+            del context
+            return None
+
+    provider = _UnavailableProvider([AssistantMessage(content=(TextBlock("unused"),))])
+    operations = _Operations(_queued_state())
+
+    result = await _driver(operations, provider).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert provider.calls == 1
 
 
 @_run_async
@@ -807,30 +856,35 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
     provider = _CountingProvider()
     package = _loaded_package().version
     package.model_policy = SimpleNamespace(
-        primary=SimpleNamespace(effective_input_token_limit=lambda: 1100),
+        primary=SimpleNamespace(effective_input_token_limit=lambda: 90),
         worker=object(),
     )
     operations = _Operations(_queued_state())
+    conversation = _CompactionConversation()
+
+    class _Generator:
+        async def generate(self, **kwargs):
+            compact_calls.append(kwargs)
+            return HistoryCompaction("summary", "node-1")
+
+    compact_calls = []
     driver = OperationDriver(
         operation_service=operations,
-        conversation_service=_Conversation(),
+        conversation_service=conversation,
         package_loader=lambda _: package,
         effects_resolver=lambda _: RuntimeEffects(provider=provider),
         model_call_service=_FakeModelCallService(operations),
         model_context_builder=_ContextBuilder(),
+        history_compaction_generator=_Generator(),
     )
-    compact_calls = []
-
-    async def compact(**kwargs):
-        compact_calls.append(kwargs)
-
-    driver._history_compaction.compact = compact
 
     result = await driver.drive_operation("operation-1")
 
     assert result.status == "failed"
     assert result.state.error.code == "history_compaction_no_progress"
     assert len(compact_calls) == 1
+    assert compact_calls[0]["preflight"].token_count == 90
+    assert conversation.nodes[-1].content == HistoryCompaction("summary", "node-1")
     assert provider.count_calls == 2
     assert provider.calls == 0
 
@@ -844,7 +898,7 @@ async def test_recovery_after_compaction_node_does_not_invoke_worker_again():
 
         async def count_context_tokens(self, context):
             self.count_calls += 1
-            return 90
+            return 100
 
     provider = _CountingProvider()
     package = _loaded_package().version
@@ -861,18 +915,10 @@ async def test_recovery_after_compaction_node_does_not_invoke_worker_again():
         model_call_service=_FakeModelCallService(operations),
         model_context_builder=_ContextBuilder(),
     )
-    compact_calls = []
-
-    async def compact(**kwargs):
-        compact_calls.append(kwargs)
-
-    driver._history_compaction.compact = compact
-
     result = await driver.drive_operation("operation-1")
 
     assert result.status == "failed"
     assert result.state.error.code == "history_compaction_no_progress"
-    assert compact_calls == []
     assert provider.count_calls == 1
     assert provider.calls == 0
 

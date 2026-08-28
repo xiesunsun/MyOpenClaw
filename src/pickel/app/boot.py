@@ -631,6 +631,7 @@ class Boot:
             max_input_tokens=model.max_input_tokens,
             max_output_tokens=model.max_output_tokens,
             context_window_tokens=model.context_window_tokens,
+            effect_rate=model.effect_rate if model.effect_rate is not None else 0.5,
             provider_options=options,
         )
 

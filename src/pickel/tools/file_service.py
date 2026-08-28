@@ -203,6 +203,25 @@ class WorkspaceFileService:
             truncated=truncated,
         )
 
+    def read_file_bytes(
+        self,
+        *,
+        path: str,
+        max_bytes: int | None = None,
+    ) -> tuple[str, bytes]:
+        """读取 Workspace 文件字节；仍由同一个路径策略完成授权。"""
+        file_path = self.access_policy.resolve_path(path, self.workspace_root)
+        self.access_policy.assert_file_readable(file_path)
+        if max_bytes is not None and (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or max_bytes < 1
+        ):
+            raise ValueError("max_bytes 必须为正整数或 None")
+        with file_path.open("rb") as handle:
+            data = handle.read() if max_bytes is None else handle.read(max_bytes)
+        return self._to_workspace_relative(file_path), data
+
     def _glob_with_ripgrep(
         self,
         *,

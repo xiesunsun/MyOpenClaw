@@ -229,7 +229,41 @@ class OpenAIChatCompletionsProvider(Provider):
         system = context.system.as_text()
         if system:
             result.append({"role": "system", "content": system})
-        result.extend(self._message(message) for message in context.messages)
+        index = 0
+        messages = context.messages
+        while index < len(messages):
+            message = messages[index]
+            if not isinstance(message, ToolResultMessage):
+                result.append(self._message(message))
+                index += 1
+                continue
+
+            artifacts: list[ArtifactBlock] = []
+            while index < len(messages) and isinstance(
+                messages[index], ToolResultMessage
+            ):
+                tool_result = messages[index]
+                assert isinstance(tool_result, ToolResultMessage)
+                result.append(self._message(tool_result))
+                artifacts.extend(
+                    block
+                    for block in tool_result.content
+                    if isinstance(block, ArtifactBlock)
+                )
+                index += 1
+            if artifacts:
+                result.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Images returned by the preceding tool calls.",
+                            },
+                            *(self._artifact(block) for block in artifacts),
+                        ],
+                    }
+                )
         return result
 
     def _message(self, message: AgentMessage) -> dict[str, Any]:
@@ -260,10 +294,14 @@ class OpenAIChatCompletionsProvider(Provider):
                 value["tool_calls"] = calls
             return value
         if isinstance(message, ToolResultMessage):
+            text = self._tool_result(message)
+            if any(isinstance(block, ArtifactBlock) for block in message.content):
+                marker = "[image result attached after this tool-result group]"
+                text = f"{text}\n{marker}" if text else marker
             return {
                 "role": "tool",
                 "tool_call_id": message.tool_call_id,
-                "content": self._tool_result(message),
+                "content": text,
             }
         raise TypeError(f"Chat Completions 不支持的消息: {type(message).__name__}")
 

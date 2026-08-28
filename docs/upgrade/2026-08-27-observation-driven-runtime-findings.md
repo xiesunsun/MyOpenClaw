@@ -137,16 +137,19 @@ Package/Tool/System 变化或一次明确的 HistoryCompaction，而不是固定
 flowchart TD
     T[完整 Conversation Tree] --> P[从最近 HistoryCompaction 投影]
     P --> C[构造候选 ModelContext]
-    C --> E[Provider 计算候选请求 token]
+    C --> E[精确计数 / usage 前缀锚 / 显式估算]
     E --> Q{达到 compaction threshold?}
     Q -->|否| I[提交 ModelRequestIntent]
     Q -->|是| H[请求生成 HistoryCompaction]
     H --> P
 ```
 
-Provider 在内部承担原生 count API、匹配 tokenizer 或可靠兼容实现的差异。Runtime 只消费最终
-计数，不使用 UTF-8 JSON 字节、字符数或固定倍数估算，也不建立独立 TokenCounter 层。计数能力
-不可用时产生明确的 preflight 不可用错误，不静默使用粗糙结果触发或跳过压缩。
+Provider 在内部承担原生 count API 或匹配 tokenizer 的精确能力。该能力不可用时，Runtime 从
+当前 ModelContext 中寻找最近一次成功 AssistantMessage：重建其请求前缀并核对
+`context_fingerprint`，匹配后使用 Provider usage 作为锚，只估算其后的新增消息；无可用锚时才
+对完整 Provider 可见语义做本地估算。来源必须标记为 `counted`、`anchor`、
+`anchor_plus_tail` 或 `estimated`，不得把估算伪装成精确值。仍不建立独立 TokenCounter、
+UsageAnchor 实体或持久化表。
 
 ```text
 effective_context_window = floor(context_window_tokens * effect_rate)
@@ -217,7 +220,8 @@ ModelCall，只适用于天然可寻址且确实超过单次可接受预算的�
 
 | Tool 形态 | 一次调用的默认结果 | 超限恢复 | 是否分页 |
 | --- | --- | --- | --- |
-| `read` | 足够大的连续行窗口 | 源路径 + 正确 `next_offset` | 是，工具原生可选 `offset/limit` |
+| `read` 文本 | 足够大的连续行窗口 | 源路径 + 首个省略完整行的 `next_offset`；单个超长行保留原行并提示定向读取 | 是，工具原生可选 `offset/limit` |
+| `read` 图片 | 一次返回既有 `ArtifactBlock`，字节保存在 Artifact/Blob | 重新读取原 Workspace 路径 | 否 |
 | `grep/glob/ls` | 有界、高信号结果 | 缩小 pattern/path；必要时稳定 spill 引用 | 否，不引入通用 cursor |
 | `bash` | 小结果完整；大结果 head/tail 或 tail | 真实完整输出文件 | 否 |
 | MCP/Web | 工具自身的结果数、正文预算 | 缩小查询或提取选中资源 | 由具体协议决定 |
@@ -328,7 +332,7 @@ event delivery
 | 11.1 | 修 Observation 口径与已知 projector/TraceReader 缺陷 | 样本 Session 的 E2E、unknown、Parent/Workflow 数值可复算 |
 | 11.2 | 补 model/tool/storage/context 时序 Span | 页面能分解总耗时，缺失值不显示为 0 |
 | 11.3 | 补 Multi-Agent 稳定 Context 与 Tool 描述 | Parent 无工作时进入 idle；Child 自动消息唤醒；无 `bash sleep` 轮询 |
-| 11.4 | 修正 token preflight：Provider 计数 + `effect_rate` 阈值，删除字节估算 | 请求计数与正式 Mapper 一致；阈值可复算；无固定安全常数 |
+| 11.4 | 修正 token preflight：精确计数优先、usage 锚兜底 + `effect_rate` 阈值 | 来源可见；无计数接口不阻断执行；阈值可复算；无固定安全常数 |
 | 11.5 | 只收敛 HistoryCompaction 组合接口；具体压缩策略后续单独设计 | 触发/生成/提交解耦；实验策略不成为合同 |
 | 11.6 | 按工具类型收敛大型结果，不建立通用分页 | 小结果完整；大结果高信号且可恢复；额外 ModelCall 只在确实缺证据时发生 |
 | 11.7 | Provider timeout/retry 内部治理 | attempt 可诊断；模型不接触 HTTP 参数；重试不重复 Agent Step |
@@ -354,17 +358,23 @@ Parent 明确知道 delegate 立即返回、Child 终态会自动投递并唤醒
 ModelRequestIntent 的三个 attempt 分别使用 `20s / 60s / 120s` deadline，全部失败即失败；
 首个输出后禁止自动重试。现有 1s/2s 退避或统一 timeout 若仍存在，属于待实施偏差。
 
-11.4 当前部分完成但不符合最终合同：正式请求已退出固定 5-turn Window，也已有 Provider
-`count_context_tokens()` 接缝；但代码仍在计数不可用时退回 UTF-8 JSON 字节上界，并且阈值尚未
-按 `effect_rate` 公式冻结。后续实施必须删除 Runtime 粗估算，再把容量计算收敛到冻结模型配置。
+11.4 已完成：`effect_rate` 已从配置冻结进 ModelVersion，阈值只按本节公式计算。
+Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)
+优先使用 Provider 原生计数接口；没有公开可靠计数端点的 OpenAI-compatible Chat Completions
+复用最近一次匹配前缀的 Provider usage 并只估算新增尾部，冷启动或前缀变化时明确标记为
+`estimated`。`/context` 与请求前检查复用同一规则，且只读命令不调用远程 count。
 
-11.5 当前存在可运行的实验实现但不验收其压缩策略。保留 HistoryCompaction 值、投影能力和窄
-生成接缝；worker 选择、历史范围、半阈值尾部预算、摘要 prompt 等都重新进入后续设计，不得因
-已有代码直接视为确定方案。原始树不删除、一次触发、重新 preflight 和无进展停止仍是护栏。
+11.5 已完成组合接缝收敛：删除按 JSON 字节选段、半阈值尾部预算、固定 worker/prompt 的实验
+生产实现；保留 `HistoryCompaction` 值、Projector 和可注入的 `HistoryCompactionGenerator`。
+Generator 只返回内容，OperationDriver 负责追加、重新 preflight 和无进展停止；未配置 Generator
+时明确失败，不静默裁剪，也不预设后续压缩策略。
 
-11.6 当前存在实验性输出标记：`read` 的路径/next offset、`ls/glob/grep` 的截断提示、`bash`
-完整文件引用、delegation 的 `omitted_chars`。后续按本节逐工具验收；不在这些字段之上增加通用
-分页层，也不把“已标记 truncated”误认为“完整结果已经对模型可恢复”。
+11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
+完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有
+`ArtifactService → ArtifactReference → ArtifactBlock → Provider` 链路，不在 ToolResult 中复制
+base64；`ls/glob/grep` 给出缩小查询的恢复提示且不切断完整记录；`bash` 保留 head/tail 并落
+完整 spill 文件；Delegation 明确 `omitted_chars`，权威终态仍在 Child Session。没有增加通用
+Page/Cursor/Result Manager、图片专用 Tool 或第二份 ToolResult DTO。
 
 每批只修改一个边界；不在观测修复中顺带实现 Eval、诊断器或自动调参。
 

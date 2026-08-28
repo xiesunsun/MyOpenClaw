@@ -52,6 +52,8 @@ def test_unwired_agent_run_progress_is_not_a_public_runtime_api() -> None:
         "pickel.model_calls.prepared",
         "pickel.observe.records",
         "pickel.tools.wait_delegation",
+        "pickel.context.window",
+        "pickel.runtime.history_compaction",
     ],
 )
 def test_retired_cross_layer_modules_do_not_return(retired_module: str) -> None:

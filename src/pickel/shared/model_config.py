@@ -1,3 +1,4 @@
+import math
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -19,12 +20,14 @@ class BaseModelConfig(BaseModel):
     max_output_tokens: int = 65536
     # 总上下文窗口（输入与输出之和）；与供应商独立输入上限不是同一概念。
     context_window_tokens: int | None = Field(default=None, ge=1)
+    # 模型表现较稳定的有效 Context 比例；由配置解析并冻结进 Package。
+    effect_rate: float = Field(default=0.5, gt=0, le=1)
     provider_options: dict[str, Any] = Field(default_factory=dict)
 
     def effective_input_token_limit(
         self, requested_output_tokens: int | None = None
     ) -> int | None:
-        """按总窗口和本次输出预留推导可用输入容量。
+        """按有效窗口和本次输出预留推导压缩阈值。
 
         ``max_input_tokens`` 只有在供应商明确给出独立输入硬上限时才填写。
         未知时仍可使用 ``context_window_tokens - output_reserve``，但不能把
@@ -39,7 +42,8 @@ class BaseModelConfig(BaseModel):
             raise ValueError("requested_output_tokens 不能小于 0")
         if self.context_window_tokens is None:
             return self.max_input_tokens
-        context_input = max(0, self.context_window_tokens - reserve)
+        effective_window = math.floor(self.context_window_tokens * self.effect_rate)
+        context_input = max(0, effective_window - reserve)
         if self.max_input_tokens is None:
             return context_input
         return min(self.max_input_tokens, context_input)

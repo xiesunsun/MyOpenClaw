@@ -182,7 +182,34 @@ def test_package_codec_persists_context_capacity() -> None:
         created_at=datetime.now(timezone.utc),
     )
     assert loaded.model_policy.primary.context_window_tokens == 1000000
+    assert loaded.model_policy.primary.effect_rate is None
+    assert loaded.model_policy.primary.effective_input_token_limit() == 998976
     assert loaded.content_dict() == content
+
+
+def test_package_codec_freezes_effect_rate_without_rewriting_old_packages() -> None:
+    old_content = _content()
+    old_content["model_policy"]["primary"]["context_window_tokens"] = 1000000
+    old = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(old_content),
+        content=old_content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert old.model_policy.primary.effect_rate is None
+    assert old.content_dict() == old_content
+
+    new_content = _content()
+    new_content["model_policy"]["primary"].update(
+        {"context_window_tokens": 1000000, "effect_rate": 0.5}
+    )
+    new = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(new_content),
+        content=new_content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert new.model_policy.primary.effect_rate == 0.5
+    assert new.model_policy.primary.effective_input_token_limit() == 498976
+    assert new.content_dict() == new_content
 
 
 def test_format_3_codec_freezes_delegation_policy_and_result_budget() -> None:

@@ -281,7 +281,8 @@ class AppConfigTests(unittest.TestCase):
 
             assert model_config.context_window_tokens == 1000000
             assert model_config.max_input_tokens is None
-            assert model_config.effective_input_token_limit(65536) == 934464
+            assert model_config.effect_rate == 0.5
+            assert model_config.effective_input_token_limit(65536) == 434464
 
     def test_context_window_must_exceed_output_budget(self) -> None:
         with self.assertRaisesRegex(
@@ -307,8 +308,29 @@ class AppConfigTests(unittest.TestCase):
             context_window_tokens=1_000_000,
         )
 
-        assert model.effective_input_token_limit() == 700_000
-        assert model.effective_input_token_limit(400_000) == 600_000
+        assert model.effective_input_token_limit() == 434_464
+        assert model.effective_input_token_limit(400_000) == 100_000
+
+    def test_effect_rate_is_configurable_and_validated(self) -> None:
+        model = ModelConfig(
+            provider="anthropic",
+            model="claude-test",
+            wire_protocol="anthropic-messages",
+            max_output_tokens=10_000,
+            context_window_tokens=100_000,
+            effect_rate=0.75,
+        )
+
+        assert model.effective_input_token_limit() == 65_000
+        for value in (0, -0.1, 1.1):
+            with self.assertRaisesRegex(ValueError, "effect_rate"):
+                ModelConfig(
+                    provider="anthropic",
+                    model="claude-test",
+                    wire_protocol="anthropic-messages",
+                    context_window_tokens=100_000,
+                    effect_rate=value,
+                )
 
     def test_resolve_model_config_defaults_temperature_to_none_when_omitted(
         self,

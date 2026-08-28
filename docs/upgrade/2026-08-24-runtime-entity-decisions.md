@@ -3279,18 +3279,22 @@ OperationDriver 先捕获 `leaf_node_id`，调用 `list_branch_nodes(session_id,
 
 ### 18.3 Token preflight 与 HistoryCompaction
 
-OperationDriver 每次准备 ModelRequest 前估算当前投影消息、Package system/tools 和为动态
-Contribution 保留的容量。未达到阈值时保持完整 append-only 消息；达到阈值时调用冻结
-Package 的 worker model 生成 HistoryCompaction，提交后沿同一活动分支重新投影。Provider
-不允许自行二次裁剪。
+OperationDriver 每次准备 ModelRequest 前检查最终 ModelContext。未达到阈值时保持完整
+append-only 消息；达到阈值时调用可注入的 `HistoryCompactionGenerator`，取得一个
+HistoryCompaction 内容值后通过 ConversationService 追加，再沿同一活动分支重新投影。
+Provider 不允许自行二次裁剪。
 
 ```text
-compaction_threshold = min(safety_threshold, quality_threshold)
+effective_context_window = floor(context_window_tokens * effect_rate)
+compaction_threshold = min(
+    max_input_tokens（已知时）,
+    effective_context_window - reserved_output_tokens,
+)
 ```
 
-`safety_threshold` 来自模型有效输入容量和输出保留量；模型容量未知时不能伪造安全阈值。
-`quality_threshold` 必须来自代表性 Agent Eval，数据不足时只执行容量保护。压缩前不动态重写
-旧 ToolResult；大型 Tool 输出在 Tool 合同处有界，并在 compaction epoch 一次性提炼。
+具体摘要模型、历史范围、压缩 Prompt、目标长度和失败重试由后续 Generator 实现决定；当前
+Runtime 不提供默认实验策略，也不把 Package worker 自动等同于压缩模型。压缩前不动态重写
+旧 ToolResult；大型 Tool 输出在 Tool 合同处有界，未来由 compaction epoch 一次性提炼。
 
 固定 `context_turn_window` 只属于迁移前实现，阶段 11.4 后删除，不保留双轨生产路径。
 

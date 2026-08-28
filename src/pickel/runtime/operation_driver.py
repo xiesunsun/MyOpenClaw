@@ -7,7 +7,6 @@ Operation，并严格执行 ``intent commit -> 外部副作用 -> 结果 commit`
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -18,15 +17,16 @@ from uuid import uuid4
 from pickel.agents.agent_package import AgentPackageVersion
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.context.model_context import ModelContext
+from pickel.context.context_usage import model_context_fingerprint
+from pickel.context.history_compaction import (
+    HistoryCompactionError,
+    HistoryCompactionGenerator,
+)
 from pickel.context.model_context_builder import (
     ContextContributions,
     ModelContextBuilder,
 )
 from pickel.context.projection import ConversationProjector
-from pickel.runtime.history_compaction import (
-    HistoryCompactionError,
-    HistoryCompactionService,
-)
 from pickel.context.token_preflight import (
     ContextCompactionRequired,
     preflight_model_context,
@@ -36,9 +36,9 @@ from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
 )
-from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
-from pickel.conversations.conversation_node import ConversationNode
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.events import BeforeRequestEvent, PreToolUseEvent
 from pickel.inbox.message import InboxMessage
@@ -112,33 +112,19 @@ async def _consume_runtime_event(
         await consumed
 
 
-def _effective_input_capacity(package: AgentPackageVersion) -> int | None:
-    """从冻结 primary ModelVersion 推导本次请求的有效输入容量。
-
-    旧测试/旧 Package 可能没有 model_policy；这种情况下保持 unknown，交由
-    preflight 继续记录估算值但不伪造输入上限。
-    """
+def _compaction_threshold(package: AgentPackageVersion) -> int | None:
+    """只从冻结 primary ModelVersion 读取本次请求的压缩阈值。"""
     model_policy = getattr(package, "model_policy", None)
     model = getattr(model_policy, "primary", None)
     if model is None:
         return None
     resolver = getattr(model, "effective_input_token_limit", None)
-    if callable(resolver):
-        try:
-            return resolver()
-        except (TypeError, ValueError):
-            return None
-    max_input = getattr(model, "max_input_tokens", None)
-    context_window = getattr(model, "context_window_tokens", None)
-    if context_window is None:
-        return max_input
-    if isinstance(context_window, bool) or not isinstance(context_window, int):
-        return max_input
-    reserve = getattr(model, "max_output_tokens", None)
-    if not isinstance(reserve, int) or reserve < 0:
-        return max_input
-    available = max(0, context_window - reserve)
-    return available if max_input is None else min(max_input, available)
+    if not callable(resolver):
+        return None
+    try:
+        return resolver()
+    except (TypeError, ValueError):
+        return None
 
 
 class OperationDriver:
@@ -165,6 +151,7 @@ class OperationDriver:
         sleep: Callable[[float], Awaitable[None]] | None = None,
         delegation_package_resolver: DelegationPackageResolver | None = None,
         allowed_tool_names: frozenset[str] | None = None,
+        history_compaction_generator: HistoryCompactionGenerator | None = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
@@ -188,11 +175,7 @@ class OperationDriver:
             service_store = getattr(model_call_service, "store", None)
             if service_store is not None:
                 send_gate = ModelCallSendGate(service_store, now=self._now)
-        self._history_compaction = HistoryCompactionService(
-            conversation_service=conversation_service,
-            model_calls=model_call_service,
-            send_gate=send_gate,
-        )
+        self._history_compaction_generator = history_compaction_generator
         self._model_call_send_gate = send_gate
         self._release_operation_package = release_operation_package
         self._context_builder = model_context_builder or ModelContextBuilder()
@@ -637,12 +620,12 @@ class OperationDriver:
             await preflight_model_context(
                 context=context,
                 provider=effects.provider,
-                effective_input_capacity=_effective_input_capacity(package),
+                compaction_threshold=_compaction_threshold(package),
             )
         except ContextCompactionRequired as required:
             if compaction_step_id == step.step_id:
                 return (
-                    self._fail_compaction(
+                    self._fail_preflight(
                         operation=operation,
                         state=state,
                         last_assistant=last_assistant,
@@ -656,7 +639,7 @@ class OperationDriver:
             )
             if branch_nodes and branch_nodes[-1].content_type == "history_compaction":
                 return (
-                    self._fail_compaction(
+                    self._fail_preflight(
                         operation=operation,
                         state=state,
                         last_assistant=last_assistant,
@@ -665,17 +648,40 @@ class OperationDriver:
                     ),
                     step.step_id,
                 )
+            generator = self._history_compaction_generator
+            if generator is None:
+                return (
+                    self._fail_preflight(
+                        operation=operation,
+                        state=state,
+                        last_assistant=last_assistant,
+                        code="history_compaction_unavailable",
+                        message=(
+                            "Context 已达到压缩阈值，但当前 Runtime 未配置 "
+                            "HistoryCompactionGenerator"
+                        ),
+                    ),
+                    step.step_id,
+                )
             try:
-                await self._history_compaction.compact(
+                content = await generator.generate(
                     session_id=operation.session_id,
                     nodes=branch_nodes,
-                    package=package,
-                    effects=effects,
-                    target_token_budget=max(1, (required.result.threshold or 1) // 2),
+                    model_context=context,
+                    preflight=required.result,
+                )
+                if not isinstance(content, HistoryCompaction):
+                    raise HistoryCompactionError(
+                        "history_compaction_invalid_result",
+                        "HistoryCompactionGenerator 必须返回 HistoryCompaction",
+                    )
+                self._conversations.append_history_compaction(
+                    session_id=operation.session_id,
+                    content=content,
                 )
             except HistoryCompactionError as exc:
                 return (
-                    self._fail_compaction(
+                    self._fail_preflight(
                         operation=operation,
                         state=state,
                         last_assistant=last_assistant,
@@ -684,11 +690,22 @@ class OperationDriver:
                     ),
                     step.step_id,
                 )
+            except Exception as exc:
+                return (
+                    self._fail_preflight(
+                        operation=operation,
+                        state=state,
+                        last_assistant=last_assistant,
+                        code="history_compaction_failed",
+                        message=f"HistoryCompaction 生成或提交失败: {exc}",
+                    ),
+                    step.step_id,
+                )
             return state, step.step_id
 
         intent = ModelRequestIntent(
             model_context=context,
-            context_fingerprint=_fingerprint(context),
+            context_fingerprint=model_context_fingerprint(context),
         )
         next_state = replace(
             state,
@@ -712,7 +729,7 @@ class OperationDriver:
             return refreshed, None
         raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
 
-    def _fail_compaction(
+    def _fail_preflight(
         self,
         *,
         operation: SessionOperation,
@@ -1511,10 +1528,6 @@ class OperationDriver:
         return next_state
 
 
-def _fingerprint(context: ModelContext) -> str:
-    return hashlib.sha256(context.to_json().encode("utf-8")).hexdigest()
-
-
 def _rejected_tool_call(
     block: ToolCallBlock,
     *,
@@ -1537,6 +1550,12 @@ def _rejected_tool_call(
 
 
 def _tool_result_text(message: ToolResultMessage) -> str:
-    return "\n".join(
-        block.text for block in message.content if isinstance(block, TextBlock)
-    )
+    parts: list[str] = []
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            parts.append(block.text)
+        elif isinstance(block, ArtifactBlock):
+            reference = block.artifact
+            label = block.alt_text or reference.display_name or "artifact"
+            parts.append(f"[artifact: {label} ({reference.media_type})]")
+    return "\n".join(parts)

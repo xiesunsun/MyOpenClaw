@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -130,6 +131,9 @@ class ModelVersion:
     required_secret_refs: tuple[SecretRef, ...]
     # 总上下文窗口（输入与输出之和）；None 表示没有可靠公开值。
     context_window_tokens: int | None = None
+    # None 只用于保持旧 Package 的 canonical hash 和历史容量语义；新 Builder
+    # 总会冻结解析后的值。
+    effect_rate: float | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -145,6 +149,8 @@ class ModelVersion:
                 raise ValueError("context_window_tokens 必须大于 0")
             if self.context_window_tokens <= self.max_output_tokens:
                 raise ValueError("context_window_tokens 必须大于 max_output_tokens")
+        if self.effect_rate is not None and not 0 < self.effect_rate <= 1:
+            raise ValueError("effect_rate 必须大于 0 且不大于 1")
         object.__setattr__(self, "provider_options", freeze_json(self.provider_options))
         object.__setattr__(
             self, "required_secret_refs", tuple(self.required_secret_refs)
@@ -153,7 +159,7 @@ class ModelVersion:
     def effective_input_token_limit(
         self, requested_output_tokens: int | None = None
     ) -> int | None:
-        """根据总窗口和本次输出预留推导可用输入容量。"""
+        """根据冻结有效窗口和本次输出预留推导压缩阈值。"""
         reserve = (
             self.max_output_tokens
             if requested_output_tokens is None
@@ -163,7 +169,10 @@ class ModelVersion:
             raise ValueError("requested_output_tokens 不能小于 0")
         if self.context_window_tokens is None:
             return self.max_input_tokens
-        context_input = max(0, self.context_window_tokens - reserve)
+        # 旧 Package 没有该字段，恢复时保留升级前使用完整窗口的语义。
+        rate = self.effect_rate if self.effect_rate is not None else 1.0
+        effective_window = math.floor(self.context_window_tokens * rate)
+        context_input = max(0, effective_window - reserve)
         if self.max_input_tokens is None:
             return context_input
         return min(self.max_input_tokens, context_input)
@@ -560,6 +569,8 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
     # 缺失字段的旧 Package 必须保持原 canonical hash；只有可靠能力值才写入。
     if model.context_window_tokens is not None:
         content["context_window_tokens"] = model.context_window_tokens
+    if model.effect_rate is not None:
+        content["effect_rate"] = model.effect_rate
     return content
 
 

@@ -4,6 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
+from pickel.conversations.content_blocks import ArtifactBlock
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.tools.base import ToolExecutionContext, ToolExecutionError
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.file_formatter import FileToolFormatter
@@ -19,11 +23,15 @@ from pickel.tools.file_tools import (
 )
 from pickel.tools.policy import FullAccessPathPolicy, WorkspacePathAccessPolicy
 from pickel.tools.services import ToolServices
+from pickel.tools.validation import validate_tool_output
 
 
 class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
     def _context(
-        self, workspace: Path, workspace_files: WorkspaceFileService | None = None
+        self,
+        workspace: Path,
+        workspace_files: WorkspaceFileService | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> ToolExecutionContext:
         return ToolExecutionContext(
             agent_id="Pickle",
@@ -34,7 +42,8 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
                 or WorkspaceFileService(
                     workspace_root=workspace,
                     access_policy=WorkspacePathAccessPolicy(),
-                )
+                ),
+                artifact_service=artifact_service,
             ),
         )
 
@@ -63,7 +72,75 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Output truncated", result)
         self.assertIn("truncated=true", result)
         self.assertIn("path=note.txt", result)
-        self.assertIn("offset=2", result)
+        self.assertNotIn("offset=2", result)
+        self.assertIn("first returned line exceeds", result)
+
+    async def test_read_tool_returns_image_as_artifact_block(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            image = b"\x89PNG\r\n\x1a\n" + b"image-payload"
+            (workspace / "chart.png").write_bytes(image)
+            artifact_service = ArtifactService(
+                artifact_store=InMemoryRuntimeStore(),
+                blob_store=InMemoryBlobStore(),
+            )
+            tool = ReadTool(FileToolFormatter())
+
+            result = await tool.execute(
+                {"path": "chart.png"},
+                self._context(
+                    workspace,
+                    artifact_service=artifact_service,
+                ),
+            )
+            rendered = tool.render(result)
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual("artifact", result["type"])
+        self.assertEqual("image/png", result["artifact"]["media_type"])
+        self.assertEqual("chart.png", result["artifact"]["display_name"])
+        self.assertEqual("chart.png", result["alt_text"])
+        self.assertIsNone(validate_tool_output(tool, result))
+        self.assertEqual(1, len(rendered))
+        self.assertIsInstance(rendered[0], ArtifactBlock)
+        self.assertEqual(
+            image, artifact_service.load_artifact_bytes(rendered[0].artifact)
+        )
+
+    async def test_read_tool_requires_artifact_service_for_image(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "chart.webp").write_bytes(b"RIFF\x10\x00\x00\x00WEBPimage")
+            tool = ReadTool(FileToolFormatter())
+
+            with self.assertRaisesRegex(ToolExecutionError, "ArtifactService"):
+                await tool.execute(
+                    {"path": "chart.webp"},
+                    self._context(workspace),
+                )
+
+    async def test_read_character_truncation_continues_at_first_omitted_line(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "note.txt").write_text(
+                "\n".join(f"{index}:" + "x" * 1_000 for index in range(80)),
+                encoding="utf-8",
+            )
+            tool = ReadTool(FileToolFormatter())
+            context = self._context(workspace)
+
+            first = await tool.execute({"path": "note.txt"}, context)
+
+        self.assertLessEqual(len(first), 50_000)
+        self.assertIn("truncated=true", first)
+        marker = "offset="
+        offset_start = first.index(marker) + len(marker)
+        offset_end = first.index(")", offset_start)
+        next_offset = int(first[offset_start:offset_end])
+        self.assertIn(f"{next_offset - 1}: ", first)
+        self.assertNotIn(f"{next_offset}: ", first)
 
     async def test_read_tool_supports_line_ranges(self) -> None:
         with TemporaryDirectory() as tmpdir:

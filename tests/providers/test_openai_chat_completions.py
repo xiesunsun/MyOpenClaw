@@ -8,13 +8,16 @@ import json
 import httpx
 import pytest
 
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.context.model_context import ModelContext, SystemContent, ToolDefinition
 from pickel.conversations.agent_message import (
     AssistantMessage,
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.conversations.content_blocks import ArtifactBlock, TextBlock, ToolCallBlock
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.shared.frozen_json import thaw_json
 from pickel.providers.stream import (
@@ -87,6 +90,64 @@ def test_snapshot_maps_full_context_and_tools() -> None:
         },
     ]
     assert snapshot["tools"][0]["function"]["name"] == "lookup"
+
+
+def test_tool_result_images_follow_complete_tool_result_group() -> None:
+    artifact_service = ArtifactService(
+        artifact_store=InMemoryRuntimeStore(),
+        blob_store=InMemoryBlobStore(),
+    )
+    reference = artifact_service.create_artifact(
+        data=b"\x89PNG\r\n\x1a\nimage",
+        media_type="image/png",
+        display_name="chart.png",
+    )
+    context = ModelContext(
+        system=SystemContent(),
+        messages=(
+            AssistantMessage(
+                (
+                    ToolCallBlock("call-1", "read", {"path": "chart.png"}),
+                    ToolCallBlock("call-2", "grep", {"pattern": "x"}),
+                )
+            ),
+            ToolResultMessage(
+                tool_call_id="call-1",
+                tool_name="read",
+                content=(ArtifactBlock(reference, alt_text="chart.png"),),
+            ),
+            ToolResultMessage(
+                tool_call_id="call-2",
+                tool_name="grep",
+                content=(TextBlock("match"),),
+            ),
+        ),
+    )
+    provider = OpenAIChatCompletionsProvider(
+        model="vision-model",
+        artifact_service=artifact_service,
+    )
+
+    messages = thaw_json(provider.prepare(context).body)["messages"]
+    asyncio.run(provider.client.aclose())
+
+    assert [message["role"] for message in messages] == [
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert messages[1]["tool_call_id"] == "call-1"
+    assert "image result attached" in messages[1]["content"]
+    assert messages[2] == {
+        "role": "tool",
+        "tool_call_id": "call-2",
+        "content": "match",
+    }
+    assert messages[3]["content"][1]["type"] == "image_url"
+    assert messages[3]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
 
 
 def test_stream_builds_provider_neutral_tool_call_and_usage() -> None:

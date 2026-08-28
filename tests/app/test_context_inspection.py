@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from pickel.app.runtime_host import RuntimeHost
@@ -111,7 +110,7 @@ def test_context_inspection_marks_uncommitted_context_as_preview(tmp_path, monke
     asyncio.run(host.shutdown())
 
 
-def test_context_inspection_never_uses_utility_model_call_as_context_source(
+def test_context_inspection_preview_does_not_read_past_model_calls(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("PICKEL_HOME", str(tmp_path / "home"))
@@ -122,10 +121,10 @@ def test_context_inspection_never_uses_utility_model_call_as_context_source(
     with patch.object(
         conversation.persistence_store,
         "list_model_calls",
-        return_value=(SimpleNamespace(purpose="title", operation_id=None),),
+        side_effect=AssertionError("preview 不应读取旧 ModelCall 请求"),
     ) as list_calls:
         inspection = asyncio.run(conversation.inspect_context())
 
     assert inspection.source == "preview"
-    list_calls.assert_called_once_with(session_id=conversation.session.session_id)
+    list_calls.assert_not_called()
     asyncio.run(host.shutdown())

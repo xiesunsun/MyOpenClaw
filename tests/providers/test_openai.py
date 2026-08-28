@@ -8,6 +8,8 @@ import json
 import httpx
 import pytest
 
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
 from pickel.context.model_context import (
     ModelContext,
     SystemContent,
@@ -19,10 +21,12 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
 )
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.shared.frozen_json import thaw_json
 from pickel.providers.stream import (
@@ -155,6 +159,76 @@ def test_snapshot_is_stateless_responses_request_with_full_context() -> None:
             "properties": {"query": {"type": "string"}},
         },
     }
+
+
+def test_tool_result_image_is_mapped_as_function_output_content() -> None:
+    artifact_service = ArtifactService(
+        artifact_store=InMemoryRuntimeStore(),
+        blob_store=InMemoryBlobStore(),
+    )
+    reference = artifact_service.create_artifact(
+        data=b"\x89PNG\r\n\x1a\nimage",
+        media_type="image/png",
+        display_name="chart.png",
+    )
+    context = ModelContext(
+        system=SystemContent(),
+        messages=(
+            AssistantMessage((ToolCallBlock("call-1", "read", {"path": "chart.png"}),)),
+            ToolResultMessage(
+                tool_call_id="call-1",
+                tool_name="read",
+                content=(ArtifactBlock(reference, alt_text="chart.png"),),
+            ),
+        ),
+    )
+    provider = OpenAIResponsesProvider(
+        model="vision-model",
+        artifact_service=artifact_service,
+    )
+
+    output = thaw_json(provider.prepare(context).body)["input"][1]["output"]
+    asyncio.run(provider.client.aclose())
+
+    assert output[0]["type"] == "input_image"
+    assert output[0]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_count_context_tokens_uses_responses_input_tokens_request_shape() -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(
+            200,
+            json={"object": "response.input_tokens", "input_tokens": 123},
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://example.test/v1/",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OpenAIResponsesProvider(
+        model="gpt-test",
+        max_output_tokens=128,
+        provider_options={"reasoning_effort": "medium"},
+        client=client,
+    )
+
+    count = asyncio.run(provider.count_context_tokens(_context()))
+    asyncio.run(client.aclose())
+
+    assert count == 123
+    assert seen[0][0] == "/v1/responses/input_tokens"
+    payload = seen[0][1]
+    assert payload["model"] == "gpt-test"
+    assert payload["instructions"] == "system"
+    assert payload["input"]
+    assert payload["tools"]
+    assert payload["reasoning"] == {"effort": "medium"}
+    assert "stream" not in payload
+    assert "store" not in payload
+    assert "max_output_tokens" not in payload
 
 
 def test_stream_and_generate_share_response_parser() -> None:

@@ -254,6 +254,7 @@ class AgentPackageBuilder:
             max_input_tokens=config.max_input_tokens,
             max_output_tokens=config.max_output_tokens,
             context_window_tokens=config.context_window_tokens,
+            effect_rate=config.effect_rate,
             provider_options=scan.value,
             provider_implementation=ImplementationRef("provider", config.wire_protocol),
             required_secret_refs=tuple(refs),

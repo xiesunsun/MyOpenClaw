@@ -603,9 +603,10 @@ Prompt 优化、Benchmark 编排或新的 HTML 报告。`ModelRequestIntent` 继
 延迟问题，统一按 [`观测驱动 Runtime 评审结论`](./2026-08-27-observation-driven-runtime-findings.md)
 的 11.1–11.7 小批次继续实施；不恢复固定 5-turn Window，不增加 Child 等待状态。
 
-当前状态（2026-08-28）：11.1–11.4 已完成；11.5 HistoryCompaction 与 11.6 大型
-Tool Result 虽已有实验实现，但设计合同尚未与维护者验收，冻结在当前行为，不标记完成；
-11.7 仅有基础 attempt 机制，等待简单重试时序定案。
+当前状态（2026-08-28）：11.1–11.6 已完成。11.5 只保留可注入
+`HistoryCompactionGenerator` 接缝，未内置历史选择和摘要策略；11.6 已按工具资源形态完成大型
+结果验收，`read` 图片复用已有 Artifact/多模态 Provider 链路，且未增加通用分页或图片专用
+Tool。11.7 仅有基础 attempt 机制，等待简单重试时序定案。
 
 进入 11.5 前已完成一次等价架构收敛：`OperationDriver._drive_operation` 按持久化阶段
 拆分；`AgentRunStateMachine` 归 `operations`；模板加载归 `templates`；

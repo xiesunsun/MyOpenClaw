@@ -98,6 +98,28 @@ class OpenAIResponsesProvider(Provider):
             body=body,
         )
 
+    async def count_context_tokens(self, context: ModelContext) -> int:
+        """通过 Responses 原生 input_tokens 端点计算同一语义请求。"""
+        request = self._build_create_request(context)
+        accepted = {
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "reasoning",
+            "tools",
+        }
+        payload = {key: value for key, value in request.items() if key in accepted}
+        response = await self.client.post("responses/input_tokens", json=payload)
+        response.raise_for_status()
+        value = response.json()
+        if not isinstance(value, Mapping):
+            raise TypeError("OpenAI input_tokens 响应必须是 JSON object")
+        count = value.get("input_tokens")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("OpenAI input_tokens 响应缺少合法 input_tokens")
+        return count
+
     async def stream_prepared(
         self, prepared: PreparedModelCall
     ) -> AsyncIterator[StreamDelta]:

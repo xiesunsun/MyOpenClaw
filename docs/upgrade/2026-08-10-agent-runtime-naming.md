@@ -150,7 +150,8 @@ ConversationProjector
     Conversation Tree → Conversation Messages
 
 OperationDriver token preflight
-    用 Provider 对候选请求计数；超过有效输入阈值时请求 HistoryCompaction 后重新投影
+    精确计数优先；不可用时复用 Provider usage 前缀锚并估算新增尾部
+    超过有效输入阈值时请求 HistoryCompaction 后重新投影
 
 RuntimeEffects
     Conversation Messages → Recall/Hook ContextContributions
@@ -165,7 +166,7 @@ Provider Request Mapper
 | 名称 | 唯一职责 |
 | --- | --- |
 | `ConversationProjector` | 沿固定 leaf 投影 AgentMessage 和 HistoryCompaction |
-| `OperationDriver` token preflight | 每次请求前组合 Provider token count 与冻结模型容量，只决定是否需要压缩；不估算、不生成摘要 |
+| `OperationDriver` token preflight | 每次请求前按精确计数、usage 锚或显式估算得到 Context 占用，并与冻结模型容量比较；不生成摘要 |
 | `HistoryCompactionGenerator` | 将选定历史生成一个 `HistoryCompaction` 内容值；不决定阈值、不提交节点、不重新投影 |
 | `ContextContributions` | Recall/Hook 返回的深度不可变追加数据 |
 | `ModelContextBuilder` | 创建唯一 Provider-neutral ModelContext |
@@ -182,9 +183,13 @@ OperationDriver 在 Intent 提交前编排。
 不同，但不得改变这三段的语义顺序；工具定义和稳定 system 内容必须先于只追加的消息历史。
 未来动态 Context 注入如何避免破坏稳定前缀另行设计，当前合同不为尚不存在的动态来源增加层级。
 
-候选请求 token 只由对应 Provider 的 `count_context_tokens()` 负责。Provider 必须复用与正式
-请求相同的 Mapper 语义，并在内部选择原生 count API、匹配 tokenizer 或其他可靠实现；
-Runtime 不使用 UTF-8、JSON 字节数或字符数猜测 token，也不引入第二套 Token Counter。
+候选请求 token 优先由对应 Provider 的 `count_context_tokens()` 精确计算。Provider 必须复用与
+正式请求相同的 Mapper 语义，并在内部选择原生 count API 或匹配 tokenizer。精确计数不可用时，
+Runtime 复用当前消息历史中最近一次仍匹配完整请求前缀的 Provider usage，只估算该响应之后新增的
+消息尾部；Package、System、Tools、消息前缀或 Hook 发生变化时锚自动失效，明确退回完整本地估算。
+本地估算只操作 Provider 可见的 system/messages/tool input schema，不把持久化 metadata、
+`output_schema` 或整个 RequestContent UTF-8 字节数当作 token。该逻辑复用现有 `ContextUsage`，
+不引入 TokenCounter、UsageAnchor 实体或新持久化结构。
 
 自动压缩的容量计算只使用冻结模型配置：
 
@@ -197,8 +202,8 @@ compaction_threshold = min(
 ```
 
 `effect_rate` 是可配置模型策略，初始值为 `0.5`，不硬编码进 Driver；不再额外减固定
-`1024` 或其他无法解释的安全常数。Provider 无法给出可靠计数时返回明确不可用错误，Runtime
-不得静默退回粗糙估算。
+`1024` 或其他无法解释的安全常数。Provider 无法给出精确计数时必须显式进入
+`anchor`、`anchor_plus_tail` 或 `estimated` 路径，不能伪装成 `counted`。
 
 HistoryCompaction 的触发、生成和提交保持三个接缝：token preflight 只触发，
 `HistoryCompactionGenerator` 只产出内容，OperationDriver 通过 ConversationService 追加节点并
@@ -210,9 +215,10 @@ Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedMo
 Builder 结果，只能在 Intent 提交前提供受限 ContextContributions。
 
 `/context` 是只读视图：当前 Step 有 ModelRequestIntent 时直接展示其中已提交的
-精确 ModelContext，source 为 `model_request_intent`；没有 Intent 时才执行不含
-Recall/Hook/draft input 的纯 preview，source 为 `preview`。preview 不能伪装成
-实际请求，也不能为了检查而触发外部副作用。
+精确 ModelContext，source 为 `model_request_intent`；没有 Intent 时投影如果现在进入下一
+ModelStep 将使用的纯 preview，source 为 `preview`，不回退展示上一条 ModelCall 请求。
+占用量与 token preflight 复用同一 usage 锚和估算规则，但 `/context` 不为检查而调用远程 count、
+Recall、Hook 或其他外部副作用。
 
 ## 7. Tool、Approval 与 HostCall
 

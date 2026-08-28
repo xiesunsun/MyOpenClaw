@@ -316,8 +316,9 @@ def test_builder_freezes_model_context_capacity(tmp_path: Path) -> None:
 
     model = package.model_policy.primary
     assert model.context_window_tokens == 200000
+    assert model.effect_rate == 0.5
     assert model.max_input_tokens is None
-    assert model.effective_input_token_limit(4096) == 195904
+    assert model.effective_input_token_limit(4096) == 95904
 
 
 def test_builder_uses_loaded_extension_version_instead_of_config_guess(

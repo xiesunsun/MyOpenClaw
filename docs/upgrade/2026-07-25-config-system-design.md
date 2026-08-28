@@ -317,8 +317,8 @@ flowchart LR
 
 CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
 
-下例是目标解析结果。项目文件可以省略默认的 `effect_rate=0.5`，但 Package Builder 必须把
-解析后的值冻结进 ModelVersion；当前代码尚未实现该字段，属于后续 11.4 实施范围。
+下例是目标解析结果。项目文件可以省略默认的 `effect_rate=0.5`，Package Builder 会把
+解析后的值冻结进 ModelVersion。
 
 ```json
 {

@@ -109,6 +109,10 @@ class _AnthropicContractProvider(Provider):
             },
         )
 
+    async def count_context_tokens(self, context):
+        del context
+        return 0
+
     async def stream_prepared(self, prepared):
         assert prepared.api_kind == "anthropic-messages"
         messages = prepared.body["messages"]

@@ -10,6 +10,10 @@ from pickel.context.model_context import (
     model_context_to_json,
 )
 from pickel.context.model_context_builder import ContextContributions
+from pickel.context.history_compaction import (
+    HistoryCompactionError,
+    HistoryCompactionGenerator,
+)
 from pickel.context.recall import Recall
 from pickel.context.session_recall import (
     SessionRecallProvider,
@@ -17,10 +21,11 @@ from pickel.context.session_recall import (
     SessionRecallSnippet,
     render_session_recall,
 )
-from pickel.context.window import group_message_units
 
 __all__ = [
     "ContextContributions",
+    "HistoryCompactionError",
+    "HistoryCompactionGenerator",
     "ModelContext",
     "Recall",
     "SessionRecallProvider",
@@ -29,7 +34,6 @@ __all__ = [
     "SystemContent",
     "SystemSection",
     "ToolDefinition",
-    "group_message_units",
     "model_context_from_dict",
     "model_context_to_dict",
     "model_context_to_json",

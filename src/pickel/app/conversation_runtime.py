@@ -32,7 +32,6 @@ from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.operations.operation_service import OperationService
-from pickel.model_calls.service import ModelCallService
 from pickel.runtime.conversation_output_bus import ConversationOutputBus
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_bus import RuntimeBus
@@ -491,26 +490,6 @@ class ConversationRuntime:
                 source = "model_request_intent"
 
         if context is None:
-            calls = tuple(
-                call
-                for call in self._persistence_store.list_model_calls(
-                    session_id=self._session.session_id
-                )
-                if call.purpose == "agent_step"
-            )
-            if operation_id is not None:
-                current_calls = tuple(
-                    call for call in calls if call.operation_id == operation_id
-                )
-                calls = current_calls or calls
-            if calls:
-                request = ModelCallService(self._persistence_store).request_content(
-                    calls[-1]
-                )
-                context = request.model_context
-                source = "model_call"
-
-        if context is None:
             messages = ConversationProjector().project_conversation_messages(nodes)
             visible = messages
             context = ModelContextBuilder().build_model_context(
@@ -534,18 +513,23 @@ class ConversationRuntime:
             if isinstance(block, ToolCallBlock)
         )
         version = self._loaded_agent_package.version
+        primary_model = version.model_policy.primary
+        context_limit = primary_model.effective_input_token_limit()
+        usage = estimate_context_usage(
+            context,
+            model_label=(f"{primary_model.provider} / " f"{primary_model.model}"),
+            max_input_tokens=context_limit,
+        )
+        usage_notes = {
+            "anchor": "最近一次 Provider usage；当前 Context 无新增尾部",
+            "anchor_plus_tail": "最近一次 Provider usage + 新增消息估算",
+            "estimated": "暂无适用 Provider usage；使用本地估算",
+        }
         return ContextInspection(
-            usage=estimate_context_usage(
-                context,
-                model_label=(
-                    f"{version.model_policy.primary.provider} / "
-                    f"{version.model_policy.primary.model}"
-                ),
-                max_input_tokens=version.model_policy.primary.max_input_tokens,
-            ),
+            usage=usage,
             last_turn=None,
             session_total=None,
-            note="本地字符估算；实际用量以 Provider 响应为准",
+            note=usage_notes.get(usage.total_source),
             turns=sum(1 for message in context.messages if message.role == "user"),
             tool_calls=tool_calls,
             compactions=sum(
