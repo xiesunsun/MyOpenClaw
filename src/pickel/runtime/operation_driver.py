@@ -391,19 +391,10 @@ class OperationDriver:
         state = prepared_call.state
         retry_after = prepared_call.retry_after_attempt
         if retry_after is not None:
-            delay_ms = min(
-                getattr(
-                    package.runtime_policy,
-                    "model_request_retry_initial_delay_ms",
-                    1000,
-                )
-                * (2 ** (retry_after - 1)),
-                getattr(
-                    package.runtime_policy,
-                    "model_request_retry_max_delay_ms",
-                    4000,
-                ),
-            )
+            # attempt 间递增退避；超出退避表长度时以最后一项封顶。
+            # 旧 Package 的退避表已在解码时按历史公式合成，这里只有单一取值路径。
+            delays = package.runtime_policy.model_request_retry_delays_ms
+            delay_ms = delays[min(retry_after - 1, len(delays) - 1)]
             await self._sleep(delay_ms / 1000)
 
         gate = self._model_call_send_gate

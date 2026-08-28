@@ -66,8 +66,11 @@ class AgentRuntimePolicy:
     context_turn_window: int | None = None
     max_delegation_depth: int = 3
     model_request_max_attempts: int = 3
+    # 仅用于复现 format 2/3 冻结 Package 的 canonical hash；运行时不再读取。
     model_request_retry_initial_delay_ms: int = 1000
     model_request_retry_max_delay_ms: int = 4000
+    # attempt 间递增退避（毫秒）；超出长度时以最后一项封顶。
+    model_request_retry_delays_ms: tuple[int, ...] = (20000, 60000, 120000)
     max_parallel_model_requests: int = 2
     delegation_result_max_chars: int = 8000
 
@@ -89,6 +92,15 @@ class AgentRuntimePolicy:
             < self.model_request_retry_initial_delay_ms
         ):
             raise ValueError("模型请求重试上限不能小于初始延迟")
+        if not self.model_request_retry_delays_ms:
+            raise ValueError("model_request_retry_delays_ms 不能为空")
+        if any(delay < 0 for delay in self.model_request_retry_delays_ms):
+            raise ValueError("model_request_retry_delays_ms 不能包含负数")
+        object.__setattr__(
+            self,
+            "model_request_retry_delays_ms",
+            tuple(self.model_request_retry_delays_ms),
+        )
         if self.max_parallel_model_requests < 1:
             raise ValueError("max_parallel_model_requests 必须大于 0")
         if self.delegation_result_max_chars < 0:
@@ -400,8 +412,8 @@ def decode_agent_package_content(
     *, package_version_id: str, content: Mapping[str, Any], created_at: datetime
 ) -> AgentPackageVersion:
     """解码当前格式；旧格式必须经过显式 ``decode_legacy_agent_package``。"""
-    if int(content.get("format_version", 0)) not in {1, 2, 3}:
-        raise ValueError("只支持 AgentPackageVersion.format_version=1/2/3")
+    if int(content.get("format_version", 0)) not in {1, 2, 3, 4}:
+        raise ValueError("只支持 AgentPackageVersion.format_version=1/2/3/4")
     return _version_from_target_content(content, created_at, package_version_id)
 
 
@@ -481,6 +493,18 @@ def _version_from_target_content(
             raise ValueError("format 3 缺少 delegation_result_max_chars")
         if "delegation_policy" not in content:
             raise ValueError("format 3 缺少 delegation_policy")
+    if format_version >= 4:
+        if "model_request_retry_delays_ms" not in runtime_policy:
+            raise ValueError("format 4 缺少 model_request_retry_delays_ms")
+    else:
+        # format 2/3 冻结的旧退避字段只用于复现 canonical hash；运行时行为由
+        # 按旧指数公式合成的退避表承载，保证旧 Package 恢复后语义不变。
+        initial = int(runtime_policy.get("model_request_retry_initial_delay_ms", 1000))
+        maximum = int(runtime_policy.get("model_request_retry_max_delay_ms", 4000))
+        attempts = int(runtime_policy.get("model_request_max_attempts", 3))
+        runtime_policy["model_request_retry_delays_ms"] = [
+            min(initial * (2**n), maximum) for n in range(attempts)
+        ]
     policy = dict(content["model_policy"])
     delegation_policy = (
         _delegation_policy_from_dict(content["delegation_policy"])
@@ -597,15 +621,22 @@ def _runtime_policy_dict(
         content.update(
             {
                 "model_request_max_attempts": policy.model_request_max_attempts,
-                "model_request_retry_initial_delay_ms": (
-                    policy.model_request_retry_initial_delay_ms
-                ),
-                "model_request_retry_max_delay_ms": (
-                    policy.model_request_retry_max_delay_ms
-                ),
                 "max_parallel_model_requests": policy.max_parallel_model_requests,
             }
         )
+        # 仅用于复现 format 2/3 冻结 Package 的 canonical hash；format 4 起由
+        # model_request_retry_delays_ms 取代，运行时不再读取。
+        if format_version <= 3:
+            content["model_request_retry_initial_delay_ms"] = (
+                policy.model_request_retry_initial_delay_ms
+            )
+            content["model_request_retry_max_delay_ms"] = (
+                policy.model_request_retry_max_delay_ms
+            )
+        if format_version >= 4:
+            content["model_request_retry_delays_ms"] = list(
+                policy.model_request_retry_delays_ms
+            )
     if format_version >= 3:
         content["delegation_result_max_chars"] = policy.delegation_result_max_chars
     return content

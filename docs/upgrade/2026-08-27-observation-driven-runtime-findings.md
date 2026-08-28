@@ -252,9 +252,13 @@ provider/model fallback policy
 低层 attempt 进入 ModelCall、Trace 和开发者观测；模型只看到最终成功响应，或策略耗尽后的稳定
 错误。模型不能控制 HTTP deadline。
 
-当前临时重试合同保持简单：同一 ModelRequestIntent 最多三个 attempt，各自 deadline 为
-`20s / 60s / 120s`；全部失败即稳定失败。首个模型输出后仍禁止自动重试，避免重复流式内容。
-本批不增加复杂 backoff、模型可控 deadline 或自动 fallback。
+当前重试合同保持简单：同一 ModelRequestIntent 最多三个 attempt；attempt 间使用
+`20s / 60s / 120s` 递增退避等待（由冻结 Package 的 `model_request_retry_delays_ms`
+承载，format 4 起冻结），全部失败即稳定失败。单次 attempt 的 connect/首字节/流空闲
+超时继续由三种 wire 的底层 HTTP/SDK timeout 负责，模型不接触这些参数。首个模型输出后
+仍禁止自动重试，避免重复流式内容。本批不增加复杂 backoff、模型可控 deadline 或自动
+fallback。format 2/3 冻结 Package 在解码时按历史 1s/2s/4s 指数公式合成退避表，恢复
+语义不变。
 
 ### 4.8 模型输出预算暂不收紧
 
@@ -354,9 +358,11 @@ Parent 明确知道 delegate 立即返回、Child 终态会自动投递并唤醒
 正常结束 Operation 并 idle，不使用 `bash sleep`、文件或 `list_agents` 轮询，
 不新增 Child 等待状态。
 
-11.7 当前只完成基础 attempt 边界，尚未验收完成。目标临时合同是同一
-ModelRequestIntent 的三个 attempt 分别使用 `20s / 60s / 120s` deadline，全部失败即失败；
-首个输出后禁止自动重试。现有 1s/2s 退避或统一 timeout 若仍存在，属于待实施偏差。
+11.7 已完成：重试退避定为 attempt 间 `20s / 60s / 120s` 递增等待，由冻结 Package
+`model_request_retry_delays_ms`（format 4）承载；format 2/3 冻结 Package 在解码时按
+历史 1s/2s/4s 指数公式合成退避表，恢复语义不变。单次 attempt 超时维持底层
+HTTP/SDK timeout；首个输出后禁止自动重试；attempt 复用同一 ModelRequestIntent 并各自
+独立持久化 ModelCall。
 
 11.4 已完成：`effect_rate` 已从配置冻结进 ModelVersion，阈值只按本节公式计算。
 Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)

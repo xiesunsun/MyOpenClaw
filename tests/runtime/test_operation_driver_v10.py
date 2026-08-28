@@ -1053,7 +1053,11 @@ def _loaded_package(
         behavior_instruction="behavior",
         delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
         skills=(),
-        runtime_policy=SimpleNamespace(max_model_steps=8, context_turn_window=8),
+        runtime_policy=SimpleNamespace(
+            max_model_steps=8,
+            context_turn_window=8,
+            model_request_retry_delays_ms=(20000, 60000, 120000),
+        ),
         tools=(
             SimpleNamespace(
                 name=tool_name,
@@ -1218,7 +1222,7 @@ async def test_retryable_provider_failure_reuses_intent_and_counts_real_attempts
 
     assert result.status == "succeeded"
     assert provider.calls == 3
-    assert delays == [1.0, 2.0]
+    assert delays == [20.0, 60.0]
     attempts = [
         state.current_step.request_attempt
         for state, _ in operations.transition_calls

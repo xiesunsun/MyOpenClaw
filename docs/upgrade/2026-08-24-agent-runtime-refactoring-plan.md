@@ -136,7 +136,7 @@ OperationDriver
 | 9.6 Multi-Agent 端到端验收 | 完成 | 并行 child 按实际完成顺序投递、重启恢复、report/send 方向、跨 Agent Package 和多层权限均有合同测试；Provider live smoke 通过 | — |
 | 10.1–10.4 ModelCall 可靠数据底座 | 完成 | SQLite v12、内容寻址存储、三种 Provider Mapper、发送 Gate、流式聚合、恢复与失败收敛已接通；utility/worker 基础链有双 Store 全链合同测试 | title/history-compaction 产品功能尚未启用，不属于本阶段新增范围 |
 | 11.2 观测时序 Span | 完成 | context、semaphore wait、ModelCall 内容写入与 prepare/complete 事务、tool execute、event delivery 均在真实边界发射窄 Span；Trace projector 暴露对应聚合 | Provider generation/first output 继续读取 ModelCall 时间事实；连接内部不可测边界不造零值 |
-| 11.7 Provider timeout/retry 内部治理 | 完成 | 共同错误分类、默认 3 次 attempt、1s/2s 指数退避（上限 4s）及首个输出后禁止重试；attempt 复用单一 ModelRequestIntent 并独立持久化 ModelCall | connect/首字节/流空闲由三种 wire 的底层 HTTP/SDK timeout 负责；无独立 total deadline 事实 |
+| 11.7 Provider timeout/retry 内部治理 | 完成 | 共同错误分类、默认 3 次 attempt、attempt 间 20s/60s/120s 递增退避（format 4 冻结 `model_request_retry_delays_ms`）及首个输出后禁止重试；attempt 复用单一 ModelRequestIntent 并独立持久化 ModelCall | connect/首字节/流空闲由三种 wire 的底层 HTTP/SDK timeout 负责；无独立 total deadline 事实 |
 
 当前验收基线：全量测试为 `1070 passed, 4 skipped`；Ruff、Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果。阶段 10 已增加 SQLite v12 ModelCall、可靠内容存储、三种 Provider prepare/发送门禁、流式聚合和崩溃恢复，并移除受支持 Provider 的 `generate/stream` 绕过入口。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
 
@@ -603,10 +603,12 @@ Prompt 优化、Benchmark 编排或新的 HTML 报告。`ModelRequestIntent` 继
 延迟问题，统一按 [`观测驱动 Runtime 评审结论`](./2026-08-27-observation-driven-runtime-findings.md)
 的 11.1–11.7 小批次继续实施；不恢复固定 5-turn Window，不增加 Child 等待状态。
 
-当前状态（2026-08-28）：11.1–11.6 已完成。11.5 只保留可注入
+当前状态（2026-08-28）：11.1–11.7 已完成。11.5 只保留可注入
 `HistoryCompactionGenerator` 接缝，未内置历史选择和摘要策略；11.6 已按工具资源形态完成大型
 结果验收，`read` 图片复用已有 Artifact/多模态 Provider 链路，且未增加通用分页或图片专用
-Tool。11.7 仅有基础 attempt 机制，等待简单重试时序定案。
+Tool。11.7 重试退避为 attempt 间 `20s / 60s / 120s` 递增等待，由 format 4 冻结的
+`model_request_retry_delays_ms` 承载；format 2/3 冻结 Package 解码时按历史 1s/2s/4s
+指数公式合成退避表，恢复语义不变。
 
 进入 11.5 前已完成一次等价架构收敛：`OperationDriver._drive_operation` 按持久化阶段
 拆分；`AgentRunStateMachine` 归 `operations`；模板加载归 `templates`；

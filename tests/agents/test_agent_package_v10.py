@@ -242,6 +242,73 @@ def test_format_3_codec_freezes_delegation_policy_and_result_budget() -> None:
     assert loaded.content_dict() == content
 
 
+def test_format_4_codec_freezes_retry_backoff_delays() -> None:
+    content = _content()
+    content["format_version"] = 4
+    content["runtime_policy"].update(
+        {
+            "model_request_max_attempts": 3,
+            "model_request_retry_delays_ms": [20000, 60000, 120000],
+            "max_parallel_model_requests": 2,
+            "delegation_result_max_chars": 1234,
+        }
+    )
+    content["delegation_policy"] = {
+        "default_agent_id": "Pickle",
+        "allowed_agent_ids": ["Pickle"],
+    }
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    assert loaded.format_version == 4
+    assert loaded.runtime_policy.model_request_retry_delays_ms == (
+        20000,
+        60000,
+        120000,
+    )
+    assert loaded.content_dict() == content
+
+
+def test_format_3_hash_preserved_and_backoff_delays_synthesized() -> None:
+    """旧冻结 Package 的 hash 必须逐字节复现，运行时退避按历史公式合成。"""
+    content = _content()
+    content["format_version"] = 3
+    content["runtime_policy"].update(
+        {
+            "model_request_max_attempts": 3,
+            "model_request_retry_initial_delay_ms": 1000,
+            "model_request_retry_max_delay_ms": 4000,
+            "max_parallel_model_requests": 2,
+            "delegation_result_max_chars": 8000,
+        }
+    )
+    content["delegation_policy"] = {
+        "default_agent_id": "Pickle",
+        "allowed_agent_ids": ["Pickle"],
+    }
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    assert loaded.format_version == 3
+    assert loaded.content_dict() == content
+    assert loaded.runtime_policy.model_request_retry_initial_delay_ms == 1000
+    # 1s / 2s / 4s：与旧指数退避公式一致。
+    assert loaded.runtime_policy.model_request_retry_delays_ms == (1000, 2000, 4000)
+
+
+def test_runtime_policy_rejects_empty_or_negative_retry_delays() -> None:
+    with pytest.raises(ValueError, match="model_request_retry_delays_ms"):
+        AgentRuntimePolicy(max_model_steps=8, model_request_retry_delays_ms=())
+    with pytest.raises(ValueError, match="model_request_retry_delays_ms"):
+        AgentRuntimePolicy(max_model_steps=8, model_request_retry_delays_ms=(1000, -1))
+
+
 def test_delegation_policy_requires_unique_non_empty_allowlist() -> None:
     with pytest.raises(ValueError, match="allowed_agent_ids"):
         AgentDelegationPolicy("Pickle", ())
@@ -356,8 +423,13 @@ def test_builder_freezes_existing_app_config_without_role_fallback(
     package = AgentPackageBuilder(
         app_config=config, tool_bus=ToolBus()
     ).build_agent_package_version()
-    assert package.format_version == 3
+    assert package.format_version == 4
     assert package.runtime_policy.model_request_max_attempts == 3
+    assert package.runtime_policy.model_request_retry_delays_ms == (
+        20000,
+        60000,
+        120000,
+    )
     assert package.runtime_policy.max_parallel_model_requests == 2
     assert package.model_policy.worker is None
     assert package.model_policy.utility is None
