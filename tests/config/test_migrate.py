@@ -144,7 +144,7 @@ class MigrateFromYamlTests(unittest.TestCase):
             settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
             self.assertEqual("Pickle", settings["default_agent"])
             self.assertEqual(42, settings["react_max_steps"])
-            self.assertEqual(3, settings["context_cli_turn_window"])
+            self.assertNotIn("context_cli_turn_window", settings)
             self.assertEqual("full", settings["default_file_access_mode"])
             self.assertEqual(".agent/skills", settings["default_skills_path"])
             self.assertEqual(

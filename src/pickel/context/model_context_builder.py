@@ -12,7 +12,8 @@ from pickel.context.model_context import (
     SystemSection,
     ToolDefinition,
 )
-from pickel.context.templates_loader import load_templates
+from pickel.context.multi_agent_guidance import MULTI_AGENT_GUIDANCE
+from pickel.templates.loader import load_templates
 from pickel.conversations.agent_message import AgentMessage
 
 
@@ -62,6 +63,9 @@ class ModelContextBuilder:
         behavior = version.behavior_instruction.strip()
         if behavior:
             sections.append(SystemSection(name="behavior", text=behavior))
+        sections.append(
+            SystemSection(name="multi_agent_guidance", text=MULTI_AGENT_GUIDANCE)
+        )
         if version.skills:
             sections.append(
                 SystemSection(

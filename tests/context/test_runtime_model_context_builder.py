@@ -17,11 +17,13 @@ from pickel.context.model_context_builder import (
     ContextContributions,
     ModelContextBuilder,
 )
+from pickel.context.multi_agent_guidance import MULTI_AGENT_GUIDANCE
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.tools.bus import ToolSource
+from pickel.tools.catalog import builtin_tools
 
 
 def _package() -> AgentPackageVersion:
@@ -120,3 +122,68 @@ def test_builder_appends_contribution_messages(tmp_path) -> None:
     )
 
     assert context.messages[-1].content[0].text == "recalled"
+
+
+def test_builder_always_exposes_stable_multi_agent_lifecycle_guidance(tmp_path) -> None:
+    context = ModelContextBuilder().build_model_context(
+        package=_package(),
+        visible_messages=_visible_messages(tmp_path),
+    )
+
+    guidance = next(
+        section.text
+        for section in context.system.sections
+        if section.name == "multi_agent_guidance"
+    )
+    assert guidance == MULTI_AGENT_GUIDANCE
+    assert "child runs independently" in guidance
+    assert "automatically delivers its terminal result" in guidance
+    assert "finish the current Operation normally" in guidance
+    assert "Never use `bash` sleep, files, or `list_agents`" in guidance
+    assert "`send_message` sends a follow-up from a Parent" in guidance
+    assert "`report` sends an intermediate message from a Child" in guidance
+
+
+def test_builder_exposes_multi_agent_tool_contracts_to_model(tmp_path) -> None:
+    base_package = _package()
+    package = build_agent_package_version(
+        agent_id=base_package.agent_id,
+        format_version=base_package.format_version,
+        behavior_instruction=base_package.behavior_instruction,
+        model_policy=base_package.model_policy,
+        runtime_policy=base_package.runtime_policy,
+        workspace_policy=base_package.workspace_policy,
+        skills=base_package.skills,
+        tools=tuple(
+            ToolVersion(
+                name=tool.spec.name,
+                source=ToolSource.BUILTIN,
+                implementation_ref=ImplementationRef("builtin", tool.spec.name),
+                version=None,
+                description=tool.spec.description,
+                input_schema=tool.spec.input_schema,
+                output_schema=tool.spec.output_schema,
+                replay_policy=tool.spec.replay_policy,
+            )
+            for tool in builtin_tools()
+            if tool.spec.name
+            in {"delegate_agent", "send_message", "list_agents", "report"}
+        ),
+        extensions=base_package.extensions,
+        created_at=base_package.created_at,
+        delegation_policy=base_package.delegation_policy,
+    )
+
+    context = ModelContextBuilder().build_model_context(
+        package=package,
+        visible_messages=_visible_messages(tmp_path),
+    )
+    tools = {tool.name: tool for tool in context.tools}
+    assert (
+        "automatically delivered to this Parent" in tools["delegate_agent"].description
+    )
+    assert "from this Parent" in tools["send_message"].description
+    assert "must not be used to poll" in tools["list_agents"].description
+    assert "from this Child" in tools["report"].description
+    assert "prompt" in tools["delegate_agent"].input_schema["properties"]
+    assert tools["list_agents"].output_schema["items"]["properties"]["status"]["enum"]

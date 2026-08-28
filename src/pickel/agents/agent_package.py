@@ -61,7 +61,8 @@ class WorkspacePolicy:
 @dataclass(frozen=True)
 class AgentRuntimePolicy:
     max_model_steps: int
-    context_turn_window: int
+    # 仅用于读取 format 1/2 冻结 Package 的历史字段；新 Package 不再写入。
+    context_turn_window: int | None = None
     max_delegation_depth: int = 3
     model_request_max_attempts: int = 3
     model_request_retry_initial_delay_ms: int = 1000
@@ -72,7 +73,7 @@ class AgentRuntimePolicy:
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
             raise ValueError("max_model_steps 必须大于 0")
-        if self.context_turn_window < 1:
+        if self.context_turn_window is not None and self.context_turn_window < 1:
             raise ValueError("context_turn_window 必须大于 0")
         if self.max_delegation_depth < 0:
             raise ValueError("max_delegation_depth 不能小于 0")
@@ -127,6 +128,8 @@ class ModelVersion:
     provider_options: Mapping[str, FrozenJSON]
     provider_implementation: ImplementationRef
     required_secret_refs: tuple[SecretRef, ...]
+    # 总上下文窗口（输入与输出之和）；None 表示没有可靠公开值。
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -137,10 +140,33 @@ class ModelVersion:
             raise ValueError("ModelVersion.provider/model/wire_protocol 不能为空")
         if self.max_output_tokens < 1:
             raise ValueError("max_output_tokens 必须大于 0")
+        if self.context_window_tokens is not None:
+            if self.context_window_tokens < 1:
+                raise ValueError("context_window_tokens 必须大于 0")
+            if self.context_window_tokens <= self.max_output_tokens:
+                raise ValueError("context_window_tokens 必须大于 max_output_tokens")
         object.__setattr__(self, "provider_options", freeze_json(self.provider_options))
         object.__setattr__(
             self, "required_secret_refs", tuple(self.required_secret_refs)
         )
+
+    def effective_input_token_limit(
+        self, requested_output_tokens: int | None = None
+    ) -> int | None:
+        """根据总窗口和本次输出预留推导可用输入容量。"""
+        reserve = (
+            self.max_output_tokens
+            if requested_output_tokens is None
+            else requested_output_tokens
+        )
+        if reserve < 0:
+            raise ValueError("requested_output_tokens 不能小于 0")
+        if self.context_window_tokens is None:
+            return self.max_input_tokens
+        context_input = max(0, self.context_window_tokens - reserve)
+        if self.max_input_tokens is None:
+            return context_input
+        return min(self.max_input_tokens, context_input)
 
 
 @dataclass(frozen=True)
@@ -517,7 +543,7 @@ def _secret_dict(ref: SecretRef) -> dict[str, Any]:
 
 
 def _model_dict(model: ModelVersion) -> dict[str, Any]:
-    return {
+    content = {
         "provider": model.provider,
         "model": model.model,
         "wire_protocol": model.wire_protocol,
@@ -531,6 +557,10 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
             _secret_dict(ref) for ref in model.required_secret_refs
         ],
     }
+    # 缺失字段的旧 Package 必须保持原 canonical hash；只有可靠能力值才写入。
+    if model.context_window_tokens is not None:
+        content["context_window_tokens"] = model.context_window_tokens
+    return content
 
 
 def _model_policy_dict(policy: ModelPolicy) -> dict[str, Any]:
@@ -546,9 +576,12 @@ def _runtime_policy_dict(
 ) -> dict[str, Any]:
     content = {
         "max_model_steps": policy.max_model_steps,
-        "context_turn_window": policy.context_turn_window,
         "max_delegation_depth": policy.max_delegation_depth,
     }
+    # 新 Builder 不再填充该字段；但读取后重新校验旧 format 3 Package 的
+    # canonical hash 时，必须保留其原始历史值。
+    if policy.context_turn_window is not None:
+        content["context_turn_window"] = policy.context_turn_window
     if format_version >= 2:
         content.update(
             {

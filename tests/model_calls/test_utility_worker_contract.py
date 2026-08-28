@@ -11,7 +11,7 @@ from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.model_calls.model_call import ModelCallPurpose, ModelRole
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.service import ModelCallService
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore

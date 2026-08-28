@@ -13,8 +13,8 @@ from pickel.operations.agent_run_state import AgentRunState, Cancellation
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.operation_store import OperationStore
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.errors import StorageIntegrityError
-from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
+from pickel.shared.storage_errors import StorageIntegrityError
+from pickel.operations.agent_run_state_machine import AgentRunStateMachine
 from pickel.workspaces.workspace_binding import WorkspaceBinding
 
 

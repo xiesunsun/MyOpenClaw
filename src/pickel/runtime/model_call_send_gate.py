@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from pickel.model_calls.model_call import ModelCall
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.service import ModelCallResponse
 from pickel.model_calls.store import ModelCallStore
 from pickel.providers.stream import StreamCompleted, StreamDelta

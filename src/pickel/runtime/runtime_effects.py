@@ -17,9 +17,10 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
+from pickel.telemetry.records import ErrorInfo, SpanTimer
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted, StreamDelta, ToolCallArgsDelta
 from pickel.shared.execution_identity import ExecutionIdentity
@@ -63,6 +64,7 @@ class RuntimeEffects:
     """外部副作用门面；模型生成只能消费已冻结 PreparedModelCall。"""
 
     provider: Provider
+    worker_provider: Provider | None = None
     execute_tool: ToolEffect | None = None
     invoke_hook_effect: HookEffect | None = None
     recall_sources: tuple[RecallEffect, ...] = ()
@@ -123,8 +125,27 @@ class RuntimeEffects:
         if self.model_request_limiter is None:
             completed = await request()
         else:
-            async with self.model_request_limiter:
+            semaphore_span = SpanTimer("pickel.model_request.semaphore_wait", identity)
+            acquired = False
+            try:
+                await self.model_request_limiter.acquire()
+                acquired = True
+                semaphore_span.finish()
                 completed = await request()
+            except asyncio.CancelledError:
+                if not acquired:
+                    semaphore_span.finish(status="cancelled")
+                raise
+            except Exception as exc:
+                if not acquired:
+                    semaphore_span.finish(
+                        status="error",
+                        error=ErrorInfo.from_exception(exc, kind="semaphore"),
+                    )
+                raise
+            finally:
+                if acquired:
+                    self.model_request_limiter.release()
 
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         message = completed.message
@@ -187,12 +208,32 @@ class RuntimeEffects:
             raise RuntimeError(
                 "Tool 调用必须先持久化 intent_recorded: " f"{tool_call_id}"
             )
-        return await self.execute_tool(
-            operation=operation,
-            state=state,
+        identity = ExecutionIdentity(
+            session_id=operation.session_id,
+            operation_id=operation.operation_id,
+            step_id=step.step_id,
+            step_sequence=step.step_sequence,
             tool_call_id=tool_call_id,
-            host_calls=host_calls,
         )
+        tool_span = SpanTimer("pickel.tool.execute", identity)
+        try:
+            result = await self.execute_tool(
+                operation=operation,
+                state=state,
+                tool_call_id=tool_call_id,
+                host_calls=host_calls,
+            )
+        except asyncio.CancelledError:
+            tool_span.finish(status="cancelled")
+            raise
+        except Exception as exc:
+            tool_span.finish(
+                status="error", error=ErrorInfo.from_exception(exc, kind="tool")
+            )
+            raise
+        else:
+            tool_span.finish()
+            return result
 
     async def _consume_prepared_stream(
         self,

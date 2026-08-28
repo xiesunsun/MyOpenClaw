@@ -25,7 +25,7 @@ from pickel.hooks.events import (
     AgentRunEndEvent,
     UserPromptSubmitEvent,
 )
-from pickel.observe.records import (
+from pickel.telemetry.records import (
     DiagnosticRecord,
     ErrorInfo,
     SpanTimer,

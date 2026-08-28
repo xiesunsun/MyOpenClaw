@@ -15,7 +15,7 @@ from pickel.model_calls.content_store import (
     ModelCallContentStore,
 )
 from pickel.model_calls.model_call import ModelCall, ModelCallError
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.store import ModelCallStore
 
 __all__ = [

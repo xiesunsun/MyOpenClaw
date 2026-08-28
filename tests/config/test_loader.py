@@ -44,6 +44,20 @@ class ConfigLoaderTests(unittest.TestCase):
         data.update(overrides)
         return data
 
+    def test_project_capability_overlay_contains_only_verified_capacity_fields(
+        self,
+    ) -> None:
+        capability_file = Path(__file__).parents[2] / ".pickel" / "models.json"
+        data = json.loads(capability_file.read_text(encoding="utf-8"))
+        models = data["providers"]
+
+        self.assertEqual({"opencode-go"}, set(models))
+        self.assertEqual({"glm-5.3-flash"}, set(models["opencode-go"]["models"]))
+        glm = models["opencode-go"]["models"]["glm-5.3-flash"]
+        self.assertEqual(1000000, glm["context_window_tokens"])
+        self.assertNotIn("max_input_tokens", glm)
+        self.assertNotIn("api_key", str(data).lower())
+
     def test_load_merges_global_settings_models_auth(self) -> None:
         with TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
@@ -135,6 +149,39 @@ class ConfigLoaderTests(unittest.TestCase):
 
             self.assertEqual(0.9, model.temperature)
             self.assertEqual(1024, model.max_output_tokens)
+
+    def test_project_models_can_supply_context_capacity_without_input_guess(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            project = Path(tmpdir) / "project"
+            pickel = project / ".pickel"
+            pickel.mkdir(parents=True)
+
+            self._write_json(home / "settings.json", self._minimal_settings())
+            self._write_json(home / "models.json", self._minimal_models())
+            self._write_json(home / "auth.json", {"providers": {}})
+            self._write_json(
+                pickel / "models.json",
+                {
+                    "providers": {
+                        "google/gemini": {
+                            "models": {
+                                "gemini-3-flash-preview": {
+                                    "context_window_tokens": 1000000,
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+
+            config = Config.load(cwd=project, home=home)
+            model = config.resolve_model_config()
+
+            self.assertEqual(1000000, model.context_window_tokens)
+            self.assertIsNone(model.max_input_tokens)
 
     def test_expand_env_vars_in_auth(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -352,7 +399,7 @@ class ConfigLoaderTests(unittest.TestCase):
             config = Config.load(cwd=project, home=home)
 
             self.assertEqual(8, config.react_max_steps)
-            self.assertEqual(5, config.context_cli_turn_window)
+            self.assertFalse(hasattr(config, "context_cli_turn_window"))
             self.assertEqual("workspace", config.default_file_access_mode.value)
 
     def test_home_defaults_to_pickel_home(self) -> None:

@@ -155,6 +155,50 @@ def test_span_metrics_include_percentiles_success_and_tokens(tmp_path):
     assert provider["tokens"]["input_tokens"] == 30
 
 
+def test_span_metrics_expose_narrow_runtime_boundaries(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    names = (
+        "pickel.model_context.build",
+        "pickel.model_request.semaphore_wait",
+        "pickel.storage.request_content.write",
+        "pickel.storage.response_content.write",
+        "pickel.model_call.prepare_transaction",
+        "pickel.model_call.complete_transaction",
+        "pickel.tool.execute",
+        "pickel.event.delivery",
+    )
+    trace_file.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "record_type": "span",
+                    "payload": {"name": name, "duration_ms": 1, "status": "ok"},
+                }
+            )
+            for name in names
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    enhancement = read_trace(trace_file)
+
+    assert enhancement is not None
+    assert all(
+        enhancement.metrics[label]["count"] == 1
+        for label in (
+            "context",
+            "model_semaphore",
+            "request_content_write",
+            "response_content_write",
+            "model_prepare",
+            "model_complete",
+            "tool",
+            "event_delivery",
+        )
+    )
+
+
 def test_rotated_segments_are_read_before_active_file(tmp_path):
     active = tmp_path / "s.jsonl"
     rotated = tmp_path / "s.20260731T000000.0001.jsonl"
@@ -214,6 +258,41 @@ def test_operation_trace_filter_excludes_global_and_other_operation_records(tmp_
     assert len(data.spans) == 1
     assert data.spans[0]["duration_ms"] == 5
     assert data.runtime_events == []
+
+
+def test_operation_trace_filter_applies_before_status_metrics(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    records = [
+        {
+            "record_type": "runtime_event",
+            "operation_id": "op-a",
+            "mode": "standard",
+            "trace_seq": 4,
+            "event_type": "text_delta",
+        },
+        {
+            "record_type": "diagnostic",
+            "operation_id": "op-b",
+            "mode": "full",
+            "trace_seq": 99,
+            "dropped_records": 8,
+            "payload": {
+                "name": "trace_delta_dropped",
+                "attributes": {"records_dropped": 8},
+            },
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    data = read_operation_trace(trace_file, operation_id="op-a")
+
+    assert data.trace_status["mode"] == "standard"
+    assert data.trace_status["last_sequence"] == 4
+    assert data.trace_status["dropped_records"] == 0
+    assert data.trace_status["status_text"] == "Standard Trace 已读取 · 未报告丢弃"
 
 
 def test_dropped_delta_count_uses_maximum_cumulative_value(tmp_path):

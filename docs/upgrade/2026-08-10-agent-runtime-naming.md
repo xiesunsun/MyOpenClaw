@@ -1,8 +1,8 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**更新日期**：2026-08-27
-**状态**：当前合同；Runtime 与 ModelCall 命名已实施
+**更新日期**：2026-08-28
+**状态**：当前合同；Runtime/ModelCall 命名已实施，Context/Tool 输出包含后续目标合同
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -94,7 +94,7 @@ flowchart LR
 | `AgentInbox` | 持久化 InboxMessage 的内存窄投影，不保存第二份队列 |
 | `AgentDriver` | 判断 Session 是否 runnable，接受或恢复 Operation；不拥有前台 task 或互斥锁 |
 | `OperationDriver` | 推进一个已有 Operation，直到 waiting 或终态 |
-| `AgentRunStateMachine` | 校验 AgentRunState、ModelStepState 和 ToolCallState 转换 |
+| `AgentRunStateMachine` | 校验 AgentRunState、ModelStepState 和 ToolCallState 转换；实现归 `operations`，不反向依赖 Runtime |
 | `RuntimeEffects` | Provider、Tool、Hook、Recall、Timer 等外部作用的窄执行边界 |
 
 删除目标态中的 `AgentRuntime` 和 `RuntimeBindings`。前者的接受/调度职责分别进入 AgentDriver 与 OperationDriver；后者的 Package 实现进入 LoadedAgentPackage，Host 级服务显式传给 RuntimeEffects。
@@ -110,7 +110,7 @@ flowchart LR
 | `LoadedAgentPackage` | 当前 RuntimeGeneration 中解析了 Secret 与可执行实现的 Package |
 | `LoadedPackageHandle` | Operation 对 LoadedAgentPackage 和 Generation 的引用 |
 | `ModelPolicy` | `primary / worker / utility` 三层模型选择 |
-| `AgentRuntimePolicy` | 最大 Step、Context Window、Delegation 深度等执行限制 |
+| `AgentRuntimePolicy` | 最大 Step、Delegation 深度、模型请求重试等执行限制 |
 | `AgentDelegationPolicy` | Parent Package 允许委派的 Agent ID 与默认 Agent |
 | `WorkspacePolicy` | Package 声明的文件访问范围 |
 | `WorkspaceBinding` | Operation 接受时冻结的实际执行目录和安全边界 |
@@ -149,14 +149,14 @@ ConversationNode 直接保存 `agent_message` 或 `history_compaction` 内容。
 ConversationProjector
     Conversation Tree → Conversation Messages
 
-ContextWindow
-    Conversation Messages → Visible Messages
+OperationDriver token preflight
+    用 Provider 对候选请求计数；超过有效输入阈值时请求 HistoryCompaction 后重新投影
 
 RuntimeEffects
-    Visible Messages → Recall/Hook ContextContributions
+    Conversation Messages → Recall/Hook ContextContributions
 
 ModelContextBuilder
-    Package + Visible Messages + Contributions → ModelContext
+    Package + Conversation Messages + Contributions → ModelContext
 
 Provider Request Mapper
     ModelContext → Provider wire request
@@ -165,14 +165,44 @@ Provider Request Mapper
 | 名称 | 唯一职责 |
 | --- | --- |
 | `ConversationProjector` | 沿固定 leaf 投影 AgentMessage 和 HistoryCompaction |
-| `ContextWindow` | 只裁剪 Conversation Messages |
+| `OperationDriver` token preflight | 每次请求前组合 Provider token count 与冻结模型容量，只决定是否需要压缩；不估算、不生成摘要 |
+| `HistoryCompactionGenerator` | 将选定历史生成一个 `HistoryCompaction` 内容值；不决定阈值、不提交节点、不重新投影 |
 | `ContextContributions` | Recall/Hook 返回的深度不可变追加数据 |
 | `ModelContextBuilder` | 创建唯一 Provider-neutral ModelContext |
 | `ModelContext` | 深度不可变的 system/messages/tools |
 | `ModelRequestIntent` | 当前 Step 已决定发送的完整 ModelContext 和 fingerprint |
 | `AnthropicRequestMapper` | ModelContext 到 Anthropic wire 的纯映射 |
 
-删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`PreparedContext` 和 Provider 周围的二次组装。`prepare()` 作为旧 Context 动词删除；唯一 Context 入口仍是 `build_model_context()`。
+删除 `ContextAssembler`、`ContextPipeline`、`ContextManager`、`ContextWindow`、
+`PreparedContext` 和 Provider 周围的二次组装。固定消息数 Window 不再进入正式
+ModelRequest；唯一 Context 入口仍是 `build_model_context()`，压缩触发由
+OperationDriver 在 Intent 提交前编排。
+
+模型请求的稳定语义前缀统一为 `tools → system → messages`。Provider wire 的字段形状可以
+不同，但不得改变这三段的语义顺序；工具定义和稳定 system 内容必须先于只追加的消息历史。
+未来动态 Context 注入如何避免破坏稳定前缀另行设计，当前合同不为尚不存在的动态来源增加层级。
+
+候选请求 token 只由对应 Provider 的 `count_context_tokens()` 负责。Provider 必须复用与正式
+请求相同的 Mapper 语义，并在内部选择原生 count API、匹配 tokenizer 或其他可靠实现；
+Runtime 不使用 UTF-8、JSON 字节数或字符数猜测 token，也不引入第二套 Token Counter。
+
+自动压缩的容量计算只使用冻结模型配置：
+
+```text
+effective_context_window = floor(context_window_tokens * effect_rate)
+compaction_threshold = min(
+    max_input_tokens（已知时）,
+    effective_context_window - reserved_output_tokens,
+)
+```
+
+`effect_rate` 是可配置模型策略，初始值为 `0.5`，不硬编码进 Driver；不再额外减固定
+`1024` 或其他无法解释的安全常数。Provider 无法给出可靠计数时返回明确不可用错误，Runtime
+不得静默退回粗糙估算。
+
+HistoryCompaction 的触发、生成和提交保持三个接缝：token preflight 只触发，
+`HistoryCompactionGenerator` 只产出内容，OperationDriver 通过 ConversationService 追加节点并
+重新投影。原始 Conversation Tree 始终保留；具体摘要模型、选取范围和压缩提示词不属于当前合同。
 
 Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedModelCall`；该对象
 包含即将发送的完整 wire body，保存和发送必须复用同一个不可变值。Provider 不再通过

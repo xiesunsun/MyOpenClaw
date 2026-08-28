@@ -13,10 +13,11 @@ from pickel.conversations.agent_message import (
     ModelUsage,
     ToolResultMessage,
 )
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.operations.agent_run_state import AgentRunState, ModelStepState
 from pickel.operations.session_operation import SessionOperation
 from pickel.providers.stream import StreamCompleted, TextDelta, ToolCallArgsDelta
+from pickel.telemetry.records import SpanRecord, observation_scope
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.workspaces.workspace_binding import WorkspaceBinding
@@ -179,6 +180,29 @@ def test_shared_package_limiter_bounds_parallel_model_requests() -> None:
     assert provider.max_active == 2
 
 
+def test_model_limiter_emits_wait_span_without_provider_span_duplication() -> None:
+    records: list[SpanRecord] = []
+
+    class Collector:
+        def record(self, record) -> None:
+            if isinstance(record, SpanRecord):
+                records.append(record)
+
+    effects = RuntimeEffects(
+        provider=_Provider(), model_request_limiter=asyncio.Semaphore(1)
+    )
+    with observation_scope(Collector()):
+        asyncio.run(
+            effects.execute_prepared_model_call(
+                prepared=_prepared(), identity=_identity()
+            )
+        )
+
+    assert [record.name for record in records] == [
+        "pickel.model_request.semaphore_wait"
+    ]
+
+
 def test_tool_effect_requires_intent_recorded_state(tmp_path) -> None:
     called = False
 
@@ -222,6 +246,81 @@ def test_tool_effect_requires_intent_recorded_state(tmp_path) -> None:
             )
         )
     assert called is False
+
+
+def test_tool_effect_emits_execution_span(tmp_path) -> None:
+    from pickel.operations.agent_run_state import ToolCallState
+
+    records: list[SpanRecord] = []
+
+    class Collector:
+        def record(self, record) -> None:
+            if isinstance(record, SpanRecord):
+                records.append(record)
+
+    async def execute_tool(**kwargs):
+        return ToolResultMessage(tool_call_id="tool-1", tool_name="echo")
+
+    effects = RuntimeEffects(provider=_Provider(), execute_tool=execute_tool)
+    step = ModelStepState(
+        "step-1",
+        1,
+        "awaiting_tools",
+        1,
+        None,
+        "node-1",
+        (
+            ToolCallState(
+                tool_call_id="tool-1",
+                tool_name="echo",
+                arguments={},
+                status="intent_recorded",
+                approval=None,
+                replay_policy="safe",
+                execution_intent=None,
+                decision_reason=None,
+                result_node_id=None,
+                is_error=None,
+            ),
+        ),
+    )
+    state = AgentRunState(
+        operation_id="operation-1",
+        revision=1,
+        status="running",
+        waiting_reason=None,
+        completed_step_count=0,
+        current_step=step,
+        final_assistant_node_id=None,
+        error=None,
+        cancellation=None,
+    )
+    operation = SessionOperation(
+        operation_id="operation-1",
+        session_id="session-1",
+        agent_package_version_id="agentpkg_" + "a" * 64,
+        workspace_binding=WorkspaceBinding(
+            workspace_id="workspace-1",
+            working_directory=tmp_path,
+            allowed_root=tmp_path,
+        ),
+        input_node_id="node-1",
+        accepted_at=datetime.now(timezone.utc),
+    )
+
+    with observation_scope(Collector()):
+        result = asyncio.run(
+            effects.execute_tool_call(
+                operation=operation,
+                state=state,
+                tool_call_id="tool-1",
+            )
+        )
+
+    assert result.tool_call_id == "tool-1"
+    assert len(records) == 1
+    assert records[0].name == "pickel.tool.execute"
+    assert records[0].identity.tool_call_id == "tool-1"
 
 
 def test_runtime_effects_has_no_model_context_send_or_request_snapshot_path() -> None:

@@ -15,7 +15,7 @@ from pickel.conversations.conversation_service import ConversationService
 from pickel.operations.agent_run_state import AgentRunState, ToolCallState
 from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.errors import StorageConflictError
+from pickel.shared.storage_errors import StorageConflictError
 from pickel.tools.base import BaseTool, JSONValue
 from pickel.tools.validation import (
     validate_tool_output,

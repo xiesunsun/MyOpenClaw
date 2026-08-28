@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, AsyncIterator
 
 from pickel.context.model_context import ModelContext
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.providers.stream import StreamDelta
 
 if TYPE_CHECKING:

@@ -1,4 +1,4 @@
-"""AgentRunState 的纯状态转换校验。"""
+"""AgentRunState 的纯状态转换校验，属于 Operation 领域。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pickel.operations.agent_run_state import AgentRunState
-from pickel.persistence.errors import StorageIntegrityError
+from pickel.shared.storage_errors import StorageIntegrityError
 
 RunAction = Literal[
     "start",

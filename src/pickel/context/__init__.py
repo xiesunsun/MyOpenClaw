@@ -17,7 +17,7 @@ from pickel.context.session_recall import (
     SessionRecallSnippet,
     render_session_recall,
 )
-from pickel.context.window import apply_window, group_conversation_turns
+from pickel.context.window import group_message_units
 
 __all__ = [
     "ContextContributions",
@@ -29,8 +29,7 @@ __all__ = [
     "SystemContent",
     "SystemSection",
     "ToolDefinition",
-    "apply_window",
-    "group_conversation_turns",
+    "group_message_units",
     "model_context_from_dict",
     "model_context_to_dict",
     "model_context_to_json",

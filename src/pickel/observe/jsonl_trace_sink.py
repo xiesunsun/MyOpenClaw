@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pickel.config.paths import home_dir
-from pickel.observe.records import (
+from pickel.telemetry.records import (
     DiagnosticRecord,
     ObservationRecord,
     RequestSnapshotRecord,
@@ -267,6 +267,12 @@ class JsonlTraceSink:
             "model_call_id": identity.model_call_id,
             "payload": observation.to_dict(),
         }
+        # Span/Diagnostic 也必须保留完整执行身份；空的可选身份字段继续省略，
+        # 兼容旧 Trace 的紧凑格式。
+        if identity.tool_call_id is not None:
+            record["tool_call_id"] = identity.tool_call_id
+        if identity.message_id is not None:
+            record["message_id"] = identity.message_id
         self._enqueue(record, low_priority=False)
 
     def wants(self, capability: str) -> bool:

@@ -24,7 +24,7 @@ from pickel.operations.agent_run_state import (
     WaitingReason,
 )
 from pickel.operations.session_operation import SessionOperation
-from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
+from pickel.shared.storage_errors import StorageConflictError, StorageIntegrityError
 from pickel.workspaces.workspace import Workspace
 
 

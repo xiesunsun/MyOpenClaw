@@ -206,6 +206,24 @@ AppConfig + AgentConfig + ModelConfig + AGENT.md + Skills + ToolBus
 - Environ、Settings 或 Agent 文件变化只影响未来接受的 Operation；已有 Operation 继续使用其 package_version_id 和 workspace_binding。
 - `ModelVersion.provider` 表示服务身份，`wire_protocol` 表示 HTTP wire；
   `provider_implementation` 按 wire protocol 冻结，不能再假设服务商与协议一一对应。
+- `ModelConfig` / `ModelVersion` 的 `context_window_tokens` 表示供应商声明的总窗口
+  （输入 + 输出），而 `max_input_tokens` 只表示供应商独立声明的输入硬上限；总窗口
+  不得复制到 `max_input_tokens`。本次项目补充将
+  `opencode-go/glm-5.3-flash` 的总窗口记为 `1000000`，其独立输入硬上限保持
+  `null`（unknown）。
+- `effect_rate` 是模型有效 Context 使用比例，默认 `0.5`，取值 `(0, 1]`；它从
+  `ModelConfig` 解析并冻结进 `ModelVersion`，不得作为 OperationDriver 内部常数。
+- `max_output_tokens` 是本项目本次请求的输出预算；除非供应商明确公开最大值，不能
+  将它解释为模型架构的最大输出。有效输入阈值由
+  `min(max_input_tokens, floor(context_window_tokens * effect_rate) - reserved_output_tokens)`
+  推导；`max_input_tokens` 未知时只使用第二项，不额外减固定安全常数。
+- Provider 负责按正式 Mapper 语义计算候选请求 token；Provider 计数不可用时明确失败，
+  Runtime 不以 UTF-8 JSON 字节、字符数或总窗口猜测 token。
+- Z.AI 的 [GLM-5.3-Flash 模型页](https://docs.z.ai/guides/vlm/glm-5.3-flash)
+  声明文本参数与 GLM-5.3 一致并支持 1M context；[GLM-5.3 模型页](https://docs.z.ai/guides/llm/glm-5.3)
+  声明最大输出长度为 `128K`（`131072`）。该供应商资料尚未给出 alias 的独立
+  `max_input_tokens`，项目仍不把 `131072` 写入 `max_output_tokens`，也不把评估中的
+  `163840` 最大生成长度当作 API 硬上限。
 - Runtime Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible
   Chat Completions 三条明确 wire 映射；OpenAI Responses 固定 `store: false`，不使用
   `previous_response_id` 或服务端 Conversation 作为恢复权威。Gemini 仍只保留
@@ -252,9 +270,7 @@ flowchart LR
   "default_skills_path": ".agent/skills",
   "react_max_steps": 100,
   "context_cli_turn_window": 5,
-  "model_request_max_attempts": 3,
-  "model_request_retry_initial_delay_ms": 1000,
-  "model_request_retry_max_delay_ms": 4000,
+  "model_request_attempt_deadlines_seconds": [20, 60, 120],
   "max_parallel_model_requests": 2,
   "delegation_result_max_chars": 8000,
   "openviking": {
@@ -271,7 +287,7 @@ flowchart LR
 | 字段 | 原 config.yaml |
 |------|----------------|
 | `default_*` / `react_*` / `context_*` | 同名 |
-| `model_request_*` / `max_parallel_model_requests` | 冻结进 AgentRuntimePolicy 的模型请求可靠性与资源边界 |
+| `model_request_attempt_deadlines_seconds` / `max_parallel_model_requests` | 冻结进 AgentRuntimePolicy；数组长度就是 attempt 数，不再并列维护 max attempts 和 backoff 字段 |
 | `delegation_result_max_chars` | 冻结进 Parent AgentRuntimePolicy，限制 child 终态自动投递给 Parent Context 的文本长度 |
 | `openviking.*` 策略 | 同名（密钥除外） |
 
@@ -282,7 +298,27 @@ flowchart LR
 无密钥；结构沿用现有 `providers` → models 能力字段。  
 项目文件按 provider/model **覆盖合并**全局。打开模型列表时重读。
 
+### 5.2.1 当前项目已核实的模型能力（2026-08-28）
+
+项目覆盖只记录当前 Boot 支持、且模型 ID 精确匹配官方资料的条目。`—` 表示
+该精确 provider/model 组合没有可核实值；`请求预算` 是 Pickel 本次请求上限，
+不是供应商架构硬上限。
+
+| Provider / model | wire | 总窗口 | 独立 max input | 供应商 max output | 请求预算 | 依据 / 状态 |
+|---|---|---:|---:|---:|---:|---|
+| `opencode-go` / `glm-5.3-flash` | Chat | 1,000,000 | — | 131,072 | 65,536 | [OpenCode Go](https://dev.opencode.ai/docs/go/)；[Z.AI GLM-5.3-Flash](https://docs.z.ai/guides/vlm/glm-5.3-flash)；[Core Parameters](https://docs.z.ai/guides/overview/concept-param)；独立 input unknown |
+
+当前用户全局配置中观察到的其他 alias（包括 OpenCode Go 的其他模型）不写入项目
+能力覆盖：OpenCode Go `/models` 只证明 endpoint/wire，不证明容量；无法确认原厂
+映射时保持 unknown。Google Gemini 的官方输入/输出资料也不进入本项目覆盖，因为
+当前 Boot 不支持 `gemini-generate-content`；它们仍可作为未来接入时的独立调研依据。
+项目 `.pickel/models.json` 因而只包含上述 `opencode-go/glm-5.3-flash` 的
+`context_window_tokens=1000000`，不猜测独立 `max_input_tokens`。
+
 CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
+
+下例是目标解析结果。项目文件可以省略默认的 `effect_rate=0.5`，但 Package Builder 必须把
+解析后的值冻结进 ModelVersion；当前代码尚未实现该字段，属于后续 11.4 实施范围。
 
 ```json
 {
@@ -296,6 +332,17 @@ CPA 的 `gpt-5.6-luna` 使用 OpenAI Provider：
             "reasoning_summary": "auto",
             "parallel_tool_calls": true
           }
+        }
+      }
+    },
+    "opencode-go": {
+      "models": {
+        "glm-5.3-flash": {
+          "wire_protocol": "openai-chat-completions",
+          "context_window_tokens": 1000000,
+          "max_input_tokens": null,
+          "effect_rate": 0.5,
+          "max_output_tokens": 65536
         }
       }
     }
@@ -328,6 +375,14 @@ OpenCode Go 作为一个服务身份同时承载三种 wire，模型必须显式
 `provider=opencode-go` 进入观测与模型身份；请求映射只由冻结的
 `wire_protocol` 决定。禁止按模型名前缀猜协议、失败后轮询其他协议，或把同一
 服务拆成三个虚假 Provider。
+
+模型能力补充属于项目 `.pickel/models.json` 的普通模型覆盖，随 Package 构建进入
+`ModelVersion` 并可被 Runtime 读取；不读取或写入 `auth.json`。当前补充的公开依据为
+[OpenCode Go 模型与 endpoint 列表](https://dev.opencode.ai/docs/go/)、
+[Z.AI 的 GLM-5.3-Flash 模型页](https://docs.z.ai/guides/vlm/glm-5.3-flash)。OpenCode Go
+alias 的独立输入硬上限未在其官方页面公开，因此保留 unknown；Z.AI GLM-5 系列资料
+记录的 `131072` 最大输出不改写本项目的 `max_output_tokens=65536` 请求预算。
+参数含义参见 [Z.AI Core Parameters](https://docs.z.ai/guides/overview/concept-param)。
 
 ### 5.3 `auth.json`
 

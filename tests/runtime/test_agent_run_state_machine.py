@@ -16,7 +16,7 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.persistence.errors import StorageIntegrityError
-from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
+from pickel.operations.agent_run_state_machine import AgentRunStateMachine
 
 
 def _state(

@@ -121,7 +121,6 @@ def _build_settings(raw: dict[str, Any], *, project_root: Path) -> dict[str, Any
         "default_llm",
         "default_file_access_mode",
         "react_max_steps",
-        "context_cli_turn_window",
         "observability",
     ):
         if key in raw and raw[key] is not None:

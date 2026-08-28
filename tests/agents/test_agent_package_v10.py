@@ -114,6 +114,23 @@ def test_recursive_json_is_immutable() -> None:
         canonical_json_bytes({"value": float("nan")})
 
 
+def test_model_version_context_window_must_fit_output_budget() -> None:
+    with pytest.raises(ValueError, match="context_window_tokens.*max_output_tokens"):
+        ModelVersion(
+            provider="anthropic",
+            model="claude-test",
+            wire_protocol="anthropic-messages",
+            api_base=None,
+            temperature=None,
+            max_input_tokens=None,
+            max_output_tokens=1024,
+            context_window_tokens=1024,
+            provider_options={},
+            provider_implementation=ImplementationRef("provider", "anthropic-messages"),
+            required_secret_refs=(),
+        )
+
+
 def test_target_codec_requires_canonical_id() -> None:
     content = _content()
     loaded = decode_agent_package_content(
@@ -143,6 +160,29 @@ def test_v1_codec_keeps_legacy_hash_shape_and_uses_policy_defaults() -> None:
     assert loaded.runtime_policy.max_parallel_model_requests == 2
     assert loaded.runtime_policy.delegation_result_max_chars == 8000
     assert loaded.delegation_policy == AgentDelegationPolicy("Pickle", ("Pickle",))
+
+
+def test_old_package_without_context_capacity_keeps_canonical_hash() -> None:
+    content = _content()
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert loaded.model_policy.primary.context_window_tokens is None
+    assert loaded.content_dict() == content
+
+
+def test_package_codec_persists_context_capacity() -> None:
+    content = _content()
+    content["model_policy"]["primary"]["context_window_tokens"] = 1000000
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert loaded.model_policy.primary.context_window_tokens == 1000000
+    assert loaded.content_dict() == content
 
 
 def test_format_3_codec_freezes_delegation_policy_and_result_budget() -> None:

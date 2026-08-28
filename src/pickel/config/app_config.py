@@ -13,7 +13,7 @@ from pickel.shared.model_config import (
     ModelSelection,
     ProviderModelConfig,
 )
-from pickel.tools.sandbox import SandboxSettings
+from pickel.config.sandbox_settings import SandboxSettings
 
 _DEFAULT_WIRE_PROTOCOLS = {
     "anthropic": "anthropic-messages",
@@ -102,7 +102,6 @@ class AppConfig(BaseModel):
     default_file_access_mode: FileAccessMode = FileAccessMode.WORKSPACE
     default_skills_path: Path | None = None
     react_max_steps: int = 8
-    context_cli_turn_window: int = 5
     model_request_max_attempts: int = Field(default=3, ge=1)
     model_request_retry_initial_delay_ms: int = Field(default=1000, ge=0)
     model_request_retry_max_delay_ms: int = Field(default=4000, ge=0)

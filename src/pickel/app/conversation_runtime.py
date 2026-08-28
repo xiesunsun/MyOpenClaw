@@ -26,7 +26,6 @@ from pickel.app.runtime_models import (
 from pickel.config.app_config import AppConfig
 from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.context.projection import ConversationProjector
-from pickel.context.window import apply_window
 from pickel.context.context_usage import estimate_context_usage
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
@@ -55,7 +54,7 @@ from pickel.observe.jsonl_trace_sink import (
     trace_path,
 )
 from pickel.observe.operation_report import export_operation_report
-from pickel.observe.records import (
+from pickel.telemetry.records import (
     ErrorInfo,
     SpanTimer,
     observation_scope,
@@ -513,12 +512,7 @@ class ConversationRuntime:
 
         if context is None:
             messages = ConversationProjector().project_conversation_messages(nodes)
-            visible = apply_window(
-                messages,
-                turn_window=(
-                    self._loaded_agent_package.version.runtime_policy.context_turn_window
-                ),
-            )
+            visible = messages
             context = ModelContextBuilder().build_model_context(
                 package=self._loaded_agent_package.version,
                 visible_messages=visible,

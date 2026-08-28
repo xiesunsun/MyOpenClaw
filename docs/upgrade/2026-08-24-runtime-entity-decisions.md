@@ -384,8 +384,10 @@ flowchart LR
     B --> C[ConversationNode 列表]
     C --> D[ConversationProjector]
     D --> E[Conversation Messages]
-    E --> W[ContextWindow]
-    W --> X[Recall / Hook Contributions]
+    E --> Q{OperationDriver token preflight}
+    Q -->|达到阈值| H[提交 HistoryCompaction]
+    H --> B
+    Q -->|未达到| X[Recall / Hook Contributions]
     X --> F[ModelContextBuilder]
 ```
 
@@ -992,7 +994,7 @@ tool definitions
 | 静态 System、Skills | AgentPackageVersion | 是 | 是 |
 | Tool Definitions | AgentPackageVersion | 是 | 是，前提是冻结 schema |
 | Conversation Messages、Compaction | Conversation Tree | 是 | 是 |
-| Context Window 裁剪 | Builder、Tokenizer | 可重算 | 不一定 |
+| HistoryCompaction 后的活动投影 | Conversation Tree | 是 | 是 |
 | Recall 结果 | Recall Source | 可重调 | 不保证 |
 | 动态 ContextContributions | Recall / 请求前 Hook | 可重调 | 不保证 |
 | 动态时间与环境内容 | Runtime | 可重取 | 通常不同 |
@@ -1017,7 +1019,8 @@ sequenceDiagram
 
 OperationDriver 在 Step 边界触发 OperationService 原子 claim `steer/inject` 消息并写入 ConversationNode，再执行第 18 节规定的唯一构建流程。最终 ModelContext 和 fingerprint 必须在同一次状态转换中写入 Request Intent；保存成功后才能调用 Provider。动态 Context 不再从 AgentRunState 的旁路字段读取。
 
-恢复时直接使用持久化 `model_context`，不重新执行 Conversation 投影、Recall、Context Window 或 BeforeRequest Hook。Provider Mapper 必须是纯转换。
+恢复时直接使用持久化 `model_context`，不重新执行 Conversation 投影、token preflight、
+Recall 或 BeforeRequest Hook。Provider Mapper 必须是纯转换。
 
 ### 6.6 临时存储与清理
 
@@ -1666,7 +1669,6 @@ Package 保存完整非敏感 Extension 配置，而不是只保存不能恢复�
 @dataclass(frozen=True)
 class AgentRuntimePolicy:
     max_model_steps: int
-    context_turn_window: int
     max_delegation_depth: int
     model_request_max_attempts: int
     model_request_retry_initial_delay_ms: int
@@ -1677,8 +1679,10 @@ class AgentRuntimePolicy:
 
 `max_delegation_depth` 默认 3。模型请求默认最多 3 次，退避为 1 秒起、4 秒封顶；
 同一 LoadedAgentPackage 默认最多并行执行 2 个模型请求。并发限制是 Generation 内
-资源门槛，不产生 Lane、Scheduler 或持久化排队实体。这里只保存影响执行、Context
-和委派安全边界的设置；UI 样式、日志级别和 CLI 展示设置不进入 Package。
+资源门槛，不产生 Lane、Scheduler 或持久化排队实体。固定 `context_turn_window` 已被真实
+Session 证明会任意重写缓存前缀，目标态删除；Context 在每次请求前按 ModelVersion 的有效
+容量做 token preflight，质量阈值待代表性 Eval 后再冻结。这里只保存影响执行和委派安全边界
+的设置；UI 样式、日志级别和 CLI 展示设置不进入 Package。
 
 `delegation_result_max_chars` 默认 8000，由创建 Delegation 的 Parent Package 冻结，
 只限制自动 settled 消息进入 Parent Context 的文本长度；完整 Child AssistantMessage
@@ -3233,8 +3237,10 @@ Trace 不进入业务数据库，不作为恢复来源，可以因容量限制�
 flowchart LR
     CL[Inbox claim 已提交] --> N[读取固定 leaf 的 ConversationNode]
     N --> CP[ConversationProjector]
-    CP --> W[ContextWindow]
-    W --> R[Recall]
+    CP --> Q{OperationDriver token preflight}
+    Q -->|达到阈值| HC[提交 HistoryCompaction]
+    HC --> N
+    Q -->|未达到| R[Recall]
     R --> H[Context Hook]
     H --> B[ModelContextBuilder]
     B --> V[校验 + fingerprint]
@@ -3247,9 +3253,9 @@ flowchart LR
 | 组件 | 输入 | 输出 |
 | --- | --- | --- |
 | `ConversationProjector` | ConversationNode | Conversation Messages |
-| `ContextWindow` | Messages + RuntimePolicy | Visible Messages |
-| `RuntimeEffects` | Visible Messages | Recall/Hook Contributions |
-| `ModelContextBuilder` | Package + Visible Messages + Contributions | 最终 ModelContext |
+| `OperationDriver` token preflight | Messages + ModelVersion 容量 | 继续构建或提交 HistoryCompaction 后重新投影 |
+| `RuntimeEffects` | Conversation Messages | Recall/Hook Contributions |
+| `ModelContextBuilder` | Package + Conversation Messages + Contributions | 最终 ModelContext |
 | `OperationService` | ModelContext + expected revision | 持久化 Request Intent |
 | Provider Mapper | 已持久化 ModelContext | PreparedModelCall |
 
@@ -3265,26 +3271,28 @@ class ConversationProjector:
     ) -> tuple[AgentMessage, ...]: ...
 ```
 
-Projector 是纯函数式投影，负责 ConversationNode → AgentMessage、HistoryCompaction 替换、忽略非消息事实、保持 Content Block/ArtifactReference 顺序。它不查询 Store，不读取 Package，不执行 Window、Recall、Hook、Tool 定义或 Provider 映射。
+Projector 是纯函数式投影，负责 ConversationNode → AgentMessage、HistoryCompaction 替换、
+忽略非消息事实、保持 Content Block/ArtifactReference 顺序。它不查询 Store，不读取 Package，
+不执行 token preflight、Recall、Hook、Tool 定义或 Provider 映射。
 
 OperationDriver 先捕获 `leaf_node_id`，调用 `list_branch_nodes(session_id, leaf_node_id)`，再投影同一分支；不在构建阶段反复读取 active leaf。
 
-### 18.3 ContextWindow
+### 18.3 Token preflight 与 HistoryCompaction
 
-```python
-def apply_context_window(
-    messages: tuple[AgentMessage, ...],
-    policy: ContextWindowPolicy,
-) -> tuple[AgentMessage, ...]: ...
-```
-
-Window 只裁剪 Conversation Messages，不裁剪 Recall、当前请求 Hook Contribution、System 或 Tool Definitions。顺序固定为：
+OperationDriver 每次准备 ModelRequest 前估算当前投影消息、Package system/tools 和为动态
+Contribution 保留的容量。未达到阈值时保持完整 append-only 消息；达到阈值时调用冻结
+Package 的 worker model 生成 HistoryCompaction，提交后沿同一活动分支重新投影。Provider
+不允许自行二次裁剪。
 
 ```text
-Conversation projection → Window → Recall / Hook additions
+compaction_threshold = min(safety_threshold, quality_threshold)
 ```
 
-Policy 来自冻结 AgentPackageVersion；Provider 不允许自行二次 Window。以后若引入 Token 估算，其决策结果仍必须在最终 ModelContext 中冻结。
+`safety_threshold` 来自模型有效输入容量和输出保留量；模型容量未知时不能伪造安全阈值。
+`quality_threshold` 必须来自代表性 Agent Eval，数据不足时只执行容量保护。压缩前不动态重写
+旧 ToolResult；大型 Tool 输出在 Tool 合同处有界，并在 compaction epoch 一次性提炼。
+
+固定 `context_turn_window` 只属于迁移前实现，阶段 11.4 后删除，不保留双轨生产路径。
 
 ### 18.4 Inbox inject 进入 Conversation Tree
 
@@ -3466,7 +3474,7 @@ ModelContext。
 
 ```text
 ConversationProjector  Conversation Tree → Messages
-ContextWindow          Messages → Visible Messages
+OperationDriver        token preflight 与 HistoryCompaction 编排
 ContextContributions   Recall/Hook 的受限追加结果
 ModelContextBuilder    唯一 ModelContext 创建入口
 ModelContext           深度不可变 Provider-neutral 输入

@@ -22,12 +22,15 @@ def _require_workspace_files(context: ToolExecutionContext) -> WorkspaceFileServ
     return context.services.workspace_files
 
 
-def _truncate_read(text: str) -> tuple[str, bool]:
+def _truncate_read(
+    text: str, *, source_path: str, next_offset: int
+) -> tuple[str, bool]:
     if len(text) <= DEFAULT_READ_CHARS:
         return text, False
     marker = (
-        f"\n[Output truncated at {DEFAULT_READ_CHARS} characters. "
-        "Use a smaller limit or bash for unusually long lines.]"
+        f"\n[Output truncated; truncated=true; preview capped at {DEFAULT_READ_CHARS} characters. "
+        f"Full source remains at path={source_path}; use read(path={source_path!r}, "
+        f"offset={next_offset}) to continue.]"
     )
     return text[: DEFAULT_READ_CHARS - len(marker)] + marker, True
 
@@ -244,7 +247,9 @@ class ReadTool(BaseFileTool):
                 end_line=offset + limit - 1,
             )
             content, chars_truncated = _truncate_read(
-                self.formatter.format_file_read(result)
+                self.formatter.format_file_read(result),
+                source_path=result.path,
+                next_offset=result.end_line + 1,
             )
             return content
         except (FileToolError, RuntimeError, ValueError) as exc:

@@ -4,6 +4,7 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
+from pickel.shared.model_config import ModelConfig
 from tests.helpers.yaml_app_config import app_config_from_yaml_file
 
 
@@ -34,7 +35,7 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(8, config.react_max_steps)
 
-    def test_load_defaults_context_cli_turn_window_to_five(self) -> None:
+    def test_load_does_not_expose_legacy_context_cli_turn_window(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
@@ -58,7 +59,7 @@ class AppConfigTests(unittest.TestCase):
 
             config = app_config_from_yaml_file(config_path)
 
-            self.assertEqual(5, config.context_cli_turn_window)
+            self.assertFalse(hasattr(config, "context_cli_turn_window"))
 
     def test_extensions_section_passes_through_raw_and_extension_parses_defaults(
         self,
@@ -165,7 +166,7 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(16, config.react_max_steps)
 
-    def test_load_reads_top_level_context_cli_turn_window(self) -> None:
+    def test_load_ignores_legacy_top_level_context_cli_turn_window(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config_path = root / "config.yaml"
@@ -190,7 +191,7 @@ class AppConfigTests(unittest.TestCase):
 
             config = app_config_from_yaml_file(config_path)
 
-            self.assertEqual(9, config.context_cli_turn_window)
+            self.assertFalse(hasattr(config, "context_cli_turn_window"))
 
     def test_resolve_model_config_merges_selected_provider_and_model(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -248,6 +249,66 @@ class AppConfigTests(unittest.TestCase):
             model_config = config.resolve_model_config()
 
             self.assertEqual(1048576, model_config.max_input_tokens)
+
+    def test_resolve_model_config_keeps_total_context_separate_from_input_limit(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(textwrap.dedent("""
+                    default_agent: Pickle
+                    default_llm:
+                      provider: opencode-go
+                      model: glm-5.3-flash
+                    providers:
+                      opencode-go:
+                        models:
+                          glm-5.3-flash:
+                            api_key: test-key
+                            wire_protocol: openai-chat-completions
+                            context_window_tokens: 1000000
+                            max_output_tokens: 65536
+                            provider_options: {}
+                    agents:
+                      Pickle:
+                        workspace_path: workspace
+                        behavior_path: agents/Pickle
+                    """).strip())
+
+            config = app_config_from_yaml_file(config_path)
+            model_config = config.resolve_model_config()
+
+            assert model_config.context_window_tokens == 1000000
+            assert model_config.max_input_tokens is None
+            assert model_config.effective_input_token_limit(65536) == 934464
+
+    def test_context_window_must_exceed_output_budget(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "context_window_tokens.*max_output_tokens"
+        ):
+            ModelConfig(
+                provider="anthropic",
+                model="claude-test",
+                wire_protocol="anthropic-messages",
+                max_output_tokens=1024,
+                context_window_tokens=1024,
+            )
+
+    def test_effective_input_limit_applies_requested_reserve_and_independent_cap(
+        self,
+    ) -> None:
+        model = ModelConfig(
+            provider="anthropic",
+            model="claude-test",
+            wire_protocol="anthropic-messages",
+            max_input_tokens=700_000,
+            max_output_tokens=65_536,
+            context_window_tokens=1_000_000,
+        )
+
+        assert model.effective_input_token_limit() == 700_000
+        assert model.effective_input_token_limit(400_000) == 600_000
 
     def test_resolve_model_config_defaults_temperature_to_none_when_omitted(
         self,

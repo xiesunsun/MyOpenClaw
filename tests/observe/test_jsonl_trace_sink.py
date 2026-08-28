@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pickel.observe.jsonl_trace_sink as trace_module
 from pickel.config.paths import home_dir
-from pickel.observe.records import (
+from pickel.telemetry.records import (
     DiagnosticRecord,
     RequestSnapshotRecord,
     SpanRecord,
@@ -445,6 +445,23 @@ def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
         "span",
     ]
     assert [record["trace_seq"] for record in records] == [0, 1]
+
+
+def test_span_trace保留_tool_call_执行身份(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path)
+    sink.record(
+        SpanRecord(
+            name="pickel.tool.execute",
+            identity=ExecutionIdentity(
+                session_id="s1", operation_id="op-1", tool_call_id="call-1"
+            ),
+        )
+    )
+    sink.close()
+
+    record = json.loads(path.read_text())
+    assert record["tool_call_id"] == "call-1"
 
 
 def test_observation_identity_沿用旧的空_operation_id输出(tmp_path: Path):

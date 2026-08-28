@@ -13,7 +13,7 @@ from pickel.operations.agent_run_state import (
     ToolCallState,
 )
 from pickel.operations.operation_service import OperationService
-from pickel.persistence.errors import StorageConflictError
+from pickel.shared.storage_errors import StorageConflictError
 
 ApprovalOutcome = Literal["approved", "denied"]
 

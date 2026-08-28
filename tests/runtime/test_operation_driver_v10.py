@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 from functools import wraps
+from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +23,7 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
-from pickel.conversations.conversation_node import ConversationNode
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.operations.agent_run_state import (
     AgentRunError,
     AgentRunState,
@@ -34,9 +35,9 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.session_operation import SessionOperation
 from pickel.hooks.decisions import PreToolUseDecision
-from pickel.providers.stream import StreamCompleted
+from pickel.providers.stream import StreamCompleted, TextDelta
 from pickel.model_calls.model_call import ModelCall, ModelCallError
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.service import AgentPreparedModelCall
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.runtime.operation_driver import OperationDriver
@@ -80,6 +81,32 @@ class _Conversation:
                 parent_node_id="node-1",
                 content_type="agent_message",
                 content=AssistantMessage(content=(TextBlock(text="done"),)),
+                created_at=datetime.now(timezone.utc),
+            ),
+        ]
+
+
+class _RecoveredCompactionConversation(_Conversation):
+    """模拟提交压缩事实后、二次 preflight 前进程恢复。"""
+
+    def list_active_branch_nodes(self, *, session_id):
+        return [
+            ConversationNode(
+                node_id="node-1",
+                session_id=session_id,
+                parent_node_id=None,
+                content_type="agent_message",
+                content=UserMessage(),
+                created_at=datetime.now(timezone.utc),
+            ),
+            ConversationNode(
+                node_id="compaction-1",
+                session_id=session_id,
+                parent_node_id="node-1",
+                content_type="history_compaction",
+                content=HistoryCompaction(
+                    summary="previous summary", first_kept_node_id="node-1"
+                ),
                 created_at=datetime.now(timezone.utc),
             ),
         ]
@@ -178,6 +205,14 @@ class _Provider:
         if isinstance(item, Exception):
             raise item
         yield StreamCompleted(item, provider_response={"attempt": self.calls})
+
+
+class _PartialOutputFailureProvider(_Provider):
+    async def stream_prepared(self, prepared):
+        del prepared
+        self.calls += 1
+        yield TextDelta("partial")
+        raise TimeoutError("stream idle after first output")
 
 
 class _Operations:
@@ -698,6 +733,195 @@ async def test_current_max_steps_failure_captures_leaf_before_terminal_commit():
     assert conversation.branch_calls == ["assistant-1"]
 
 
+@_run_async
+async def test_preflight_runs_on_final_context_before_model_request_intent():
+    provider = _Provider([AssistantMessage(content=(TextBlock("done"),))])
+    operations = _Operations(_queued_state())
+    seen = []
+
+    async def preflight(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(compaction_required=False)
+
+    with patch(
+        "pickel.runtime.operation_driver.preflight_model_context",
+        side_effect=preflight,
+    ):
+        result = await _driver(operations, provider).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert len(seen) == 1
+    assert seen[0]["context"] == provider.contexts[0]
+    assert seen[0]["provider"] is provider
+    assert seen[0]["effective_input_capacity"] is None
+
+
+@_run_async
+async def test_preflight_compaction_signal_does_not_create_intent_or_provider_call():
+    class _CountingProvider(_Provider):
+        def __init__(self):
+            super().__init__([AssistantMessage(content=(TextBlock("unused"),))])
+            self.count_calls = 0
+
+        async def count_context_tokens(self, context):
+            self.count_calls += 1
+            return 90
+
+    provider = _CountingProvider()
+    package = _loaded_package().version
+    package.model_policy = SimpleNamespace(
+        primary=SimpleNamespace(
+            effective_input_token_limit=lambda: 100,
+        )
+    )
+    operations = _Operations(_queued_state())
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(provider=provider),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error.code == "history_compaction_worker_unavailable"
+    assert provider.count_calls == 1
+    assert provider.calls == 0
+    assert operations.state.current_step is None
+
+
+@_run_async
+async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_large():
+    class _CountingProvider(_Provider):
+        def __init__(self):
+            super().__init__([AssistantMessage(content=(TextBlock("unused"),))])
+            self.count_calls = 0
+
+        async def count_context_tokens(self, context):
+            self.count_calls += 1
+            return 90
+
+    provider = _CountingProvider()
+    package = _loaded_package().version
+    package.model_policy = SimpleNamespace(
+        primary=SimpleNamespace(effective_input_token_limit=lambda: 1100),
+        worker=object(),
+    )
+    operations = _Operations(_queued_state())
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_Conversation(),
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(provider=provider),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+    )
+    compact_calls = []
+
+    async def compact(**kwargs):
+        compact_calls.append(kwargs)
+
+    driver._history_compaction.compact = compact
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error.code == "history_compaction_no_progress"
+    assert len(compact_calls) == 1
+    assert provider.count_calls == 2
+    assert provider.calls == 0
+
+
+@_run_async
+async def test_recovery_after_compaction_node_does_not_invoke_worker_again():
+    class _CountingProvider(_Provider):
+        def __init__(self):
+            super().__init__([AssistantMessage(content=(TextBlock("unused"),))])
+            self.count_calls = 0
+
+        async def count_context_tokens(self, context):
+            self.count_calls += 1
+            return 90
+
+    provider = _CountingProvider()
+    package = _loaded_package().version
+    package.model_policy = SimpleNamespace(
+        primary=SimpleNamespace(effective_input_token_limit=lambda: 100),
+        worker=SimpleNamespace(provider="worker", model="worker-model"),
+    )
+    operations = _Operations(_queued_state())
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_RecoveredCompactionConversation(),
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(provider=provider),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+    )
+    compact_calls = []
+
+    async def compact(**kwargs):
+        compact_calls.append(kwargs)
+
+    driver._history_compaction.compact = compact
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error.code == "history_compaction_no_progress"
+    assert compact_calls == []
+    assert provider.count_calls == 1
+    assert provider.calls == 0
+
+
+@_run_async
+async def test_formal_context_keeps_complete_active_branch_without_turn_window():
+    projected = tuple(
+        UserMessage((TextBlock(f"message-{index}"),)) for index in range(8)
+    )
+    seen = []
+
+    class _Builder:
+        def build_model_context(self, **kwargs):
+            seen.append(tuple(kwargs["visible_messages"]))
+            return ModelContext(
+                system=SystemContent(), messages=tuple(kwargs["visible_messages"])
+            )
+
+    driver = OperationDriver(
+        operation_service=_Operations(
+            replace(
+                _queued_state(),
+                status="running",
+                current_step=ModelStepState(
+                    "step-1", 1, "preparing_request", 0, None, None, ()
+                ),
+            )
+        ),
+        conversation_service=_Conversation(),
+        package_loader=lambda _: _loaded_package().version,
+        effects_resolver=lambda _: RuntimeEffects(provider=object()),
+        model_context_builder=_Builder(),
+    )
+
+    with patch(
+        "pickel.runtime.operation_driver.ConversationProjector.project_conversation_messages",
+        return_value=projected,
+    ):
+        context = await driver._build_context(
+            operation=_operation(),
+            state=driver._operations.state,
+            package=_loaded_package().version,
+            effects=RuntimeEffects(provider=object()),
+        )
+
+    assert seen == [projected]
+    assert context.messages == projected
+
+
 class _CancellationOperations(_Operations):
     def reconcile_cancellation(self, operation_id, *, reason):
         return ()
@@ -976,6 +1200,23 @@ async def test_provider_failure_exhaustion_commits_failed_terminal_state():
         retryable=True,
     )
     assert provider.calls == 3
+
+
+@_run_async
+async def test_provider_failure_after_first_output_does_not_retry():
+    provider = _PartialOutputFailureProvider([])
+    operations = _Operations(_queued_state())
+    driver = _driver(operations, provider)
+    delays: list[float] = []
+    driver._sleep = lambda delay: _record_delay(delays, delay)
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error is not None
+    assert result.state.error.code == "provider_timeout"
+    assert provider.calls == 1
+    assert delays == []
 
 
 @_run_async
@@ -1468,6 +1709,7 @@ async def test_before_request_contributions_are_frozen_in_request_intent():
     assert intent_context == provider.contexts[0]
     assert [section.name for section in intent_context.system.sections] == [
         "behavior",
+        "multi_agent_guidance",
         "request_hook",
     ]
     assert [message.content[0].text for message in intent_context.messages] == [

@@ -10,15 +10,16 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 @tool(
     name="report",
     description=(
-        "Report a self-contained result to your direct parent. Reporting does not "
-        "end this child turn or mean that the child is complete."
+        "Send an intermediate, self-contained report from this Child to its direct "
+        "Parent. This is not the terminal result and does not end the child "
+        "Operation; Runtime automatically delivers the terminal result separately."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "output": {
                 "type": "string",
-                "description": "Self-contained actionable report for the direct parent.",
+                "description": "Self-contained actionable intermediate report for the direct Parent.",
             }
         },
         "required": ["output"],
@@ -26,7 +27,12 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
     },
     output_schema={
         "type": "object",
-        "properties": {"message_id": {"type": "string"}},
+        "properties": {
+            "message_id": {
+                "type": "string",
+                "description": "ID of the durable report UserMessage delivered to the Parent.",
+            }
+        },
         "required": ["message_id"],
         "additionalProperties": False,
     },

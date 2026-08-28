@@ -25,7 +25,7 @@ from pickel.observe.operation_projector import (
 )
 from pickel.observe.operation_report_renderer import OperationReportRenderer
 from pickel.observe.session_projector import SessionObservationProjector
-from pickel.observe.trace_reader import read_operation_trace
+from pickel.observe.trace_reader import read_operation_trace, read_trace
 from pickel.observe.jsonl_trace_sink import trace_path
 from pickel.shared.frozen_json import thaw_json
 
@@ -82,7 +82,12 @@ class ObservationAPI:
             raise LookupError(f"未找到 Session: {session_id}")
         # SessionObservationProjector 是 Session index 的唯一合同来源；这里
         # 不复制聚合字段，避免 API 和静态导出各自产生不一致的指标。
-        return self.session_projector.project_session(session_id).to_dict()
+        path = self.trace_path_override or trace_path(session_id)
+        trace = read_trace(path)
+        return self.session_projector.project_session(
+            session_id,
+            trace_status=(trace.trace_status if trace is not None else None),
+        ).to_dict()
 
     def operation(self, operation_id: str) -> dict[str, Any]:
         operation = self.reader.read_operation(operation_id)

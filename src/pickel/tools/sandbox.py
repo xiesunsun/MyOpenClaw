@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pickel.config.sandbox_settings import SandboxSettings
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +53,6 @@ _DEFAULT_DENY_READ_HOME_DIRS = (
     ".kube",
     ".docker",
 )
-
-
-class SandboxSettings(BaseModel):
-    enabled: bool = True
-    strict: bool = False
-    allow_write: list[str] = Field(default_factory=list)
-    deny_read: list[str] = Field(default_factory=list)
-    env_deny: list[str] = Field(default_factory=list)
-    env_allow: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

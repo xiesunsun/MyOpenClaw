@@ -177,7 +177,6 @@ class AgentPackageBuilder:
     ) -> AgentDefinition:
         runtime = AgentRuntimePolicy(
             max_model_steps=self._app_config.react_max_steps,
-            context_turn_window=self._app_config.context_cli_turn_window,
             max_delegation_depth=3,
             model_request_max_attempts=self._app_config.model_request_max_attempts,
             model_request_retry_initial_delay_ms=(
@@ -254,6 +253,7 @@ class AgentPackageBuilder:
             temperature=config.temperature,
             max_input_tokens=config.max_input_tokens,
             max_output_tokens=config.max_output_tokens,
+            context_window_tokens=config.context_window_tokens,
             provider_options=scan.value,
             provider_implementation=ImplementationRef("provider", config.wire_protocol),
             required_secret_refs=tuple(refs),
@@ -268,10 +268,14 @@ class AgentPackageBuilder:
         input_schema = thaw_json(entry.tool.spec.input_schema)
         if entry.name == "delegate_agent":
             properties = dict(input_schema.get("properties") or {})
-            properties["agent_id"] = {
-                "type": "string",
-                "enum": list(delegation_policy.allowed_agent_ids),
-            }
+            agent_id_schema = dict(properties.get("agent_id") or {})
+            agent_id_schema.update(
+                {
+                    "type": "string",
+                    "enum": list(delegation_policy.allowed_agent_ids),
+                }
+            )
+            properties["agent_id"] = agent_id_schema
             input_schema["properties"] = properties
             required = list(input_schema.get("required") or ())
             input_schema["required"] = [name for name in required if name != "agent_id"]

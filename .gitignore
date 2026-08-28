@@ -101,3 +101,7 @@ pickle_workspace/
 # ------------------------------
 .claude/worktrees/
 .pickel/
+# 项目级模型能力补充不含密钥，允许随项目版本化；其余 .pickel 内容仍忽略。
+!.pickel/
+.pickel/*
+!.pickel/models.json

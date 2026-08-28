@@ -19,8 +19,9 @@ from pickel.model_calls.content import (
 )
 from pickel.model_calls.content_store import ModelCallContentRef
 from pickel.model_calls.model_call import ModelCall, ModelCallError
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.store import ModelCallStore
+from pickel.telemetry.records import ErrorInfo, SpanTimer
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
 from pickel.providers.errors import ProviderRequestError
@@ -86,10 +87,6 @@ class ModelCallService:
         self._content_store = store.model_call_content_store
         self._model_call_id = model_call_id_factory or (lambda: str(uuid4()))
         self._now = now or (lambda: datetime.now(timezone.utc))
-
-    @property
-    def store(self) -> ModelCallStore:
-        return self._store
 
     def prepare_or_recover_agent_call(
         self,
@@ -167,7 +164,8 @@ class ModelCallService:
         purpose: str,
     ) -> SessionPreparedModelCall:
         prepared = mapper.prepare(context)
-        ref = self._put_request_content(context, prepared)
+        identity = ExecutionIdentity(session_id=session_id)
+        ref = self._put_request_content(context, prepared, identity=identity)
         timestamp = self._now()
         call = ModelCall(
             model_call_id=self._model_call_id(),
@@ -192,7 +190,17 @@ class ModelCallService:
             first_chunk_at=None,
             finished_at=None,
         )
-        self._store.insert_session_model_call(model_call=call)
+        prepare_span = SpanTimer("pickel.model_call.prepare_transaction", call.identity)
+        try:
+            self._store.insert_session_model_call(model_call=call)
+        except Exception as exc:
+            prepare_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="model_call_prepare"),
+            )
+            raise
+        else:
+            prepare_span.finish()
         return SessionPreparedModelCall(model_call=call, prepared=prepared)
 
     def load_prepared(self, call: ModelCall) -> PreparedModelCall:
@@ -277,34 +285,63 @@ class ModelCallService:
         response_ref = (
             ModelCallContentRef.from_string(response_content_ref)
             if response_content_ref is not None
-            else ModelCallContentRef.from_string(self.save_response_content(response))
+            else ModelCallContentRef.from_string(
+                self.save_response_content(response, identity=call.identity)
+            )
         )
         completed = self._completed_call(call, response, response_ref)
-        if not self._store.commit_agent_model_response(
-            model_call=completed,
-            state=state,
-            expected_revision=expected_revision,
-            node=node,
-            updated_at=response.finished_at,
-        ):
+        complete_span = SpanTimer(
+            "pickel.model_call.complete_transaction", call.identity
+        )
+        try:
+            committed = self._store.commit_agent_model_response(
+                model_call=completed,
+                state=state,
+                expected_revision=expected_revision,
+                node=node,
+                updated_at=response.finished_at,
+            )
+        except Exception as exc:
+            complete_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="model_call_complete"),
+            )
+            raise
+        if not committed:
+            complete_span.finish(status="error")
             raise ModelCallPrepareConflict(
                 "ResponseContent 已保存，但 ModelCall/Assistant/State 原子 CAS 失败"
             )
+        complete_span.finish()
         return completed
 
     def save_response_content(
-        self, response: ModelCallResponse, *, partial: bool = False
+        self,
+        response: ModelCallResponse,
+        *,
+        partial: bool = False,
+        identity: ExecutionIdentity | None = None,
     ) -> str:
         """先保存 Provider 聚合响应，返回可挂到 ModelCall 的内容引用。"""
-        ref = self._content_store.put(
-            encode_response_content(
-                ResponseContent(
-                    partial=partial,
-                    provider_response=response.provider_response,
-                    assistant_message=response.assistant_message,
-                )
+        payload = encode_response_content(
+            ResponseContent(
+                partial=partial,
+                provider_response=response.provider_response,
+                assistant_message=response.assistant_message,
             )
         )
+        if identity is None:
+            return self._content_store.put(payload).to_string()
+        write_span = SpanTimer("pickel.storage.response_content.write", identity)
+        try:
+            ref = self._content_store.put(payload)
+        except Exception as exc:
+            write_span.finish(
+                status="error", error=ErrorInfo.from_exception(exc, kind="storage")
+            )
+            raise
+        else:
+            write_span.finish()
         return ref.to_string()
 
     def commit_agent_processing_failure(
@@ -323,19 +360,34 @@ class ModelCallService:
         response_ref = (
             ModelCallContentRef.from_string(response_content_ref)
             if response_content_ref is not None
-            else ModelCallContentRef.from_string(self.save_response_content(response))
+            else ModelCallContentRef.from_string(
+                self.save_response_content(response, identity=call.identity)
+            )
         )
         completed = self._completed_call(call, response, response_ref)
-        if not self._store.commit_agent_model_processing_failure(
-            model_call=completed,
-            state=state,
-            expected_revision=expected_revision,
-            node=node,
-            updated_at=response.finished_at,
-        ):
+        complete_span = SpanTimer(
+            "pickel.model_call.complete_transaction", call.identity
+        )
+        try:
+            committed = self._store.commit_agent_model_processing_failure(
+                model_call=completed,
+                state=state,
+                expected_revision=expected_revision,
+                node=node,
+                updated_at=response.finished_at,
+            )
+        except Exception as exc:
+            complete_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="model_call_complete"),
+            )
+            raise
+        if not committed:
+            complete_span.finish(status="error")
             raise ModelCallPrepareConflict(
                 "ResponseContent 已保存，但 completed ModelCall/Assistant/failed State 原子 CAS 失败"
             )
+        complete_span.finish()
         return completed
 
     def complete_session_response(
@@ -344,21 +396,28 @@ class ModelCallService:
         call: ModelCall,
         response: ModelCallResponse,
     ) -> ModelCall:
-        response_ref = self._content_store.put(
-            encode_response_content(
-                ResponseContent(
-                    partial=False,
-                    provider_response=response.provider_response,
-                    assistant_message=response.assistant_message,
-                )
-            )
+        response_ref = ModelCallContentRef.from_string(
+            self.save_response_content(response, identity=call.identity)
         )
         completed = self._completed_call(call, response, response_ref)
-        if not self._store.transition_model_call(
-            model_call=completed,
-            expected_status="in_flight",
-        ):
+        complete_span = SpanTimer(
+            "pickel.model_call.complete_transaction", call.identity
+        )
+        try:
+            committed = self._store.transition_model_call(
+                model_call=completed,
+                expected_status="in_flight",
+            )
+        except Exception as exc:
+            complete_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="model_call_complete"),
+            )
+            raise
+        if not committed:
+            complete_span.finish(status="error")
             raise ModelCallPrepareConflict("Session ModelCall completed CAS 失败")
+        complete_span.finish()
         return completed
 
     def request_content(self, call: ModelCall) -> RequestContent:
@@ -376,8 +435,18 @@ class ModelCallService:
         step = state.current_step
         assert step is not None and step.request_intent is not None
         prepared = mapper.prepare(step.request_intent.model_context)
-        ref = self._put_request_content(step.request_intent.model_context, prepared)
         next_step = replace(step, request_attempt=step.request_attempt + 1)
+        identity = ExecutionIdentity(
+            session_id=operation.session_id,
+            operation_id=operation.operation_id,
+            step_id=next_step.step_id,
+            step_sequence=next_step.step_sequence,
+        )
+        ref = self._put_request_content(
+            step.request_intent.model_context,
+            prepared,
+            identity=identity,
+        )
         next_state = replace(
             state,
             revision=state.revision + 1,
@@ -412,15 +481,26 @@ class ModelCallService:
             first_chunk_at=None,
             finished_at=None,
         )
-        if not self._store.prepare_agent_model_call(
-            model_call=call,
-            state=next_state,
-            expected_revision=state.revision,
-            updated_at=timestamp,
-        ):
+        prepare_span = SpanTimer("pickel.model_call.prepare_transaction", call.identity)
+        try:
+            prepared_ok = self._store.prepare_agent_model_call(
+                model_call=call,
+                state=next_state,
+                expected_revision=state.revision,
+                updated_at=timestamp,
+            )
+        except Exception as exc:
+            prepare_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="model_call_prepare"),
+            )
+            raise
+        if not prepared_ok:
+            prepare_span.finish(status="error")
             raise ModelCallPrepareConflict(
                 "ModelCall prepared 事务 CAS 失败，Provider 未调用"
             )
+        prepare_span.finish()
         return AgentPreparedModelCall(
             state=next_state,
             model_call=call,
@@ -450,15 +530,26 @@ class ModelCallService:
         self,
         context: ModelContext,
         prepared: PreparedModelCall,
+        *,
+        identity: ExecutionIdentity,
     ) -> ModelCallContentRef:
-        return self._content_store.put(
-            encode_request_content(
-                RequestContent(
-                    model_context=context,
-                    wire_request=prepared.body,
-                )
+        payload = encode_request_content(
+            RequestContent(
+                model_context=context,
+                wire_request=prepared.body,
             )
         )
+        write_span = SpanTimer("pickel.storage.request_content.write", identity)
+        try:
+            ref = self._content_store.put(payload)
+        except Exception as exc:
+            write_span.finish(
+                status="error", error=ErrorInfo.from_exception(exc, kind="storage")
+            )
+            raise
+        else:
+            write_span.finish()
+        return ref
 
     @staticmethod
     def _completed_call(

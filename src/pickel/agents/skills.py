@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from pickel.context.templates_loader import load_templates
+from pickel.templates.loader import load_templates
 
 logger = logging.getLogger(__name__)
 

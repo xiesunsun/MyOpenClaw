@@ -58,10 +58,14 @@ class DelegationResultProjector:
         if status == "succeeded":
             if assistant_message is None:
                 raise ValueError("succeeded Delegation 缺少最终 AssistantMessage")
-            return {
-                "result": self._assistant_content(assistant_message),
-                "error": None,
-            }
+            content, truncated, omitted_chars = self._assistant_content(
+                assistant_message
+            )
+            projection: dict[str, object] = {"result": content, "error": None}
+            if truncated:
+                # 小结果保持旧 JSON 形状；只有发生有界投影时才暴露元数据。
+                projection.update({"truncated": True, "omitted_chars": omitted_chars})
+            return projection
         if status == "failed":
             return {"result": None, "error": self._error(error)}
         if status == "cancelled":
@@ -70,27 +74,35 @@ class DelegationResultProjector:
         # ``archived`` 是 ChildAgentSnapshot 的查询状态；若它仍携带最终消息，
         # wait 仍应返回同一成功投影。其余运行态只表示尚未有结果。
         if status == "archived" and assistant_message is not None:
-            return {
-                "result": self._assistant_content(assistant_message),
-                "error": None,
-            }
+            content, truncated, omitted_chars = self._assistant_content(
+                assistant_message
+            )
+            projection = {"result": content, "error": None}
+            if truncated:
+                projection.update({"truncated": True, "omitted_chars": omitted_chars})
+            return projection
         return {"result": None, "error": None}
 
-    def _assistant_content(self, message: AssistantMessage) -> list[dict[str, Any]]:
+    def _assistant_content(
+        self, message: AssistantMessage
+    ) -> tuple[list[dict[str, Any]], bool, int]:
         content: list[dict[str, Any]] = []
         remaining = self.max_chars
+        omitted_chars = 0
         for block in message.content:
             if isinstance(block, TextBlock):
                 if remaining <= 0:
+                    omitted_chars += len(block.text)
                     continue
                 text = block.text[:remaining]
                 remaining -= len(text)
+                omitted_chars += len(block.text) - len(text)
                 if text:
                     content.append(content_block_to_dict(TextBlock(text=text)))
             elif isinstance(block, ArtifactBlock):
                 # Artifact 是稳定的消息值引用，不受文本预算影响。
                 content.append(content_block_to_dict(block))
-        return content
+        return content, omitted_chars > 0, omitted_chars
 
     @staticmethod
     def _error(error: AgentRunError | None) -> dict[str, object]:
@@ -160,12 +172,21 @@ def project_settled_message(
         cancellation=cancellation,
         max_chars=max_chars,
     )
+    truncated = bool(projection.get("truncated", False))
     envelope = TextBlock(
         json.dumps(
             {
                 "child_session_id": child_session_id,
                 "status": status,
                 "type": "agent_settled",
+                **(
+                    {
+                        "truncated": True,
+                        "omitted_chars": projection["omitted_chars"],
+                    }
+                    if truncated
+                    else {}
+                ),
             },
             ensure_ascii=False,
             sort_keys=True,

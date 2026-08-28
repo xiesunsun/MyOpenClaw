@@ -204,6 +204,7 @@ def test_builder_freezes_delegation_policy_into_package_and_tool_schema(
     assert delegate.input_schema["properties"]["agent_id"] == {
         "type": "string",
         "enum": ("Pickle", "Worker"),
+        "description": "Optional target Agent ID from the frozen delegation allowlist.",
     }
     assert "provider" not in delegate.input_schema
     assert "agent_id" not in delegate.input_schema["required"]
@@ -300,7 +301,23 @@ def test_snapshot_excludes_provider_secrets(tmp_path: Path) -> None:
     ]
     assert package.model_policy.primary.provider_options == {"thinking": "high"}
     assert package.runtime_policy.max_model_steps == 8
-    assert package.runtime_policy.context_turn_window == 5
+    assert package.runtime_policy.context_turn_window is None
+    assert "context_turn_window" not in package.content_dict()["runtime_policy"]
+
+
+def test_builder_freezes_model_context_capacity(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.providers["anthropic"].models["claude-test"].context_window_tokens = 200000
+
+    package = AgentPackageBuilder(
+        app_config=config,
+        tool_bus=_tool_bus(),
+    ).build_agent_package_version()
+
+    model = package.model_policy.primary
+    assert model.context_window_tokens == 200000
+    assert model.max_input_tokens is None
+    assert model.effective_input_token_limit(4096) == 195904
 
 
 def test_builder_uses_loaded_extension_version_instead_of_config_guess(

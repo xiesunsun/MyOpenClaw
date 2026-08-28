@@ -4,7 +4,7 @@ import html
 import json
 from datetime import datetime, timezone
 
-from pickel.context.history_compaction import HistoryCompaction
+from pickel.conversations.conversation_node import HistoryCompaction
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_service import ConversationService

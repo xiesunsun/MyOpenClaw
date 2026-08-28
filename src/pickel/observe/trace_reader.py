@@ -49,7 +49,9 @@ class OperationTraceData:
         return str(self.trace_status.get("status_text") or "Trace 状态未知")
 
 
-def read_trace(path: Path) -> TraceEnhancement | None:
+def read_trace(
+    path: Path, *, operation_id: str | None = None
+) -> TraceEnhancement | None:
     files = _trace_files(path)
     if not files:
         return None
@@ -67,6 +69,12 @@ def read_trace(path: Path) -> TraceEnhancement | None:
         except json.JSONDecodeError:
             continue
         if not isinstance(event, dict):
+            continue
+
+        # Operation 过滤必须先于所有完整性指标计算。Trace 文件可能包含同一
+        # Session 的多个 Operation；其它 Operation 的 sequence、丢弃计数和
+        # stream delta 不能污染当前 Operation 的状态。
+        if operation_id is not None and event.get("operation_id") != operation_id:
             continue
         mode = _read_trace_mode(event, mode)
         last_sequence = max(last_sequence, _read_trace_sequence(event))
@@ -196,18 +204,21 @@ def read_operation_trace(
         if not isinstance(record, dict):
             continue
 
+        rec_op_id = record.get("operation_id")
+        # Operation 过滤必须是精确匹配。没有 operation_id 的全局记录不能
+        # 混入某一个 Operation，否则观测页会把别的运行的 span/delta 算进来。
+        if operation_id is not None and rec_op_id != operation_id:
+            continue
+
+        # 只有通过 Operation 过滤的记录才可以参与 Trace 状态。特别是
+        # last_sequence 与 dropped_records，否则另一个 Operation 的尾部记录
+        # 会让当前 Operation 看起来不完整或丢弃了数据。
         mode = _read_trace_mode(record, mode)
         last_sequence = max(last_sequence, _read_trace_sequence(record))
         dropped_records = max(
             dropped_records,
             _read_number(record.get("dropped_records")),
         )
-
-        rec_op_id = record.get("operation_id")
-        # Operation 过滤必须是精确匹配。没有 operation_id 的全局记录不能
-        # 混入某一个 Operation，否则观测页会把别的运行的 span/delta 算进来。
-        if operation_id is not None and rec_op_id != operation_id:
-            continue
 
         record_type = record.get("record_type", "runtime_event")
         if record_type == "span" and isinstance(record.get("payload"), dict):
@@ -396,6 +407,12 @@ def _build_metrics(spans: list[dict]) -> dict:
         "tool": "pickel.tool.execute",
         "hook": "pickel.hook.",
         "context": "pickel.model_context.build",
+        "model_semaphore": "pickel.model_request.semaphore_wait",
+        "request_content_write": "pickel.storage.request_content.write",
+        "response_content_write": "pickel.storage.response_content.write",
+        "model_prepare": "pickel.model_call.prepare_transaction",
+        "model_complete": "pickel.model_call.complete_transaction",
+        "event_delivery": "pickel.event.delivery",
         "storage": "pickel.storage.commit",
     }
     result: dict[str, dict] = {}
@@ -430,18 +447,32 @@ def _build_metrics(spans: list[dict]) -> dict:
                 and isinstance(attributes.get("ttft_ms"), (int, float))
             ]
             summary["ttft_ms"] = _percentiles(ttft)
-            summary["tokens"] = {
-                key: sum(
-                    int(attributes.get(key) or 0)
-                    for span in matched
-                    if isinstance((attributes := span.get("attributes")), dict)
-                )
+            token_values: dict[str, list[int]] = {
+                key: []
                 for key in (
                     "input_tokens",
                     "output_tokens",
                     "cache_read_tokens",
                     "cache_write_tokens",
+                    "reasoning_tokens",
                 )
+            }
+            token_unknown: dict[str, int] = {key: 0 for key in token_values}
+            for span in matched:
+                attributes = span.get("attributes")
+                attributes = attributes if isinstance(attributes, dict) else {}
+                for key in token_values:
+                    value = attributes.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        token_values[key].append(value)
+                    else:
+                        token_unknown[key] += 1
+            summary["tokens"] = {
+                key: (sum(values) if values else None)
+                for key, values in token_values.items()
+            }
+            summary["token_unknown_counts"] = {
+                key: count for key, count in token_unknown.items() if count
             }
         result[label] = summary
     return result

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from pickel.telemetry.records import SpanRecord, observation_scope
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_events import AssistantMessageEvent, AgentRunStarted
 from pickel.shared.event_envelope import EventEnvelope
@@ -80,6 +81,23 @@ def test_唯一订阅者抛异常时_emit_仍正常返回():
     emitted = asyncio.run(bus.emit(AssistantMessageEvent()))
 
     assert emitted.envelope.event_sequence == 0
+
+
+def test_emit_records_event_delivery_span():
+    bus = EventBus()
+    records: list[SpanRecord] = []
+
+    class Collector:
+        def record(self, record) -> None:
+            if isinstance(record, SpanRecord):
+                records.append(record)
+
+    with observation_scope(Collector()):
+        asyncio.run(bus.emit(AssistantMessageEvent()))
+
+    assert len(records) == 1
+    assert records[0].name == "pickel.event.delivery"
+    assert records[0].status == "ok"
 
 
 def test_异步订阅者被_await():

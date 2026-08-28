@@ -28,7 +28,7 @@ from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.providers.base import Provider
 from pickel.providers.stream import StreamCompleted
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.runtime.agent import Agent
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.shared.execution_identity import ExecutionIdentity

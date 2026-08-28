@@ -1,4 +1,4 @@
-"""Runtime 诊断记录与被动 Observer 端口。"""
+"""跨 Runtime、ModelCall 与 Observer 的窄诊断记录。"""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ import pytest
 from pickel.conversations.agent_message import AssistantMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.model_calls.model_call import ModelCall
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.model_call_send_gate import (
     ModelCallSendConflict,

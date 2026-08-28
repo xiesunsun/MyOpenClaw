@@ -52,7 +52,7 @@ from pickel.observe.jsonl_trace_sink import (
     trace_mode,
     trace_path,
 )
-from pickel.observe.records import observation_scope
+from pickel.telemetry.records import observation_scope
 from pickel.providers.stream import TextDelta, ThinkingDelta, ToolCallArgsDelta
 from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation

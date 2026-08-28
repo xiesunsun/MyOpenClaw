@@ -46,6 +46,7 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
+from pickel.runtime.model_call_send_gate import ModelCallSendGate
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
 from pickel.tools.base import ToolExecutionContext
@@ -381,6 +382,7 @@ class Boot:
                 )
             ),
             model_call_service=ModelCallService(store),
+            model_call_send_gate=ModelCallSendGate(store),
             release_operation_package=release_operation_package,
             wake_callback=wake_callback,
             terminal_callback=terminal_callback,
@@ -554,6 +556,7 @@ class Boot:
 
         return RuntimeEffects(
             provider=provider,
+            worker_provider=loaded_agent_package.model_clients.get("worker"),
             execute_tool=execute_tool,
             invoke_hook_effect=invoke_hook,
             recall_sources=tuple(loaded_agent_package.recall_sources),
@@ -627,6 +630,7 @@ class Boot:
             temperature=model.temperature,
             max_input_tokens=model.max_input_tokens,
             max_output_tokens=model.max_output_tokens,
+            context_window_tokens=model.context_window_tokens,
             provider_options=options,
         )
 

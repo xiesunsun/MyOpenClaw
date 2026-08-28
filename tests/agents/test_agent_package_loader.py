@@ -25,7 +25,6 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.providers.anthropic import AnthropicMessagesProvider
 from pickel.tools.bus import ToolSource, ToolActivation
 from pickel.tools.cancel_delegation import cancel_delegation
-from pickel.tools.wait_delegation import wait_delegation
 from tests.agents.test_agent_package_builder import _EchoTool
 from tests.agents.test_agent_package_builder import _config, _tool_bus
 
@@ -143,7 +142,10 @@ def test_legacy_wait_tool_is_hidden_from_new_snapshot_but_loadable(
         source=ToolSource.BUILTIN,
         implementation_ref=ImplementationRef("builtin", "wait_delegation"),
         version=None,
-        description=wait_delegation.spec.description,
+        description=(
+            "Wait for a durable direct child agent for a bounded time. Returns its "
+            "persisted final assistant response when terminal; timeout does not cancel it."
+        ),
         input_schema={
             "type": "object",
             "properties": {

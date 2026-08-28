@@ -107,7 +107,10 @@ async def test_delegate_agent_passes_optional_target_agent_to_control() -> None:
 
 def test_delegate_agent_schema_has_optional_agent_id_only() -> None:
     properties = delegate_agent.spec.input_schema["properties"]
-    assert properties["agent_id"] == {"type": "string"}
+    assert properties["agent_id"] == {
+        "type": "string",
+        "description": "Optional target Agent ID from the frozen delegation allowlist.",
+    }
     assert "agent_id" not in delegate_agent.spec.input_schema["required"]
     assert delegate_agent.spec.input_schema["additionalProperties"] is False
 

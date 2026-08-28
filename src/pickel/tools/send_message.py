@@ -12,18 +12,21 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 @tool(
     name="send_message",
     description=(
-        "Send a durable follow-up message to a direct child agent without waiting."
+        "Send a durable follow-up from this Parent to one direct child agent. "
+        "The call returns after enqueueing and never waits for completion; the "
+        "child continues independently and its terminal result is delivered "
+        "automatically to this Parent."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "child_session_id": {
                 "type": "string",
-                "description": "Target direct child Session ID.",
+                "description": "Target direct child Session ID; this tool cannot message a sibling or ancestor.",
             },
             "message": {
                 "type": "string",
-                "description": "Follow-up message for the child agent.",
+                "description": "Follow-up UserMessage for the child agent.",
             },
         },
         "required": ["child_session_id", "message"],
@@ -31,7 +34,12 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
     },
     output_schema={
         "type": "object",
-        "properties": {"message_id": {"type": "string"}},
+        "properties": {
+            "message_id": {
+                "type": "string",
+                "description": "ID of the durable follow-up UserMessage.",
+            }
+        },
         "required": ["message_id"],
         "additionalProperties": False,
     },

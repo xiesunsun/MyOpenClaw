@@ -14,15 +14,16 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 @tool(
     name="interrupt_agent",
     description=(
-        "Interrupt the current active operation of a direct child agent. "
-        "The child Session and its Inbox are preserved for later work."
+        "Interrupt the current active Operation of one direct child agent. The "
+        "child Session and Inbox are preserved for later work; this does not "
+        "delete the child or its queued messages."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "child_session_id": {
                 "type": "string",
-                "description": "Target direct child Session ID.",
+                "description": "Target direct child Session ID whose active Operation should be cancelled.",
             }
         },
         "required": ["child_session_id"],
@@ -36,6 +37,7 @@ from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
             "status": {
                 "type": "string",
                 "enum": ["cancellation_requested", "no_active_operation"],
+                "description": "Whether an active child Operation was selected for cancellation.",
             },
         },
         "required": ["child_session_id", "operation_id", "status"],

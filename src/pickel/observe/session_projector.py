@@ -11,7 +11,11 @@ from typing import Any
 
 from pickel.observe.model_call_content_reader import ModelCallContentReader
 from pickel.observe.operation_fact_reader import OperationFactReader
-from pickel.observe.operation_projector import ModelCallUsageObservation, project_usage
+from pickel.observe.operation_projector import (
+    ModelCallUsageObservation,
+    project_usage,
+    project_usage_summary,
+)
 
 
 def _session_dict(session: Any) -> dict[str, Any]:
@@ -105,6 +109,10 @@ class SessionObservationProjector:
         }
         cache_denominator = 0
         cache_cached = 0
+        agent_usages: list[ModelCallUsageObservation] = []
+        agent_statuses: list[str] = []
+        workflow_usages: list[ModelCallUsageObservation] = []
+        workflow_statuses: list[str] = []
         for operation in sorted(
             self._facts.read_session_operations(session_id),
             key=lambda item: (item.accepted_at, item.operation_id),
@@ -122,6 +130,24 @@ class SessionObservationProjector:
                 )
                 for call in facts.model_calls
             ]
+            agent_usages.extend(usages)
+            agent_statuses.extend(call.status for call in facts.model_calls)
+            workflow_facts = _collect_workflow_facts(self._facts, facts)
+            workflow_call_usages: list[ModelCallUsageObservation] = []
+            workflow_call_statuses: list[str] = []
+            for workflow_fact in workflow_facts:
+                for call in workflow_fact.model_calls:
+                    usage = project_usage(
+                        self._content.read_response_content(
+                            call.response_content_ref
+                        ).content,
+                        provider=call.provider,
+                        api_kind=call.api_kind,
+                    )
+                    workflow_call_usages.append(usage)
+                    workflow_call_statuses.append(call.status)
+            workflow_usages.extend(workflow_call_usages)
+            workflow_statuses.extend(workflow_call_statuses)
             status = (
                 facts.run_state.status if facts.run_state is not None else "unknown"
             )
@@ -162,6 +188,10 @@ class SessionObservationProjector:
                     ),
                     "accepted_at": operation.accepted_at.isoformat(),
                     "duration_ms": _operation_duration_ms(operation, facts.model_calls),
+                    # Session index 没有按 Operation 读取 Trace；因此只提供
+                    # 可由 ConversationNode 复算的答案时间，完成时间明确未知。
+                    "answer_ready_ms": _answer_ready_ms(facts),
+                    "operation_completed_ms": None,
                     "model_calls_count": model_calls_count,
                     "tool_calls_count": tool_calls_count,
                     "children_count": children_count,
@@ -169,6 +199,23 @@ class SessionObservationProjector:
                     "output_tokens": _sum_usage(usages, "output_tokens"),
                     "cache_read_tokens": _sum_usage(usages, "cache_read_tokens"),
                     "cache_hit_rate": _aggregate_cache_rate(usages),
+                    "usage": {
+                        "agent": project_usage_summary(
+                            usages, statuses=(call.status for call in facts.model_calls)
+                        ),
+                        "workflow-inclusive": project_usage_summary(
+                            workflow_call_usages, statuses=workflow_call_statuses
+                        ),
+                    },
+                    "usage_unknown_attempt_count": sum(
+                        1 for usage in usages if _usage_is_unknown(usage)
+                    ),
+                    "failed_usage_unknown_attempt_count": sum(
+                        1
+                        for call, usage in zip(facts.model_calls, usages)
+                        if call.status in {"failed", "error"}
+                        and _usage_is_unknown(usage)
+                    ),
                     "operation_url": self._operation_url.format(
                         operation_id=operation.operation_id
                     ),
@@ -183,6 +230,12 @@ class SessionObservationProjector:
             if cache_denominator
             else None
         )
+        totals["usage"] = {
+            "agent": project_usage_summary(agent_usages, statuses=agent_statuses),
+            "workflow-inclusive": project_usage_summary(
+                workflow_usages, statuses=workflow_statuses
+            ),
+        }
         totals.update(
             {
                 "operations": totals["operations_count"],
@@ -202,6 +255,58 @@ class SessionObservationProjector:
             operations=operation_items,
             trace_status=trace_status,
         )
+
+
+def _usage_is_unknown(usage: ModelCallUsageObservation) -> bool:
+    return not any(
+        isinstance(getattr(usage, field), int)
+        and not isinstance(getattr(usage, field), bool)
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        )
+    )
+
+
+def _answer_ready_ms(facts: Any) -> float | None:
+    input_node = facts.input_node
+    final_node = facts.final_node
+    if input_node is None or final_node is None:
+        return None
+    return round(
+        max(
+            0.0, (final_node.created_at - input_node.created_at).total_seconds() * 1000
+        ),
+        3,
+    )
+
+
+def _collect_workflow_facts(reader: OperationFactReader, root: Any) -> list[Any]:
+    """读取 root Operation 及其 durable Child 后代，防止循环关系扩散。"""
+
+    result: list[Any] = []
+    visited: set[str] = set()
+
+    def visit(facts: Any) -> None:
+        operation_id = facts.operation.operation_id
+        if operation_id in visited:
+            return
+        visited.add(operation_id)
+        result.append(facts)
+        for delegation in facts.delegations:
+            for child_operation in reader.read_session_operations(
+                delegation.child_session_id
+            ):
+                child_facts = reader.read_operation_facts(child_operation.operation_id)
+                if child_facts is not None:
+                    visit(child_facts)
+
+    visit(root)
+    return result
 
 
 def _sum_usage(items: list[ModelCallUsageObservation], field: str) -> int | None:

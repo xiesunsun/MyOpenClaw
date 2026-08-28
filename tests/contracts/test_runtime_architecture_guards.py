@@ -31,7 +31,7 @@ from pickel.inbox.message import UserMessageSource
 from pickel.operations.operation_service import OperationService
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
 from pickel.providers.base import Provider
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.providers.stream import StreamCompleted
 from pickel.runtime.operation_driver import OperationDriver
 from pickel.runtime.runtime_effects import RuntimeEffects
@@ -42,6 +42,33 @@ def test_unwired_agent_run_progress_is_not_a_public_runtime_api() -> None:
     """未接线的 AgentRun 进度通知不能继续作为 Runtime 公共模块存在。"""
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("pickel.runtime.agent_run_progress")
+
+
+@pytest.mark.parametrize(
+    "retired_module",
+    [
+        "pickel.runtime.agent_run_state_machine",
+        "pickel.context.templates_loader",
+        "pickel.model_calls.prepared",
+        "pickel.observe.records",
+        "pickel.tools.wait_delegation",
+    ],
+)
+def test_retired_cross_layer_modules_do_not_return(retired_module: str) -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(retired_module)
+
+
+def test_operations_do_not_import_persistence_adapters() -> None:
+    root = Path(__file__).parents[2] / "src" / "pickel" / "operations"
+    for path in root.glob("*.py"):
+        tree = ast.parse(path.read_text())
+        imported = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert not any(name.startswith("pickel.persistence") for name in imported), path
 
 
 def test_supported_provider_modules_have_no_legacy_generation_entrypoints() -> None:

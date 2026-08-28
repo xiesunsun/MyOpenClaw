@@ -62,6 +62,7 @@
 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | AgentRunState、Intent、审批、取消和恢复语义 |
 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | Pickel 配置来源、合并、SecretRef 和 Package 构建输入 |
 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 批次顺序和验收门槛 |
+| [`观测驱动 Runtime 评审结论`](docs/upgrade/2026-08-27-observation-driven-runtime-findings.md) | 当前观测口径缺口、Context 压缩、Parent/Child 驱动与后续批次输入 |
 
 除上表明确列出的当前合同外，2026-08-10 之前的 Runtime、Session、Context、Observability 设计与实施计划均视为历史资料；其中的 `Run`、Strategy、`AgentRuntime`、`RuntimeBindings`、`SessionService`、`ContextAssembler`、`ConversationEntry`、通用 Commit/Reference 和旧表结构不得作为当前实现依据。
 
@@ -91,6 +92,7 @@
 | Config、Settings、Environ、Agent Package 输入 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 约束 Pickel 设置来源、合并、SecretRef；Runtime 名称以命名合同为准 |
 | Operation、AgentRunState、Tool Approval/Intent、取消与恢复 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | 约束接受事务、revision CAS、Package 绑定和未知副作用恢复语义 |
 | 重构批次、迁移顺序和验收范围 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 只决定实施顺序，不重新定义实体 |
+| 观测指标、Context 压缩、Parent/Child 空闲与唤醒、Provider 延迟治理 | [`观测驱动 Runtime 评审结论`](docs/upgrade/2026-08-27-observation-driven-runtime-findings.md) | 约束本轮真实 Session 暴露的问题和后续开发验收 |
 | Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 只参考 Anthropic 协议语义；其中旧 Strategy/Run 描述已失效 |
 
 ### 使用要求

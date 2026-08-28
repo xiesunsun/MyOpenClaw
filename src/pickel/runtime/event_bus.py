@@ -7,14 +7,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from dataclasses import replace
 from typing import Callable
 
-from pickel.observe.records import (
+from pickel.telemetry.records import (
     DiagnosticRecord,
     ErrorInfo,
+    SpanTimer,
     record_diagnostic,
 )
 from pickel.runtime.runtime_events import RuntimeEventBase, RuntimeEventHandler
@@ -50,20 +52,33 @@ class EventBus:
         )
         self._next_event_sequence += 1
 
-        for handler in list(self._handlers.values()):
-            try:
-                result = handler(stamped)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as exc:  # noqa: BLE001 — 订阅者异常不得影响 AgentRun
-                identifier = getattr(handler, "__qualname__", repr(handler))
-                logger.exception("事件订阅者异常，已隔离: %s", identifier)
-                record_diagnostic(
-                    DiagnosticRecord(
-                        name="event_handler_error",
-                        identity=stamped.envelope.identity,
-                        attributes={"handler": identifier},
-                        error=ErrorInfo.from_exception(exc, kind="event_handler"),
+        delivery_span = SpanTimer("pickel.event.delivery", stamped.envelope.identity)
+        try:
+            for handler in list(self._handlers.values()):
+                try:
+                    result = handler(stamped)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:  # noqa: BLE001 — 订阅者异常不得影响 AgentRun
+                    identifier = getattr(handler, "__qualname__", repr(handler))
+                    logger.exception("事件订阅者异常，已隔离: %s", identifier)
+                    record_diagnostic(
+                        DiagnosticRecord(
+                            name="event_handler_error",
+                            identity=stamped.envelope.identity,
+                            attributes={"handler": identifier},
+                            error=ErrorInfo.from_exception(exc, kind="event_handler"),
+                        )
                     )
-                )
+        except asyncio.CancelledError:
+            delivery_span.finish(status="cancelled")
+            raise
+        except Exception as exc:
+            delivery_span.finish(
+                status="error",
+                error=ErrorInfo.from_exception(exc, kind="event_delivery"),
+            )
+            raise
+        else:
+            delivery_span.finish()
         return stamped

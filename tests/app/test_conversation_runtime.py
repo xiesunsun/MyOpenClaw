@@ -126,11 +126,13 @@ def _operation_result(status: str, *, message=None, usage=None, error=None):
 
 
 def test_usage_is_the_same_value_on_message_completed_and_result(monkeypatch) -> None:
-    perf_counter_values = iter((100.0, 100.0, 100.123, 100.123))
+    # EventBus/SpanTimer 也使用同一个 perf_counter；首两个读数对应 Runtime
+    # 起始与 agent_run Span，后续读数保持终点，避免观测 Span 消耗完测试时钟。
+    perf_counter_values = iter((100.0, 100.0))
     monkeypatch.setattr(
         conversation_runtime_module.time,
         "perf_counter",
-        lambda: next(perf_counter_values),
+        lambda: next(perf_counter_values, 100.123),
     )
     usage = AgentRunUsage(steps=1, input_tokens=12, output_tokens=4, elapsed_ms=77)
     message = AssistantMessage(content=(TextBlock("done"),))

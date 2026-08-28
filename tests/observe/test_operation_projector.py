@@ -21,7 +21,11 @@ from pickel.model_calls.content import (
 from pickel.model_calls.model_call import ModelCall, ModelCallError
 from pickel.observe.model_call_content_reader import ModelCallContentReader
 from pickel.observe.operation_fact_reader import OperationFactReader
-from pickel.observe.operation_projector import OperationObservationProjector
+from pickel.observe.operation_projector import (
+    ModelCallUsageObservation,
+    OperationObservationProjector,
+    project_usage_summary,
+)
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
@@ -234,3 +238,43 @@ def test_operation_projector_end_to_end_projection(tmp_path: Path) -> None:
     json_doc = doc.to_json()
     assert "op_proj" in json_doc
     assert "mc_retry_2" in json_doc
+
+
+def test_usage_summary_preserves_unknown_attempt_and_subset_semantics() -> None:
+    known = ModelCallUsageObservation(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read_tokens=40,
+        cache_write_tokens=None,
+        reasoning_tokens=8,
+        total_tokens=120,
+        cache_hit_rate=40.0,
+        cache_hit_rate_formula="cache_read_tokens / input_tokens",
+        cache_hit_rate_denominator=100,
+        cache_hit_rate_source="test",
+        provider_reported=None,
+    )
+    unknown = ModelCallUsageObservation(
+        input_tokens=None,
+        output_tokens=None,
+        cache_read_tokens=None,
+        cache_write_tokens=None,
+        reasoning_tokens=None,
+        total_tokens=None,
+        cache_hit_rate=None,
+        cache_hit_rate_formula=None,
+        cache_hit_rate_denominator=None,
+        cache_hit_rate_source=None,
+        provider_reported=None,
+    )
+
+    summary = project_usage_summary([known, unknown], statuses=["completed", "failed"])
+
+    assert summary["input_tokens"] == 100
+    assert summary["reasoning_tokens"] == 8
+    assert summary["total_tokens"] == 120
+    assert summary["unknown_attempt_count"] == 1
+    assert summary["failed_usage_unknown_attempt_count"] == 1
+    assert summary["complete"] is False
+    assert summary["unknown_fields"]["cache_write_tokens"] == 2
+    assert summary["subset_semantics"]["reasoning_tokens"] == "output_tokens 子集"

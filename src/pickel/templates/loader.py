@@ -7,7 +7,7 @@ from pathlib import Path
 from pickel.config.paths import home_dir
 
 # 包内默认模板目录：src/pickel/templates
-_PACKAGE_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+_PACKAGE_TEMPLATES_DIR = Path(__file__).resolve().parent
 
 
 def _normalize_template_text(text: str) -> str:

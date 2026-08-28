@@ -10,7 +10,7 @@ from pickel.agents.skills import (
     compose_system_instruction,
     compose_system_instruction_parts,
 )
-from pickel.context.templates_loader import load_templates
+from pickel.templates.loader import load_templates
 
 # 与包内默认 skills_guidance.md（rstrip 后）字节一致
 _DEFAULT_SKILLS_GUIDANCE = """You have access to filesystem-based skills.

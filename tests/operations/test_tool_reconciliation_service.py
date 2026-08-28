@@ -15,7 +15,7 @@ from pickel.operations.agent_run_state import (
 )
 from pickel.operations.tool_reconciliation_service import ToolReconciliationService
 from pickel.persistence.errors import StorageConflictError
-from pickel.runtime.agent_run_state_machine import AgentRunStateMachine
+from pickel.operations.agent_run_state_machine import AgentRunStateMachine
 from pickel.tools.base import BaseTool, ToolSpec
 from pickel.tools.base import ToolExecutionContext
 from pickel.conversations.content_blocks import ToolResultContent

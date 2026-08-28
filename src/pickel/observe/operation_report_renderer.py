@@ -661,6 +661,37 @@ class OperationReportRenderer:
         return value == null ? '—' : Number(value).toLocaleString('en-US');
       }}
 
+      function timelinePosition(value) {{
+        const total = Number(timelineData.total_duration_ms || 0);
+        const start = Date.parse(timelineData.start_time_iso || '');
+        const point = Date.parse(value || '');
+        if (!Number.isFinite(start) || !Number.isFinite(point) || total <= 0) return 0;
+        return Math.max(0, Math.min(100, (point - start) / total * 100));
+      }}
+
+      function timelineBarView(bar) {{
+        if (bar.left_pct != null || bar.width_pct != null) {{
+          return {{
+            left: Number(bar.left_pct || 0),
+            width: Number(bar.width_pct || 0),
+            duration: bar.duration_text || '未知'
+          }};
+        }}
+        const left = timelinePosition(bar.started_at_iso);
+        const right = timelinePosition(bar.finished_at_iso);
+        const rawWidth = Math.max(0, right - left);
+        const durationMs = bar.duration_ms == null ? null : Number(bar.duration_ms);
+        return {{
+          left,
+          width: rawWidth > 0 ? Math.max(0.4, rawWidth) : 0,
+          duration: durationMs == null
+            ? '未知'
+            : (bar.kind === 'storage' && durationMs === 0
+              ? '已记录'
+              : `${{(durationMs / 1000).toFixed(1)}}s`)
+        }};
+      }}
+
       function renderTree() {{
         treeContainer.innerHTML = executionNodes.map(node => {{
           const isPressed = node.key === selectedKey;
@@ -687,7 +718,8 @@ class OperationReportRenderer:
           const barsHtml = lane.bars.map(bar => {{
             const isPressed = bar.key === selectedKey;
             const traceClass = bar.is_trace ? ' pk-trace' : '';
-            return `<button class="pk-bar${{traceClass}}" data-select="${{escapeHtml(bar.key)}}" data-kind="${{escapeHtml(bar.kind)}}" data-status="${{escapeHtml(bar.status)}}" type="button" aria-pressed="${{String(isPressed)}}" style="--left:${{bar.left_pct}}%;--width:${{bar.width_pct}}%;"><span>${{escapeHtml(bar.label)}}</span><span class="pk-duration">${{escapeHtml(bar.duration_text)}}</span></button>`;
+            const view = timelineBarView(bar);
+            return `<button class="pk-bar${{traceClass}}" data-select="${{escapeHtml(bar.key)}}" data-kind="${{escapeHtml(bar.kind)}}" data-status="${{escapeHtml(bar.status)}}" type="button" aria-pressed="${{String(isPressed)}}" style="--left:${{view.left}}%;--width:${{view.width}}%;"><span>${{escapeHtml(bar.label)}}</span><span class="pk-duration">${{escapeHtml(view.duration)}}</span></button>`;
           }}).join('');
           return `<div class="pk-lane"><div class="pk-lane-label">${{escapeHtml(lane.name)}}</div><div class="pk-track">${{barsHtml}}</div></div>`;
         }}).join('');
@@ -764,7 +796,7 @@ class OperationReportRenderer:
           return;
         }}
 
-        const maxTotal = Math.max(1000, ...series.map(s => s.total || 0));
+        const maxTotal = Math.max(1000, ...series.map(s => s.total == null ? 0 : s.total));
         const barWidth = Math.min(32, Math.max(12, plotWidth / (series.length * 2.5)));
         const y = value => margin.top + plotHeight - (Math.min(maxTotal, Math.max(0, value || 0)) / maxTotal) * plotHeight;
 
@@ -780,13 +812,14 @@ class OperationReportRenderer:
           const isSelected = s.key === selectedModelCallKey;
           const selClass = isSelected ? ' pk-selected-label' : '';
 
-          if (s.input == null || s.status === 'failed') {{
-            return `<circle class="pk-failed-mark" cx="${{center}}" cy="${{margin.top + plotHeight - 4}}" r="4"></circle><text class="pk-value-text pk-error-color" x="${{center}}" y="${{margin.top + plotHeight - 12}}" text-anchor="middle">${{escapeHtml(s.error || 'Failed')}}</text><text class="pk-axis-text${{selClass}}" x="${{center}}" y="${{height - 8}}" text-anchor="middle">${{escapeHtml(s.label)}}</text>`;
+          if (s.input == null || s.cached == null || s.uncached == null || s.output == null || s.total == null || s.status === 'failed') {{
+            const label = s.error || (s.status === 'failed' ? 'Failed' : 'Usage unknown');
+            return `<circle class="pk-failed-mark" cx="${{center}}" cy="${{margin.top + plotHeight - 4}}" r="4"></circle><text class="pk-value-text pk-error-color" x="${{center}}" y="${{margin.top + plotHeight - 12}}" text-anchor="middle">${{escapeHtml(label)}}</text><text class="pk-axis-text${{selClass}}" x="${{center}}" y="${{height - 8}}" text-anchor="middle">${{escapeHtml(s.label)}}</text>`;
           }}
 
-          const cached = s.cached || 0;
-          const uncached = s.uncached || 0;
-          const output = s.output || 0;
+          const cached = s.cached;
+          const uncached = s.uncached;
+          const output = s.output;
           const baseY = y(0);
 
           const uncachedH = (plotHeight * uncached) / maxTotal;

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pickel.context.templates_loader import load_templates
+from pickel.templates.loader import load_templates
 
 # 与 src/pickel/templates/skills_guidance.md 一致（rstrip 后）
 _DEFAULT_SKILLS_GUIDANCE = """You have access to filesystem-based skills.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from pickel.conversations.agent_message import agent_message_to_dict
 from pickel.conversations.content_blocks import ToolCallBlock
@@ -138,10 +138,10 @@ class TimelineBar:
     key: str
     kind: str
     label: str
-    duration_text: str
     status: str
-    left_pct: float
-    width_pct: float
+    started_at_iso: str | None
+    finished_at_iso: str | None
+    duration_ms: float | None
     is_trace: bool = False
 
 
@@ -183,6 +183,91 @@ def _empty_usage() -> ModelCallUsageObservation:
         cache_hit_rate_source=None,
         provider_reported=None,
     )
+
+
+_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+
+
+def project_usage_summary(
+    usages: Iterable[ModelCallUsageObservation],
+    *,
+    statuses: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """聚合 usage，同时保留 subset 和未知值的边界。
+
+    每个 token 字段都是独立 Provider 事实；缺失值不能按 0 参与推断。
+    ``reasoning_tokens`` 是 ``output_tokens`` 的子集，``cache_read_tokens``
+    是输入的子集，二者不会被加到 ``total_tokens``。聚合值若只有部分
+    attempt 已知仍可供诊断使用，但 ``complete`` 和未知计数会明确标记。
+    """
+
+    usage_list = list(usages)
+    status_list = list(statuses) if statuses is not None else [None] * len(usage_list)
+    if len(status_list) < len(usage_list):
+        status_list.extend([None] * (len(usage_list) - len(status_list)))
+
+    values: dict[str, list[int]] = {field: [] for field in _USAGE_FIELDS}
+    unknown_fields: dict[str, int] = {field: 0 for field in _USAGE_FIELDS}
+    unknown_attempt_count = 0
+    failed_unknown_attempt_count = 0
+    for index, usage in enumerate(usage_list):
+        known_any = False
+        for usage_field in _USAGE_FIELDS:
+            value = getattr(usage, usage_field)
+            if isinstance(value, int) and not isinstance(value, bool):
+                values[usage_field].append(value)
+                known_any = True
+            else:
+                unknown_fields[usage_field] += 1
+        if not known_any:
+            unknown_attempt_count += 1
+            if status_list[index] in {"failed", "error"}:
+                failed_unknown_attempt_count += 1
+
+    result: dict[str, Any] = {
+        field: (sum(items) if items else None) for field, items in values.items()
+    }
+    result.update(
+        {
+            "attempt_count": len(usage_list),
+            "known_attempt_count": len(usage_list) - unknown_attempt_count,
+            "unknown_attempt_count": unknown_attempt_count,
+            "failed_usage_unknown_attempt_count": failed_unknown_attempt_count,
+            "complete": unknown_attempt_count == 0,
+            "unknown_fields": {
+                field: count for field, count in unknown_fields.items() if count
+            },
+            # 明确 subset 关系，避免展示层把这两项再次堆叠。
+            "subset_semantics": {
+                "cache_read_tokens": "input_tokens 子集（Provider 语义决定是否已包含在 input_tokens）",
+                "reasoning_tokens": "output_tokens 子集",
+            },
+        }
+    )
+
+    denominator = 0
+    cached = 0
+    cache_known_attempts = 0
+    for item in usage_list:
+        if item.cache_hit_rate_denominator is None or item.cache_read_tokens is None:
+            continue
+        denominator += item.cache_hit_rate_denominator
+        cached += item.cache_read_tokens
+        cache_known_attempts += 1
+    result["cache_hit_rate"] = (
+        round(cached / denominator * 100, 2) if denominator else None
+    )
+    result["cache_hit_rate_denominator"] = denominator or None
+    result["cache_known_attempt_count"] = cache_known_attempts
+    result["cache_complete"] = cache_known_attempts == len(usage_list)
+    return result
 
 
 def _cache_rate(
@@ -237,6 +322,45 @@ def _timeline_status(status: Any) -> str:
     if status in {"incomplete", "affected"}:
         return "affected"
     return "unknown"
+
+
+def _elapsed_ms(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return round(max(0.0, (end - start).total_seconds() * 1000.0), 3)
+
+
+def _operation_timing(
+    facts: OperationFacts,
+    trace_data: OperationTraceData | None,
+) -> tuple[float | None, float | None]:
+    """返回 answer-ready 与 Runtime terminal completion 两个独立时钟。
+
+    answer-ready 只使用输入 User ConversationNode 和最终 Assistant 节点；
+    operation-completed 只认 ``pickel.agent_run`` Span 的结束时间。没有
+    该 Span 时保持 unknown，不能用最后一个 ModelCall 或答案时间冒充。
+    """
+
+    accepted_at = facts.input_node.created_at if facts.input_node else None
+    if accepted_at is None:
+        accepted_at = facts.operation.accepted_at
+    answer_ready = _elapsed_ms(
+        accepted_at,
+        facts.final_node.created_at if facts.final_node is not None else None,
+    )
+
+    completed_at: datetime | None = None
+    if trace_data is not None:
+        for span in trace_data.spans:
+            if span.get("name") != "pickel.agent_run":
+                continue
+            finished_at = _parse_iso(span.get("finished_at"))
+            if finished_at is not None and (
+                completed_at is None or finished_at > completed_at
+            ):
+                completed_at = finished_at
+    operation_completed = _elapsed_ms(accepted_at, completed_at)
+    return answer_ready, operation_completed
 
 
 @dataclass(frozen=True)
@@ -370,13 +494,18 @@ def project_charts(model_call_items: list[ModelCallObservationItem]) -> dict[str
         ):
             input_total = item.usage.cache_hit_rate_denominator
             uncached = input_tokens
-        else:
+        elif cached is not None:
             input_total = input_tokens
-            uncached = max(0, input_tokens - (cached or 0))
+            uncached = max(0, input_tokens - cached)
+        else:
+            # input_tokens 已知不代表 cache_read_tokens 已知；不能把未知
+            # 的缓存子集当成 0 来绘制“未缓存”柱段。
+            input_total = input_tokens
+            uncached = None
         output = item.usage.output_tokens
-        total = item.usage.total_tokens or (
-            input_total + (output or 0) if input_total is not None else None
-        )
+        # total_tokens 是 Provider 报告的独立事实。input/output 已知时也
+        # 不自行拼出 total，避免漏掉 Provider 特有的 reasoning/缓存口径。
+        total = item.usage.total_tokens
         token_series.append(
             {
                 "key": item.key,
@@ -387,6 +516,8 @@ def project_charts(model_call_items: list[ModelCallObservationItem]) -> dict[str
                 "cache_write": cache_write,
                 "uncached": uncached,
                 "output": output,
+                # reasoning 是 output 的子集，仅作为明细，不加入柱状图总量。
+                "reasoning": item.usage.reasoning_tokens,
                 "total": total,
                 "formula": item.usage.cache_hit_rate_formula,
                 "status": item.status,
@@ -406,14 +537,27 @@ def project_summary(
     model_call_items: list[ModelCallObservationItem],
     timeline: TimelineData,
     trace_data: OperationTraceData | None,
+    workflow_model_call_items: list[ModelCallObservationItem] | None = None,
 ) -> dict[str, Any]:
     """从已经投影的事实构造摘要；不访问外部资源。"""
 
-    duration_ms = timeline.total_duration_ms
+    answer_ready_ms, operation_completed_ms = _operation_timing(facts, trace_data)
+    # Workflow 用量包含当前 Agent 以及其 durable Child 后代；没有传入时
+    # 保持单 Agent 结果（供独立调用方兼容）。
+    workflow_items = workflow_model_call_items or model_call_items
+    agent_usage = project_usage_summary(
+        (item.usage for item in model_call_items),
+        statuses=(item.status for item in model_call_items),
+    )
+    workflow_usage = project_usage_summary(
+        (item.usage for item in workflow_items),
+        statuses=(item.status for item in workflow_items),
+    )
+    duration_ms = operation_completed_ms
     duration_text = (
         f"{duration_ms / 1000.0:.1f}s"
-        if duration_ms >= 1000.0
-        else f"{round(duration_ms)}ms"
+        if duration_ms is not None and duration_ms >= 1000.0
+        else f"{round(duration_ms)}ms" if duration_ms is not None else "未知"
     )
     run_state = facts.run_state
     trace_integrity = (
@@ -425,10 +569,21 @@ def project_summary(
         "status": run_state.status if run_state is not None else "unknown",
         "duration_ms": duration_ms,
         "duration_text": duration_text,
+        "answer_ready_ms": answer_ready_ms,
+        "operation_completed_ms": operation_completed_ms,
         "model_calls_count": len(model_call_items),
         "model_retries_count": sum(item.attempt > 1 for item in model_call_items),
         "tool_calls_count": len(facts.tool_calls),
         "children_count": len(facts.delegations),
+        "usage": {
+            "agent": agent_usage,
+            "workflow-inclusive": workflow_usage,
+        },
+        # 便于非 UI 消费者直接查询，不重复计算另一套事实。
+        "usage_unknown_attempt_count": agent_usage["unknown_attempt_count"],
+        "failed_usage_unknown_attempt_count": agent_usage[
+            "failed_usage_unknown_attempt_count"
+        ],
         "trace_integrity": trace_integrity,
     }
 
@@ -470,14 +625,6 @@ def project_timeline(
             end = max(end, parsed)
     total = max(0.0, (end - start).total_seconds() * 1000.0)
 
-    def position(value: str | None) -> float:
-        parsed = _parse_iso(value)
-        if parsed is None or total <= 0:
-            return 0.0
-        return max(
-            0.0, min(100.0, (parsed - start).total_seconds() * 1000 / total * 100)
-        )
-
     parent_status = _timeline_status(
         facts.run_state.status if facts.run_state is not None else None
     )
@@ -489,33 +636,27 @@ def project_timeline(
                     key="operation",
                     kind="agent",
                     label="Operation",
-                    duration_text=f"{total / 1000:.1f}s" if total else "未知",
                     status=parent_status,
-                    left_pct=0.0,
-                    width_pct=100.0 if total else 0.0,
+                    started_at_iso=start.isoformat(),
+                    finished_at_iso=end.isoformat(),
+                    duration_ms=total,
                 )
             ],
         )
     ]
     model_bars = []
     for item in model_call_items:
-        left = position(item.timing.started_at or item.timing.created_at)
-        right = position(item.timing.finished_at)
         model_bars.append(
             TimelineBar(
                 key=item.key,
                 kind="model",
                 label=f"Call {item.key.removeprefix('call')}",
-                duration_text=(
-                    f"{item.timing.latency_ms / 1000:.1f}s"
-                    if item.timing.latency_ms is not None
-                    else "未知"
-                ),
                 status=(
                     "affected" if item.attempt > 1 else _timeline_status(item.status)
                 ),
-                left_pct=round(left, 1),
-                width_pct=round(max(0.0, right - left), 1),
+                started_at_iso=item.timing.started_at or item.timing.created_at,
+                finished_at_iso=item.timing.finished_at,
+                duration_ms=item.timing.latency_ms,
             )
         )
     lanes.append(TimelineLane(name="Model", bars=model_bars))
@@ -566,11 +707,6 @@ def project_timeline(
                 key=f"tool_{tool.tool_call_id}",
                 kind="tool",
                 label=tool.name,
-                duration_text=(
-                    f"{float(duration) / 1000:.1f}s"
-                    if isinstance(duration, (int, float))
-                    else "未知"
-                ),
                 status=(
                     _timeline_status(trace.get("status"))
                     if trace
@@ -580,41 +716,95 @@ def project_timeline(
                         else "ok" if tool.result is not None else "unknown"
                     )
                 ),
-                left_pct=round(position(started_at), 1),
-                width_pct=round(
-                    max(0.0, position(finished_at) - position(started_at)), 1
+                started_at_iso=started_at,
+                finished_at_iso=finished_at,
+                duration_ms=(
+                    float(duration) if isinstance(duration, (int, float)) else None
                 ),
                 is_trace=bool(trace),
             )
         )
     lanes.append(TimelineLane(name="Tool", bars=tool_bars))
 
-    storage_bars = []
-    for index, item in enumerate(model_call_items, start=1):
-        storage_bars.append(
-            TimelineBar(
-                f"store_req_{index}",
-                "storage",
-                "RequestContent",
-                "已记录",
-                "ok",
-                round(position(item.timing.created_at), 1),
+    def trace_bar(span: dict[str, Any], *, kind: str, label: str) -> TimelineBar:
+        started_at = span.get("started_at")
+        finished_at = span.get("finished_at")
+        duration = span.get("duration_ms")
+        if (
+            not isinstance(duration, (int, float))
+            and _parse_iso(started_at)
+            and _parse_iso(finished_at)
+        ):
+            duration = max(
                 0.0,
+                (_parse_iso(finished_at) - _parse_iso(started_at)).total_seconds()
+                * 1000,
             )
+        return TimelineBar(
+            key=f"trace_{span.get('span_id') or id(span)}",
+            kind=kind,
+            label=label,
+            status=_timeline_status(span.get("status")),
+            started_at_iso=started_at,
+            finished_at_iso=finished_at,
+            duration_ms=(
+                float(duration) if isinstance(duration, (int, float)) else None
+            ),
+            is_trace=True,
         )
-        if item.response_content_ref and item.timing.finished_at:
+
+    trace_spans = trace_data.spans if trace_data is not None else ()
+    storage_span_names = {
+        "pickel.storage.request_content.write": "RequestContent write",
+        "pickel.storage.response_content.write": "ResponseContent write",
+        "pickel.model_call.prepare_transaction": "ModelCall prepare",
+        "pickel.model_call.complete_transaction": "ModelCall + Node complete",
+    }
+    storage_bars = [
+        trace_bar(span, kind="storage", label=storage_span_names[span["name"]])
+        for span in trace_spans
+        if span.get("name") in storage_span_names
+    ]
+    # ContentRef 的存在是可靠事实，但没有 Trace Span 时不声称写入耗时。
+    if not storage_bars:
+        for index, item in enumerate(model_call_items, start=1):
             storage_bars.append(
                 TimelineBar(
-                    f"store_resp_{index}",
-                    "storage",
-                    "ResponseContent",
-                    "已记录",
-                    "ok",
-                    round(position(item.timing.finished_at), 1),
-                    0.0,
+                    key=f"store_req_{index}",
+                    kind="storage",
+                    label="RequestContent",
+                    status="ok",
+                    started_at_iso=item.timing.created_at,
+                    finished_at_iso=item.timing.created_at,
+                    duration_ms=0.0,
                 )
             )
+            if item.response_content_ref and item.timing.finished_at:
+                storage_bars.append(
+                    TimelineBar(
+                        key=f"store_resp_{index}",
+                        kind="storage",
+                        label="ResponseContent",
+                        status="ok",
+                        started_at_iso=item.timing.finished_at,
+                        finished_at_iso=item.timing.finished_at,
+                        duration_ms=0.0,
+                    )
+                )
     lanes.append(TimelineLane(name="Storage", bars=storage_bars))
+
+    runtime_span_names = {
+        "pickel.model_context.build": "Context build",
+        "pickel.model_request.semaphore_wait": "Model semaphore wait",
+        "pickel.event.delivery": "Event delivery",
+    }
+    runtime_bars = [
+        trace_bar(span, kind="runtime", label=runtime_span_names[span["name"]])
+        for span in trace_spans
+        if span.get("name") in runtime_span_names
+    ]
+    if runtime_bars:
+        lanes.append(TimelineLane(name="Runtime", bars=runtime_bars))
 
     for index, delegation in enumerate(facts.delegations, start=1):
         child_status = "unknown"
@@ -628,13 +818,13 @@ def project_timeline(
                 name=f"Child {chr(64 + index)}",
                 bars=[
                     TimelineBar(
-                        f"child_{index}",
-                        "agent",
-                        delegation.child_session_id[:8],
-                        "未知",
-                        child_status,
-                        round(position(delegation.created_at.isoformat()), 1),
-                        0.0,
+                        key=f"child_{index}",
+                        kind="agent",
+                        label=delegation.child_session_id[:8],
+                        status=child_status,
+                        started_at_iso=delegation.created_at.isoformat(),
+                        finished_at_iso=delegation.created_at.isoformat(),
+                        duration_ms=0.0,
                     )
                 ],
             )
@@ -648,14 +838,14 @@ def project_timeline(
                 name="Stream",
                 bars=[
                     TimelineBar(
-                        "stream",
-                        "model",
-                        f"delta × {trace_data.stream_deltas_count}",
-                        "未知",
-                        "unknown",
-                        0.0,
-                        0.0,
-                        True,
+                        key="stream",
+                        kind="model",
+                        label=f"delta × {trace_data.stream_deltas_count}",
+                        status="unknown",
+                        started_at_iso=None,
+                        finished_at_iso=None,
+                        duration_ms=None,
+                        is_trace=True,
                     )
                 ],
             )
@@ -1420,6 +1610,33 @@ class OperationObservationProjector:
         self._facts = fact_reader
         self._content = content_reader
 
+    def _workflow_model_call_items(
+        self, root_facts: OperationFacts
+    ) -> list[ModelCallObservationItem]:
+        """沿现有 AgentDelegation 事实读取 root + durable Child calls。"""
+
+        result: list[ModelCallObservationItem] = []
+        visited_operations: set[str] = set()
+
+        def visit(facts: OperationFacts) -> None:
+            operation_id = facts.operation.operation_id
+            if operation_id in visited_operations:
+                return
+            visited_operations.add(operation_id)
+            result.extend(project_model_calls(facts.model_calls, self._content))
+            for delegation in facts.delegations:
+                for child_operation in self._facts.read_session_operations(
+                    delegation.child_session_id
+                ):
+                    child_facts = self._facts.read_operation_facts(
+                        child_operation.operation_id
+                    )
+                    if child_facts is not None:
+                        visit(child_facts)
+
+        visit(root_facts)
+        return result
+
     def project_operation(
         self,
         operation_id: str,
@@ -1496,6 +1713,7 @@ class OperationObservationProjector:
 
         # 1. 投影 ModelCalls
         model_call_items = project_model_calls(facts.model_calls, self._content)
+        workflow_model_call_items = self._workflow_model_call_items(facts)
         tool_call_items = project_tool_calls(facts, model_call_items)
 
         # 2. 构造执行树节点
@@ -1527,6 +1745,7 @@ class OperationObservationProjector:
             model_call_items=model_call_items,
             timeline=timeline,
             trace_data=trace_data,
+            workflow_model_call_items=workflow_model_call_items,
         )
         trace_integrity = summary["trace_integrity"]
 

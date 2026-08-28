@@ -43,6 +43,14 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("without changing the file", definitions["edit"].description)
         self.assertIn("completely overwrite", definitions["write"].description)
         self.assertIn("non-zero exit code", definitions["bash"].description)
+        self.assertIn("return immediately", definitions["delegate_agent"].description)
+        self.assertIn("automatically", definitions["delegate_agent"].description)
+        self.assertIn("from this Parent", definitions["send_message"].description)
+        self.assertIn(
+            "must not be used to poll", definitions["list_agents"].description
+        )
+        self.assertIn("from this Child", definitions["report"].description)
+        self.assertIn("not the terminal result", definitions["report"].description)
 
         expected_defaults = {
             "ls": {"path": ".", "limit": 500},

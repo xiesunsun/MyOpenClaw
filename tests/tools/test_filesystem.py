@@ -61,6 +61,9 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(50_000, len(result))
         self.assertIn("Output truncated", result)
+        self.assertIn("truncated=true", result)
+        self.assertIn("path=note.txt", result)
+        self.assertIn("offset=2", result)
 
     async def test_read_tool_supports_line_ranges(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -281,6 +284,7 @@ class FilesystemToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("Result limit reached", exact)
         self.assertIn("Result limit reached", truncated)
+        self.assertIn("truncated=true", truncated)
 
     async def test_read_tool_rejects_paths_outside_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:

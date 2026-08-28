@@ -1,0 +1,11 @@
+{
+  "providers": {
+    "opencode-go": {
+      "models": {
+        "glm-5.3-flash": {
+          "context_window_tokens": 1000000
+        }
+      }
+    }
+  }
+}

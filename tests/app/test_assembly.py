@@ -58,5 +58,5 @@ def test_loaded_package_captures_current_pickel_settings() -> None:
 
         version = loaded.version
         assert version.runtime_policy.max_model_steps == 12
-        assert version.runtime_policy.context_turn_window == 6
+        assert version.runtime_policy.context_turn_window is None
         assert version.model_policy.primary.provider == "anthropic"

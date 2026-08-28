@@ -26,7 +26,7 @@ from pickel.conversations.content_blocks import (
     thaw_json,
 )
 from pickel.providers.base import Provider
-from pickel.model_calls.prepared import PreparedModelCall
+from pickel.providers.prepared import PreparedModelCall
 from pickel.providers.response_json import provider_response_json
 from pickel.providers.stream import (
     StreamCompleted,
