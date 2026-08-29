@@ -16,7 +16,12 @@ from pickel.conversations.agent_message import (
     ToolResultMessage,
     UserMessage,
 )
-from pickel.conversations.content_blocks import ArtifactBlock, TextBlock, ToolCallBlock
+from pickel.conversations.content_blocks import (
+    ArtifactBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+)
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.shared.frozen_json import thaw_json
@@ -90,6 +95,42 @@ def test_snapshot_maps_full_context_and_tools() -> None:
         },
     ]
     assert snapshot["tools"][0]["function"]["name"] == "lookup"
+
+
+def test_glm_snapshot_enables_tool_stream_and_preserves_thinking() -> None:
+    context = ModelContext(
+        system=SystemContent.from_text("system"),
+        messages=(
+            AssistantMessage(
+                (
+                    ThinkingBlock("先检查工具结果"),
+                    TextBlock("继续执行"),
+                    ToolCallBlock("call-1", "lookup", {"q": "x"}),
+                )
+            ),
+        ),
+        tools=_context().tools,
+    )
+    provider = OpenAIChatCompletionsProvider(
+        model="glm-5.3-flash",
+        provider_name="opencode-go",
+        provider_options={
+            "tool_stream": True,
+            "preserve_thinking": True,
+            "thinking": {"type": "enabled", "clear_thinking": False},
+            "reasoning_effort": "max",
+            "parallel_tool_calls": False,
+        },
+    )
+
+    snapshot = thaw_json(provider.prepare(context).body)
+    asyncio.run(provider.client.aclose())
+
+    assert snapshot["tool_stream"] is True
+    assert snapshot["thinking"] == {"type": "enabled", "clear_thinking": False}
+    assert snapshot["reasoning_effort"] == "max"
+    assert snapshot["parallel_tool_calls"] is False
+    assert snapshot["messages"][1]["reasoning_content"] == "先检查工具结果"
 
 
 def test_tool_result_images_follow_complete_tool_result_group() -> None:

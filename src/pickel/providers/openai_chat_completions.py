@@ -219,6 +219,14 @@ class OpenAIChatCompletionsProvider(Provider):
         parallel = self.provider_options.get("parallel_tool_calls")
         if parallel is not None:
             request["parallel_tool_calls"] = bool(parallel)
+        tool_stream = self.provider_options.get("tool_stream")
+        if tool_stream is not None:
+            request["tool_stream"] = bool(tool_stream)
+        thinking = self.provider_options.get("thinking")
+        if isinstance(thinking, Mapping):
+            request["thinking"] = dict(thinking)
+        elif thinking is not None:
+            request["thinking"] = {"type": str(thinking)}
         effort = self.provider_options.get("reasoning_effort")
         if effort is not None:
             request["reasoning_effort"] = str(effort)
@@ -274,6 +282,10 @@ class OpenAIChatCompletionsProvider(Provider):
                 "role": "assistant",
                 "content": self._text(message),
             }
+            if self.provider_options.get("preserve_thinking"):
+                thinking = self._thinking(message)
+                if thinking:
+                    value["reasoning_content"] = thinking
             calls = [
                 {
                     "id": block.id,
@@ -338,6 +350,12 @@ class OpenAIChatCompletionsProvider(Provider):
     def _text(message: AssistantMessage) -> str:
         return "\n".join(
             block.text for block in message.content if isinstance(block, TextBlock)
+        )
+
+    @staticmethod
+    def _thinking(message: AssistantMessage) -> str:
+        return "\n".join(
+            block.text for block in message.content if isinstance(block, ThinkingBlock)
         )
 
     @staticmethod

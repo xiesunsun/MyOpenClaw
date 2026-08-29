@@ -3,7 +3,19 @@
     "opencode-go": {
       "models": {
         "glm-5.3-flash": {
-          "context_window_tokens": 1000000
+          "wire_protocol": "openai-chat-completions",
+          "context_window_tokens": 1000000,
+          "max_output_tokens": 65536,
+          "provider_options": {
+            "tool_stream": true,
+            "preserve_thinking": true,
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            },
+            "reasoning_effort": "max",
+            "parallel_tool_calls": false
+          }
         }
       }
     }

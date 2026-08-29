@@ -31,22 +31,40 @@ def _context() -> ModelContext:
 
 
 @pytest.mark.parametrize(
-    ("provider_type", "model"),
+    ("provider_type", "model", "provider_options", "max_output_tokens"),
     [
-        (OpenAIResponsesProvider, "gpt-5.6-luna"),
-        (OpenAIChatCompletionsProvider, "deepseek-v4-flash"),
-        (AnthropicMessagesProvider, "minimax-m3"),
+        (OpenAIResponsesProvider, "gpt-5.6-luna", {}, 64),
+        (
+            OpenAIChatCompletionsProvider,
+            "deepseek-v4-flash",
+            {},
+            64,
+        ),
+        (
+            OpenAIChatCompletionsProvider,
+            "glm-5.3-flash",
+            {
+                "tool_stream": True,
+                "preserve_thinking": True,
+                "thinking": {"type": "enabled", "clear_thinking": False},
+                "reasoning_effort": "max",
+            },
+            512,
+        ),
+        (AnthropicMessagesProvider, "minimax-m3", {}, 64),
     ],
 )
-def test_opencode_go_text_stream(provider_type, model: str) -> None:
+def test_opencode_go_text_stream(
+    provider_type, model: str, provider_options, max_output_tokens: int
+) -> None:
     async def run():
         provider = provider_type(
             model=model,
             provider_name="opencode-go",
             api_base=_API_BASE,
             api_key=os.environ["OPENCODE_GO_API_KEY"],
-            max_output_tokens=64,
-            provider_options={"timeout_seconds": 90},
+            max_output_tokens=max_output_tokens,
+            provider_options={"timeout_seconds": 90, **provider_options},
         )
         try:
             return await accumulate(
