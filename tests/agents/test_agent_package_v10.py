@@ -14,6 +14,7 @@ from pickel.agents.agent_package import (
     ModelVersion,
     SecretRef,
     WorkspacePolicy,
+    _content_dict,
     canonical_json_bytes,
     decode_agent_package_content,
     decode_legacy_agent_package,
@@ -423,7 +424,7 @@ def test_builder_freezes_existing_app_config_without_role_fallback(
     package = AgentPackageBuilder(
         app_config=config, tool_bus=ToolBus()
     ).build_agent_package_version()
-    assert package.format_version == 4
+    assert package.format_version == 5
     assert package.runtime_policy.model_request_max_attempts == 3
     assert package.runtime_policy.model_request_retry_delays_ms == (
         20000,
@@ -437,3 +438,103 @@ def test_builder_freezes_existing_app_config_without_role_fallback(
         SecretRef("providers.anthropic.api_key"),
     )
     assert "'api_key': 'secret'" not in str(package.content_dict())
+
+
+def test_retry_policy_methods_are_the_single_decision_knowledge() -> None:
+    """主请求与 worker 请求共用同一判定与退避知识，仅参数不同。"""
+    policy = AgentRuntimePolicy(max_model_steps=8)
+
+    assert policy.should_retry_request(
+        retryable=True,
+        first_chunk_received=False,
+        completed_attempts=0,
+    )
+    assert not policy.should_retry_request(
+        retryable=False,
+        first_chunk_received=False,
+        completed_attempts=0,
+    )
+    assert not policy.should_retry_request(
+        retryable=True,
+        first_chunk_received=True,
+        completed_attempts=0,
+    )
+    assert not policy.should_retry_request(
+        retryable=True,
+        first_chunk_received=False,
+        completed_attempts=3,
+    )
+    # 递增表；completed_attempts 从 0 计，超出表长以最后一项封顶。
+    assert policy.retry_delay_ms(0) == 20000
+    assert policy.retry_delay_ms(2) == 120000
+    assert policy.retry_delay_ms(5) == 120000
+
+
+def test_worker_retry_policy_defaults_are_shorter_than_primary() -> None:
+    """worker 重试默认 2 次、5s/15s 递增退避；存在降级路径，不需要长等待。"""
+    policy = AgentRuntimePolicy(max_model_steps=8)
+
+    assert policy.worker_request_max_attempts == 2
+    assert policy.worker_request_retry_delays_ms == (5000, 15000)
+    assert policy.should_retry_worker_request(
+        retryable=True,
+        first_chunk_received=False,
+        completed_attempts=0,
+    )
+    assert not policy.should_retry_worker_request(
+        retryable=True,
+        first_chunk_received=False,
+        completed_attempts=2,
+    )
+    assert policy.worker_retry_delay_ms(0) == 5000
+    assert policy.worker_retry_delay_ms(1) == 15000
+    assert policy.worker_retry_delay_ms(3) == 15000
+
+
+def _version_with_policy(
+    format_version: int, policy: AgentRuntimePolicy
+) -> AgentPackageVersion:
+    content = _content_dict(
+        format_version=format_version,
+        agent_id="Pickle",
+        behavior_instruction="be useful",
+        model_policy=ModelPolicy(primary=_model()),
+        runtime_policy=policy,
+        workspace_policy=WorkspacePolicy(),
+        skills=(),
+        tools=(),
+        extensions=(),
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
+    )
+    return AgentPackageVersion(
+        package_version_id=package_version_id_for_content(content),
+        agent_id="Pickle",
+        format_version=format_version,
+        behavior_instruction="be useful",
+        model_policy=ModelPolicy(primary=_model()),
+        runtime_policy=policy,
+        workspace_policy=WorkspacePolicy(),
+        skills=(),
+        tools=(),
+        extensions=(),
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
+    )
+
+
+def test_format5_package_roundtrip_keeps_worker_retry_policy() -> None:
+    """format 5 冻结 worker 重试策略；format 4 解码落到默认值且不含新字段。"""
+    policy = AgentRuntimePolicy(
+        max_model_steps=8,
+        worker_request_max_attempts=4,
+        worker_request_retry_delays_ms=(1000, 2000, 3000),
+    )
+    content = _version_with_policy(5, policy).content_dict()
+    roundtripped = AgentRuntimePolicy(**content["runtime_policy"])
+    assert roundtripped.worker_request_max_attempts == 4
+    assert roundtripped.worker_request_retry_delays_ms == (1000, 2000, 3000)
+
+    legacy_content = _version_with_policy(4, policy).content_dict()
+    legacy = AgentRuntimePolicy(**legacy_content["runtime_policy"])
+    assert legacy.worker_request_max_attempts == 2
+    assert "worker_request_max_attempts" not in legacy_content["runtime_policy"]

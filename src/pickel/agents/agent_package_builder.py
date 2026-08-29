@@ -221,7 +221,7 @@ class AgentPackageBuilder:
         )
         return build_agent_package_version(
             agent_id=definition.agent_id,
-            format_version=4,
+            format_version=5,
             behavior_instruction=behavior_instruction,
             model_policy=definition.model_policy,
             runtime_policy=definition.runtime_policy,

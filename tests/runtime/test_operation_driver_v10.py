@@ -45,7 +45,7 @@ from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import ToolCallCompleted, ToolCallStarted
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.workspaces.workspace_binding import WorkspaceBinding
-from pickel.agents.agent_package import AgentDelegationPolicy
+from pickel.agents.agent_package import AgentDelegationPolicy, AgentRuntimePolicy
 
 
 def _run_async(function):
@@ -743,7 +743,7 @@ async def test_current_package_failure_captures_leaf_before_terminal_commit():
 @_run_async
 async def test_current_max_steps_failure_captures_leaf_before_terminal_commit():
     package = _loaded_package().version
-    package.runtime_policy = SimpleNamespace(max_model_steps=1, context_turn_window=8)
+    package.runtime_policy = AgentRuntimePolicy(max_model_steps=1, context_turn_window=8)
     conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
     operations = _Operations(
         replace(_queued_state(), status="running", completed_step_count=1)
@@ -1053,10 +1053,9 @@ def _loaded_package(
         behavior_instruction="behavior",
         delegation_policy=AgentDelegationPolicy("Pickle", ("Pickle",)),
         skills=(),
-        runtime_policy=SimpleNamespace(
+        runtime_policy=AgentRuntimePolicy(
             max_model_steps=8,
             context_turn_window=8,
-            model_request_retry_delays_ms=(20000, 60000, 120000),
         ),
         tools=(
             SimpleNamespace(

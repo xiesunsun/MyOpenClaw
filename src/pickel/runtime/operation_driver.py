@@ -413,10 +413,8 @@ class OperationDriver:
         state = prepared_call.state
         retry_after = prepared_call.retry_after_attempt
         if retry_after is not None:
-            # attempt 间递增退避；超出退避表长度时以最后一项封顶。
-            # 旧 Package 的退避表已在解码时按历史公式合成，这里只有单一取值路径。
-            delays = package.runtime_policy.model_request_retry_delays_ms
-            delay_ms = delays[min(retry_after - 1, len(delays) - 1)]
+            # attempt 间递增退避；旧 Package 的退避表已在解码时按历史公式合成。
+            delay_ms = package.runtime_policy.retry_delay_ms(retry_after - 1)
             await self._sleep(delay_ms / 1000)
 
         gate = self._model_call_send_gate
@@ -457,10 +455,10 @@ class OperationDriver:
                     error,
                     first_chunk_at=exc.first_chunk_at,
                 )
-            if (
-                error.retryable
-                and exc.first_chunk_at is None
-                and failed_call.request_attempt < max_attempts
+            if package.runtime_policy.should_retry_request(
+                retryable=error.retryable,
+                first_chunk_received=exc.first_chunk_at is not None,
+                completed_attempts=failed_call.request_attempt,
             ):
                 return state, None
             failed = replace(

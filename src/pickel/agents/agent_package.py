@@ -74,6 +74,10 @@ class AgentRuntimePolicy:
     model_request_retry_delays_ms: tuple[int, ...] = (20000, 60000, 120000)
     max_parallel_model_requests: int = 2
     delegation_result_max_chars: int = 8000
+    # worker 请求（历史压缩、Goal 验证）的有界重试；比主请求短，因为调用方
+    # 存在降级路径，长等待只会卡住正在推进的 Operation。
+    worker_request_max_attempts: int = 2
+    worker_request_retry_delays_ms: tuple[int, ...] = (5000, 15000)
 
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
@@ -106,6 +110,64 @@ class AgentRuntimePolicy:
             raise ValueError("max_parallel_model_requests 必须大于 0")
         if self.delegation_result_max_chars < 0:
             raise ValueError("delegation_result_max_chars 不能小于 0")
+        if self.worker_request_max_attempts < 1:
+            raise ValueError("worker_request_max_attempts 必须大于 0")
+        if not self.worker_request_retry_delays_ms:
+            raise ValueError("worker_request_retry_delays_ms 不能为空")
+        if any(delay < 0 for delay in self.worker_request_retry_delays_ms):
+            raise ValueError("worker_request_retry_delays_ms 不能包含负数")
+        object.__setattr__(
+            self,
+            "worker_request_retry_delays_ms",
+            tuple(self.worker_request_retry_delays_ms),
+        )
+
+    @staticmethod
+    def _retry_allowed(
+        *,
+        retryable: bool,
+        first_chunk_received: bool,
+        completed_attempts: int,
+        max_attempts: int,
+    ) -> bool:
+        # 重试判定的唯一知识：可重试错误、尚未收到任何输出、且未达次数上限。
+        return (
+            retryable and not first_chunk_received and completed_attempts < max_attempts
+        )
+
+    @staticmethod
+    def _backoff_ms(delays_ms: tuple[int, ...], completed_attempts: int) -> int:
+        return delays_ms[min(completed_attempts, len(delays_ms) - 1)]
+
+    def should_retry_request(
+        self, *, retryable: bool, first_chunk_received: bool, completed_attempts: int
+    ) -> bool:
+        """主模型请求的重试判定；attempt 语义见 retry_delay_ms。"""
+        return self._retry_allowed(
+            retryable=retryable,
+            first_chunk_received=first_chunk_received,
+            completed_attempts=completed_attempts,
+            max_attempts=self.model_request_max_attempts,
+        )
+
+    def retry_delay_ms(self, completed_attempts: int) -> int:
+        """主请求 attempt 间退避；completed_attempts 从 0 计，超出表长封顶。"""
+        return self._backoff_ms(self.model_request_retry_delays_ms, completed_attempts)
+
+    def should_retry_worker_request(
+        self, *, retryable: bool, first_chunk_received: bool, completed_attempts: int
+    ) -> bool:
+        """worker 请求（压缩、Goal 验证）的重试判定。"""
+        return self._retry_allowed(
+            retryable=retryable,
+            first_chunk_received=first_chunk_received,
+            completed_attempts=completed_attempts,
+            max_attempts=self.worker_request_max_attempts,
+        )
+
+    def worker_retry_delay_ms(self, completed_attempts: int) -> int:
+        """worker 请求 attempt 间退避；completed_attempts 从 0 计。"""
+        return self._backoff_ms(self.worker_request_retry_delays_ms, completed_attempts)
 
 
 @dataclass(frozen=True)
@@ -422,8 +484,8 @@ def decode_agent_package_content(
     *, package_version_id: str, content: Mapping[str, Any], created_at: datetime
 ) -> AgentPackageVersion:
     """解码当前格式；旧格式必须经过显式 ``decode_legacy_agent_package``。"""
-    if int(content.get("format_version", 0)) not in {1, 2, 3, 4}:
-        raise ValueError("只支持 AgentPackageVersion.format_version=1/2/3/4")
+    if int(content.get("format_version", 0)) not in {1, 2, 3, 4, 5}:
+        raise ValueError("只支持 AgentPackageVersion.format_version=1/2/3/4/5")
     return _version_from_target_content(content, created_at, package_version_id)
 
 
@@ -651,6 +713,11 @@ def _runtime_policy_dict(
             )
     if format_version >= 3:
         content["delegation_result_max_chars"] = policy.delegation_result_max_chars
+    if format_version >= 5:
+        content["worker_request_max_attempts"] = policy.worker_request_max_attempts
+        content["worker_request_retry_delays_ms"] = list(
+            policy.worker_request_retry_delays_ms
+        )
     return content
 
 
