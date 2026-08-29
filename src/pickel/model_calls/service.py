@@ -24,7 +24,11 @@ from pickel.model_calls.store import ModelCallStore
 from pickel.telemetry.records import ErrorInfo, SpanTimer
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
-from pickel.providers.errors import ProviderRequestError
+from pickel.providers.errors import (
+    ProviderRequestError,
+    ProviderStreamIncompleteError,
+    classify_provider_error,
+)
 from pickel.shared.execution_identity import ExecutionIdentity
 
 
@@ -254,6 +258,43 @@ class ModelCallService:
         ):
             raise ModelCallRecoveryError("ModelCall incomplete CAS 失败")
         return incomplete
+
+    def record_send_failure(
+        self,
+        call: ModelCall,
+        cause: Exception,
+        *,
+        first_chunk_at: datetime | None = None,
+    ) -> ModelCall:
+        """发送失败的统一记账：不完整流保存 partial 响应，其余标记失败。
+
+        主请求、Goal 验证与历史压缩的发送路径共用；partial 内容只用于
+        恢复诊断，不能把半截响应伪装成可提交的完整结果。
+        """
+        if isinstance(cause, ProviderStreamIncompleteError):
+            now = self._now()
+            ref = self.save_response_content(
+                ModelCallResponse(
+                    assistant_message=cause.assistant_message,
+                    provider_response=cause.provider_response,
+                    started_at=call.started_at or now,
+                    first_chunk_at=first_chunk_at,
+                    finished_at=now,
+                    http_status=cause.http_status,
+                ),
+                partial=True,
+                identity=call.identity,
+            )
+            return self.mark_incomplete(
+                call,
+                first_chunk_at=first_chunk_at,
+                response_content_ref=ref,
+            )
+        return self.mark_failed(
+            call,
+            classify_provider_error(cause),
+            first_chunk_at=first_chunk_at,
+        )
 
     def mark_cancelled(
         self,

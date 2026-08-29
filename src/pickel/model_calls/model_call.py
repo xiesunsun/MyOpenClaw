@@ -22,7 +22,9 @@ ModelCallPurpose = Literal["agent_step", "title", "history_compaction"]
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "incomplete"})
 _ROLES = frozenset({"primary", "worker", "utility"})
-_PURPOSES = frozenset({"agent_step", "title", "history_compaction"})
+_PURPOSES = frozenset(
+    {"agent_step", "title", "history_compaction", "goal_verification"}
+)
 _STATUSES = frozenset({"prepared", "in_flight", *_TERMINAL})
 
 

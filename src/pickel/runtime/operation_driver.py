@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from pickel.agents.agent_package import AgentPackageVersion
+from pickel.agents.agent_package import AgentPackageVersion, AgentRuntimePolicy
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.context.model_context import ModelContext
 from pickel.context.model_context import SystemContent, SystemSection
@@ -23,6 +23,7 @@ from pickel.context.context_usage import model_context_fingerprint
 from pickel.context.history_compaction import (
     HistoryCompactionError,
     HistoryCompactionGenerator,
+    SummarizerSender,
 )
 from pickel.context.model_context_builder import (
     ContextContributions,
@@ -66,7 +67,6 @@ from pickel.model_calls.service import (
     ModelCallPrepareConflict,
     ModelCallRecoveryError,
     ModelCallRetryExhausted,
-    ModelCallResponse,
     ModelCallService,
 )
 from pickel.telemetry.records import ErrorInfo, SpanTimer
@@ -77,9 +77,9 @@ from pickel.runtime.model_call_send_gate import (
 )
 from pickel.providers.stream import StreamDelta
 from pickel.providers.errors import ProviderRequestError, classify_provider_error
-from pickel.providers.errors import ProviderStreamIncompleteError
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.runtime_effects import RuntimeEffects
+from pickel.runtime.worker_call_sender import WorkerSendEffect
 from pickel.runtime.runtime_events import (
     RuntimeEventBase,
     ToolCallCompleted,
@@ -167,6 +167,7 @@ class OperationDriver:
         delegation_package_resolver: DelegationPackageResolver | None = None,
         allowed_tool_names: frozenset[str] | None = None,
         history_compaction_generator: HistoryCompactionGenerator | None = None,
+        worker_sender: WorkerSendEffect | None = None,
         collaboration_state_provider: (
             Callable[[str], CollaborationState | None] | None
         ) = None,
@@ -194,6 +195,7 @@ class OperationDriver:
             if service_store is not None:
                 send_gate = ModelCallSendGate(service_store, now=self._now)
         self._history_compaction_generator = history_compaction_generator
+        self._worker_sender = worker_sender
         self._collaboration_state_provider = collaboration_state_provider
         self._goal_feedback: dict[str, str] = {}
         self._model_call_send_gate = send_gate
@@ -429,32 +431,11 @@ class OperationDriver:
             )
         except ModelCallSendFailure as exc:
             error = classify_provider_error(exc.cause)
-            response_content_ref = None
-            if isinstance(exc.cause, ProviderStreamIncompleteError):
-                partial_response = ModelCallResponse(
-                    assistant_message=exc.cause.assistant_message,
-                    provider_response=exc.cause.provider_response,
-                    started_at=exc.call.started_at or self._now(),
-                    first_chunk_at=exc.first_chunk_at,
-                    finished_at=self._now(),
-                    http_status=exc.cause.http_status,
-                )
-                response_content_ref = self._model_calls.save_response_content(
-                    partial_response,
-                    partial=True,
-                    identity=exc.call.identity,
-                )
-                failed_call = self._model_calls.mark_incomplete(
-                    exc.call,
-                    first_chunk_at=exc.first_chunk_at,
-                    response_content_ref=response_content_ref,
-                )
-            else:
-                failed_call = self._model_calls.mark_failed(
-                    exc.call,
-                    error,
-                    first_chunk_at=exc.first_chunk_at,
-                )
+            failed_call = self._model_calls.record_send_failure(
+                exc.call,
+                exc.cause,
+                first_chunk_at=exc.first_chunk_at,
+            )
             if package.runtime_policy.should_retry_request(
                 retryable=error.retryable,
                 first_chunk_received=exc.first_chunk_at is not None,
@@ -695,13 +676,30 @@ class OperationDriver:
                     ),
                     step.step_id,
                 )
+            if effects.worker_provider is None:
+                return (
+                    self._fail_preflight(
+                        operation=operation,
+                        state=state,
+                        last_assistant=last_assistant,
+                        code="history_compaction_unavailable",
+                        message=(
+                            "Context 已达到压缩阈值，但当前 Operation 未配置 "
+                            "worker model"
+                        ),
+                    ),
+                    step.step_id,
+                )
             try:
                 content = await generator.generate(
-                    session_id=operation.session_id,
                     nodes=branch_nodes,
                     model_context=context,
                     preflight=required.result,
-                    runtime_effects=effects,
+                    send_summarizer=self._summarizer_sender_for(
+                        session_id=operation.session_id,
+                        effects=effects,
+                        runtime_policy=package.runtime_policy,
+                    ),
                 )
                 if not isinstance(content, HistoryCompaction):
                     raise HistoryCompactionError(
@@ -909,6 +907,7 @@ class OperationDriver:
                 state=state,
                 last_assistant=last_assistant,
                 effects=effects,
+                runtime_policy=package.runtime_policy,
             )
 
         pending = next(
@@ -991,6 +990,7 @@ class OperationDriver:
         state: AgentRunState,
         last_assistant: AssistantMessage | None,
         effects: RuntimeEffects,
+        runtime_policy: AgentRuntimePolicy,
     ) -> AgentRunState | OperationDriveResult:
         step = state.current_step
         assert step is not None and step.assistant_message_node_id is not None
@@ -1015,6 +1015,7 @@ class OperationDriver:
                     state=state,
                     candidate=last_assistant,
                     effects=effects,
+                    runtime_policy=runtime_policy,
                     goal=collaboration.goal,
                 )
             except Exception as exc:  # noqa: BLE001 — Goal 验证失败必须 fail closed
@@ -1089,6 +1090,7 @@ class OperationDriver:
         state: AgentRunState,
         candidate: AssistantMessage | None,
         effects: RuntimeEffects,
+        runtime_policy: AgentRuntimePolicy,
         goal: str | None,
     ) -> GoalVerification:
         del state
@@ -1096,8 +1098,6 @@ class OperationDriver:
             raise ValueError("Goal 模式缺少目标")
         if effects.worker_provider is None:
             raise ValueError("Goal 模式需要配置 worker model")
-        if self._model_calls is None or self._model_call_send_gate is None:
-            raise ValueError("Goal 模式未配置 ModelCall service")
         candidate_text = json.dumps(
             agent_message_to_dict(candidate) if candidate is not None else {},
             ensure_ascii=False,
@@ -1122,60 +1122,41 @@ class OperationDriver:
             ),
             tools=(),
         )
-        prepared_call = self._model_calls.prepare_session_call(
+        message = await self._summarizer_sender_for(
             session_id=operation.session_id,
-            context=context,
-            mapper=effects.worker_provider,
-            request_attempt=1,
-            model_role="worker",
-            purpose="goal_verification",
-        )
-        worker_effects = RuntimeEffects(
-            provider=effects.worker_provider,
-            provider_name=prepared_call.prepared.provider,
-            model_name=prepared_call.prepared.requested_model,
-            provider_timeout_seconds=effects.provider_timeout_seconds,
-        )
-        try:
-            response = await self._model_call_send_gate.send(
-                call=prepared_call.model_call,
-                prepared=prepared_call.prepared,
-                effects=worker_effects,
-            )
-        except ModelCallSendFailure as exc:
-            error = classify_provider_error(exc.cause)
-            if isinstance(exc.cause, ProviderStreamIncompleteError):
-                partial = ModelCallResponse(
-                    assistant_message=exc.cause.assistant_message,
-                    provider_response=exc.cause.provider_response,
-                    started_at=exc.call.started_at or self._now(),
-                    first_chunk_at=exc.first_chunk_at,
-                    finished_at=self._now(),
-                    http_status=exc.cause.http_status,
-                )
-                ref = self._model_calls.save_response_content(partial, partial=True)
-                self._model_calls.mark_incomplete(
-                    exc.call,
-                    first_chunk_at=exc.first_chunk_at,
-                    response_content_ref=ref,
-                )
-            else:
-                self._model_calls.mark_failed(
-                    exc.call,
-                    error,
-                    first_chunk_at=exc.first_chunk_at,
-                )
-            raise RuntimeError(str(exc)) from exc
-        self._model_calls.complete_session_response(
-            call=prepared_call.model_call,
-            response=response,
-        )
+            effects=effects,
+            runtime_policy=runtime_policy,
+        )(context=context, purpose="goal_verification")
         text = "\n".join(
             block.text
-            for block in response.assistant_message.content
+            for block in message.content
             if isinstance(block, TextBlock) and block.text
         )
         return parse_goal_verification(text)
+
+    def _summarizer_sender_for(
+        self,
+        *,
+        session_id: str,
+        effects: RuntimeEffects,
+        runtime_policy: AgentRuntimePolicy,
+    ) -> SummarizerSender:
+        """绑定本次 Operation 的 worker 身份与重试策略的窄发送回调。"""
+        sender = self._worker_sender
+        if sender is None:
+            raise RuntimeError("OperationDriver 未配置 WorkerCallSender")
+
+        async def send(*, context: ModelContext, purpose: str) -> AssistantMessage:
+            return await sender(
+                session_id=session_id,
+                context=context,
+                purpose=purpose,
+                worker_provider=effects.worker_provider,
+                runtime_policy=runtime_policy,
+                provider_timeout_seconds=effects.provider_timeout_seconds,
+            )
+
+        return send
 
     def _record_rejected_tool(
         self,

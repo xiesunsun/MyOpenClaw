@@ -48,7 +48,10 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
-from pickel.context.history_compaction import ModelBackedHistoryCompactionGenerator
+from pickel.runtime.history_compaction_worker import (
+    ModelBackedHistoryCompactionGenerator,
+)
+from pickel.runtime.worker_call_sender import WorkerCallSender
 from pickel.runtime.model_call_send_gate import ModelCallSendGate
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
@@ -373,6 +376,10 @@ class Boot:
 
         model_call_service = ModelCallService(store)
         model_call_send_gate = ModelCallSendGate(store)
+        worker_call_sender = WorkerCallSender(
+            model_calls=model_call_service,
+            send_gate=model_call_send_gate,
+        )
         operation_driver = OperationDriver(
             operation_service=operation_service,
             conversation_service=ConversationService(conversation_store),
@@ -391,10 +398,8 @@ class Boot:
             ),
             model_call_service=model_call_service,
             model_call_send_gate=model_call_send_gate,
-            history_compaction_generator=ModelBackedHistoryCompactionGenerator(
-                model_calls=model_call_service,
-                send_gate=model_call_send_gate,
-            ),
+            history_compaction_generator=ModelBackedHistoryCompactionGenerator(),
+            worker_sender=worker_call_sender,
             collaboration_state_provider=collaboration_state_provider,
             release_operation_package=release_operation_package,
             wake_callback=wake_callback,

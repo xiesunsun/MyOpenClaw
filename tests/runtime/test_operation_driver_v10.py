@@ -41,6 +41,10 @@ from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.service import AgentPreparedModelCall
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.runtime.operation_driver import OperationDriver
+from pickel.providers.errors import (
+    ProviderStreamIncompleteError,
+    classify_provider_error,
+)
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import ToolCallCompleted, ToolCallStarted
 from pickel.agents.agent_package_loader import PackageLoadError
@@ -358,6 +362,19 @@ class _FakeModelCallService:
             return False
         self.calls[model_call.model_call_id] = model_call
         return True
+
+    def record_send_failure(self, call, cause, *, first_chunk_at=None):
+        error = classify_provider_error(cause)
+        if isinstance(cause, ProviderStreamIncompleteError):
+            incomplete = replace(
+                call,
+                status="incomplete",
+                first_chunk_at=first_chunk_at,
+                finished_at=datetime.now(timezone.utc),
+            )
+            self.calls[call.model_call_id] = incomplete
+            return incomplete
+        return self.mark_failed(call, error, first_chunk_at=first_chunk_at)
 
     def mark_failed(self, call, error, *, first_chunk_at=None):
         failed = replace(
@@ -743,7 +760,9 @@ async def test_current_package_failure_captures_leaf_before_terminal_commit():
 @_run_async
 async def test_current_max_steps_failure_captures_leaf_before_terminal_commit():
     package = _loaded_package().version
-    package.runtime_policy = AgentRuntimePolicy(max_model_steps=1, context_turn_window=8)
+    package.runtime_policy = AgentRuntimePolicy(
+        max_model_steps=1, context_turn_window=8
+    )
     conversation = _UsageConversation(_usage_nodes(), active_leaf="assistant-1")
     operations = _Operations(
         replace(_queued_state(), status="running", completed_step_count=1)
@@ -867,15 +886,22 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
             compact_calls.append(kwargs)
             return HistoryCompaction("summary", "node-1")
 
+    class _NeverSender:
+        async def __call__(self, **kwargs):
+            raise AssertionError("fake generator 不应触发 worker 发送")
+
     compact_calls = []
     driver = OperationDriver(
         operation_service=operations,
         conversation_service=conversation,
         package_loader=lambda _: package,
-        effects_resolver=lambda _: RuntimeEffects(provider=provider),
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=provider, worker_provider=object()
+        ),
         model_call_service=_FakeModelCallService(operations),
         model_context_builder=_ContextBuilder(),
         history_compaction_generator=_Generator(),
+        worker_sender=_NeverSender(),
     )
 
     result = await driver.drive_operation("operation-1")

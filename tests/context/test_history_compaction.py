@@ -1,16 +1,18 @@
 import asyncio
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
-from pickel.context.history_compaction import ModelBackedHistoryCompactionGenerator
+import pytest
+
+from pickel.context.history_compaction import HistoryCompactionError
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.context.token_preflight import TokenPreflightResult
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_node import ConversationNode
-from pickel.model_calls.service import ModelCallResponse
-from pickel.providers.prepared import PreparedModelCall
-from pickel.runtime.runtime_effects import RuntimeEffects
+from pickel.runtime.history_compaction_worker import (
+    ModelBackedHistoryCompactionGenerator,
+)
+from pickel.runtime.worker_call_sender import WorkerCallSendError
 
 
 def _node(node_id: str, message) -> ConversationNode:
@@ -24,97 +26,104 @@ def _node(node_id: str, message) -> ConversationNode:
     )
 
 
-class _ModelCalls:
-    def __init__(self) -> None:
-        self.context = None
-        self.completed = None
-
-    def prepare_session_call(self, *, context, mapper, **kwargs):
-        del mapper, kwargs
-        self.context = context
-        prepared = PreparedModelCall(
-            provider="worker",
-            api_kind="test",
-            endpoint="test",
-            requested_model="worker-model",
-            body={"stream": True},
-        )
-        return SimpleNamespace(model_call=SimpleNamespace(), prepared=prepared)
-
-    def complete_session_response(self, *, call, response):
-        self.completed = (call, response)
+def _nodes() -> tuple[ConversationNode, ...]:
+    return (
+        _node("user-1", UserMessage((TextBlock("old request"),))),
+        _node("assistant-1", AssistantMessage((TextBlock("old answer"),))),
+        _node("user-2", UserMessage((TextBlock("recent request"),))),
+        _node("assistant-2", AssistantMessage((TextBlock("recent answer"),))),
+    )
 
 
-class _SendGate:
-    async def send(self, *, call, prepared, effects):
-        del call, prepared, effects
-        return ModelCallResponse(
-            assistant_message=AssistantMessage((TextBlock("压缩摘要"),)),
-            provider_response={"ok": True},
-            started_at=datetime.now(timezone.utc),
-            first_chunk_at=None,
-            finished_at=datetime.now(timezone.utc),
-            http_status=200,
-        )
+def _preflight() -> TokenPreflightResult:
+    return TokenPreflightResult(
+        token_count=100,
+        threshold=90,
+        compaction_required=True,
+        source="estimated",
+    )
 
 
-def test_model_backed_generator_keeps_recent_tail_and_persists_worker_response():
-    model_calls = _ModelCalls()
+class _FakeSender:
+    """记录摘要输入、返回固定摘要的窄 SummarizerSender fake。"""
 
-    async def run():
-        generator = ModelBackedHistoryCompactionGenerator(
-            model_calls=model_calls,
-            send_gate=_SendGate(),
-            preserve_tail_tokens=1,
-            summary_input_tokens=100,
-        )
-        nodes = (
-            _node("user-1", UserMessage((TextBlock("old request"),))),
-            _node("assistant-1", AssistantMessage((TextBlock("old answer"),))),
-            _node("user-2", UserMessage((TextBlock("recent request"),))),
-            _node("assistant-2", AssistantMessage((TextBlock("recent answer"),))),
-        )
+    def __init__(
+        self,
+        message: AssistantMessage | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.calls: list[tuple[ModelContext, str]] = []
+        self._message = message or AssistantMessage((TextBlock("压缩摘要"),))
+        self._error = error
 
-        return await generator.generate(
-            session_id="session-1",
-            nodes=nodes,
+    async def __call__(self, *, context: ModelContext, purpose: str):
+        self.calls.append((context, purpose))
+        if self._error is not None:
+            raise self._error
+        return self._message
+
+
+def test_model_backed_generator_keeps_recent_tail_and_sends_summary_request():
+    sender = _FakeSender()
+    generator = ModelBackedHistoryCompactionGenerator(
+        preserve_tail_tokens=1,
+        summary_input_tokens=100,
+    )
+
+    result = asyncio.run(
+        generator.generate(
+            nodes=_nodes(),
             model_context=ModelContext(system=SystemContent(), messages=()),
-            preflight=TokenPreflightResult(
-                token_count=100,
-                threshold=90,
-                compaction_required=True,
-                source="estimated",
-            ),
-            runtime_effects=RuntimeEffects(provider=object(), worker_provider=object()),
+            preflight=_preflight(),
+            send_summarizer=sender,
         )
-
-    result = asyncio.run(run())
+    )
 
     assert result.summary == "压缩摘要"
     assert result.first_kept_node_id == "user-2"
-    assert (
-        model_calls.context.messages[0].content[0].text.startswith("请压缩以下历史消息")
-    )
-    assert model_calls.completed is not None
+    assert len(sender.calls) == 1
+    context, purpose = sender.calls[0]
+    assert purpose == "history_compaction"
+    assert context.tools == ()
+    assert context.messages[0].content[0].text.startswith("请压缩以下历史消息")
+    # 摘要输入只包含被压缩的旧历史，不含保留尾部。
+    assert "recent request" not in context.messages[0].content[0].text
 
 
-def test_model_backed_generator_requires_worker_provider():
+def test_model_backed_generator_rejects_empty_summary():
     generator = ModelBackedHistoryCompactionGenerator(
-        model_calls=_ModelCalls(), send_gate=_SendGate()
+        preserve_tail_tokens=1,
+        summary_input_tokens=100,
     )
 
-    async def run():
-        return await generator.generate(
-            session_id="session-1",
-            nodes=(_node("user-1", UserMessage()), _node("user-2", UserMessage())),
-            model_context=ModelContext(system=SystemContent(), messages=()),
-            preflight=TokenPreflightResult(1, 0, True, "estimated"),
-            runtime_effects=RuntimeEffects(provider=object()),
+    with pytest.raises(HistoryCompactionError) as exc_info:
+        asyncio.run(
+            generator.generate(
+                nodes=_nodes(),
+                model_context=ModelContext(system=SystemContent(), messages=()),
+                preflight=_preflight(),
+                send_summarizer=_FakeSender(
+                    message=AssistantMessage((TextBlock("   "),))
+                ),
+            )
         )
+    assert exc_info.value.code == "history_compaction_empty"
 
-    try:
-        asyncio.run(run())
-    except RuntimeError as exc:
-        assert "需要配置 worker model" in str(exc)
-    else:
-        raise AssertionError("缺少 worker provider 时必须失败")
+
+def test_model_backed_generator_does_not_swallow_sender_failures():
+    """发送失败原样上抛；降级语义由 OperationDriver 决定，Generator 不吞错。"""
+    generator = ModelBackedHistoryCompactionGenerator(
+        preserve_tail_tokens=1,
+        summary_input_tokens=100,
+    )
+    sender = _FakeSender(error=WorkerCallSendError("worker 调用失败"))
+
+    with pytest.raises(WorkerCallSendError):
+        asyncio.run(
+            generator.generate(
+                nodes=_nodes(),
+                model_context=ModelContext(system=SystemContent(), messages=()),
+                preflight=_preflight(),
+                send_summarizer=sender,
+            )
+        )
