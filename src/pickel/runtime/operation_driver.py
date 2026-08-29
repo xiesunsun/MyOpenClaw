@@ -79,7 +79,10 @@ from pickel.providers.stream import StreamDelta
 from pickel.providers.errors import ProviderRequestError, classify_provider_error
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.runtime_effects import RuntimeEffects
-from pickel.runtime.worker_call_sender import WorkerSendEffect
+from pickel.runtime.worker_call_sender import (
+    WorkerCallSendError,
+    WorkerSendEffect,
+)
 from pickel.runtime.runtime_events import (
     RuntimeEventBase,
     ToolCallCompleted,
@@ -710,17 +713,25 @@ class OperationDriver:
                     session_id=operation.session_id,
                     content=content,
                 )
-            except HistoryCompactionError as exc:
-                return (
-                    self._fail_preflight(
-                        operation=operation,
-                        state=state,
-                        last_assistant=last_assistant,
-                        code=exc.code,
-                        message=str(exc),
-                    ),
-                    step.step_id,
+                # 压缩已提交：重新预检重建后的投影。
+                return state, step.step_id
+            except (HistoryCompactionError, WorkerCallSendError) as exc:
+                # 压缩失败优雅降级：sender 重试额度已耗尽或摘要无法产出，
+                # 记录诊断后直接以全量 Context 提交 Intent；provider 若拒绝
+                # 会在发送路径显式失败。标记本 step 已尝试压缩，防止同一
+                # step 内的重入形成压缩循环。
+                code = (
+                    exc.code
+                    if isinstance(exc, HistoryCompactionError)
+                    else "worker_send_failed"
                 )
+                logger.warning(
+                    "历史压缩失败，降级为全量 Context 继续 operation=%s code=%s: %s",
+                    operation.operation_id,
+                    code,
+                    exc,
+                )
+                compaction_step_id = step.step_id
             except Exception as exc:
                 return (
                     self._fail_preflight(
@@ -732,7 +743,6 @@ class OperationDriver:
                     ),
                     step.step_id,
                 )
-            return state, step.step_id
 
         intent = ModelRequestIntent(
             model_context=context,

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from pickel.context.history_compaction import HistoryCompactionError
 from pickel.context.model_context import ModelContext, SystemContent, SystemSection
 from pickel.context.model_context_builder import (
     ContextContributions,
@@ -859,6 +860,56 @@ async def test_unavailable_token_count_falls_back_and_continues_model_request():
 
     assert result.status == "succeeded"
     assert provider.calls == 1
+
+
+@_run_async
+async def test_compaction_failure_degrades_to_full_context_instead_of_failing():
+    """压缩失败不终止 Operation：记诊断后以全量 Context 继续本 Step。"""
+
+    class _CountingProvider(_Provider):
+        def __init__(self):
+            super().__init__([AssistantMessage(content=(TextBlock("answer"),))])
+
+        async def count_context_tokens(self, context):
+            del context
+            return 90
+
+    class _FailingGenerator:
+        async def generate(self, **kwargs):
+            del kwargs
+            raise HistoryCompactionError(
+                "history_compaction_empty", "worker 压缩响应为空"
+            )
+
+    class _NeverSender:
+        async def __call__(self, **kwargs):
+            raise AssertionError("失败的 generator 不应触发 worker 发送")
+
+    provider = _CountingProvider()
+    package = _loaded_package().version
+    package.model_policy = SimpleNamespace(
+        primary=SimpleNamespace(effective_input_token_limit=lambda: 90),
+        worker=object(),
+    )
+    operations = _Operations(_queued_state())
+    conversation = _CompactionConversation()
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=provider, worker_provider=object()
+        ),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+        history_compaction_generator=_FailingGenerator(),
+        worker_sender=_NeverSender(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert provider.calls == 1  # 降级后仍以全量 Context 完成了一次真实请求
 
 
 @_run_async
