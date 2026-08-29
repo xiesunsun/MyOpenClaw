@@ -18,10 +18,11 @@ from pickel.context.model_context import ModelContext, SystemContent, SystemSect
 from pickel.context.token_preflight import TokenPreflightResult
 from pickel.conversations.agent_message import (
     AssistantMessage,
+    ToolResultMessage,
     UserMessage,
     agent_message_to_dict,
 )
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 
 
@@ -101,8 +102,11 @@ class ModelBackedHistoryCompactionGenerator:
                 break
             total += cost
             first = index
+        # 配对硬规则：保留区里的每个 ToolResult 必须能找到它的 ToolCall，
+        # 否则切点会制造"有结果无调用"的孤立消息；向下修正切点直到平衡。
+        first = self._repair_tool_pairing(nodes, first)
         # 活动分支不能从孤立的 Assistant 开始，否则模型会看到没有对应问题的
-        # 答案。优先把紧邻的 User 一并保留；ToolResult 配对由 A3 硬规则保证。
+        # 答案。优先把紧邻的 User 一并保留；该调整只扩大保留区，不会破坏配对。
         if (
             first < len(nodes)
             and isinstance(nodes[first].content, AssistantMessage)
@@ -111,6 +115,38 @@ class ModelBackedHistoryCompactionGenerator:
         ):
             first -= 1
         return first if first > 0 else None
+
+    def _repair_tool_pairing(
+        self, nodes: Sequence[ConversationNode], first: int
+    ) -> int:
+        """把切点下修到 tool 配对平衡处；call 丢失的孤儿结果按可修复处理。"""
+        call_node_index: dict[str, int] = {}
+        for index, node in enumerate(nodes):
+            if node.content_type != "agent_message":
+                continue
+            content = node.content
+            if not isinstance(content, AssistantMessage):
+                continue
+            for block in content.content:
+                if isinstance(block, ToolCallBlock):
+                    call_node_index.setdefault(block.id, index)
+        while True:
+            repair_to: int | None = None
+            for node in nodes[first:]:
+                if node.content_type != "agent_message":
+                    continue
+                content = node.content
+                if not isinstance(content, ToolResultMessage):
+                    continue
+                call_index = call_node_index.get(content.tool_call_id)
+                if call_index is None or call_index >= first:
+                    continue
+                repair_to = (
+                    call_index if repair_to is None else min(repair_to, call_index)
+                )
+            if repair_to is None:
+                return first
+            first = repair_to
 
     def _summary_prompt(self, nodes: Sequence[ConversationNode]) -> str:
         rendered = []

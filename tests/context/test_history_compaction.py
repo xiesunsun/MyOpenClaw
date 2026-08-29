@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -6,8 +7,13 @@ import pytest
 from pickel.context.history_compaction import HistoryCompactionError
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.context.token_preflight import TokenPreflightResult
-from pickel.conversations.agent_message import AssistantMessage, UserMessage
-from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+    agent_message_to_dict,
+)
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_node import ConversationNode
 from pickel.runtime.history_compaction_worker import (
     ModelBackedHistoryCompactionGenerator,
@@ -127,3 +133,56 @@ def test_model_backed_generator_does_not_swallow_sender_failures():
                 send_summarizer=sender,
             )
         )
+
+
+def _cost(node: ConversationNode) -> int:
+    """与生成器相同的节点成本估算口径。"""
+    return max(1, len(json.dumps(agent_message_to_dict(node.content))) // 4)
+
+
+def test_tail_cut_never_separates_tool_result_from_its_call():
+    """贪心切点落在 ToolResult 上时，必须下修到它的 ToolCall 所在节点。"""
+    nodes = (
+        _node("user-oldest", UserMessage((TextBlock("old"),))),
+        _node("assistant-older", AssistantMessage((TextBlock("even older"),))),
+        _node(
+            "assistant-call",
+            AssistantMessage(
+                (
+                    TextBlock("checking"),
+                    ToolCallBlock("call-1", "bash", {"command": "ls -la " + "x" * 500}),
+                )
+            ),
+        ),
+        ConversationNode(
+            node_id="tool-result",
+            session_id="session-1",
+            parent_node_id=None,
+            content_type="agent_message",
+            content=ToolResultMessage(tool_call_id="call-1", tool_name="bash"),
+            created_at=datetime.now(timezone.utc),
+        ),
+        _node("user-recent", UserMessage((TextBlock("recent"),))),
+        _node("assistant-recent", AssistantMessage((TextBlock("recent answer"),))),
+    )
+    budget = _cost(nodes[5]) + _cost(nodes[4]) + _cost(nodes[3])
+    assert _cost(nodes[2]) > budget  # 前置：无修复时贪心切点恰好落在 result 上
+
+    sender = _FakeSender()
+    generator = ModelBackedHistoryCompactionGenerator(
+        preserve_tail_tokens=budget,
+        summary_input_tokens=100,
+    )
+    result = asyncio.run(
+        generator.generate(
+            nodes=nodes,
+            model_context=ModelContext(system=SystemContent(), messages=()),
+            preflight=_preflight(),
+            send_summarizer=sender,
+        )
+    )
+
+    # first_kept 是 call 节点而非 result 节点；result 连同 call 一起保留。
+    assert result.first_kept_node_id == "assistant-call"
+    rendered = sender.calls[0][0].messages[0].content[0].text
+    assert "call-1" not in rendered  # 被保留的配对不进入摘要输入
