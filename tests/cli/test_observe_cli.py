@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typer.testing import CliRunner
@@ -10,22 +11,29 @@ from pickel.model_calls.content_store import InMemoryModelCallContentStore
 
 runner = CliRunner()
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(output: str) -> str:
+    """去掉 ANSI 转义；部分 CI 环境会强制 rich 输出着色文本。"""
+    return _ANSI_RE.sub("", output)
+
 
 def test_cli_observe_help() -> None:
     result = runner.invoke(app, ["observe", "--help"])
     assert result.exit_code == 0
-    assert (
-        "可观测系统与故障诊断数据工作台" in result.output or "observe" in result.output
-    )
-    assert "operation" in result.output
+    output = _plain(result.output)
+    assert "可观测系统与故障诊断数据工作台" in output or "observe" in output
+    assert "operation" in output
 
 
 def test_cli_observe_operation_help() -> None:
     result = runner.invoke(app, ["observe", "operation", "--help"])
     assert result.exit_code == 0
-    assert "导出单个 Operation 的诊断数据工作台" in result.output
-    assert "--format" in result.output
-    assert "--output" in result.output
+    output = _plain(result.output)
+    assert "导出单个 Operation 的诊断数据工作台" in output
+    assert "--format" in output
+    assert "--output" in output
 
 
 def test_observe_operation_does_not_boot_runtime(monkeypatch, tmp_path: Path) -> None:
