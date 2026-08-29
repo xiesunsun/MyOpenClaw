@@ -239,10 +239,12 @@ class ModelCallService:
         call: ModelCall,
         *,
         first_chunk_at: datetime | None = None,
+        response_content_ref: str | None = None,
     ) -> ModelCall:
         incomplete = replace(
             call,
             status="incomplete",
+            response_content_ref=response_content_ref,
             first_chunk_at=first_chunk_at or call.first_chunk_at,
             finished_at=self._now(),
         )

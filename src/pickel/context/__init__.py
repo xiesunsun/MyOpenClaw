@@ -13,6 +13,7 @@ from pickel.context.model_context_builder import ContextContributions
 from pickel.context.history_compaction import (
     HistoryCompactionError,
     HistoryCompactionGenerator,
+    ModelBackedHistoryCompactionGenerator,
 )
 from pickel.context.recall import Recall
 from pickel.context.session_recall import (
@@ -26,6 +27,7 @@ __all__ = [
     "ContextContributions",
     "HistoryCompactionError",
     "HistoryCompactionGenerator",
+    "ModelBackedHistoryCompactionGenerator",
     "ModelContext",
     "Recall",
     "SessionRecallProvider",

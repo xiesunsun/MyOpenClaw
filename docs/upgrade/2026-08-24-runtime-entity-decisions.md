@@ -1583,6 +1583,7 @@ class ModelVersion:
     temperature: float | None
     max_input_tokens: int | None
     max_output_tokens: int
+    capability_profile: ModelCapabilityProfile
     provider_options: dict[str, JSONValue]
     provider_implementation: ImplementationRef
     required_secret_refs: tuple[SecretRef, ...]
@@ -3292,9 +3293,9 @@ compaction_threshold = min(
 )
 ```
 
-具体摘要模型、历史范围、压缩 Prompt、目标长度和失败重试由后续 Generator 实现决定；当前
-Runtime 不提供默认实验策略，也不把 Package worker 自动等同于压缩模型。压缩前不动态重写
-旧 ToolResult；大型 Tool 输出在 Tool 合同处有界，未来由 compaction epoch 一次性提炼。
+生产默认 Generator 使用 Operation 所属 Package 的 worker model 生成摘要；历史范围、压缩
+Prompt、目标长度和失败恢复仍通过 Generator 接缝替换。Runtime 不静默裁剪，也不动态重写旧
+ToolResult；大型 Tool 输出在 Tool 合同处有界，压缩节点通过 compaction epoch 一次性提炼。
 
 固定 `context_turn_window` 只属于迁移前实现，阶段 11.4 后删除，不保留双轨生产路径。
 

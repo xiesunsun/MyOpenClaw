@@ -24,6 +24,7 @@ from pickel.conversations.content_blocks import (
 )
 from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
+from pickel.shared.model_capability import GLM_5_3_FLASH_CAPABILITY_PROFILE
 from pickel.shared.frozen_json import thaw_json
 from pickel.providers.stream import (
     StreamCompleted,
@@ -131,6 +132,31 @@ def test_glm_snapshot_enables_tool_stream_and_preserves_thinking() -> None:
     assert snapshot["reasoning_effort"] == "max"
     assert snapshot["parallel_tool_calls"] is False
     assert snapshot["messages"][1]["reasoning_content"] == "先检查工具结果"
+
+
+def test_glm_capability_profile_supplies_wire_defaults() -> None:
+    context = ModelContext(
+        system=SystemContent.from_text("system"),
+        messages=(
+            AssistantMessage(
+                (ThinkingBlock("previous"), TextBlock("done")),
+            ),
+        ),
+    )
+    provider = OpenAIChatCompletionsProvider(
+        model="glm-5.3-flash",
+        provider_name="opencode-go",
+        capability_profile=GLM_5_3_FLASH_CAPABILITY_PROFILE,
+    )
+
+    snapshot = thaw_json(provider.prepare(context).body)
+    asyncio.run(provider.client.aclose())
+
+    assert snapshot["tool_stream"] is True
+    assert snapshot["thinking"] == {"type": "enabled", "clear_thinking": False}
+    assert snapshot["reasoning_effort"] == "max"
+    assert snapshot["parallel_tool_calls"] is False
+    assert snapshot["messages"][1]["reasoning_content"] == "previous"
 
 
 def test_tool_result_images_follow_complete_tool_result_group() -> None:
@@ -280,6 +306,137 @@ def test_stream_builds_provider_neutral_tool_call_and_usage() -> None:
     assert message.metadata.provider_response_id == "chat-1"
     assert message.metadata.usage is not None
     assert message.metadata.usage.total_tokens == 27
+
+
+def test_stream_preserves_interleaved_reasoning_and_multiple_tool_indexes() -> None:
+    client = httpx.AsyncClient(
+        base_url="https://opencode.example/v1/",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    {
+                        "id": "chat-multi",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": "先分析",
+                                    "tool_calls": [
+                                        {
+                                            "index": 1,
+                                            "id": "call-1",
+                                            "function": {
+                                                "name": "second",
+                                                "arguments": '{"b":',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": "再验证",
+                                    "content": "调用工具",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call-0",
+                                            "function": {
+                                                "name": "first",
+                                                "arguments": '{"a":',
+                                            },
+                                        },
+                                        {
+                                            "index": 1,
+                                            "function": {"arguments": "2}"},
+                                        },
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": "1}"},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ]
+                    },
+                ),
+            )
+        ),
+    )
+    provider = OpenAIChatCompletionsProvider(model="glm-5.3-flash", client=client)
+
+    async def collect():
+        return [
+            delta
+            async for delta in provider.stream_prepared(provider.prepare(_context()))
+        ]
+
+    deltas = asyncio.run(collect())
+    asyncio.run(client.aclose())
+
+    assert [type(delta).__name__ for delta in deltas[:5]] == [
+        "ThinkingDelta",
+        "ToolCallArgsDelta",
+        "ThinkingDelta",
+        "TextDelta",
+        "ToolCallArgsDelta",
+    ]
+    message = deltas[-1].message
+    assert message.content == (
+        ThinkingBlock("先分析再验证"),
+        TextBlock("调用工具"),
+        ToolCallBlock("call-0", "first", {"a": 1}),
+        ToolCallBlock("call-1", "second", {"b": 2}),
+    )
+
+
+def test_stream_incomplete_error_keeps_partial_reasoning_for_recovery() -> None:
+    client = httpx.AsyncClient(
+        base_url="https://opencode.example/v1/",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    'data: {"choices":[{"delta":{"reasoning_content":"partial"}}]}\n\n'
+                ).encode(),
+            )
+        ),
+    )
+    provider = OpenAIChatCompletionsProvider(model="glm-5.3-flash", client=client)
+
+    from pickel.providers.errors import ProviderStreamIncompleteError
+
+    with pytest.raises(ProviderStreamIncompleteError) as caught:
+        asyncio.run(
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(ModelContext(system=SystemContent(), messages=()))
+                )
+            )
+        )
+    asyncio.run(client.aclose())
+
+    assert caught.value.assistant_message.content == (ThinkingBlock("partial"),)
+    assert caught.value.http_status == 200
 
 
 def test_stream_rejects_truncated_response() -> None:

@@ -13,3 +13,6 @@ models:
   primary:
     provider: opencode-go
     model: glm-5.3-flash
+  worker:
+    provider: opencode-go
+    model: glm-5.3-flash

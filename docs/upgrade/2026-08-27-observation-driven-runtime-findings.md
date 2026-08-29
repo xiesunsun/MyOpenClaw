@@ -337,7 +337,7 @@ event delivery
 | 11.2 | 补 model/tool/storage/context 时序 Span | 页面能分解总耗时，缺失值不显示为 0 |
 | 11.3 | 补 Multi-Agent 稳定 Context 与 Tool 描述 | Parent 无工作时进入 idle；Child 自动消息唤醒；无 `bash sleep` 轮询 |
 | 11.4 | 修正 token preflight：精确计数优先、usage 锚兜底 + `effect_rate` 阈值 | 来源可见；无计数接口不阻断执行；阈值可复算；无固定安全常数 |
-| 11.5 | 只收敛 HistoryCompaction 组合接口；具体压缩策略后续单独设计 | 触发/生成/提交解耦；实验策略不成为合同 |
+| 11.5 | 收敛 HistoryCompaction 接口并接入可替换的 worker 默认实现 | 触发/生成/提交解耦；默认实现不成为不可替换的领域实体 |
 | 11.6 | 按工具类型收敛大型结果，不建立通用分页 | 小结果完整；大结果高信号且可恢复；额外 ModelCall 只在确实缺证据时发生 |
 | 11.7 | Provider timeout/retry 内部治理 | attempt 可诊断；模型不接触 HTTP 参数；重试不重复 Agent Step |
 
@@ -370,10 +370,10 @@ Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/refe
 复用最近一次匹配前缀的 Provider usage 并只估算新增尾部，冷启动或前缀变化时明确标记为
 `estimated`。`/context` 与请求前检查复用同一规则，且只读命令不调用远程 count。
 
-11.5 已完成组合接缝收敛：删除按 JSON 字节选段、半阈值尾部预算、固定 worker/prompt 的实验
-生产实现；保留 `HistoryCompaction` 值、Projector 和可注入的 `HistoryCompactionGenerator`。
-Generator 只返回内容，OperationDriver 负责追加、重新 preflight 和无进展停止；未配置 Generator
-时明确失败，不静默裁剪，也不预设后续压缩策略。
+11.5 已完成组合接缝收敛：保留 `HistoryCompaction` 值、Projector 和可注入的
+`HistoryCompactionGenerator`，并提供生产默认的 `ModelBackedHistoryCompactionGenerator`。
+它使用冻结 Package worker、保留最近消息对、以中文事实摘要压缩旧历史；Generator 只返回内容，
+OperationDriver 负责追加、重新 preflight 和无进展停止；缺少 worker 时明确失败，不静默裁剪。
 
 11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
 完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有

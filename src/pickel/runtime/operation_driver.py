@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ from uuid import uuid4
 from pickel.agents.agent_package import AgentPackageVersion
 from pickel.agents.agent_package_loader import PackageLoadError
 from pickel.context.model_context import ModelContext
+from pickel.context.model_context import SystemContent, SystemSection
 from pickel.context.context_usage import model_context_fingerprint
 from pickel.context.history_compaction import (
     HistoryCompactionError,
@@ -25,6 +27,10 @@ from pickel.context.history_compaction import (
 from pickel.context.model_context_builder import (
     ContextContributions,
     ModelContextBuilder,
+)
+from pickel.shared.collaboration import (
+    CollaborationState,
+    PLAN_READ_ONLY_TOOL_NAMES,
 )
 from pickel.context.projection import ConversationProjector
 from pickel.context.token_preflight import (
@@ -35,6 +41,8 @@ from pickel.conversations.agent_message import (
     AgentMessage,
     AssistantMessage,
     ToolResultMessage,
+    UserMessage,
+    agent_message_to_dict,
 )
 from pickel.conversations.content_blocks import ArtifactBlock, TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
@@ -58,6 +66,7 @@ from pickel.model_calls.service import (
     ModelCallPrepareConflict,
     ModelCallRecoveryError,
     ModelCallRetryExhausted,
+    ModelCallResponse,
     ModelCallService,
 )
 from pickel.telemetry.records import ErrorInfo, SpanTimer
@@ -68,6 +77,7 @@ from pickel.runtime.model_call_send_gate import (
 )
 from pickel.providers.stream import StreamDelta
 from pickel.providers.errors import ProviderRequestError, classify_provider_error
+from pickel.providers.errors import ProviderStreamIncompleteError
 from pickel.runtime.agent_run_usage import AgentRunUsage, project_agent_run_usage
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import (
@@ -78,6 +88,11 @@ from pickel.runtime.runtime_events import (
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.frozen_json import freeze_json_object, thaw_json
 from pickel.shared.execution_identity import ExecutionIdentity
+from pickel.runtime.goal_verifier import (
+    GoalVerification,
+    build_goal_verification_prompt,
+    parse_goal_verification,
+)
 from pickel.tools.validation import validate_json_schema
 
 StreamDeltaConsumer = Callable[[StreamDelta, ExecutionIdentity], None | Awaitable[None]]
@@ -152,6 +167,9 @@ class OperationDriver:
         delegation_package_resolver: DelegationPackageResolver | None = None,
         allowed_tool_names: frozenset[str] | None = None,
         history_compaction_generator: HistoryCompactionGenerator | None = None,
+        collaboration_state_provider: (
+            Callable[[str], CollaborationState | None] | None
+        ) = None,
     ) -> None:
         self._operations = operation_service
         self._conversations = conversation_service
@@ -176,6 +194,8 @@ class OperationDriver:
             if service_store is not None:
                 send_gate = ModelCallSendGate(service_store, now=self._now)
         self._history_compaction_generator = history_compaction_generator
+        self._collaboration_state_provider = collaboration_state_provider
+        self._goal_feedback: dict[str, str] = {}
         self._model_call_send_gate = send_gate
         self._release_operation_package = release_operation_package
         self._context_builder = model_context_builder or ModelContextBuilder()
@@ -201,6 +221,8 @@ class OperationDriver:
             consume_tool_event=consume_tool_event,
             host_calls=host_calls,
         )
+        if result.status in {"succeeded", "failed", "cancelled"}:
+            self._goal_feedback.pop(operation_id, None)
         if result.status in {"succeeded", "failed", "cancelled"}:
             self._wake_parent(operation_id)
         if (
@@ -409,11 +431,32 @@ class OperationDriver:
             )
         except ModelCallSendFailure as exc:
             error = classify_provider_error(exc.cause)
-            failed_call = self._model_calls.mark_failed(
-                exc.call,
-                error,
-                first_chunk_at=exc.first_chunk_at,
-            )
+            response_content_ref = None
+            if isinstance(exc.cause, ProviderStreamIncompleteError):
+                partial_response = ModelCallResponse(
+                    assistant_message=exc.cause.assistant_message,
+                    provider_response=exc.cause.provider_response,
+                    started_at=exc.call.started_at or self._now(),
+                    first_chunk_at=exc.first_chunk_at,
+                    finished_at=self._now(),
+                    http_status=exc.cause.http_status,
+                )
+                response_content_ref = self._model_calls.save_response_content(
+                    partial_response,
+                    partial=True,
+                    identity=exc.call.identity,
+                )
+                failed_call = self._model_calls.mark_incomplete(
+                    exc.call,
+                    first_chunk_at=exc.first_chunk_at,
+                    response_content_ref=response_content_ref,
+                )
+            else:
+                failed_call = self._model_calls.mark_failed(
+                    exc.call,
+                    error,
+                    first_chunk_at=exc.first_chunk_at,
+                )
             if (
                 error.retryable
                 and exc.first_chunk_at is None
@@ -660,6 +703,7 @@ class OperationDriver:
                     nodes=branch_nodes,
                     model_context=context,
                     preflight=required.result,
+                    runtime_effects=effects,
                 )
                 if not isinstance(content, HistoryCompaction):
                     raise HistoryCompactionError(
@@ -862,10 +906,11 @@ class OperationDriver:
         if step.phase != "awaiting_tools":
             raise RuntimeError(f"未知 ModelStep phase: {step.phase}")
         if not step.tool_calls:
-            return self._finish_answer(
+            return await self._finish_answer(
                 operation=operation,
                 state=state,
                 last_assistant=last_assistant,
+                effects=effects,
             )
 
         pending = next(
@@ -876,6 +921,27 @@ class OperationDriver:
 
         executable: ToolCallState | None = None
         if pending is not None and pending.status == "ready":
+            collaboration = (
+                self._collaboration_state_provider(operation.session_id)
+                if self._collaboration_state_provider is not None
+                else None
+            )
+            if (
+                collaboration is not None
+                and collaboration.mode == "plan"
+                and pending.tool_name not in PLAN_READ_ONLY_TOOL_NAMES
+            ):
+                return self._record_rejected_tool(
+                    state=state,
+                    step=step,
+                    call=replace(
+                        pending,
+                        status="rejected",
+                        decision_reason=(
+                            "Plan 模式只允许只读工具：ls、glob、grep、read"
+                        ),
+                    ),
+                )
             state, executable = self._record_tool_intent(
                 operation=operation,
                 state=state,
@@ -920,15 +986,69 @@ class OperationDriver:
             )
         raise RuntimeError("ToolCallState 存在无法推进的状态")
 
-    def _finish_answer(
+    async def _finish_answer(
         self,
         *,
         operation: SessionOperation,
         state: AgentRunState,
         last_assistant: AssistantMessage | None,
+        effects: RuntimeEffects,
     ) -> AgentRunState | OperationDriveResult:
         step = state.current_step
         assert step is not None and step.assistant_message_node_id is not None
+        if last_assistant is None:
+            for persisted in self._conversations.list_active_branch_nodes(
+                session_id=operation.session_id
+            ):
+                if persisted.node_id == step.assistant_message_node_id and isinstance(
+                    persisted.content, AssistantMessage
+                ):
+                    last_assistant = persisted.content
+                    break
+        collaboration = (
+            self._collaboration_state_provider(operation.session_id)
+            if self._collaboration_state_provider is not None
+            else None
+        )
+        if collaboration is not None and collaboration.mode == "goal":
+            try:
+                verification = await self._verify_goal(
+                    operation=operation,
+                    state=state,
+                    candidate=last_assistant,
+                    effects=effects,
+                    goal=collaboration.goal,
+                )
+            except Exception as exc:  # noqa: BLE001 — Goal 验证失败必须 fail closed
+                failed = replace(
+                    state,
+                    revision=state.revision + 1,
+                    current_step=None,
+                    status="failed",
+                    final_assistant_node_id=None,
+                    error=AgentRunError(
+                        code="goal_verification_failed",
+                        message=f"Goal 完成验证失败: {exc}",
+                        retryable=True,
+                    ),
+                )
+                return self._commit(failed, state)
+            if not verification.passed:
+                feedback = (
+                    f"Goal verifier 判断尚未完成。原因：{verification.reason}\n"
+                    f"下一步：{verification.next_action}"
+                )
+                self._goal_feedback[operation.operation_id] = feedback
+                continue_state = replace(
+                    state,
+                    revision=state.revision + 1,
+                    current_step=None,
+                    status="running",
+                    completed_step_count=state.completed_step_count + 1,
+                    final_assistant_node_id=None,
+                    error=None,
+                )
+                return self._commit(continue_state, state)
         next_state = replace(
             state,
             revision=state.revision + 1,
@@ -963,6 +1083,101 @@ class OperationDriver:
         ):
             raise RuntimeError("AgentRunState CAS 冲突，停止推进且不重放副作用")
         return continue_state
+
+    async def _verify_goal(
+        self,
+        *,
+        operation: SessionOperation,
+        state: AgentRunState,
+        candidate: AssistantMessage | None,
+        effects: RuntimeEffects,
+        goal: str | None,
+    ) -> GoalVerification:
+        del state
+        if not goal:
+            raise ValueError("Goal 模式缺少目标")
+        if effects.worker_provider is None:
+            raise ValueError("Goal 模式需要配置 worker model")
+        if self._model_calls is None or self._model_call_send_gate is None:
+            raise ValueError("Goal 模式未配置 ModelCall service")
+        candidate_text = json.dumps(
+            agent_message_to_dict(candidate) if candidate is not None else {},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        context = ModelContext(
+            system=SystemContent(
+                sections=(
+                    SystemSection(
+                        name="goal_verification",
+                        text=(
+                            "你是独立的 Goal 完成验证器。只判断目标是否被候选结果证明，"
+                            "不得调用工具，不得替候选结果补事实。"
+                        ),
+                    ),
+                )
+            ),
+            messages=(
+                UserMessage(
+                    (TextBlock(build_goal_verification_prompt(goal, candidate_text)),)
+                ),
+            ),
+            tools=(),
+        )
+        prepared_call = self._model_calls.prepare_session_call(
+            session_id=operation.session_id,
+            context=context,
+            mapper=effects.worker_provider,
+            request_attempt=1,
+            model_role="worker",
+            purpose="goal_verification",
+        )
+        worker_effects = RuntimeEffects(
+            provider=effects.worker_provider,
+            provider_name=prepared_call.prepared.provider,
+            model_name=prepared_call.prepared.requested_model,
+            provider_timeout_seconds=effects.provider_timeout_seconds,
+        )
+        try:
+            response = await self._model_call_send_gate.send(
+                call=prepared_call.model_call,
+                prepared=prepared_call.prepared,
+                effects=worker_effects,
+            )
+        except ModelCallSendFailure as exc:
+            error = classify_provider_error(exc.cause)
+            if isinstance(exc.cause, ProviderStreamIncompleteError):
+                partial = ModelCallResponse(
+                    assistant_message=exc.cause.assistant_message,
+                    provider_response=exc.cause.provider_response,
+                    started_at=exc.call.started_at or self._now(),
+                    first_chunk_at=exc.first_chunk_at,
+                    finished_at=self._now(),
+                    http_status=exc.cause.http_status,
+                )
+                ref = self._model_calls.save_response_content(partial, partial=True)
+                self._model_calls.mark_incomplete(
+                    exc.call,
+                    first_chunk_at=exc.first_chunk_at,
+                    response_content_ref=ref,
+                )
+            else:
+                self._model_calls.mark_failed(
+                    exc.call,
+                    error,
+                    first_chunk_at=exc.first_chunk_at,
+                )
+            raise RuntimeError(str(exc)) from exc
+        self._model_calls.complete_session_response(
+            call=prepared_call.model_call,
+            response=response,
+        )
+        text = "\n".join(
+            block.text
+            for block in response.assistant_message.content
+            if isinstance(block, TextBlock) and block.text
+        )
+        return parse_goal_verification(text)
 
     def _record_rejected_tool(
         self,
@@ -1326,13 +1541,25 @@ class OperationDriver:
         )
         if not isinstance(hook_contributions, ContextContributions):
             hook_contributions = ContextContributions()
+        collaboration = (
+            self._collaboration_state_provider(operation.session_id)
+            if self._collaboration_state_provider is not None
+            else None
+        )
+        system_sections = list(hook_contributions.system_sections)
+        feedback = self._goal_feedback.get(operation.operation_id)
+        if feedback:
+            system_sections.append(
+                SystemSection(name="goal_verification_feedback", text=feedback)
+            )
         model_context = self._context_builder.build_model_context(
             package=package,
             visible_messages=visible,
             contributions=ContextContributions(
-                system_sections=hook_contributions.system_sections,
+                system_sections=tuple(system_sections),
                 messages=tuple(recalled) + hook_contributions.messages,
             ),
+            collaboration=collaboration,
         )
         # report 是 child→parent 的中间通信工具。它可以保留在冻结 Package
         # 中供 delegated Session 执行，但 Root 的 ModelContext 不应暴露它。
@@ -1355,6 +1582,15 @@ class OperationDriver:
                     tool
                     for tool in model_context.tools
                     if tool.name in self._allowed_tool_names
+                ),
+            )
+        if collaboration is not None and collaboration.mode == "plan":
+            model_context = replace(
+                model_context,
+                tools=tuple(
+                    tool
+                    for tool in model_context.tools
+                    if tool.name in PLAN_READ_ONLY_TOOL_NAMES
                 ),
             )
         return model_context

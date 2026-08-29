@@ -71,6 +71,7 @@ from pickel.runtime.runtime_events import (
     ToolCallArgsDeltaEvent,
 )
 from pickel.shared.conversation_mode import ConversationMode
+from pickel.shared.collaboration import CollaborationState
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.tools.bus import ToolBus
@@ -408,6 +409,7 @@ class RuntimeHost:
         )
         self._settled_parent_tasks: dict[str, asyncio.Task[None]] = {}
         self._shutting_down = False
+        self._collaboration_states: dict[str, CollaborationState] = {}
 
     @property
     def agent_registry(self) -> AgentRegistry:
@@ -455,6 +457,14 @@ class RuntimeHost:
     @property
     def app_config(self) -> AppConfig:
         return self._boot.app_config
+
+    def _collaboration_state(self, session_id: str) -> CollaborationState:
+        return self._collaboration_states.setdefault(session_id, CollaborationState())
+
+    def _set_collaboration_state(
+        self, session_id: str, state: CollaborationState
+    ) -> None:
+        self._collaboration_states[session_id] = state
 
     @property
     def load_result(self) -> LoadResult:
@@ -855,6 +865,9 @@ class RuntimeHost:
                     expected_agent_id=session.agent_id,
                     delegation_control=delegation_control,
                 ),
+                collaboration_state_provider=lambda _session_id: self._collaboration_state(
+                    session_id
+                ),
                 release_operation_package=self._release_operation_package,
             )
             trace_driver = (
@@ -1238,6 +1251,9 @@ class RuntimeHost:
                         expected_agent_id=agent_id,
                         delegation_control=delegation_control,
                     ),
+                    collaboration_state_provider=lambda _session_id: self._collaboration_state(
+                        session.session_id
+                    ),
                     release_operation_package=self._release_operation_package,
                 )
             conversation = ConversationRuntime(
@@ -1251,6 +1267,10 @@ class RuntimeHost:
                 persistence=persistence,
                 app_config=boot.app_config,
                 mode=mode,
+                collaboration_state=self._collaboration_state(session.session_id),
+                on_collaboration_state_change=lambda state: self._set_collaboration_state(
+                    session.session_id, state
+                ),
                 on_detach=lambda: self._agent_registry.unregister(
                     session.session_id,
                     agent,

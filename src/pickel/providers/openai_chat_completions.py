@@ -27,6 +27,7 @@ from pickel.conversations.content_blocks import (
     thaw_json,
 )
 from pickel.providers.base import Provider
+from pickel.providers.errors import ProviderStreamIncompleteError
 from pickel.providers.prepared import PreparedModelCall
 from pickel.providers.stream import (
     StreamCompleted,
@@ -36,6 +37,7 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.shared.model_config import ModelConfig
+from pickel.shared.model_capability import ModelCapabilityProfile
 
 
 class OpenAIChatCompletionsProvider(Provider):
@@ -55,6 +57,7 @@ class OpenAIChatCompletionsProvider(Provider):
         temperature: float | None = None,
         max_output_tokens: int = 65536,
         provider_options: dict[str, Any] | None = None,
+        capability_profile: ModelCapabilityProfile | None = None,
         artifact_service: ArtifactService | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -65,6 +68,7 @@ class OpenAIChatCompletionsProvider(Provider):
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
+        self.capability_profile = capability_profile or ModelCapabilityProfile()
         self.artifact_service = artifact_service
         self.client = client or self._build_client()
 
@@ -83,6 +87,7 @@ class OpenAIChatCompletionsProvider(Provider):
             temperature=config.temperature,
             max_output_tokens=config.max_output_tokens,
             provider_options=dict(config.provider_options),
+            capability_profile=config.capability_profile,
             artifact_service=artifact_service,
         )
 
@@ -167,8 +172,47 @@ class OpenAIChatCompletionsProvider(Provider):
                         if item["arguments"]:
                             yield ToolCallArgsDelta(call["id"], item["arguments"])
 
+        message = self._build_assistant_message(
+            thinking=thinking,
+            text_parts=text_parts,
+            calls=calls,
+            response_id=response_id,
+            response_model=response_model,
+            finish_reason=finish_reason,
+            usage=usage,
+            allow_incomplete=not completed,
+        )
+        provider_response = {
+            "events": raw_events,
+            "id": response_id,
+            "model": response_model,
+            "finish_reason": finish_reason,
+        }
         if not completed:
-            raise ValueError("Chat Completions 流结束时没有完成标志")
+            raise ProviderStreamIncompleteError(
+                message="Chat Completions 流结束时没有完成标志",
+                assistant_message=message,
+                provider_response=provider_response,
+                http_status=http_status,
+            )
+        yield StreamCompleted(
+            message=message,
+            provider_response=provider_response,
+            http_status=http_status,
+        )
+
+    def _build_assistant_message(
+        self,
+        *,
+        thinking: list[str],
+        text_parts: list[str],
+        calls: dict[int, dict[str, str]],
+        response_id: str | None,
+        response_model: str | None,
+        finish_reason: str | None,
+        usage: ModelUsage | None,
+        allow_incomplete: bool,
+    ) -> AssistantMessage:
         blocks: list[Any] = []
         if thinking:
             blocks.append(ThinkingBlock("".join(thinking)))
@@ -176,14 +220,22 @@ class OpenAIChatCompletionsProvider(Provider):
             blocks.append(TextBlock("".join(text_parts)))
         for index in sorted(calls):
             call = calls[index]
+            if allow_incomplete:
+                try:
+                    arguments = self._arguments(call["arguments"])
+                except (TypeError, ValueError):
+                    # 不完整响应仅用于诊断，不能把半截 JSON 伪装成可执行 ToolCall。
+                    continue
+            else:
+                arguments = self._arguments(call["arguments"])
             blocks.append(
                 ToolCallBlock(
                     call["id"] or f"tool_call_{index}",
                     call["name"],
-                    self._arguments(call["arguments"]),
+                    arguments,
                 )
             )
-        message = AssistantMessage(
+        return AssistantMessage(
             tuple(blocks),
             metadata=ModelResponseMetadata(
                 provider=self.provider_name,
@@ -194,16 +246,6 @@ class OpenAIChatCompletionsProvider(Provider):
                 finish_message=None,
                 usage=usage,
             ),
-        )
-        yield StreamCompleted(
-            message=message,
-            provider_response={
-                "events": raw_events,
-                "id": response_id,
-                "model": response_model,
-                "finish_reason": finish_reason,
-            },
-            http_status=http_status,
         )
 
     def _build_create_request(self, context: ModelContext) -> dict[str, Any]:
@@ -216,18 +258,28 @@ class OpenAIChatCompletionsProvider(Provider):
             request["temperature"] = self.temperature
         if context.tools:
             request["tools"] = self._tools(context.tools)
-        parallel = self.provider_options.get("parallel_tool_calls")
+        parallel = self.provider_options.get(
+            "parallel_tool_calls", self.capability_profile.parallel_tool_calls
+        )
         if parallel is not None:
             request["parallel_tool_calls"] = bool(parallel)
-        tool_stream = self.provider_options.get("tool_stream")
+        tool_stream = self.provider_options.get(
+            "tool_stream", self.capability_profile.tool_call_streaming
+        )
         if tool_stream is not None:
             request["tool_stream"] = bool(tool_stream)
         thinking = self.provider_options.get("thinking")
+        if thinking is None and self.capability_profile.thinking_enabled:
+            thinking = {"type": "enabled"}
+            if self.capability_profile.clear_thinking is not None:
+                thinking["clear_thinking"] = self.capability_profile.clear_thinking
         if isinstance(thinking, Mapping):
             request["thinking"] = dict(thinking)
         elif thinking is not None:
             request["thinking"] = {"type": str(thinking)}
-        effort = self.provider_options.get("reasoning_effort")
+        effort = self.provider_options.get(
+            "reasoning_effort", self.capability_profile.reasoning_default
+        )
         if effort is not None:
             request["reasoning_effort"] = str(effort)
         return request
@@ -282,7 +334,10 @@ class OpenAIChatCompletionsProvider(Provider):
                 "role": "assistant",
                 "content": self._text(message),
             }
-            if self.provider_options.get("preserve_thinking"):
+            if self.provider_options.get(
+                "preserve_thinking",
+                self.capability_profile.preserve_reasoning_after_tool_call,
+            ):
                 thinking = self._thinking(message)
                 if thinking:
                     value["reasoning_content"] = thinking

@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias
 
 from pickel.shared.frozen_json import FrozenJSON, freeze_json, thaw_json
+from pickel.shared.model_capability import ModelCapabilityProfile
 from pickel.tools.bus import ToolSnapshot, ToolSource
 
 if TYPE_CHECKING:
@@ -146,6 +147,7 @@ class ModelVersion:
     # None 只用于保持旧 Package 的 canonical hash 和历史容量语义；新 Builder
     # 总会冻结解析后的值。
     effect_rate: float | None = None
+    capability_profile: Mapping[str, FrozenJSON] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -163,6 +165,14 @@ class ModelVersion:
                 raise ValueError("context_window_tokens 必须大于 max_output_tokens")
         if self.effect_rate is not None and not 0 < self.effect_rate <= 1:
             raise ValueError("effect_rate 必须大于 0 且不大于 1")
+        if self.capability_profile:
+            profile = ModelCapabilityProfile.model_validate(self.capability_profile)
+            object.__setattr__(
+                self, "capability_profile", freeze_json(profile.model_dump())
+            )
+        else:
+            # 空值用于保持旧 Package 的 canonical hash 和解码兼容性。
+            object.__setattr__(self, "capability_profile", freeze_json({}))
         object.__setattr__(self, "provider_options", freeze_json(self.provider_options))
         object.__setattr__(
             self, "required_secret_refs", tuple(self.required_secret_refs)
@@ -595,6 +605,8 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
         content["context_window_tokens"] = model.context_window_tokens
     if model.effect_rate is not None:
         content["effect_rate"] = model.effect_rate
+    if model.capability_profile:
+        content["capability_profile"] = thaw_json(model.capability_profile)
     return content
 
 
@@ -712,6 +724,7 @@ def _model_from_dict(value: Mapping[str, Any]) -> ModelVersion:
         )
     data["provider_implementation"] = _ref_from_dict(data["provider_implementation"])
     data["required_secret_refs"] = _secret_refs(data.get("required_secret_refs"))
+    data.setdefault("capability_profile", {})
     return ModelVersion(**data)
 
 

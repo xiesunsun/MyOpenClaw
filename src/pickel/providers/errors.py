@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import httpx
 
+from pickel.conversations.agent_message import AssistantMessage
+
 
 class ProviderRequestError(RuntimeError):
     """Runtime 可以持久化的 Provider 请求错误。"""
@@ -20,6 +22,23 @@ class ProviderRequestError(RuntimeError):
         self.code = code
         self.retryable = retryable
         self.status_code = status_code
+
+
+class ProviderStreamIncompleteError(ValueError):
+    """Provider 已收到部分输出，但流没有可靠终止。"""
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        assistant_message: AssistantMessage,
+        provider_response: dict,
+        http_status: int | None,
+    ) -> None:
+        super().__init__(message)
+        self.assistant_message = assistant_message
+        self.provider_response = provider_response
+        self.http_status = http_status
 
 
 def classify_provider_error(error: Exception) -> ProviderRequestError:
@@ -55,6 +74,13 @@ def classify_provider_error(error: Exception) -> ProviderRequestError:
         )
 
     if isinstance(error, ValueError):
+        if isinstance(error, ProviderStreamIncompleteError):
+            return ProviderRequestError(
+                code="provider_stream_incomplete",
+                message=f"模型流式响应不完整: {error}",
+                retryable=True,
+                status_code=error.http_status,
+            )
         return ProviderRequestError(
             code="provider_response_invalid",
             message=f"模型响应无效: {error}",

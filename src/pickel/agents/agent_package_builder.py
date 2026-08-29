@@ -250,6 +250,7 @@ class AgentPackageBuilder:
             max_output_tokens=config.max_output_tokens,
             context_window_tokens=config.context_window_tokens,
             effect_rate=config.effect_rate,
+            capability_profile=config.capability_profile.model_dump(),
             provider_options=scan.value,
             provider_implementation=ImplementationRef("provider", config.wire_protocol),
             required_secret_refs=tuple(refs),

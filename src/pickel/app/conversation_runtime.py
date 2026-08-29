@@ -67,6 +67,7 @@ from pickel.app.runtime_generation import LoadedPackageHandle
 from pickel.runtime.agent import Agent, AgentBusyError
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
+from pickel.shared.collaboration import CollaborationMode, CollaborationState
 from pickel.shared.conversation_output import (
     ConversationOutputBase,
     ConversationOutputHandler,
@@ -109,6 +110,10 @@ class ConversationRuntime:
         persistence: str,
         app_config: AppConfig,
         mode: ConversationMode = "batch",
+        collaboration_state: CollaborationState | None = None,
+        on_collaboration_state_change: (
+            Callable[[CollaborationState], None] | None
+        ) = None,
         loaded_package_handle: LoadedPackageHandle | None = None,
         skill_store: Any | None = None,
         on_detach: Callable[[], None] | None = None,
@@ -124,6 +129,8 @@ class ConversationRuntime:
         self._persistence = persistence
         self._app_config = app_config
         self._mode = mode
+        self._collaboration_state = collaboration_state or CollaborationState()
+        self._on_collaboration_state_change = on_collaboration_state_change
         # 该 Handle 同时保持 LoadedAgentPackage 与所属 Generation 存活。
         self._loaded_package_handle = loaded_package_handle
         self._runtime_generation = (
@@ -160,6 +167,27 @@ class ConversationRuntime:
     @property
     def mode(self) -> ConversationMode:
         return self._mode
+
+    @property
+    def collaboration(self) -> CollaborationState:
+        """当前 Goal/Plan 协作状态；与 interactive/batch 输出模式分离。"""
+
+        return self._collaboration_state
+
+    def set_collaboration_mode(
+        self,
+        mode: CollaborationMode,
+        *,
+        goal: str | None = None,
+        plan: tuple[str, ...] = (),
+    ) -> CollaborationState:
+        """切换当前 Session 的协作模式，不改变 Conversation 树。"""
+
+        next_state = CollaborationState(mode=mode, goal=goal, plan=plan)
+        self._collaboration_state = next_state
+        if self._on_collaboration_state_change is not None:
+            self._on_collaboration_state_change(next_state)
+        return next_state
 
     @property
     def persistence(self) -> str:

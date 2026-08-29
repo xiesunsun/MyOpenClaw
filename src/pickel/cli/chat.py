@@ -213,6 +213,7 @@ class ChatLoop:
 
     def _render_session_summary(self) -> None:
         preview = self._conversation.snapshot()
+        collaboration = self._conversation.collaboration
         summary = Text(
             "\n".join(
                 [
@@ -222,10 +223,38 @@ class ChatLoop:
                     f"Messages: {preview.message_count}",
                     f"Updated: {preview.updated_at.isoformat()}",
                     f"Last message: {preview.last_message or '-'}",
+                    f"Collaboration: {collaboration.mode}",
+                    f"Goal: {collaboration.goal or '-'}",
                 ]
             ),
         )
         self.console.print(summary)
+
+    def _command_plan(self, arg: str | None) -> bool:
+        argument = (arg or "").strip()
+        if argument.lower() == "off":
+            self._conversation.set_collaboration_mode("normal")
+            self._render_system_message("已退出 Plan 模式。")
+            return True
+        plan = (argument,) if argument else ()
+        self._conversation.set_collaboration_mode("plan", plan=plan)
+        self._render_system_message(
+            "已进入 Plan 模式：模型只能使用 ls/glob/grep/read，完成计划后不会修改文件。"
+        )
+        return True
+
+    def _command_goal(self, arg: str | None) -> bool:
+        argument = (arg or "").strip()
+        if argument.lower() == "off":
+            self._conversation.set_collaboration_mode("normal")
+            self._render_system_message("已退出 Goal 模式。")
+            return True
+        if not argument:
+            self._render_error_message("用法：/goal <goal> 或 /goal off")
+            return True
+        self._conversation.set_collaboration_mode("goal", goal=argument)
+        self._render_system_message(f"已进入 Goal 模式：{argument}")
+        return True
 
     def _close_session(self) -> None:
         self._conversation.archive()

@@ -31,6 +31,8 @@ from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
 from pickel.extensions_host.registry import AgentScope, ExtensionRegistry
 from pickel.shared.frozen_json import thaw_json
 from pickel.shared.model_config import ModelConfig
+from pickel.shared.model_capability import ModelCapabilityProfile
+from pickel.shared.collaboration import CollaborationState
 from pickel.inbox.store import InboxStore
 from pickel.hooks.lifecycle import LifecycleHooks, NoopLifecycleHooks
 from pickel.operations.operation_service import OperationService
@@ -46,6 +48,7 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
+from pickel.context.history_compaction import ModelBackedHistoryCompactionGenerator
 from pickel.runtime.model_call_send_gate import ModelCallSendGate
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.skills.store import SkillStore
@@ -337,6 +340,9 @@ class Boot:
         ) = None,
         allowed_tool_names: frozenset[str] | None = None,
         parent_allowed_root: Path | None = None,
+        collaboration_state_provider: (
+            Callable[[str], CollaborationState | None] | None
+        ) = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
@@ -365,6 +371,8 @@ class Boot:
                 loaded_packages[requested] = cached
             return cached
 
+        model_call_service = ModelCallService(store)
+        model_call_send_gate = ModelCallSendGate(store)
         operation_driver = OperationDriver(
             operation_service=operation_service,
             conversation_service=ConversationService(conversation_store),
@@ -381,8 +389,13 @@ class Boot:
                     parent_allowed_root=parent_allowed_root,
                 )
             ),
-            model_call_service=ModelCallService(store),
-            model_call_send_gate=ModelCallSendGate(store),
+            model_call_service=model_call_service,
+            model_call_send_gate=model_call_send_gate,
+            history_compaction_generator=ModelBackedHistoryCompactionGenerator(
+                model_calls=model_call_service,
+                send_gate=model_call_send_gate,
+            ),
+            collaboration_state_provider=collaboration_state_provider,
             release_operation_package=release_operation_package,
             wake_callback=wake_callback,
             terminal_callback=terminal_callback,
@@ -632,6 +645,9 @@ class Boot:
             max_output_tokens=model.max_output_tokens,
             context_window_tokens=model.context_window_tokens,
             effect_rate=model.effect_rate if model.effect_rate is not None else 0.5,
+            capability_profile=ModelCapabilityProfile.model_validate(
+                thaw_json(model.capability_profile)
+            ),
             provider_options=options,
         )
 

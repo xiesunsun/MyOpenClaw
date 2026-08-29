@@ -15,6 +15,7 @@ from pickel.context.model_context import (
 from pickel.context.multi_agent_guidance import MULTI_AGENT_GUIDANCE
 from pickel.templates.loader import load_templates
 from pickel.conversations.agent_message import AgentMessage
+from pickel.shared.collaboration import CollaborationState
 
 
 @dataclass(frozen=True)
@@ -38,9 +39,14 @@ class ModelContextBuilder:
         package: AgentPackageVersion,
         visible_messages: Sequence[AgentMessage],
         contributions: ContextContributions = ContextContributions(),
+        collaboration: CollaborationState | None = None,
     ) -> ModelContext:
         return ModelContext(
-            system=self._build_system(package, contributions=contributions),
+            system=self._build_system(
+                package,
+                contributions=contributions,
+                collaboration=collaboration,
+            ),
             messages=tuple(visible_messages) + contributions.messages,
             tools=tuple(
                 ToolDefinition(
@@ -58,6 +64,7 @@ class ModelContextBuilder:
         version: AgentPackageVersion,
         *,
         contributions: ContextContributions,
+        collaboration: CollaborationState | None,
     ) -> SystemContent:
         sections = []
         behavior = version.behavior_instruction.strip()
@@ -79,6 +86,15 @@ class ModelContextBuilder:
                     text=self._format_skill_catalog(version.skills),
                 )
             )
+        if collaboration is not None:
+            collaboration_prompt = collaboration.system_prompt()
+            if collaboration_prompt:
+                sections.append(
+                    SystemSection(
+                        name="collaboration_mode",
+                        text=collaboration_prompt,
+                    )
+                )
         sections.extend(contributions.system_sections)
         return SystemContent(sections=tuple(sections))
 

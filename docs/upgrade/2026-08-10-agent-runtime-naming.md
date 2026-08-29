@@ -181,7 +181,9 @@ OperationDriver 在 Intent 提交前编排。
 
 模型请求的稳定语义前缀统一为 `tools → system → messages`。Provider wire 的字段形状可以
 不同，但不得改变这三段的语义顺序；工具定义和稳定 system 内容必须先于只追加的消息历史。
-未来动态 Context 注入如何避免破坏稳定前缀另行设计，当前合同不为尚不存在的动态来源增加层级。
+`CollaborationState` 是 Host 持有的 Session 协作状态值对象；`ModelContextBuilder` 将其投影为
+独立的 `collaboration_mode` system section，不改变稳定前缀，也不把临时 Goal/Plan 状态写入
+ConversationNode。Plan 的只读工具集合还必须由 OperationDriver 硬性收窄，不能只依赖提示词。
 
 候选请求 token 优先由对应 Provider 的 `count_context_tokens()` 精确计算。Provider 必须复用与
 正式请求相同的 Mapper 语义，并在内部选择原生 count API 或匹配 tokenizer。精确计数不可用时，
@@ -207,7 +209,8 @@ compaction_threshold = min(
 
 HistoryCompaction 的触发、生成和提交保持三个接缝：token preflight 只触发，
 `HistoryCompactionGenerator` 只产出内容，OperationDriver 通过 ConversationService 追加节点并
-重新投影。原始 Conversation Tree 始终保留；具体摘要模型、选取范围和压缩提示词不属于当前合同。
+重新投影。原始 Conversation Tree 始终保留；生产默认实现
+`ModelBackedHistoryCompactionGenerator` 使用冻结 Package 的 worker model 生成摘要，具体实现仍可替换。
 
 Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedModelCall`；该对象
 包含即将发送的完整 wire body，保存和发送必须复用同一个不可变值。Provider 不再通过

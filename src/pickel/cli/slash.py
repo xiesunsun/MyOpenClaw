@@ -114,6 +114,18 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
         ),
         SlashCommand("context", "Show context usage", "/context", "_command_context"),
         SlashCommand(
+            "plan",
+            "Enter read-only planning mode",
+            "/plan [off|initial plan]",
+            "_command_plan",
+        ),
+        SlashCommand(
+            "goal",
+            "Run until a goal is verifiably complete",
+            "/goal <goal> | /goal off",
+            "_command_goal",
+        ),
+        SlashCommand(
             "observe",
             "Open current session observability workspace",
             "/observe [port|export [path]]",

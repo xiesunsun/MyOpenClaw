@@ -3,6 +3,8 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from pickel.shared.model_capability import ModelCapabilityProfile
+
 WireProtocol: TypeAlias = Literal[
     "openai-responses",
     "openai-chat-completions",
@@ -22,6 +24,9 @@ class BaseModelConfig(BaseModel):
     context_window_tokens: int | None = Field(default=None, ge=1)
     # 模型表现较稳定的有效 Context 比例；由配置解析并冻结进 Package。
     effect_rate: float = Field(default=0.5, gt=0, le=1)
+    capability_profile: ModelCapabilityProfile = Field(
+        default_factory=ModelCapabilityProfile
+    )
     provider_options: dict[str, Any] = Field(default_factory=dict)
 
     def effective_input_token_limit(
