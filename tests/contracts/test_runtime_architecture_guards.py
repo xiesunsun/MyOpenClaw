@@ -216,3 +216,22 @@ def test_trace_is_not_model_request_authority() -> None:
     """可靠 actual request 只能来自 ModelCall RequestContent。"""
     assert not hasattr(RuntimeEffects, "execute_model_request")
     assert not hasattr(Provider, "request_snapshot")
+
+
+def test_context_does_not_import_runtime() -> None:
+    """Context 是领域层，不得反向依赖 Runtime 编排层。"""
+    root = Path(__file__).parents[2] / "src" / "pickel" / "context"
+    for path in root.glob("*.py"):
+        tree = ast.parse(path.read_text())
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+        offenders = [
+            name
+            for name in imported
+            if name == "pickel.runtime" or name.startswith("pickel.runtime.")
+        ]
+        assert not offenders, (path, offenders)
