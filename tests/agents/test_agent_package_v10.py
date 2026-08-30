@@ -528,11 +528,15 @@ def test_format5_package_roundtrip_keeps_worker_retry_policy() -> None:
         max_model_steps=8,
         worker_request_max_attempts=4,
         worker_request_retry_delays_ms=(1000, 2000, 3000),
+        compaction_max_summary_tokens=2048,
+        compaction_tail_tokens=16_000,
     )
     content = _version_with_policy(5, policy).content_dict()
     roundtripped = AgentRuntimePolicy(**content["runtime_policy"])
     assert roundtripped.worker_request_max_attempts == 4
     assert roundtripped.worker_request_retry_delays_ms == (1000, 2000, 3000)
+    assert roundtripped.compaction_max_summary_tokens == 2048
+    assert roundtripped.compaction_tail_tokens == 16_000
 
     legacy_content = _version_with_policy(4, policy).content_dict()
     legacy = AgentRuntimePolicy(**legacy_content["runtime_policy"])

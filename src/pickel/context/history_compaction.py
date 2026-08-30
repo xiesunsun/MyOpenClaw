@@ -49,6 +49,8 @@ class HistoryCompactionGenerator(Protocol):
         model_context: ModelContext,
         preflight: TokenPreflightResult,
         send_summarizer: SummarizerSender,
+        max_summary_tokens: int,
+        preserve_tail_tokens: int,
     ) -> HistoryCompaction:
         """返回待追加的值；不得删除或改写已有 ConversationNode。"""
         ...

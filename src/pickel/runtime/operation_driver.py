@@ -703,6 +703,8 @@ class OperationDriver:
                         effects=effects,
                         runtime_policy=package.runtime_policy,
                     ),
+                    max_summary_tokens=package.runtime_policy.compaction_max_summary_tokens,
+                    preserve_tail_tokens=package.runtime_policy.compaction_tail_tokens,
                 )
                 if not isinstance(content, HistoryCompaction):
                     raise HistoryCompactionError(

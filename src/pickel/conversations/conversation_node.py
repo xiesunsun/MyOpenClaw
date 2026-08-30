@@ -20,10 +20,16 @@ ContentType = Literal["agent_message", "history_compaction"]
 class HistoryCompaction:
     summary: str
     first_kept_node_id: str | None
+    # 跨压缩累积的文件账本；由生成器从被压缩区域的读写工具调用确定性
+    # 提取并合并前序压缩节点的账本，随摘要一起回喂下一次压缩。
+    read_files: tuple[str, ...] = ()
+    modified_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.summary:
             raise ValueError("HistoryCompaction.summary 不能为空")
+        object.__setattr__(self, "read_files", tuple(self.read_files))
+        object.__setattr__(self, "modified_files", tuple(self.modified_files))
 
 
 ConversationContent = AgentMessage | HistoryCompaction
@@ -56,10 +62,15 @@ class ConversationNode:
         if self.content_type == "agent_message":
             return agent_message_to_dict(self.content)  # type: ignore[arg-type]
         content = self.content  # type: ignore[assignment]
-        return {
+        payload = {
             "summary": content.summary,
             "first_kept_node_id": content.first_kept_node_id,
         }
+        if content.read_files:
+            payload["read_files"] = list(content.read_files)
+        if content.modified_files:
+            payload["modified_files"] = list(content.modified_files)
+        return payload
 
     def content_json(self) -> str:
         return _encode_json(self.content_dict())
@@ -86,7 +97,11 @@ class ConversationNode:
             first = value["first_kept_node_id"]
             if first is not None and not isinstance(first, str):
                 raise TypeError("first_kept_node_id 必须是字符串或 null")
-            content = HistoryCompaction(value["summary"], first)
+            read_files = _string_tuple(value, "read_files")
+            modified_files = _string_tuple(value, "modified_files")
+            content = HistoryCompaction(
+                value["summary"], first, read_files, modified_files
+            )
         else:
             raise ValueError(f"不支持的 content_type: {content_type!r}")
         return cls(
@@ -97,6 +112,16 @@ class ConversationNode:
             content=content,
             created_at=created_at,
         )
+
+
+def _string_tuple(value: dict[str, Any], key: str) -> tuple[str, ...]:
+    """旧节点的解码兼容：字段缺失落空元组，存在时必须是字符串列表。"""
+    if key not in value:
+        return ()
+    items = value[key]
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise TypeError(f"{key} 必须是字符串列表")
+    return tuple(items)
 
 
 def _encode_json(value: dict[str, Any]) -> str:

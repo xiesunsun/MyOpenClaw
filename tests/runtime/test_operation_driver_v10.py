@@ -961,6 +961,9 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
     assert result.state.error.code == "history_compaction_no_progress"
     assert len(compact_calls) == 1
     assert compact_calls[0]["preflight"].token_count == 90
+    # 冻结策略的压缩预算随调用传递给 Generator。
+    assert compact_calls[0]["max_summary_tokens"] == 4096
+    assert compact_calls[0]["preserve_tail_tokens"] == 32000
     assert conversation.nodes[-1].content == HistoryCompaction("summary", "node-1")
     assert provider.count_calls == 2
     assert provider.calls == 0

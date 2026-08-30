@@ -78,6 +78,9 @@ class AgentRuntimePolicy:
     # 存在降级路径，长等待只会卡住正在推进的 Operation。
     worker_request_max_attempts: int = 2
     worker_request_retry_delays_ms: tuple[int, ...] = (5000, 15000)
+    # 历史压缩预算：摘要输出上限与尾部原样保留量，随 Package 冻结。
+    compaction_max_summary_tokens: int = 4096
+    compaction_tail_tokens: int = 32_000
 
     def __post_init__(self) -> None:
         if self.max_model_steps < 1:
@@ -112,6 +115,10 @@ class AgentRuntimePolicy:
             raise ValueError("delegation_result_max_chars 不能小于 0")
         if self.worker_request_max_attempts < 1:
             raise ValueError("worker_request_max_attempts 必须大于 0")
+        if self.compaction_max_summary_tokens < 1:
+            raise ValueError("compaction_max_summary_tokens 必须大于 0")
+        if self.compaction_tail_tokens < 1:
+            raise ValueError("compaction_tail_tokens 必须大于 0")
         if not self.worker_request_retry_delays_ms:
             raise ValueError("worker_request_retry_delays_ms 不能为空")
         if any(delay < 0 for delay in self.worker_request_retry_delays_ms):
@@ -718,6 +725,8 @@ def _runtime_policy_dict(
         content["worker_request_retry_delays_ms"] = list(
             policy.worker_request_retry_delays_ms
         )
+        content["compaction_max_summary_tokens"] = policy.compaction_max_summary_tokens
+        content["compaction_tail_tokens"] = policy.compaction_tail_tokens
     return content
 
 

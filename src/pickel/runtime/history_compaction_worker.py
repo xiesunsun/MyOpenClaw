@@ -1,14 +1,15 @@
 """ModelBacked 历史压缩：用冻结 Package 的 worker model 生成摘要节点。
 
-只做三件事：选择压缩边界、渲染摘要输入、解析摘要输出；worker 调用的
-记账与重试由调用方注入的 SummarizerSender 负责，本模块不触达
-ModelCallService 或 SendGate。
+只做五件事：选择压缩边界、保证 Tool 配对、渲染摘要输入、解析摘要输出、
+提取文件账本；worker 调用的记账与重试由调用方注入的 SummarizerSender
+负责，本模块不触达 ModelCallService 或 SendGate。
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 
 from pickel.context.history_compaction import (
     HistoryCompactionError,
@@ -25,6 +26,38 @@ from pickel.conversations.agent_message import (
 from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
 from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 
+_COMPACT_SYSTEM_TEXT = (
+    "你是代码 Agent 的历史压缩 worker。把用户消息中的历史对话压缩为"
+    "结构化检查点，让另一个模型能无损接续工作。"
+    "只输出检查点文本，不调用工具、不臆测。\n\n"
+    "严格按以下 Markdown 结构输出；每一节都保留，空节写「（无）」，不得删节。"
+    "用简短要点，不写散文。\n\n"
+    "## 目标与意图\n"
+    "## 关键决策            ← 格式：**[决策]**：[理由]\n"
+    "## 已验证的命令与结果\n"
+    "## 文件与代码          ← 精确路径：为什么重要 / 关键改动\n"
+    "## 错误与修复\n"
+    "## 未完成事项\n"
+    "## 当前进展\n"
+    "## 下一步              ← 单个动作，与最近请求直接对应\n"
+    "## 关键上下文          ← 约束、用户偏好、环境事实、开放问题\n\n"
+    "规则：\n"
+    "- 保留精确的文件路径、命令、错误原文、标识符、数值、函数签名。\n"
+    "- 忠实记录用户的纠正与显式指令。\n"
+    "- 不提及本次压缩或上下文被压缩这一事实。\n"
+    "- 若历史中已存在压缩检查点，将其合并去重：保留仍成立的事实，丢弃过时内容。"
+)
+
+# 摘要输入端的确定性截断：只影响渲染给 worker 的文本，不改写历史节点。
+_RESULT_TEXT_LIMIT = 2000
+_RESULT_HEAD_CHARS = 1200
+_RESULT_TAIL_CHARS = 600
+_RESULT_MARKER = "\n[... 中间内容已截断 ...]\n"
+
+# 文件账本只从内置读写工具的确定性提取；bash 等自由工具不参与。
+_READ_TOOL_NAMES = frozenset({"read"})
+_WRITE_TOOL_NAMES = frozenset({"edit", "write"})
+
 
 class ModelBackedHistoryCompactionGenerator:
     """使用冻结 Package 的 worker model 生成历史压缩节点。"""
@@ -32,12 +65,10 @@ class ModelBackedHistoryCompactionGenerator:
     def __init__(
         self,
         *,
-        preserve_tail_tokens: int = 32_000,
         summary_input_tokens: int = 64_000,
     ) -> None:
-        if preserve_tail_tokens < 1 or summary_input_tokens < 1:
+        if summary_input_tokens < 1:
             raise ValueError("压缩 token 预算必须大于 0")
-        self._preserve_tail_tokens = preserve_tail_tokens
         self._summary_input_tokens = summary_input_tokens
 
     async def generate(
@@ -47,11 +78,15 @@ class ModelBackedHistoryCompactionGenerator:
         model_context: ModelContext,
         preflight: TokenPreflightResult,
         send_summarizer: SummarizerSender,
+        max_summary_tokens: int,
+        preserve_tail_tokens: int,
     ) -> HistoryCompaction:
-        # model_context 与 preflight 留待批次 B 使用：预检口径的收缩校验
-        # 与摘要输入复用；当前实现只依赖投影节点本身。
+        if max_summary_tokens < 1 or preserve_tail_tokens < 1:
+            raise ValueError("压缩 token 预算必须大于 0")
+        # model_context 与 preflight 留待热前缀复用批次使用；当前实现
+        # 只依赖投影节点本身。
         del model_context, preflight
-        first_kept_index = self._first_kept_index(nodes)
+        first_kept_index = self._first_kept_index(nodes, preserve_tail_tokens)
         if first_kept_index is None:
             raise HistoryCompactionError(
                 "history_compaction_no_history",
@@ -65,11 +100,7 @@ class ModelBackedHistoryCompactionGenerator:
                 sections=(
                     SystemSection(
                         name="history_compaction",
-                        text=(
-                            "你是代码 Agent 的历史压缩 worker。只输出简洁的中文事实摘要，"
-                            "不得调用工具、不得臆测。必须保留用户目标、约束、已经验证的命令与结果、"
-                            "修改过的文件、错误、未完成事项和下一步。"
-                        ),
+                        text=_COMPACT_SYSTEM_TEXT,
                     ),
                 )
             ),
@@ -83,12 +114,32 @@ class ModelBackedHistoryCompactionGenerator:
                 "history_compaction_empty",
                 "worker 压缩响应为空",
             )
+        # 以下两个校验复用选材的 chars/4 估算口径，仅用于压缩有效性判断，
+        # 不是 token preflight 的正式口径。
+        summary_cost = max(1, len(summary) // 4)
+        if summary_cost > max_summary_tokens:
+            raise HistoryCompactionError(
+                "history_compaction_summary_too_long",
+                f"摘要估算 {summary_cost} token 超过预算 {max_summary_tokens}",
+            )
+        shadowed_cost = sum(self._node_cost(node) for node in old_nodes)
+        if shadowed_cost > 0 and summary_cost >= shadowed_cost:
+            raise HistoryCompactionError(
+                "history_compaction_no_shrink",
+                f"摘要估算 {summary_cost} token 未小于被压缩区域 "
+                f"{shadowed_cost} token，压缩无效",
+            )
+        read_files, modified_files = self._extract_file_ledger(old_nodes)
         return HistoryCompaction(
             summary=summary,
             first_kept_node_id=first_kept.node_id,
+            read_files=read_files,
+            modified_files=modified_files,
         )
 
-    def _first_kept_index(self, nodes: Sequence[ConversationNode]) -> int | None:
+    def _first_kept_index(
+        self, nodes: Sequence[ConversationNode], preserve_tail_tokens: int
+    ) -> int | None:
         if len(nodes) < 2:
             return None
         total = 0
@@ -97,8 +148,8 @@ class ModelBackedHistoryCompactionGenerator:
             node = nodes[index]
             if node.content_type != "agent_message":
                 continue
-            cost = max(1, len(json.dumps(agent_message_to_dict(node.content))) // 4)
-            if index < len(nodes) - 1 and total + cost > self._preserve_tail_tokens:
+            cost = self._node_cost(node)
+            if index < len(nodes) - 1 and total + cost > preserve_tail_tokens:
                 break
             total += cost
             first = index
@@ -115,6 +166,17 @@ class ModelBackedHistoryCompactionGenerator:
         ):
             first -= 1
         return first if first > 0 else None
+
+    @staticmethod
+    def _node_cost(node: ConversationNode) -> int:
+        """单节点成本估算：json 字节数除以 4，只用于压缩内部决策。"""
+        if node.content_type == "agent_message":
+            return max(1, len(json.dumps(agent_message_to_dict(node.content))) // 4)
+        return max(
+            1,
+            len(json.dumps(ModelBackedHistoryCompactionGenerator._node_payload(node)))
+            // 4,
+        )
 
     def _repair_tool_pairing(
         self, nodes: Sequence[ConversationNode], first: int
@@ -171,13 +233,51 @@ class ModelBackedHistoryCompactionGenerator:
     @staticmethod
     def _node_payload(node: ConversationNode) -> dict:
         if node.content_type == "agent_message":
-            return agent_message_to_dict(node.content)
-        content = node.content
-        return {
+            content = node.content
+            if isinstance(content, ToolResultMessage):
+                content = _truncate_result_text(content)
+            return agent_message_to_dict(content)
+        compaction = node.content
+        payload: dict = {
             "content_type": "history_compaction",
-            "summary": content.summary,
-            "first_kept_node_id": content.first_kept_node_id,
+            "summary": compaction.summary,
+            "first_kept_node_id": compaction.first_kept_node_id,
         }
+        if compaction.read_files:
+            payload["read_files"] = list(compaction.read_files)
+        if compaction.modified_files:
+            payload["modified_files"] = list(compaction.modified_files)
+        return payload
+
+    @staticmethod
+    def _extract_file_ledger(
+        nodes: Sequence[ConversationNode],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """从被压缩区域提取文件账本：内置读写工具 + 前序压缩账本累积。"""
+        reads: set[str] = set()
+        writes: set[str] = set()
+        for node in nodes:
+            if node.content_type == "history_compaction":
+                compaction = node.content
+                reads.update(compaction.read_files)
+                writes.update(compaction.modified_files)
+                continue
+            if node.content_type != "agent_message":
+                continue
+            content = node.content
+            if not isinstance(content, AssistantMessage):
+                continue
+            for block in content.content:
+                if not isinstance(block, ToolCallBlock):
+                    continue
+                path = block.arguments.get("path")
+                if not isinstance(path, str) or not path:
+                    continue
+                if block.name in _READ_TOOL_NAMES:
+                    reads.add(path)
+                elif block.name in _WRITE_TOOL_NAMES:
+                    writes.add(path)
+        return tuple(sorted(reads)), tuple(sorted(writes))
 
     @staticmethod
     def _summary_text(message: AssistantMessage) -> str:
@@ -186,3 +286,22 @@ class ModelBackedHistoryCompactionGenerator:
             for block in message.content
             if isinstance(block, TextBlock) and block.text
         ).strip()
+
+
+def _truncate_result_text(message: ToolResultMessage) -> ToolResultMessage:
+    """截断超限的 tool result 文本块；只影响摘要输入渲染，不改写历史。"""
+    blocks = message.content
+    if not any(
+        isinstance(block, TextBlock) and len(block.text) > _RESULT_TEXT_LIMIT
+        for block in blocks
+    ):
+        return message
+    truncated = []
+    for block in blocks:
+        if isinstance(block, TextBlock) and len(block.text) > _RESULT_TEXT_LIMIT:
+            head = block.text[:_RESULT_HEAD_CHARS]
+            tail = block.text[-_RESULT_TAIL_CHARS:]
+            truncated.append(TextBlock(f"{head}{_RESULT_MARKER}{tail}"))
+        else:
+            truncated.append(block)
+    return replace(message, content=tuple(truncated))
