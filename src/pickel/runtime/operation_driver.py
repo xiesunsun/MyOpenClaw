@@ -36,6 +36,7 @@ from pickel.shared.collaboration import (
 from pickel.context.projection import ConversationProjector
 from pickel.context.token_preflight import (
     ContextCompactionRequired,
+    TokenPreflightResult,
     preflight_model_context,
 )
 from pickel.conversations.agent_message import (
@@ -439,6 +440,16 @@ class OperationDriver:
                 exc.cause,
                 first_chunk_at=exc.first_chunk_at,
             )
+            if error.code == "context_window_exceeded":
+                # 溢出重试原请求注定失败：先尝试压缩恢复，失败则按原错误终态。
+                recovered = await self._recover_context_overflow(
+                    operation=operation,
+                    state=state,
+                    package=package,
+                    effects=effects,
+                )
+                if recovered is not None:
+                    return recovered, None
             if package.runtime_policy.should_retry_request(
                 retryable=error.retryable,
                 first_chunk_received=exc.first_chunk_at is not None,
@@ -650,83 +661,41 @@ class OperationDriver:
                     ),
                     compaction_step_id,
                 )
-            branch_nodes = self._conversations.list_active_branch_nodes(
-                session_id=operation.session_id
-            )
-            if branch_nodes and branch_nodes[-1].content_type == "history_compaction":
-                return (
-                    self._fail_preflight(
-                        operation=operation,
-                        state=state,
-                        last_assistant=last_assistant,
-                        code="history_compaction_no_progress",
-                        message="检测到已提交的历史压缩，恢复后仍达到阈值，停止重复压缩",
-                    ),
-                    step.step_id,
-                )
-            generator = self._history_compaction_generator
-            if generator is None:
-                return (
-                    self._fail_preflight(
-                        operation=operation,
-                        state=state,
-                        last_assistant=last_assistant,
-                        code="history_compaction_unavailable",
-                        message=(
-                            "Context 已达到压缩阈值，但当前 Runtime 未配置 "
-                            "HistoryCompactionGenerator"
-                        ),
-                    ),
-                    step.step_id,
-                )
-            if effects.worker_provider is None:
-                return (
-                    self._fail_preflight(
-                        operation=operation,
-                        state=state,
-                        last_assistant=last_assistant,
-                        code="history_compaction_unavailable",
-                        message=(
-                            "Context 已达到压缩阈值，但当前 Operation 未配置 "
-                            "worker model"
-                        ),
-                    ),
-                    step.step_id,
-                )
             try:
-                content = await generator.generate(
-                    nodes=branch_nodes,
-                    model_context=context,
+                await self._execute_history_compaction(
+                    operation=operation,
+                    context=context,
+                    package=package,
+                    effects=effects,
                     preflight=required.result,
-                    send_summarizer=self._summarizer_sender_for(
-                        session_id=operation.session_id,
-                        effects=effects,
-                        runtime_policy=package.runtime_policy,
-                    ),
-                    max_summary_tokens=package.runtime_policy.compaction_max_summary_tokens,
-                    preserve_tail_tokens=package.runtime_policy.compaction_tail_tokens,
-                )
-                if not isinstance(content, HistoryCompaction):
-                    raise HistoryCompactionError(
-                        "history_compaction_invalid_result",
-                        "HistoryCompactionGenerator 必须返回 HistoryCompaction",
-                    )
-                self._conversations.append_history_compaction(
-                    session_id=operation.session_id,
-                    content=content,
                 )
                 # 压缩已提交：重新预检重建后的投影。
                 return state, step.step_id
             except (HistoryCompactionError, WorkerCallSendError) as exc:
-                # 压缩失败优雅降级：sender 重试额度已耗尽或摘要无法产出，
-                # 记录诊断后直接以全量 Context 提交 Intent；provider 若拒绝
-                # 会在发送路径显式失败。标记本 step 已尝试压缩，防止同一
-                # step 内的重入形成压缩循环。
                 code = (
                     exc.code
                     if isinstance(exc, HistoryCompactionError)
                     else "worker_send_failed"
                 )
+                if code in {
+                    "history_compaction_unavailable",
+                    "history_compaction_no_progress",
+                }:
+                    # 配置缺失与结构性超限必须显式失败，不做静默降级。
+                    return (
+                        self._fail_preflight(
+                            operation=operation,
+                            state=state,
+                            last_assistant=last_assistant,
+                            code=code,
+                            message=str(exc),
+                        ),
+                        step.step_id,
+                    )
+                # 压缩失败优雅降级：sender 重试额度已耗尽或摘要无法产出，
+                # 记录诊断后直接以全量 Context 提交 Intent；provider 若拒绝
+                # 会在发送路径显式失败。标记本 step 已尝试压缩，防止同一
+                # step 内的重入形成压缩循环。
                 logger.warning(
                     "历史压缩失败，降级为全量 Context 继续 operation=%s code=%s: %s",
                     operation.operation_id,
@@ -896,6 +865,113 @@ class OperationDriver:
             candidate=candidate,
         ):
             return candidate
+        return self._commit(candidate, state)
+
+    async def _execute_history_compaction(
+        self,
+        *,
+        operation: SessionOperation,
+        context: ModelContext,
+        package: AgentPackageVersion,
+        effects: RuntimeEffects,
+        preflight: TokenPreflightResult | None = None,
+    ) -> None:
+        """执行一次压缩并追加节点；失败语义由 HistoryCompactionError.code 表达。
+
+        最近节点已是压缩节点时拒绝执行：上一次压缩后 Context 仍超限属于
+        结构性超限，重复压缩无法修复。
+        """
+        branch_nodes = self._conversations.list_active_branch_nodes(
+            session_id=operation.session_id
+        )
+        if branch_nodes and branch_nodes[-1].content_type == "history_compaction":
+            raise HistoryCompactionError(
+                "history_compaction_no_progress",
+                "最近节点已是历史压缩，Context 仍超限，停止重复压缩",
+            )
+        generator = self._history_compaction_generator
+        if generator is None:
+            raise HistoryCompactionError(
+                "history_compaction_unavailable",
+                "当前 Runtime 未配置 HistoryCompactionGenerator",
+            )
+        if effects.worker_provider is None:
+            raise HistoryCompactionError(
+                "history_compaction_unavailable",
+                "当前 Operation 未配置 worker model",
+            )
+        content = await generator.generate(
+            nodes=branch_nodes,
+            model_context=context,
+            preflight=preflight,
+            send_summarizer=self._summarizer_sender_for(
+                session_id=operation.session_id,
+                effects=effects,
+                runtime_policy=package.runtime_policy,
+            ),
+            max_summary_tokens=package.runtime_policy.compaction_max_summary_tokens,
+            preserve_tail_tokens=package.runtime_policy.compaction_tail_tokens,
+        )
+        if not isinstance(content, HistoryCompaction):
+            raise HistoryCompactionError(
+                "history_compaction_invalid_result",
+                "HistoryCompactionGenerator 必须返回 HistoryCompaction",
+            )
+        self._conversations.append_history_compaction(
+            session_id=operation.session_id,
+            content=content,
+        )
+
+    async def _recover_context_overflow(
+        self,
+        *,
+        operation: SessionOperation,
+        state: AgentRunState,
+        package: AgentPackageVersion,
+        effects: RuntimeEffects,
+    ) -> AgentRunState | None:
+        """上下文溢出的恢复：强制压缩后回到准备阶段重建 Intent 并重试。
+
+        溢出说明本地估算低估了真实占用，重发原请求注定失败。压缩守卫
+        保证同一条溢出链路不会无限重复压缩；恢复不可用时返回 None，
+        调用方按原溢出错误进入终态，根因不丢失。
+        """
+        step = state.current_step
+        assert step is not None and step.request_intent is not None
+        try:
+            await self._execute_history_compaction(
+                operation=operation,
+                context=step.request_intent.model_context,
+                package=package,
+                effects=effects,
+            )
+        except (HistoryCompactionError, WorkerCallSendError) as exc:
+            code = (
+                exc.code
+                if isinstance(exc, HistoryCompactionError)
+                else "worker_send_failed"
+            )
+            logger.warning(
+                "上下文溢出恢复失败 operation=%s code=%s: %s",
+                operation.operation_id,
+                code,
+                exc,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "上下文溢出恢复异常 operation=%s: %s", operation.operation_id, exc
+            )
+            return None
+        candidate = replace(
+            state,
+            revision=state.revision + 1,
+            current_step=replace(
+                step,
+                phase="preparing_request",
+                request_intent=None,
+            ),
+        )
         return self._commit(candidate, state)
 
     async def _drive_awaiting_tools(

@@ -76,7 +76,7 @@ class ModelBackedHistoryCompactionGenerator:
         *,
         nodes: Sequence[ConversationNode],
         model_context: ModelContext,
-        preflight: TokenPreflightResult,
+        preflight: TokenPreflightResult | None = None,
         send_summarizer: SummarizerSender,
         max_summary_tokens: int,
         preserve_tail_tokens: int,

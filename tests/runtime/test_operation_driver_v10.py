@@ -863,6 +863,143 @@ async def test_unavailable_token_count_falls_back_and_continues_model_request():
 
 
 @_run_async
+async def test_context_overflow_recovers_by_compaction_and_retries():
+    """溢出→强制压缩→回退准备阶段重建 Intent→重试成功。"""
+
+    class _OverflowProvider(_Provider):
+        def __init__(self):
+            super().__init__(
+                [
+                    ValueError("This model's maximum context length is 8192 tokens"),
+                    AssistantMessage(content=(TextBlock("answer"),)),
+                ]
+            )
+
+    class _Generator:
+        async def generate(self, **kwargs):
+            compact_calls.append(kwargs)
+            return HistoryCompaction("summary", "node-1")
+
+    class _RecordingSender:
+        async def __call__(self, **kwargs):
+            return AssistantMessage((TextBlock("压缩摘要"),))
+
+    provider = _OverflowProvider()
+    package = _loaded_package().version
+    operations = _Operations(_queued_state())
+    conversation = _CompactionConversation()
+    compact_calls = []
+    sleeps: list[float] = []
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=provider, worker_provider=object()
+        ),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+        history_compaction_generator=_Generator(),
+        worker_sender=_RecordingSender(),
+    )
+    driver._sleep = lambda delay: _record_delay(sleeps, delay)
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert provider.calls == 2
+    assert sleeps == [20.0]  # 溢出重试消耗一次主请求退避
+    assert len(compact_calls) == 1
+    # 重试消费的是重建后的 Intent，不是重发原请求。
+    assert provider.contexts[0] is not provider.contexts[1]
+
+
+@_run_async
+async def test_context_overflow_without_compaction_fails_with_root_cause():
+    """压缩不可用时恢复放弃，按原溢出错误进入终态，根因不丢失。"""
+
+    class _OverflowProvider(_Provider):
+        def __init__(self):
+            super().__init__(
+                [
+                    ValueError("context length exceeded"),
+                    AssistantMessage(content=(TextBlock("unused"),)),
+                ]
+            )
+
+    provider = _OverflowProvider()
+    package = _loaded_package().version
+    operations = _Operations(_queued_state())
+    conversation = _CompactionConversation()
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=provider, worker_provider=object()
+        ),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error.code == "context_window_exceeded"
+    assert provider.calls == 1
+
+
+@_run_async
+async def test_second_context_overflow_stops_after_one_forced_compaction():
+    """压缩后仍溢出属于结构性超限：恢复只执行一次，随后按原错误终态。"""
+
+    class _AlwaysOverflowProvider(_Provider):
+        def __init__(self):
+            super().__init__(
+                [
+                    ValueError("context length exceeded"),
+                    ValueError("context length exceeded"),
+                ]
+            )
+
+    class _Generator:
+        async def generate(self, **kwargs):
+            del kwargs
+            return HistoryCompaction("summary", "node-1")
+
+    class _RecordingSender:
+        async def __call__(self, **kwargs):
+            return AssistantMessage((TextBlock("压缩摘要"),))
+
+    provider = _AlwaysOverflowProvider()
+    package = _loaded_package().version
+    operations = _Operations(_queued_state())
+    conversation = _CompactionConversation()
+    sleeps: list[float] = []
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=conversation,
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(
+            provider=provider, worker_provider=object()
+        ),
+        model_call_service=_FakeModelCallService(operations),
+        model_context_builder=_ContextBuilder(),
+        history_compaction_generator=_Generator(),
+        worker_sender=_RecordingSender(),
+    )
+    driver._sleep = lambda delay: _record_delay(sleeps, delay)
+
+    result = await driver.drive_operation("operation-1")
+
+    assert result.status == "failed"
+    assert result.state.error.code == "context_window_exceeded"
+    assert provider.calls == 2
+    assert len(conversation.nodes) == 2  # 仅追加了一次压缩节点
+    assert sleeps == [20.0]  # 第一次恢复后的一次主请求退避
+
+
+@_run_async
 async def test_compaction_failure_degrades_to_full_context_instead_of_failing():
     """压缩失败不终止 Operation：记诊断后以全量 Context 继续本 Step。"""
 
