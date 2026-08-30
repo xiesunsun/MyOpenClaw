@@ -375,6 +375,14 @@ Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/refe
 它使用冻结 Package worker、保留最近消息对、以中文事实摘要压缩旧历史；Generator 只返回内容，
 OperationDriver 负责追加、重新 preflight 和无进展停止；缺少 worker 时明确失败，不静默裁剪。
 
+11.5 后续补充（2026-08-30，压缩升级批次 A–C 之后）：记录两项已知取舍。其一，尾部保留与
+配对修复的选材成本沿用 `chars ÷ 4` 启发式，不接入 preflight 正式计数口径——选材只影响切点
+偏移、无正确性后果；已知缺陷是对中文系统性低估（CJK 约 0.5–0.67 token/字，chars/4 只算
+0.25），升级路径是给 token 估算模块增加按消息列表的入口后由选材复用，属独立小改进。
+其二，摘要输入预算 `summary_input_tokens` 在 worker 与主模型同为 1M 窗口时并非容量约束，
+只是单次压缩的成本封顶，代价是影子区中段对摘要器不可见；其去留与批次 E 的 warm 前缀
+重放、以及 worker 是否切换小窗口模型一并决策。
+
 11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
 完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有
 `ArtifactService → ArtifactReference → ArtifactBlock → Provider` 链路，不在 ToolResult 中复制
