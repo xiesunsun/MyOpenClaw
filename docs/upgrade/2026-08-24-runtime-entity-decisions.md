@@ -351,7 +351,7 @@ ConversationContent
 └── history_compaction
 ```
 
-`agent_message` 保存 Provider-neutral AgentMessage，文本和 ArtifactReference 按模型可见顺序排列。`history_compaction` 保存摘要和 `first_kept_node_id`。
+`agent_message` 保存 Provider-neutral AgentMessage，文本和 ArtifactReference 按模型可见顺序排列。`history_compaction` 保存摘要、`first_kept_node_id` 和 `read_files`/`modified_files` 文件账本（账本字段可选，旧节点解码落空元组）。
 
 HostCall request/response 默认属于执行或观测记录；只有产生模型可见内容时，才转换成普通 `agent_message` 写入 Conversation Tree。
 
@@ -3293,9 +3293,12 @@ compaction_threshold = min(
 )
 ```
 
-生产默认 Generator 使用 Operation 所属 Package 的 worker model 生成摘要；历史范围、压缩
-Prompt、目标长度和失败恢复仍通过 Generator 接缝替换。Runtime 不静默裁剪，也不动态重写旧
-ToolResult；大型 Tool 输出在 Tool 合同处有界，压缩节点通过 compaction epoch 一次性提炼。
+生产默认 Generator 使用 Operation 所属 Package 的 worker model 生成固定骨架的结构化摘要；
+历史范围与压缩 Prompt 仍通过 Generator 接缝替换，摘要目标长度由冻结的
+`compaction_max_summary_tokens` 约束。Runtime 不静默裁剪，也不动态重写旧 ToolResult；大型
+Tool 输出在 Tool 合同处有界，摘要输入端的截断不落库；压缩节点通过 compaction epoch 一次性
+提炼，并携带 `read_files`/`modified_files` 文件账本跨压缩累积。压缩失败降级为全量 Context
+继续，Provider 溢出（`context_window_exceeded`）触发一次强制压缩后重建 Intent 重试。
 
 固定 `context_turn_window` 只属于迁移前实现，阶段 11.4 后删除，不保留双轨生产路径。
 

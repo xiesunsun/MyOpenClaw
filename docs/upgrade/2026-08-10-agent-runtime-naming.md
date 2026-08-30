@@ -110,7 +110,7 @@ flowchart LR
 | `LoadedAgentPackage` | 当前 RuntimeGeneration 中解析了 Secret 与可执行实现的 Package |
 | `LoadedPackageHandle` | Operation 对 LoadedAgentPackage 和 Generation 的引用 |
 | `ModelPolicy` | `primary / worker / utility` 三层模型选择 |
-| `AgentRuntimePolicy` | 最大 Step、Delegation 深度、模型请求重试等执行限制 |
+| `AgentRuntimePolicy` | 最大 Step、Delegation 深度、主/worker 请求重试、压缩预算等执行限制 |
 | `AgentDelegationPolicy` | Parent Package 允许委派的 Agent ID 与默认 Agent |
 | `WorkspacePolicy` | Package 声明的文件访问范围 |
 | `WorkspaceBinding` | Operation 接受时冻结的实际执行目录和安全边界 |
@@ -209,8 +209,18 @@ compaction_threshold = min(
 
 HistoryCompaction 的触发、生成和提交保持三个接缝：token preflight 只触发，
 `HistoryCompactionGenerator` 只产出内容，OperationDriver 通过 ConversationService 追加节点并
-重新投影。原始 Conversation Tree 始终保留；生产默认实现
-`ModelBackedHistoryCompactionGenerator` 使用冻结 Package 的 worker model 生成摘要，具体实现仍可替换。
+重新投影。原始 Conversation Tree 始终保留。协议与 `SummarizerSender` 窄回调定义在 `context`；
+生产默认实现 `ModelBackedHistoryCompactionGenerator` 位于 `runtime`，使用冻结 Package 的
+worker model 生成固定骨架的中文结构化检查点，具体实现仍可替换。worker 调用的记账与退避
+重试由 `WorkerCallSender` 统一承担，复用 `AgentRuntimePolicy` 的 `worker_request_*` 策略。
+
+压缩预算随 Package 冻结：`compaction_max_summary_tokens` 约束摘要输出，`compaction_tail_tokens`
+约束尾部原样保留量；摘要不小于被压缩区域（no_shrink）或超出输出预算即压缩无效，记录诊断后
+以全量 Context 降级继续。配置缺失与结构性超限（压缩提交后仍超阈值）保持快速失败。
+`HistoryCompaction` 携带 `read_files`/`modified_files` 文件账本，由被压缩区域的内置读写工具
+调用确定性提取并合并前序压缩账本，跨压缩累积回喂；超限 tool result 只在摘要输入端截断，
+历史节点不被改写。Provider 报告上下文窗口溢出时，Runtime 识别 `context_window_exceeded`，
+强制压缩一次后回退准备阶段重建 Intent 重试；恢复不可用则按原溢出错误进入终态。
 
 Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedModelCall`；该对象
 包含即将发送的完整 wire body，保存和发送必须复用同一个不可变值。Provider 不再通过
