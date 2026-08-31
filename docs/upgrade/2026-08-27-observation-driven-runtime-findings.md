@@ -1,8 +1,8 @@
 # Pickel Agent Runtime 观测驱动评审结论
 
 **日期**：2026-08-27
-**更新日期**：2026-08-28
-**状态**：当前问题清单；Context/Cache/Tool 输出方案已收敛，供后续实施设计使用
+**更新日期**：2026-08-31
+**状态**：当前问题清单；HistoryCompaction 自包含 checkpoint 目标已收敛
 **样本 Session**：`7d22cffb-cfa4-4689-b4b3-f2580cb88abb`
 
 ## 1. 文档边界
@@ -177,17 +177,19 @@ Z.AI 声明的厂商最大输出。依据：[OpenCode Go endpoint/model 列表](
 [Z.AI GLM-5.3 模型页](https://docs.z.ai/guides/llm/glm-5.3) 和
 [Z.AI Core Parameters](https://docs.z.ai/guides/overview/concept-param)。
 
-### 4.5 HistoryCompaction 只保留组合接口
+### 4.5 HistoryCompaction 使用自包含 checkpoint
 
 HistoryCompaction 在数据层仍是一条 ConversationNode 内容。原始 Conversation Tree 不删除，
-ConversationProjector 从最新压缩节点重新投影即可复用现有消息、持久化和恢复链路。
+但正常 Context 查询从 leaf 回溯到最近 checkpoint 即停止；Projector 只展开 checkpoint 自带的
+summary 与 retained messages，不再解析旧 Node 引用。
 
 ```mermaid
 flowchart LR
     P[token preflight] -->|超过阈值| O[OperationDriver]
-    O --> G[HistoryCompactionGenerator]
-    G -->|HistoryCompaction 内容| O
-    O --> S[ConversationService.append]
+    O --> C[HistoryCompactionService]
+    C --> G[HistoryCompactionGenerator]
+    G -->|HistoryCompaction 内容| C
+    C --> S[ConversationService CAS append]
     S --> R[ConversationProjector 重新投影]
 ```
 
@@ -195,13 +197,16 @@ flowchart LR
 | --- | --- | --- |
 | Provider | 候选请求 token count | 阈值、摘要、持久化 |
 | token preflight | 比较 count 与 threshold | 选择历史、调用模型、提交节点 |
-| `HistoryCompactionGenerator` | 从明确输入生成一个 HistoryCompaction 内容值 | 何时触发、节点提交、重试循环 |
-| OperationDriver | 编排一次触发、提交、重新投影和再次 preflight | 摘要策略本身 |
-| ConversationService/Projector | 追加节点、按最新压缩点投影 | token 与摘要策略 |
+| `HistoryCompactionService` | expected leaf 校验、stop-at-checkpoint 读取与 CAS 追加 | 阈值、模型选择、摘要策略 |
+| `HistoryCompactionGenerator` | 从 Provider-neutral 逻辑历史生成一个 HistoryCompaction 内容值 | Node/Store、何时触发、节点提交 |
+| OperationDriver | 自动触发、失败终态和再次 preflight | 摘要策略本身 |
+| ConversationService/Projector | CAS 追加、纯展开 checkpoint | token 与摘要策略 |
 
-当前只拍板这个组合接缝。摘要模型、压缩 prompt、历史选择、保留信息、压缩目标长度和失败恢复
-需要后续单独讨论；现有实验实现不能反向成为合同。每个 Step 最多触发一次且无进展必须停止，
-防止压缩循环。
+checkpoint 固定为 `summary + retained_messages + file ledgers`。worker 只摘要本次被替代的逻辑
+前缀，重复压缩包含 previous summary，不包含新 retained tail。任一压缩错误直接失败，不以全量
+Context 降级；Provider overflow 不触发恢复压缩。每个 Step 最多成功提交一次 checkpoint，压缩后
+仍超阈值立即停止。完整合同见
+[`HistoryCompaction 压缩设计方案`](./2026-08-30-history-compaction-design.md)。
 
 ### 4.6 Tool Result 控制上下文增长
 
@@ -340,6 +345,7 @@ event delivery
 | 11.5 | 收敛 HistoryCompaction 接口并接入可替换的 worker 默认实现 | 触发/生成/提交解耦；默认实现不成为不可替换的领域实体 |
 | 11.6 | 按工具类型收敛大型结果，不建立通用分页 | 小结果完整；大结果高信号且可恢复；额外 ModelCall 只在确实缺证据时发生 |
 | 11.7 | Provider timeout/retry 内部治理 | attempt 可诊断；模型不接触 HTTP 参数；重试不重复 Agent Step |
+| 11.8 | HistoryCompaction 自包含 checkpoint 升级 | 正常读取遇 checkpoint 停止；自动/手动入口统一失败合同；SQLite v13 |
 
 11.1 状态（2026-08-28）：已完成 Observation 口径修正。Operation 同时投影
 `answer_ready_ms` 与 `operation_completed_ms`，token/cache 明确分为 agent 与
@@ -375,13 +381,11 @@ Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/refe
 它使用冻结 Package worker、保留最近消息对、以中文事实摘要压缩旧历史；Generator 只返回内容，
 OperationDriver 负责追加、重新 preflight 和无进展停止；缺少 worker 时明确失败，不静默裁剪。
 
-11.5 后续补充（2026-08-30，压缩升级批次 A–C 之后）：记录两项已知取舍。其一，尾部保留与
-配对修复的选材成本沿用 `chars ÷ 4` 启发式，不接入 preflight 正式计数口径——选材只影响切点
-偏移、无正确性后果；已知缺陷是对中文系统性低估（CJK 约 0.5–0.67 token/字，chars/4 只算
-0.25），升级路径是给 token 估算模块增加按消息列表的入口后由选材复用，属独立小改进。
-其二，摘要输入预算 `summary_input_tokens` 在 worker 与主模型同为 1M 窗口时并非容量约束，
-只是单次压缩的成本封顶，代价是影子区中段对摘要器不可见；其去留与批次 E 的 warm 前缀
-重放、以及 worker 是否切换小窗口模型一并决策。
+11.8 目标已于 2026-08-31 对齐，待实施。它把当前 `first_kept_node_id` 基线迁移为自包含
+checkpoint，并新增真正 stop-at-checkpoint 的 Context 查询。尾部选材优先复用消息 token 估算；
+若暂沿用 `chars ÷ 4`，必须保留 CJK 低估事实。删除 `summary_input_tokens` 的头尾保留/中段丢弃：
+worker 必须看完整逻辑待替代前缀，超过自身有效窗口就失败。warm prefix 只作为后续请求 envelope
+优化，不改变 checkpoint 语义或 worker 摘要范围。
 
 11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
 完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有

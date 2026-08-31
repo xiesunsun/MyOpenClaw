@@ -1,8 +1,8 @@
 # Runtime 实体决策
 
 **日期**：2026-08-24  
-**更新日期**：2026-08-27
-**状态**：当前合同；ModelCall 可靠数据底座已实施
+**更新日期**：2026-08-31
+**状态**：当前合同；HistoryCompaction 自包含 checkpoint 为待实施目标
 **范围**：Agent Runtime 中持久化实体、值对象、状态、快照、运行时对象和服务的抽象边界  
 **不在范围**：实施排期、数据库迁移步骤、Provider 协议字段
 
@@ -351,7 +351,10 @@ ConversationContent
 └── history_compaction
 ```
 
-`agent_message` 保存 Provider-neutral AgentMessage，文本和 ArtifactReference 按模型可见顺序排列。`history_compaction` 保存摘要、`first_kept_node_id` 和 `read_files`/`modified_files` 文件账本（账本字段可选，旧节点解码落空元组）。
+`agent_message` 保存 Provider-neutral AgentMessage，文本和 ArtifactReference 按模型可见顺序排列。
+`history_compaction` 保存摘要、原样保留的 `retained_messages` 和
+`read_files`/`modified_files` 文件账本。checkpoint 自包含，不保存旧 Node 引用；
+`first_kept_node_id` 随 SQLite v13 内容迁移删除。
 
 HostCall request/response 默认属于执行或观测记录；只有产生模型可见内容时，才转换成普通 `agent_message` 写入 Conversation Tree。
 
@@ -384,11 +387,12 @@ flowchart LR
     B --> C[ConversationNode 列表]
     C --> D[ConversationProjector]
     D --> E[Conversation Messages]
-    E --> Q{OperationDriver token preflight}
+    E --> X[Recall / Hook Contributions]
+    X --> F[ModelContextBuilder]
+    F --> Q{OperationDriver token preflight}
     Q -->|达到阈值| H[提交 HistoryCompaction]
     H --> B
-    Q -->|未达到| X[Recall / Hook Contributions]
-    X --> F[ModelContextBuilder]
+    Q -->|未达到| I[提交 ModelRequestIntent]
 ```
 
 读取接口收敛为：
@@ -398,9 +402,18 @@ list_branch_nodes(
     session_id,
     leaf_node_id,
 ) -> tuple[ConversationNode, ...]
+
+list_context_nodes(
+    session_id,
+    leaf_node_id,
+) -> tuple[ConversationNode, ...]
 ```
 
-OperationDriver 先读取一次确定的 leaf，再读取该分支。`ConversationProjector` 是处理 HistoryCompaction 并投影 AgentMessage 的唯一入口。Runtime、Provider、Trace 和 `/context` 不分别实现树遍历，也不在构建期间反复读取可能变化的 active leaf。
+`list_branch_nodes` 用于审计、导出和迁移，读取完整分支；`list_context_nodes` 用于正常模型
+Context 与重复压缩，在最近 HistoryCompaction（含）停止。OperationDriver 先读取一次确定的
+leaf，再读取该 leaf 的 Context suffix。`ConversationProjector` 是展开自包含 checkpoint 并投影
+AgentMessage 的唯一入口。Runtime、Provider、Trace 和 `/context` 不分别实现树遍历，也不在
+构建期间反复读取可能变化的 active leaf。
 
 ### 3.8 ConversationEntry 与界面展示
 
@@ -3238,13 +3251,13 @@ Trace 不进入业务数据库，不作为恢复来源，可以因容量限制�
 flowchart LR
     CL[Inbox claim 已提交] --> N[读取固定 leaf 的 ConversationNode]
     N --> CP[ConversationProjector]
-    CP --> Q{OperationDriver token preflight}
-    Q -->|达到阈值| HC[提交 HistoryCompaction]
-    HC --> N
-    Q -->|未达到| R[Recall]
+    CP --> R[Recall]
     R --> H[Context Hook]
     H --> B[ModelContextBuilder]
-    B --> V[校验 + fingerprint]
+    B --> Q{OperationDriver token preflight}
+    Q -->|达到阈值| HC[提交 HistoryCompaction]
+    HC --> N
+    Q -->|未达到| V[校验 + fingerprint]
     V --> I[持久化 ModelRequestIntent]
     I --> P[Provider Mapper]
     P --> C[PreparedModelCall]
@@ -3254,7 +3267,7 @@ flowchart LR
 | 组件 | 输入 | 输出 |
 | --- | --- | --- |
 | `ConversationProjector` | ConversationNode | Conversation Messages |
-| `OperationDriver` token preflight | Messages + ModelVersion 容量 | 继续构建或提交 HistoryCompaction 后重新投影 |
+| `OperationDriver` token preflight | 候选 ModelContext + ModelVersion 容量 | 提交 Intent 或请求 HistoryCompaction 后重新构建 |
 | `RuntimeEffects` | Conversation Messages | Recall/Hook Contributions |
 | `ModelContextBuilder` | Package + Conversation Messages + Contributions | 最终 ModelContext |
 | `OperationService` | ModelContext + expected revision | 持久化 Request Intent |
@@ -3272,18 +3285,24 @@ class ConversationProjector:
     ) -> tuple[AgentMessage, ...]: ...
 ```
 
-Projector 是纯函数式投影，负责 ConversationNode → AgentMessage、HistoryCompaction 替换、
-忽略非消息事实、保持 Content Block/ArtifactReference 顺序。它不查询 Store，不读取 Package，
-不执行 token preflight、Recall、Hook、Tool 定义或 Provider 映射。
+Projector 是纯函数式投影，负责 ConversationNode → AgentMessage、自包含 HistoryCompaction 展开、
+忽略非消息事实、保持 Content Block/ArtifactReference 顺序。Context 查询若包含 checkpoint，
+它必须是输入第一个 Node；Projector 输出 summary message、checkpoint.retained_messages，再输出
+后续 Node 中的 AgentMessage。它不查询 Store、不解析旧 Node 引用、不读取 Package，也不执行
+token preflight、Recall、Hook、Tool 定义或 Provider 映射。
 
-OperationDriver 先捕获 `leaf_node_id`，调用 `list_branch_nodes(session_id, leaf_node_id)`，再投影同一分支；不在构建阶段反复读取 active leaf。
+OperationDriver 先捕获 `leaf_node_id`，调用 `list_context_nodes(session_id, leaf_node_id)`，再投影
+同一 Context suffix；不在构建阶段反复读取 active leaf。完整分支只由审计、导出和迁移使用
+`list_branch_nodes` 读取。
 
 ### 18.3 Token preflight 与 HistoryCompaction
 
-OperationDriver 每次准备 ModelRequest 前检查最终 ModelContext。未达到阈值时保持完整
-append-only 消息；达到阈值时调用可注入的 `HistoryCompactionGenerator`，取得一个
-HistoryCompaction 内容值后通过 ConversationService 追加，再沿同一活动分支重新投影。
-Provider 不允许自行二次裁剪。
+OperationDriver 每次准备 ModelRequest 时先构建包含 Recall/Hook contribution 的候选
+ModelContext，再执行 token preflight。未达到阈值时保持 append-only 消息并提交 Intent；达到
+阈值时调用 `HistoryCompactionService`。Service 校验 expected leaf、读取最近 checkpoint 至 leaf、
+调用可注入的 `HistoryCompactionGenerator`，并通过 ConversationService CAS 追加 checkpoint。
+随后 OperationDriver 重新构建候选 Context；Recall 与 `before_request` Hook 允许再次执行，最终
+Intent 只保存第二次结果。Provider 不允许自行二次裁剪。
 
 ```text
 effective_context_window = floor(context_window_tokens * effect_rate)
@@ -3293,12 +3312,14 @@ compaction_threshold = min(
 )
 ```
 
-生产默认 Generator 使用 Operation 所属 Package 的 worker model 生成固定骨架的结构化摘要；
-历史范围与压缩 Prompt 仍通过 Generator 接缝替换，摘要目标长度由冻结的
-`compaction_max_summary_tokens` 约束。Runtime 不静默裁剪，也不动态重写旧 ToolResult；大型
-Tool 输出在 Tool 合同处有界，摘要输入端的截断不落库；压缩节点通过 compaction epoch 一次性
-提炼，并携带 `read_files`/`modified_files` 文件账本跨压缩累积。压缩失败降级为全量 Context
-继续，Provider 溢出（`context_window_exceeded`）触发一次强制压缩后重建 Intent 重试。
+生产默认 Generator 使用 Operation 所属 Package 的 worker model 生成固定骨架的结构化摘要。
+`HistoryCompaction` 自包含 `summary + retained_messages + file ledgers`；正常 Context 读取遇最近
+checkpoint 即停。worker 只接收本次被替代的逻辑前缀：重复压缩时包含 previous summary，不包含
+新 retained tail。完整摘要输入不得用头尾截断丢弃中段；超过 worker 能力即失败。Runtime 不动态
+重写旧 ToolResult，文件账本按进入 summary 的历史跨 checkpoint 累积。任一压缩错误直接使当前
+入口失败，不以全量 Context 降级；Provider `context_window_exceeded` 按普通 Provider 失败收敛，
+不触发恢复压缩。数据、算法和手动 idle 入口遵循
+[`HistoryCompaction 压缩设计方案`](./2026-08-30-history-compaction-design.md)。
 
 固定 `context_turn_window` 只属于迁移前实现，阶段 11.4 后删除，不保留双轨生产路径。
 
@@ -3354,7 +3375,7 @@ System
 5. request hook system sections
 
 Messages
-1. windowed conversation messages（包含已 claim 的 steer/inject）
+1. projected conversation messages（包含已 claim 的 steer/inject）
 2. recall messages
 3. request hook messages
 

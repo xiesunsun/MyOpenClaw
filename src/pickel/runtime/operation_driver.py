@@ -36,7 +36,6 @@ from pickel.shared.collaboration import (
 from pickel.context.projection import ConversationProjector
 from pickel.context.token_preflight import (
     ContextCompactionRequired,
-    TokenPreflightResult,
     preflight_model_context,
 )
 from pickel.conversations.agent_message import (
@@ -48,7 +47,7 @@ from pickel.conversations.agent_message import (
 )
 from pickel.conversations.content_blocks import ArtifactBlock, TextBlock, ToolCallBlock
 from pickel.conversations.conversation_service import ConversationService
-from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
+from pickel.conversations.conversation_node import ConversationNode
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.hooks.events import BeforeRequestEvent, PreToolUseEvent
 from pickel.inbox.message import InboxMessage
@@ -84,6 +83,7 @@ from pickel.runtime.worker_call_sender import (
     WorkerCallSendError,
     WorkerSendEffect,
 )
+from pickel.runtime.history_compaction_service import HistoryCompactionService
 from pickel.runtime.runtime_events import (
     RuntimeEventBase,
     ToolCallCompleted,
@@ -118,6 +118,13 @@ class OperationDriveResult:
 
 
 _AUTO_USAGE_LEAF = object()
+
+
+@dataclass(frozen=True)
+class _BuiltContext:
+    model_context: ModelContext
+    leaf_node_id: str | None
+    has_history_compaction: bool
 
 
 async def _consume_runtime_event(
@@ -171,6 +178,7 @@ class OperationDriver:
         delegation_package_resolver: DelegationPackageResolver | None = None,
         allowed_tool_names: frozenset[str] | None = None,
         history_compaction_generator: HistoryCompactionGenerator | None = None,
+        history_compaction_service: HistoryCompactionService | None = None,
         worker_sender: WorkerSendEffect | None = None,
         collaboration_state_provider: (
             Callable[[str], CollaborationState | None] | None
@@ -199,6 +207,7 @@ class OperationDriver:
             if service_store is not None:
                 send_gate = ModelCallSendGate(service_store, now=self._now)
         self._history_compaction_generator = history_compaction_generator
+        self._history_compaction_service = history_compaction_service
         self._worker_sender = worker_sender
         self._collaboration_state_provider = collaboration_state_provider
         self._goal_feedback: dict[str, str] = {}
@@ -440,16 +449,6 @@ class OperationDriver:
                 exc.cause,
                 first_chunk_at=exc.first_chunk_at,
             )
-            if error.code == "context_window_exceeded":
-                # 溢出重试原请求注定失败：先尝试压缩恢复，失败则按原错误终态。
-                recovered = await self._recover_context_overflow(
-                    operation=operation,
-                    state=state,
-                    package=package,
-                    effects=effects,
-                )
-                if recovered is not None:
-                    return recovered, None
             if package.runtime_policy.should_retry_request(
                 retryable=error.retryable,
                 first_chunk_received=exc.first_chunk_at is not None,
@@ -637,7 +636,7 @@ class OperationDriver:
             if self._pending_step_messages(operation.session_id):
                 raise RuntimeError("Step 消息 claim 冲突，停止推进")
 
-        context = await self._build_context(
+        built_context = await self._build_context(
             operation=operation,
             state=state,
             package=package,
@@ -645,12 +644,15 @@ class OperationDriver:
         )
         try:
             await preflight_model_context(
-                context=context,
+                context=built_context.model_context,
                 provider=effects.provider,
                 compaction_threshold=_compaction_threshold(package),
             )
-        except ContextCompactionRequired as required:
-            if compaction_step_id == step.step_id:
+        except ContextCompactionRequired:
+            if (
+                compaction_step_id == step.step_id
+                or built_context.has_history_compaction
+            ):
                 return (
                     self._fail_preflight(
                         operation=operation,
@@ -664,10 +666,9 @@ class OperationDriver:
             try:
                 await self._execute_history_compaction(
                     operation=operation,
-                    context=context,
+                    built_context=built_context,
                     package=package,
                     effects=effects,
-                    preflight=required.result,
                 )
                 # 压缩已提交：重新预检重建后的投影。
                 return state, step.step_id
@@ -677,32 +678,16 @@ class OperationDriver:
                     if isinstance(exc, HistoryCompactionError)
                     else "worker_send_failed"
                 )
-                if code in {
-                    "history_compaction_unavailable",
-                    "history_compaction_no_progress",
-                }:
-                    # 配置缺失与结构性超限必须显式失败，不做静默降级。
-                    return (
-                        self._fail_preflight(
-                            operation=operation,
-                            state=state,
-                            last_assistant=last_assistant,
-                            code=code,
-                            message=str(exc),
-                        ),
-                        step.step_id,
-                    )
-                # 压缩失败优雅降级：sender 重试额度已耗尽或摘要无法产出，
-                # 记录诊断后直接以全量 Context 提交 Intent；provider 若拒绝
-                # 会在发送路径显式失败。标记本 step 已尝试压缩，防止同一
-                # step 内的重入形成压缩循环。
-                logger.warning(
-                    "历史压缩失败，降级为全量 Context 继续 operation=%s code=%s: %s",
-                    operation.operation_id,
-                    code,
-                    exc,
+                return (
+                    self._fail_preflight(
+                        operation=operation,
+                        state=state,
+                        last_assistant=last_assistant,
+                        code=code,
+                        message=str(exc),
+                    ),
+                    step.step_id,
                 )
-                compaction_step_id = step.step_id
             except Exception as exc:
                 return (
                     self._fail_preflight(
@@ -715,6 +700,7 @@ class OperationDriver:
                     step.step_id,
                 )
 
+        context = built_context.model_context
         intent = ModelRequestIntent(
             model_context=context,
             context_fingerprint=model_context_fingerprint(context),
@@ -871,26 +857,21 @@ class OperationDriver:
         self,
         *,
         operation: SessionOperation,
-        context: ModelContext,
+        built_context: _BuiltContext,
         package: AgentPackageVersion,
         effects: RuntimeEffects,
-        preflight: TokenPreflightResult | None = None,
     ) -> None:
         """执行一次压缩并追加节点；失败语义由 HistoryCompactionError.code 表达。
 
         最近节点已是压缩节点时拒绝执行：上一次压缩后 Context 仍超限属于
         结构性超限，重复压缩无法修复。
         """
-        branch_nodes = self._conversations.list_active_branch_nodes(
-            session_id=operation.session_id
-        )
-        if branch_nodes and branch_nodes[-1].content_type == "history_compaction":
-            raise HistoryCompactionError(
-                "history_compaction_no_progress",
-                "最近节点已是历史压缩，Context 仍超限，停止重复压缩",
+        service = self._history_compaction_service
+        if service is None and self._history_compaction_generator is not None:
+            service = HistoryCompactionService(
+                self._conversations, self._history_compaction_generator
             )
-        generator = self._history_compaction_generator
-        if generator is None:
+        if service is None:
             raise HistoryCompactionError(
                 "history_compaction_unavailable",
                 "当前 Runtime 未配置 HistoryCompactionGenerator",
@@ -900,10 +881,22 @@ class OperationDriver:
                 "history_compaction_unavailable",
                 "当前 Operation 未配置 worker model",
             )
-        content = await generator.generate(
-            nodes=branch_nodes,
-            model_context=context,
-            preflight=preflight,
+        worker_model = getattr(getattr(package, "model_policy", None), "worker", None)
+        worker_limit = (
+            worker_model.effective_input_token_limit()
+            if worker_model is not None
+            and callable(getattr(worker_model, "effective_input_token_limit", None))
+            else None
+        )
+        if worker_limit is None or worker_limit < 1:
+            raise HistoryCompactionError(
+                "history_compaction_worker_limit_unavailable",
+                "无法取得冻结 worker 模型的有效输入上限",
+            )
+        await service.compact(
+            session_id=operation.session_id,
+            expected_leaf_node_id=built_context.leaf_node_id,
+            model_context=built_context.model_context,
             send_summarizer=self._summarizer_sender_for(
                 session_id=operation.session_id,
                 effects=effects,
@@ -911,68 +904,8 @@ class OperationDriver:
             ),
             max_summary_tokens=package.runtime_policy.compaction_max_summary_tokens,
             preserve_tail_tokens=package.runtime_policy.compaction_tail_tokens,
+            worker_input_limit=worker_limit,
         )
-        if not isinstance(content, HistoryCompaction):
-            raise HistoryCompactionError(
-                "history_compaction_invalid_result",
-                "HistoryCompactionGenerator 必须返回 HistoryCompaction",
-            )
-        self._conversations.append_history_compaction(
-            session_id=operation.session_id,
-            content=content,
-        )
-
-    async def _recover_context_overflow(
-        self,
-        *,
-        operation: SessionOperation,
-        state: AgentRunState,
-        package: AgentPackageVersion,
-        effects: RuntimeEffects,
-    ) -> AgentRunState | None:
-        """上下文溢出的恢复：强制压缩后回到准备阶段重建 Intent 并重试。
-
-        溢出说明本地估算低估了真实占用，重发原请求注定失败。压缩守卫
-        保证同一条溢出链路不会无限重复压缩；恢复不可用时返回 None，
-        调用方按原溢出错误进入终态，根因不丢失。
-        """
-        step = state.current_step
-        assert step is not None and step.request_intent is not None
-        try:
-            await self._execute_history_compaction(
-                operation=operation,
-                context=step.request_intent.model_context,
-                package=package,
-                effects=effects,
-            )
-        except (HistoryCompactionError, WorkerCallSendError) as exc:
-            code = (
-                exc.code
-                if isinstance(exc, HistoryCompactionError)
-                else "worker_send_failed"
-            )
-            logger.warning(
-                "上下文溢出恢复失败 operation=%s code=%s: %s",
-                operation.operation_id,
-                code,
-                exc,
-            )
-            return None
-        except Exception as exc:
-            logger.warning(
-                "上下文溢出恢复异常 operation=%s: %s", operation.operation_id, exc
-            )
-            return None
-        candidate = replace(
-            state,
-            revision=state.revision + 1,
-            current_step=replace(
-                step,
-                phase="preparing_request",
-                request_intent=None,
-            ),
-        )
-        return self._commit(candidate, state)
 
     async def _drive_awaiting_tools(
         self,
@@ -1541,7 +1474,7 @@ class OperationDriver:
         state: AgentRunState,
         package: AgentPackageVersion,
         effects: RuntimeEffects,
-    ) -> ModelContext:
+    ) -> _BuiltContext:
         step = state.current_step
         if step is None or step.phase != "preparing_request":
             raise RuntimeError("Context 只能为 preparing_request Step 构建")
@@ -1578,16 +1511,16 @@ class OperationDriver:
         state: AgentRunState,
         package: AgentPackageVersion,
         effects: RuntimeEffects,
-    ) -> ModelContext:
+    ) -> _BuiltContext:
         step = state.current_step
         if step is None or step.phase != "preparing_request":
             raise RuntimeError("Context 只能为 preparing_request Step 构建")
-        nodes = self._conversations.list_active_branch_nodes(
-            session_id=operation.session_id
+        session = self._conversations.load_conversation_session(operation.session_id)
+        leaf_node_id = session.active_node_id
+        nodes = self._conversations.list_context_nodes(
+            session_id=operation.session_id, leaf_node_id=leaf_node_id
         )
         projected = ConversationProjector().project_conversation_messages(nodes)
-        # 正式 ModelRequest 使用完整活动分支；Context 压缩由后续 token
-        # preflight/HistoryCompaction 流程负责，不在这里静默截断历史。
         visible = tuple(projected)
         recalled = await effects.retrieve_recall_messages(
             session_id=operation.session_id,
@@ -1660,7 +1593,13 @@ class OperationDriver:
                     if tool.name in PLAN_READ_ONLY_TOOL_NAMES
                 ),
             )
-        return model_context
+        return _BuiltContext(
+            model_context=model_context,
+            leaf_node_id=leaf_node_id,
+            has_history_compaction=bool(
+                nodes and nodes[0].content_type == "history_compaction"
+            ),
+        )
 
     def _resolve_delegation_intent(
         self,

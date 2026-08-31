@@ -208,6 +208,33 @@ class InMemoryRuntimeStore(InMemoryModelCallStoreMixin):
             )
             return True
 
+    def append_history_compaction(
+        self, *, node: ConversationNode, expected_node_id: str | None
+    ) -> bool:
+        """checkpoint 专用 CAS；active_operation_id 不影响该提交。"""
+        with self._lock:
+            session = self._require_session_unlocked(node.session_id)
+            if (
+                session.archived_at is not None
+                or session.active_node_id != expected_node_id
+                or node.parent_node_id != expected_node_id
+            ):
+                return False
+            self._validate_node_unlocked(node)
+            self._validate_content_artifacts_unlocked(node.content)
+            existing = self._nodes.get(node.node_id)
+            if existing is not None:
+                if existing == node:
+                    return False
+                raise StorageIntegrityError(
+                    f"ConversationNode ID 已存在: {node.node_id}"
+                )
+            self._nodes[node.node_id] = node
+            self._sessions[node.session_id] = replace(
+                session, active_node_id=node.node_id, updated_at=node.created_at
+            )
+            return True
+
     def load_node(self, node_id: str) -> ConversationNode | None:
         with self._lock:
             return self._nodes.get(node_id)
@@ -233,6 +260,33 @@ class InMemoryRuntimeStore(InMemoryModelCallStoreMixin):
                     )
                 result.append(node)
                 leaf = node.parent_node_id
+            result.reverse()
+            return tuple(result)
+
+    def list_context_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]:
+        """沿 parent 链回溯，遇 checkpoint 即停止并包含 checkpoint。"""
+        with self._lock:
+            self._require_session_unlocked(session_id)
+            if leaf_node_id is None:
+                return ()
+            result: list[ConversationNode] = []
+            seen: set[str] = set()
+            current_id = leaf_node_id
+            while current_id is not None:
+                if current_id in seen:
+                    raise StorageIntegrityError("ConversationNode parent 链存在环")
+                seen.add(current_id)
+                node = self._nodes.get(current_id)
+                if node is None or node.session_id != session_id:
+                    raise StorageIntegrityError(
+                        f"ConversationNode 不存在或 Session 不匹配: {current_id}"
+                    )
+                result.append(node)
+                if node.content_type == "history_compaction":
+                    break
+                current_id = node.parent_node_id
             result.reverse()
             return tuple(result)
 

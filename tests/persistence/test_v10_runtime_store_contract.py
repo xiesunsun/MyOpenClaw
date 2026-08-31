@@ -25,7 +25,7 @@ from pickel.agents.agent_package import (
 from pickel.artifacts.artifact import Artifact, ArtifactReference
 from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import ArtifactBlock, TextBlock
-from pickel.conversations.conversation_node import ConversationNode
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.context.model_context import ModelContext, SystemContent
 from pickel.inbox.message import (
@@ -266,6 +266,79 @@ def test_active_leaf_uses_cas_and_rejects_cross_session_reference(
             new_node_id="node-1",
             updated_at=NOW,
         )
+
+
+def test_context_nodes_stop_at_latest_checkpoint_for_both_stores(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    root = ConversationNode(
+        "node-1",
+        "session-1",
+        None,
+        "agent_message",
+        UserMessage((TextBlock("old"),)),
+        NOW,
+    )
+    checkpoint = ConversationNode(
+        "node-2",
+        "session-1",
+        "node-1",
+        "history_compaction",
+        HistoryCompaction("summary", (UserMessage((TextBlock("retained"),)),)),
+        NOW,
+    )
+    tail = ConversationNode(
+        "node-3",
+        "session-1",
+        "node-2",
+        "agent_message",
+        UserMessage((TextBlock("new"),)),
+        NOW,
+    )
+    assert store.append_node(node=root, expected_node_id=None)
+    assert store.append_node(node=checkpoint, expected_node_id="node-1")
+    assert store.append_node(node=tail, expected_node_id="node-2")
+
+    assert [
+        node.node_id for node in store.list_branch_nodes("session-1", "node-3")
+    ] == ["node-1", "node-2", "node-3"]
+    assert [
+        node.node_id for node in store.list_context_nodes("session-1", "node-3")
+    ] == ["node-2", "node-3"]
+
+
+def test_checkpoint_cas_is_allowed_while_operation_is_active(
+    store_factory: StoreFactory, tmp_path: Path
+) -> None:
+    store = store_factory(tmp_path)
+    _create_session(store, "session-1", "workspace-1", tmp_path / "one")
+    _accept_one(store, tmp_path)
+    checkpoint = ConversationNode(
+        "checkpoint-1",
+        "session-1",
+        "message-1",
+        "history_compaction",
+        HistoryCompaction("summary", ()),
+        NOW,
+    )
+
+    assert store.append_history_compaction(
+        node=checkpoint, expected_node_id="message-1"
+    )
+    assert store.load_session("session-1").active_node_id == "checkpoint-1"
+    assert not store.append_node(
+        node=ConversationNode(
+            "ordinary-1",
+            "session-1",
+            "checkpoint-1",
+            "agent_message",
+            UserMessage((TextBlock("ordinary"),)),
+            NOW,
+        ),
+        expected_node_id="checkpoint-1",
+    )
 
 
 def test_accept_operation_commits_all_facts_or_leaves_no_residue(

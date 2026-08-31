@@ -68,7 +68,7 @@ def test_conversation_node_strict_content_codec() -> None:
         "session_1",
         None,
         "history_compaction",
-        HistoryCompaction("summary", None),
+        HistoryCompaction("summary", ()),
         NOW,
     )
     restored = ConversationNode.from_content_json(
@@ -86,7 +86,7 @@ def test_conversation_node_strict_content_codec() -> None:
             session_id="session_1",
             parent_node_id=None,
             content_type="history_compaction",
-            content_json='{"summary":"x","first_kept_node_id":null,"extra":1}',
+            content_json='{"summary":"x","retained_messages":[],"extra":1}',
             created_at=NOW,
         )
 

@@ -23,7 +23,7 @@ from pickel.conversations.content_blocks import (
     ArtifactBlock,
     TextBlock,
 )
-from pickel.conversations.conversation_node import ConversationNode
+from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
 from pickel.conversations.conversation_session import ConversationSession
 from pickel.inbox.message import (
     AgentMessageSource,
@@ -46,7 +46,7 @@ from pickel.operations.delegation_result import (
 )
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.persistence.model_call_store_mixin import SQLiteModelCallStoreMixin
-from pickel.persistence.sqlite_schema_v12 import (
+from pickel.persistence.sqlite_schema_v13 import (
     SCHEMA_VERSION,
     UnsupportedSchemaVersionError,
     create_schema,
@@ -75,6 +75,25 @@ _LIST_BRANCH_NODES_SQL = """
     FROM conversation_nodes AS n
     JOIN branch AS b ON b.node_id = n.node_id
     ORDER BY b.depth DESC
+"""
+
+_LIST_CONTEXT_NODES_SQL = """
+    WITH RECURSIVE context(node_id, parent_node_id, content_type, depth) AS (
+        SELECT node_id, parent_node_id, content_type, 0
+        FROM conversation_nodes
+        WHERE node_id = ? AND session_id = ?
+        UNION ALL
+        SELECT parent.node_id, parent.parent_node_id, parent.content_type,
+               context.depth + 1
+        FROM conversation_nodes AS parent
+        JOIN context ON parent.node_id = context.parent_node_id
+        WHERE parent.session_id = ?
+          AND context.content_type != 'history_compaction'
+    )
+    SELECT n.*
+    FROM conversation_nodes AS n
+    JOIN context AS c ON c.node_id = n.node_id
+    ORDER BY c.depth DESC
 """
 
 
@@ -300,6 +319,62 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 raise StorageIntegrityError("ConversationNode 写入失败") from exc
         return True
 
+    def append_history_compaction(
+        self, *, node: ConversationNode, expected_node_id: str | None
+    ) -> bool:
+        """checkpoint 专用 CAS；active_operation_id 不影响该提交。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = self._require_session(connection, node.session_id)
+            if (
+                session["archived_at"] is not None
+                or session["active_node_id"] != expected_node_id
+                or node.parent_node_id != expected_node_id
+            ):
+                connection.rollback()
+                return False
+            try:
+                self._validate_node_artifacts(connection, node)
+                connection.execute(
+                    """
+                    INSERT INTO conversation_nodes
+                        (node_id, session_id, parent_node_id, content_type,
+                         content_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node.node_id,
+                        node.session_id,
+                        node.parent_node_id,
+                        node.content_type,
+                        node.content_json(),
+                        node.created_at.isoformat(),
+                    ),
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET active_node_id = ?, updated_at = ?
+                    WHERE session_id = ? AND active_node_id IS ?
+                      AND archived_at IS NULL
+                    """,
+                    (
+                        node.node_id,
+                        node.created_at.isoformat(),
+                        node.session_id,
+                        expected_node_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
+            except sqlite3.IntegrityError as exc:
+                raise StorageIntegrityError(
+                    "ConversationNode checkpoint 写入失败"
+                ) from exc
+        return True
+
     def load_node(self, node_id: str) -> ConversationNode | None:
         self._ensure_schema()
         with self._connect() as connection:
@@ -317,6 +392,20 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
         with self._connect() as connection:
             rows = connection.execute(
                 _LIST_BRANCH_NODES_SQL,
+                (leaf_node_id, session_id, session_id),
+            ).fetchall()
+        return tuple(self._node_from_row(row) for row in rows)
+
+    def list_context_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]:
+        """递归查询在 checkpoint 行停止，避免读取更旧祖先。"""
+        self._ensure_schema()
+        if leaf_node_id is None:
+            return ()
+        with self._connect() as connection:
+            rows = connection.execute(
+                _LIST_CONTEXT_NODES_SQL,
                 (leaf_node_id, session_id, session_id),
             ).fetchall()
         return tuple(self._node_from_row(row) for row in rows)
@@ -2205,6 +2294,10 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 raise UnsupportedStorageSchemaError(
                     "检测到 SQLite schema version 11；请先执行一次性 v11→v12 迁移"
                 )
+            elif version == 12:
+                raise UnsupportedStorageSchemaError(
+                    "检测到 SQLite schema version 12；请先执行一次性 v12→v13 迁移"
+                )
             elif version != SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(
                     f"不支持的 SQLite schema version: {version}"
@@ -2342,7 +2435,14 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
     def _validate_node_artifacts(
         connection: sqlite3.Connection, node: ConversationNode
     ) -> None:
-        SQLiteRuntimeStore._validate_message_artifacts(connection, node.content)
+        if node.content_type == "agent_message":
+            SQLiteRuntimeStore._validate_message_artifacts(connection, node.content)
+            return
+        if isinstance(node.content, HistoryCompaction):
+            for message in node.content.retained_messages:
+                SQLiteRuntimeStore._validate_message_artifacts(connection, message)
+            return
+        raise StorageIntegrityError("history_compaction 节点内容类型无效")
 
     @staticmethod
     def _transition_blocked_by_pending_step_messages(

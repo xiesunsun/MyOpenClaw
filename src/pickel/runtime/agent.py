@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from pickel.conversations.agent_message import UserMessage
 from pickel.runtime.agent_driver import AgentDriveResult, AgentDriver
@@ -12,6 +14,23 @@ from pickel.runtime.agent_inbox import AgentInbox
 
 class AgentBusyError(RuntimeError):
     """Agent 已有前台驱动占用时，拒绝新的原子 followup。"""
+
+
+@dataclass(frozen=True)
+class ManualHistoryCompactionResult:
+    """手动压缩的稳定结果；该入口不创建 Operation。"""
+
+    code: str
+    message: str
+    node_id: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.code == "ok"
+
+
+ManualHistoryCompactor = Callable[[], Awaitable[ManualHistoryCompactionResult]]
+ManualHistoryIdleCheck = Callable[[], bool]
 
 
 class Agent:
@@ -27,6 +46,8 @@ class Agent:
         session_id: str,
         inbox: AgentInbox,
         driver: AgentDriver,
+        manual_history_compactor: ManualHistoryCompactor | None = None,
+        manual_history_idle_check: ManualHistoryIdleCheck | None = None,
     ) -> None:
         if inbox.session_id != session_id:
             raise ValueError("Agent 与 AgentInbox 必须绑定同一 session_id")
@@ -34,6 +55,8 @@ class Agent:
         self._inbox = inbox
         self._driver = driver
         self._drive_lock = asyncio.Lock()
+        self._manual_history_compactor = manual_history_compactor
+        self._manual_history_idle_check = manual_history_idle_check
 
     @property
     def session_id(self) -> str:
@@ -99,6 +122,45 @@ class Agent:
                 consume_tool_event=consume_tool_event,
                 host_calls=host_calls,
             )
+
+    async def compact_history(self) -> ManualHistoryCompactionResult:
+        """严格 idle 时手动压缩；忙碌立即返回，不等待 Agent 驱动。"""
+
+        busy = ManualHistoryCompactionResult(
+            code="session_busy", message="Session 当前繁忙，不能手动压缩历史"
+        )
+        if self._drive_lock.locked():
+            return busy
+        if self._manual_history_compactor is None:
+            return ManualHistoryCompactionResult(
+                code="history_compaction_unavailable",
+                message="当前 Runtime 未配置手动历史压缩",
+            )
+        if (
+            self._manual_history_idle_check is not None
+            and not self._manual_history_idle_check()
+        ):
+            return busy
+        async with self._drive_lock:
+            # 获取同一个 drive lock 后由 Host 回读 Session 和 Inbox；这次检查
+            # 是手动压缩真正开始前的最后一道 idle 门禁。
+            if (
+                self._manual_history_idle_check is not None
+                and not self._manual_history_idle_check()
+            ):
+                return busy
+            return await self._manual_history_compactor()
+
+    def configure_manual_history_compaction(
+        self,
+        *,
+        compactor: ManualHistoryCompactor,
+        idle_check: ManualHistoryIdleCheck,
+    ) -> None:
+        """注入 Host 组合的手动压缩依赖。"""
+
+        self._manual_history_compactor = compactor
+        self._manual_history_idle_check = idle_check
 
     async def resume_operation(
         self,

@@ -1,7 +1,7 @@
 """HistoryCompaction 的生成接缝。
 
-这里只定义 Runtime 组合所需的窄协议：触发方传入投影节点、已构建的
-ModelContext 与预检结果，实现方返回待追加的 HistoryCompaction 值。
+这里只定义 Runtime 组合所需的窄协议：触发方传入 Provider-neutral 的
+逻辑历史，实现方返回待追加的 HistoryCompaction 值。
 worker 调用、摘要模型、边界选取与提示词都属于可替换实现，不进入
 Context 核心，也不反向依赖 Runtime。
 """
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from pickel.context.model_context import ModelContext
-from pickel.context.token_preflight import TokenPreflightResult
-from pickel.conversations.conversation_node import ConversationNode, HistoryCompaction
+from pickel.conversations.agent_message import AgentMessage
+from pickel.conversations.conversation_node import HistoryCompaction
 
 if TYPE_CHECKING:
     from pickel.conversations.agent_message import AssistantMessage
@@ -45,9 +45,12 @@ class HistoryCompactionGenerator(Protocol):
     async def generate(
         self,
         *,
-        nodes: Sequence[ConversationNode],
-        model_context: ModelContext,
-        preflight: TokenPreflightResult | None = None,
+        previous_summary: str | None,
+        exact_messages: Sequence[AgentMessage],
+        previous_read_files: Sequence[str] = (),
+        previous_modified_files: Sequence[str] = (),
+        model_context: ModelContext | None = None,
+        worker_input_limit: int,
         send_summarizer: SummarizerSender,
         max_summary_tokens: int,
         preserve_tail_tokens: int,

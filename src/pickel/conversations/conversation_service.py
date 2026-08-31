@@ -99,6 +99,17 @@ class ConversationService:
             )
         )
 
+    def list_context_nodes(
+        self, *, session_id: str, leaf_node_id: str | None
+    ) -> list[ConversationNode]:
+        """读取供模型使用的边界路径；Store 在最近 checkpoint 处停止。"""
+        self.load_conversation_session(session_id)
+        return list(
+            self._store.list_context_nodes(
+                session_id=session_id, leaf_node_id=leaf_node_id
+            )
+        )
+
     def list_conversation_previews(
         self,
         *,
@@ -157,6 +168,29 @@ class ConversationService:
         return self._append_content(
             session_id=session_id, content_type="history_compaction", content=content
         )
+
+    def append_history_compaction_at_leaf(
+        self,
+        *,
+        session_id: str,
+        expected_leaf_node_id: str | None,
+        content: HistoryCompaction,
+    ) -> ConversationNode:
+        """在指定 leaf 后追加 checkpoint；允许该 Session 有 active Operation。"""
+        self.load_conversation_session(session_id)
+        node = ConversationNode(
+            node_id=self._node_id_factory(),
+            session_id=session_id,
+            parent_node_id=expected_leaf_node_id,
+            content_type="history_compaction",
+            content=content,
+            created_at=self._now(),
+        )
+        if not self._store.append_history_compaction(
+            node=node, expected_node_id=expected_leaf_node_id
+        ):
+            raise RuntimeError("ConversationSession history_compaction leaf CAS 冲突")
+        return node
 
     def move_active_branch_to(
         self, *, session_id: str, node_id: str

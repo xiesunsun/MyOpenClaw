@@ -63,10 +63,13 @@ def _run_async(function):
 
 class _Conversation:
     def list_active_branch_nodes(self, *, session_id):
-        return ()
+        return self.list_branch_nodes(session_id=session_id, leaf_node_id=None)
 
     def load_conversation_session(self, session_id):
         return SimpleNamespace(active_node_id=None)
+
+    def list_context_nodes(self, *, session_id, leaf_node_id):
+        return self.list_branch_nodes(session_id=session_id, leaf_node_id=leaf_node_id)
 
     def list_branch_nodes(self, *, session_id, leaf_node_id):
         if leaf_node_id is None:
@@ -94,23 +97,15 @@ class _Conversation:
 class _RecoveredCompactionConversation(_Conversation):
     """模拟提交压缩事实后、二次 preflight 前进程恢复。"""
 
-    def list_active_branch_nodes(self, *, session_id):
+    def list_context_nodes(self, *, session_id, leaf_node_id):
         return [
-            ConversationNode(
-                node_id="node-1",
-                session_id=session_id,
-                parent_node_id=None,
-                content_type="agent_message",
-                content=UserMessage(),
-                created_at=datetime.now(timezone.utc),
-            ),
             ConversationNode(
                 node_id="compaction-1",
                 session_id=session_id,
                 parent_node_id="node-1",
                 content_type="history_compaction",
                 content=HistoryCompaction(
-                    summary="previous summary", first_kept_node_id="node-1"
+                    summary="previous summary", retained_messages=()
                 ),
                 created_at=datetime.now(timezone.utc),
             ),
@@ -130,8 +125,17 @@ class _CompactionConversation(_Conversation):
             )
         ]
 
-    def list_active_branch_nodes(self, *, session_id):
-        return tuple(self.nodes)
+    def list_context_nodes(self, *, session_id, leaf_node_id=None):
+        del session_id, leaf_node_id
+        checkpoint = next(
+            (
+                index
+                for index, node in enumerate(self.nodes)
+                if node.content_type == "history_compaction"
+            ),
+            None,
+        )
+        return tuple(self.nodes[checkpoint:] if checkpoint is not None else self.nodes)
 
     def append_history_compaction(self, *, session_id, content):
         node = ConversationNode(
@@ -144,6 +148,12 @@ class _CompactionConversation(_Conversation):
         )
         self.nodes.append(node)
         return node
+
+    def append_history_compaction_at_leaf(
+        self, *, session_id, expected_leaf_node_id, content
+    ):
+        del expected_leaf_node_id
+        return self.append_history_compaction(session_id=session_id, content=content)
 
 
 class _UsageConversation:
@@ -570,7 +580,7 @@ async def test_context_hides_report_for_root_and_keeps_it_for_delegated_session(
         package=package,
         effects=RuntimeEffects(provider=object()),
     )
-    assert [tool.name for tool in root_context.tools] == []
+    assert [tool.name for tool in root_context.model_context.tools] == []
 
     operations.load_delegation = lambda session_id: SimpleNamespace(
         parent_session_id="parent-session"
@@ -581,7 +591,7 @@ async def test_context_hides_report_for_root_and_keeps_it_for_delegated_session(
         package=package,
         effects=RuntimeEffects(provider=object()),
     )
-    assert [tool.name for tool in delegated_context.tools] == ["report"]
+    assert [tool.name for tool in delegated_context.model_context.tools] == ["report"]
 
 
 @_run_async
@@ -863,8 +873,8 @@ async def test_unavailable_token_count_falls_back_and_continues_model_request():
 
 
 @_run_async
-async def test_context_overflow_recovers_by_compaction_and_retries():
-    """溢出→强制压缩→回退准备阶段重建 Intent→重试成功。"""
+async def test_context_overflow_is_a_normal_provider_failure():
+    """Provider context_window_exceeded 不再触发历史压缩。"""
 
     class _OverflowProvider(_Provider):
         def __init__(self):
@@ -875,20 +885,10 @@ async def test_context_overflow_recovers_by_compaction_and_retries():
                 ]
             )
 
-    class _Generator:
-        async def generate(self, **kwargs):
-            compact_calls.append(kwargs)
-            return HistoryCompaction("summary", "node-1")
-
-    class _RecordingSender:
-        async def __call__(self, **kwargs):
-            return AssistantMessage((TextBlock("压缩摘要"),))
-
     provider = _OverflowProvider()
     package = _loaded_package().version
     operations = _Operations(_queued_state())
     conversation = _CompactionConversation()
-    compact_calls = []
     sleeps: list[float] = []
     driver = OperationDriver(
         operation_service=operations,
@@ -899,19 +899,15 @@ async def test_context_overflow_recovers_by_compaction_and_retries():
         ),
         model_call_service=_FakeModelCallService(operations),
         model_context_builder=_ContextBuilder(),
-        history_compaction_generator=_Generator(),
-        worker_sender=_RecordingSender(),
     )
     driver._sleep = lambda delay: _record_delay(sleeps, delay)
 
     result = await driver.drive_operation("operation-1")
 
-    assert result.status == "succeeded"
-    assert provider.calls == 2
-    assert sleeps == [20.0]  # 溢出重试消耗一次主请求退避
-    assert len(compact_calls) == 1
-    # 重试消费的是重建后的 Intent，不是重发原请求。
-    assert provider.contexts[0] is not provider.contexts[1]
+    assert result.status == "failed"
+    assert result.state.error.code == "context_window_exceeded"
+    assert provider.calls == 1
+    assert sleeps == []
 
 
 @_run_async
@@ -950,8 +946,8 @@ async def test_context_overflow_without_compaction_fails_with_root_cause():
 
 
 @_run_async
-async def test_second_context_overflow_stops_after_one_forced_compaction():
-    """压缩后仍溢出属于结构性超限：恢复只执行一次，随后按原错误终态。"""
+async def test_context_overflow_does_not_trigger_compaction():
+    """Provider 溢出按普通失败收敛，不进入压缩路径。"""
 
     class _AlwaysOverflowProvider(_Provider):
         def __init__(self):
@@ -961,15 +957,6 @@ async def test_second_context_overflow_stops_after_one_forced_compaction():
                     ValueError("context length exceeded"),
                 ]
             )
-
-    class _Generator:
-        async def generate(self, **kwargs):
-            del kwargs
-            return HistoryCompaction("summary", "node-1")
-
-    class _RecordingSender:
-        async def __call__(self, **kwargs):
-            return AssistantMessage((TextBlock("压缩摘要"),))
 
     provider = _AlwaysOverflowProvider()
     package = _loaded_package().version
@@ -985,8 +972,6 @@ async def test_second_context_overflow_stops_after_one_forced_compaction():
         ),
         model_call_service=_FakeModelCallService(operations),
         model_context_builder=_ContextBuilder(),
-        history_compaction_generator=_Generator(),
-        worker_sender=_RecordingSender(),
     )
     driver._sleep = lambda delay: _record_delay(sleeps, delay)
 
@@ -994,14 +979,14 @@ async def test_second_context_overflow_stops_after_one_forced_compaction():
 
     assert result.status == "failed"
     assert result.state.error.code == "context_window_exceeded"
-    assert provider.calls == 2
-    assert len(conversation.nodes) == 2  # 仅追加了一次压缩节点
-    assert sleeps == [20.0]  # 第一次恢复后的一次主请求退避
+    assert provider.calls == 1
+    assert len(conversation.nodes) == 1
+    assert sleeps == []
 
 
 @_run_async
-async def test_compaction_failure_degrades_to_full_context_instead_of_failing():
-    """压缩失败不终止 Operation：记诊断后以全量 Context 继续本 Step。"""
+async def test_compaction_failure_fails_without_full_context_fallback():
+    """压缩失败直接终止 Operation，不提交全量 Context Intent。"""
 
     class _CountingProvider(_Provider):
         def __init__(self):
@@ -1026,7 +1011,7 @@ async def test_compaction_failure_degrades_to_full_context_instead_of_failing():
     package = _loaded_package().version
     package.model_policy = SimpleNamespace(
         primary=SimpleNamespace(effective_input_token_limit=lambda: 90),
-        worker=object(),
+        worker=SimpleNamespace(effective_input_token_limit=lambda: 64000),
     )
     operations = _Operations(_queued_state())
     conversation = _CompactionConversation()
@@ -1045,8 +1030,8 @@ async def test_compaction_failure_degrades_to_full_context_instead_of_failing():
 
     result = await driver.drive_operation("operation-1")
 
-    assert result.status == "succeeded"
-    assert provider.calls == 1  # 降级后仍以全量 Context 完成了一次真实请求
+    assert result.status == "failed"
+    assert provider.calls == 0
 
 
 @_run_async
@@ -1064,7 +1049,7 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
     package = _loaded_package().version
     package.model_policy = SimpleNamespace(
         primary=SimpleNamespace(effective_input_token_limit=lambda: 90),
-        worker=object(),
+        worker=SimpleNamespace(effective_input_token_limit=lambda: 64000),
     )
     operations = _Operations(_queued_state())
     conversation = _CompactionConversation()
@@ -1072,7 +1057,7 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
     class _Generator:
         async def generate(self, **kwargs):
             compact_calls.append(kwargs)
-            return HistoryCompaction("summary", "node-1")
+            return HistoryCompaction("summary", ())
 
     class _NeverSender:
         async def __call__(self, **kwargs):
@@ -1097,11 +1082,10 @@ async def test_compaction_is_attempted_once_per_step_when_rebuilt_context_stays_
     assert result.status == "failed"
     assert result.state.error.code == "history_compaction_no_progress"
     assert len(compact_calls) == 1
-    assert compact_calls[0]["preflight"].token_count == 90
     # 冻结策略的压缩预算随调用传递给 Generator。
     assert compact_calls[0]["max_summary_tokens"] == 4096
     assert compact_calls[0]["preserve_tail_tokens"] == 32000
-    assert conversation.nodes[-1].content == HistoryCompaction("summary", "node-1")
+    assert conversation.nodes[-1].content == HistoryCompaction("summary", ())
     assert provider.count_calls == 2
     assert provider.calls == 0
 
@@ -1182,7 +1166,7 @@ async def test_formal_context_keeps_complete_active_branch_without_turn_window()
         )
 
     assert seen == [projected]
-    assert context.messages == projected
+    assert context.model_context.messages == projected
 
 
 class _CancellationOperations(_Operations):

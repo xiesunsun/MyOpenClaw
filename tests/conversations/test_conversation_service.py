@@ -132,10 +132,10 @@ def test_append_compaction_preserves_typed_content(tmp_path: Path) -> None:
     session = service.create_conversation_session(agent_id="Pickle", cwd=str(tmp_path))
     node = service.append_history_compaction(
         session_id=session.session_id,
-        content=HistoryCompaction(summary="short", first_kept_node_id=None),
+        content=HistoryCompaction(summary="short", retained_messages=()),
     )
     assert node.content_type == "history_compaction"
-    assert node.content == HistoryCompaction(summary="short", first_kept_node_id=None)
+    assert node.content == HistoryCompaction(summary="short", retained_messages=())
 
 
 def test_preview_archive_and_delete(tmp_path: Path) -> None:

@@ -54,7 +54,7 @@ def test_project_agent_run_usage_only_counts_strict_assistant_descendants() -> N
         ),
         _node(
             "compaction",
-            HistoryCompaction(summary="old", first_kept_node_id=None),
+            HistoryCompaction(summary="old", retained_messages=()),
             content_type="history_compaction",
         ),
         _assistant(

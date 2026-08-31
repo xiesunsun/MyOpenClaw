@@ -9,6 +9,9 @@ from typing import Any, Literal
 
 from pickel.conversations.agent_message import (
     AgentMessage,
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
     agent_message_from_dict,
     agent_message_to_dict,
 )
@@ -19,7 +22,7 @@ ContentType = Literal["agent_message", "history_compaction"]
 @dataclass(frozen=True)
 class HistoryCompaction:
     summary: str
-    first_kept_node_id: str | None
+    retained_messages: tuple[AgentMessage, ...]
     # 跨压缩累积的文件账本；由生成器从被压缩区域的读写工具调用确定性
     # 提取并合并前序压缩节点的账本，随摘要一起回喂下一次压缩。
     read_files: tuple[str, ...] = ()
@@ -28,8 +31,25 @@ class HistoryCompaction:
     def __post_init__(self) -> None:
         if not self.summary:
             raise ValueError("HistoryCompaction.summary 不能为空")
-        object.__setattr__(self, "read_files", tuple(self.read_files))
-        object.__setattr__(self, "modified_files", tuple(self.modified_files))
+        retained: list[AgentMessage] = []
+        for message in self.retained_messages:
+            if not isinstance(
+                message, (UserMessage, AssistantMessage, ToolResultMessage)
+            ):
+                raise TypeError(
+                    "HistoryCompaction.retained_messages 必须是 AgentMessage"
+                )
+            # 通过现有 codec 复制一次，确保嵌套 arguments 也不可变。
+            retained.append(agent_message_from_dict(agent_message_to_dict(message)))
+        object.__setattr__(self, "retained_messages", tuple(retained))
+        object.__setattr__(
+            self, "read_files", _normalized_string_tuple(self.read_files, "read_files")
+        )
+        object.__setattr__(
+            self,
+            "modified_files",
+            _normalized_string_tuple(self.modified_files, "modified_files"),
+        )
 
 
 ConversationContent = AgentMessage | HistoryCompaction
@@ -64,7 +84,9 @@ class ConversationNode:
         content = self.content  # type: ignore[assignment]
         payload = {
             "summary": content.summary,
-            "first_kept_node_id": content.first_kept_node_id,
+            "retained_messages": [
+                agent_message_to_dict(message) for message in content.retained_messages
+            ],
         }
         if content.read_files:
             payload["read_files"] = list(content.read_files)
@@ -91,16 +113,27 @@ class ConversationNode:
             _validate_agent_message_object(value)
             content: ConversationContent = agent_message_from_dict(value)
         elif content_type == "history_compaction":
-            _require_keys(value, {"summary", "first_kept_node_id"})
+            keys = {"summary", "retained_messages", "read_files", "modified_files"}
+            if not set(value).issubset(keys) or not {
+                "summary",
+                "retained_messages",
+            }.issubset(value):
+                _require_keys(value, {"summary", "retained_messages"})
             if not isinstance(value["summary"], str):
                 raise TypeError("summary 必须是字符串")
-            first = value["first_kept_node_id"]
-            if first is not None and not isinstance(first, str):
-                raise TypeError("first_kept_node_id 必须是字符串或 null")
+            retained_value = value["retained_messages"]
+            if not isinstance(retained_value, list):
+                raise TypeError("retained_messages 必须是 AgentMessage 列表")
+            retained: list[AgentMessage] = []
+            for item in retained_value:
+                if not isinstance(item, dict):
+                    raise TypeError("retained_messages 中的消息必须是 JSON object")
+                _validate_agent_message_object(item)
+                retained.append(agent_message_from_dict(item))
             read_files = _string_tuple(value, "read_files")
             modified_files = _string_tuple(value, "modified_files")
             content = HistoryCompaction(
-                value["summary"], first, read_files, modified_files
+                value["summary"], tuple(retained), read_files, modified_files
             )
         else:
             raise ValueError(f"不支持的 content_type: {content_type!r}")
@@ -122,6 +155,14 @@ def _string_tuple(value: dict[str, Any], key: str) -> tuple[str, ...]:
     if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
         raise TypeError(f"{key} 必须是字符串列表")
     return tuple(items)
+
+
+def _normalized_string_tuple(items: Any, key: str) -> tuple[str, ...]:
+    if not isinstance(items, (list, tuple)) or not all(
+        isinstance(item, str) for item in items
+    ):
+        raise TypeError(f"{key} 必须是字符串序列")
+    return tuple(sorted(set(items)))
 
 
 def _encode_json(value: dict[str, Any]) -> str:

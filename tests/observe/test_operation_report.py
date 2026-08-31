@@ -29,7 +29,7 @@ def test_report_uses_current_session_and_conversation_node_contract(tmp_path) ->
     )
     service.append_history_compaction(
         session_id="report-session",
-        content=HistoryCompaction("summary", "user-node"),
+        content=HistoryCompaction("summary", (UserMessage((TextBlock("hello"),)),)),
     )
     service.append_assistant_message(
         session_id="report-session",

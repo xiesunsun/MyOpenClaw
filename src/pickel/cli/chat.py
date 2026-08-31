@@ -392,6 +392,14 @@ class ChatLoop:
         await self._render_context_command()
         return True
 
+    async def _command_compact(self, _arg: str | None) -> bool:
+        result = await self._conversation.compact_history()
+        if result.succeeded:
+            self._render_system_message(result.message)
+        else:
+            self._render_error_message(f"{result.code}: {result.message}")
+        return True
+
     def _command_observe(self, arg: str | None) -> bool:
         argument = (arg or "").strip()
         if argument == "export" or argument.startswith("export "):

@@ -54,12 +54,20 @@ from pickel.observe.jsonl_trace_sink import (
 )
 from pickel.telemetry.records import observation_scope
 from pickel.providers.stream import TextDelta, ThinkingDelta, ToolCallArgsDelta
+from pickel.context.history_compaction import HistoryCompactionError
+from pickel.runtime.history_compaction_service import HistoryCompactionService
+from pickel.runtime.history_compaction_worker import (
+    ModelBackedHistoryCompactionGenerator,
+)
+from pickel.model_calls.service import ModelCallService
+from pickel.runtime.model_call_send_gate import ModelCallSendGate
+from pickel.runtime.worker_call_sender import WorkerCallSender, WorkerCallSendError
 from pickel.operations.operation_service import OperationService
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import ChildAgentSnapshot, DelegationService
 from pickel.operations.agent_run_state import AgentRunError
-from pickel.runtime.agent import Agent
+from pickel.runtime.agent import Agent, ManualHistoryCompactionResult
 from pickel.runtime.agent_registry import AgentRegistry
 from pickel.runtime.runtime_effects import RuntimeEffects
 from pickel.runtime.runtime_events import (
@@ -536,6 +544,97 @@ class RuntimeHost:
         )
         self._artifact_services[key] = (store, artifact_service)
         return artifact_service
+
+    @staticmethod
+    def _manual_history_compaction_hooks(
+        *,
+        agent: Agent,
+        loaded: LoadedAgentPackage,
+        store: CompositionStore,
+        service: ConversationService,
+        compaction_service: HistoryCompactionService,
+    ) -> None:
+        """把严格 idle 手动压缩接到当前 Agent，不经过 OperationDriver。"""
+
+        session_id = agent.session_id
+        model_policy = loaded.version.model_policy
+        runtime_policy = loaded.version.runtime_policy
+        worker_provider = loaded.model_clients.get("worker")
+        worker_model = model_policy.worker
+        worker_limit = (
+            worker_model.effective_input_token_limit()
+            if worker_model is not None
+            else None
+        )
+        model_calls = ModelCallService(store)
+        send_gate = ModelCallSendGate(store)
+        sender = WorkerCallSender(model_calls=model_calls, send_gate=send_gate)
+
+        def idle_check() -> bool:
+            session = service.load_conversation_session(session_id)
+            return (
+                session.archived_at is None
+                and session.active_operation_id is None
+                and not store.list_pending(session_id=session_id)
+            )
+
+        async def compact():
+            if worker_provider is None or worker_model is None or worker_limit is None:
+                return ManualHistoryCompactionResult(
+                    code="history_compaction_unavailable",
+                    message="当前 LoadedAgentPackage 未配置可用 worker model",
+                )
+            if worker_limit < 1:
+                return ManualHistoryCompactionResult(
+                    code="history_compaction_worker_limit_unavailable",
+                    message="无法取得当前 worker 模型的有效输入上限",
+                )
+            # 这里再次读取 leaf；Agent 已经持有 drive lock，期间 Inbox 只能
+            # 留在 pending，不能被 AgentDriver claim。
+            session = service.load_conversation_session(session_id)
+            try:
+                node = await compaction_service.compact(
+                    session_id=session_id,
+                    expected_leaf_node_id=session.active_node_id,
+                    model_context=None,
+                    send_summarizer=lambda **kwargs: sender(
+                        session_id=session_id,
+                        context=kwargs["context"],
+                        purpose=kwargs["purpose"],
+                        worker_provider=worker_provider,
+                        runtime_policy=runtime_policy,
+                        provider_timeout_seconds=600.0,
+                    ),
+                    max_summary_tokens=runtime_policy.compaction_max_summary_tokens,
+                    preserve_tail_tokens=runtime_policy.compaction_tail_tokens,
+                    worker_input_limit=worker_limit,
+                )
+            except HistoryCompactionError as exc:
+                return ManualHistoryCompactionResult(exc.code, str(exc))
+            except WorkerCallSendError as exc:
+                return ManualHistoryCompactionResult(
+                    "worker_send_failed", f"worker 压缩调用失败：{exc}"
+                )
+            except RuntimeError as exc:
+                if "leaf CAS 冲突" in str(exc):
+                    return ManualHistoryCompactionResult(
+                        "history_compaction_leaf_conflict",
+                        "压缩 leaf 已变化，拒绝把旧摘要挂到新历史上",
+                    )
+                return ManualHistoryCompactionResult(
+                    "history_compaction_failed", f"手动历史压缩失败：{exc}"
+                )
+            except Exception as exc:  # noqa: BLE001 — 手动入口返回稳定错误
+                return ManualHistoryCompactionResult(
+                    "history_compaction_failed", f"手动历史压缩失败：{exc}"
+                )
+            return ManualHistoryCompactionResult(
+                code="ok", message="历史压缩完成", node_id=node.node_id
+            )
+
+        agent.configure_manual_history_compaction(
+            compactor=compact, idle_check=idle_check
+        )
 
     def _schedule_settled_parent_wake(
         self, store: CompositionStore, session_id: str
@@ -1203,6 +1302,9 @@ class RuntimeHost:
         package_handle = generation.acquire_loaded_package(
             loaded.version.package_version_id
         )
+        history_compaction_service = HistoryCompactionService(
+            service, ModelBackedHistoryCompactionGenerator()
+        )
         previous_agent = self._agent_registry.get(session.session_id)
         try:
             store.insert_agent_package_version(loaded.version)
@@ -1255,6 +1357,14 @@ class RuntimeHost:
                         session.session_id
                     ),
                     release_operation_package=self._release_operation_package,
+                    history_compaction_service=history_compaction_service,
+                )
+                self._manual_history_compaction_hooks(
+                    agent=agent,
+                    loaded=loaded,
+                    store=store,
+                    service=service,
+                    compaction_service=history_compaction_service,
                 )
             conversation = ConversationRuntime(
                 loaded_agent_package=loaded,

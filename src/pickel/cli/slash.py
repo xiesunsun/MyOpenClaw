@@ -114,6 +114,12 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
         ),
         SlashCommand("context", "Show context usage", "/context", "_command_context"),
         SlashCommand(
+            "compact",
+            "Compact history while the session is idle",
+            "/compact",
+            "_command_compact",
+        ),
+        SlashCommand(
             "plan",
             "Enter read-only planning mode",
             "/plan [off|initial plan]",

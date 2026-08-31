@@ -17,46 +17,24 @@ class ConversationProjector:
     ) -> list[AgentMessage]:
         if not nodes:
             return []
-
-        # 从 leaf 向前查找最后一个合法压缩。后续节点可能属于新分支，
-        # 但输入路径本身已经由 Store 固定为单条 active leaf 链。
-        for index in range(len(nodes) - 1, -1, -1):
-            node = nodes[index]
-            if node.content_type != "history_compaction":
-                continue
-            result = self._project_with_compaction(nodes, index, node.content)
-            if result is not None:
-                return result
-        return [node.content for node in nodes if node.content_type == "agent_message"]
-
-    def _project_with_compaction(
-        self,
-        nodes: Sequence[ConversationNode],
-        compaction_index: int,
-        compaction: HistoryCompaction,
-    ) -> list[AgentMessage] | None:
-        first_kept_node_id = compaction.first_kept_node_id
-        if first_kept_node_id is None:
-            return None
-        first_kept_index = next(
-            (
-                index
-                for index, node in enumerate(nodes[:compaction_index])
-                if node.node_id == first_kept_node_id
-            ),
-            None,
-        )
-        if first_kept_index is None:
-            return None
-
-        messages: list[AgentMessage] = [
-            UserMessage(
-                content=(TextBlock(text=f"[compaction]\n{compaction.summary}"),)
+        messages: list[AgentMessage] = []
+        if nodes[0].content_type == "history_compaction":
+            checkpoint = nodes[0].content
+            if not isinstance(checkpoint, HistoryCompaction):
+                raise TypeError("history_compaction 节点必须包含 HistoryCompaction")
+            messages.append(
+                UserMessage(
+                    content=(TextBlock(text=f"[compaction]\n{checkpoint.summary}"),)
+                )
             )
-        ]
-        messages.extend(
-            node.content
-            for node in nodes[first_kept_index:]
-            if node.content_type == "agent_message"
-        )
+            messages.extend(checkpoint.retained_messages)
+            tail = nodes[1:]
+        else:
+            tail = nodes
+
+        if any(node.content_type != "agent_message" for node in tail):
+            raise ValueError(
+                "ConversationProjector 输入合同无效: checkpoint 只能是首节点"
+            )
+        messages.extend(node.content for node in tail)
         return messages

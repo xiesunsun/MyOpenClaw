@@ -1,8 +1,8 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**更新日期**：2026-08-28
-**状态**：当前合同；Runtime/ModelCall 命名已实施，Context/Tool 输出包含后续目标合同
+**更新日期**：2026-08-31
+**状态**：当前合同；HistoryCompaction 自包含 checkpoint 为待实施目标合同
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -149,15 +149,15 @@ ConversationNode 直接保存 `agent_message` 或 `history_compaction` 内容。
 ConversationProjector
     Conversation Tree → Conversation Messages
 
-OperationDriver token preflight
-    精确计数优先；不可用时复用 Provider usage 前缀锚并估算新增尾部
-    超过有效输入阈值时请求 HistoryCompaction 后重新投影
-
 RuntimeEffects
     Conversation Messages → Recall/Hook ContextContributions
 
 ModelContextBuilder
-    Package + Conversation Messages + Contributions → ModelContext
+    Package + Conversation Messages + Contributions → Candidate ModelContext
+
+OperationDriver token preflight
+    精确计数优先；不可用时复用 Provider usage 前缀锚并估算新增尾部
+    超过有效输入阈值时请求 HistoryCompaction 后重新构建
 
 Provider Request Mapper
     ModelContext → Provider wire request
@@ -165,9 +165,10 @@ Provider Request Mapper
 
 | 名称 | 唯一职责 |
 | --- | --- |
-| `ConversationProjector` | 沿固定 leaf 投影 AgentMessage 和 HistoryCompaction |
-| `OperationDriver` token preflight | 每次请求前按精确计数、usage 锚或显式估算得到 Context 占用，并与冻结模型容量比较；不生成摘要 |
-| `HistoryCompactionGenerator` | 将选定历史生成一个 `HistoryCompaction` 内容值；不决定阈值、不提交节点、不重新投影 |
+| `ConversationProjector` | 将 stop-at-checkpoint 查询结果纯投影为 AgentMessage |
+| `OperationDriver` token preflight | 每次请求前按精确计数、usage 锚或显式估算得到候选 Context 占用，并与冻结模型容量比较；不生成摘要 |
+| `HistoryCompactionService` | 校验 expected leaf、读取最近 checkpoint 至 leaf、调用 Generator 并按同一 leaf 追加 checkpoint；不决定触发与模型 |
+| `HistoryCompactionGenerator` | 将 Provider-neutral 逻辑历史生成一个 `HistoryCompaction` 内容值；不读取 Node/Store、不决定阈值、不提交节点 |
 | `ContextContributions` | Recall/Hook 返回的深度不可变追加数据 |
 | `ModelContextBuilder` | 创建唯一 Provider-neutral ModelContext |
 | `ModelContext` | 深度不可变的 system/messages/tools |
@@ -207,20 +208,22 @@ compaction_threshold = min(
 `1024` 或其他无法解释的安全常数。Provider 无法给出精确计数时必须显式进入
 `anchor`、`anchor_plus_tail` 或 `estimated` 路径，不能伪装成 `counted`。
 
-HistoryCompaction 的触发、生成和提交保持三个接缝：token preflight 只触发，
-`HistoryCompactionGenerator` 只产出内容，OperationDriver 通过 ConversationService 追加节点并
-重新投影。原始 Conversation Tree 始终保留。协议与 `SummarizerSender` 窄回调定义在 `context`；
-生产默认实现 `ModelBackedHistoryCompactionGenerator` 位于 `runtime`，使用冻结 Package 的
-worker model 生成固定骨架的中文结构化检查点，具体实现仍可替换。worker 调用的记账与退避
-重试由 `WorkerCallSender` 统一承担，复用 `AgentRuntimePolicy` 的 `worker_request_*` 策略。
+HistoryCompaction 的触发、生成和提交保持窄接缝：token preflight 只触发；
+`HistoryCompactionService` 复用 expected leaf 校验、stop-at-checkpoint 读取与 CAS 追加；
+`HistoryCompactionGenerator` 只产出内容。原始 Conversation Tree 始终保留，正常 Context 读取
+遇到最近 checkpoint 即停止，不读取更旧祖先。checkpoint 自包含 `summary`、
+`retained_messages` 与 `read_files`/`modified_files`，不保存 `first_kept_node_id`。
+协议与 `SummarizerSender` 窄回调定义在 `context`；生产默认实现
+`ModelBackedHistoryCompactionGenerator` 位于 `runtime`，worker 调用的记账与有界重试由
+`WorkerCallSender` 承担。
 
-压缩预算随 Package 冻结：`compaction_max_summary_tokens` 约束摘要输出，`compaction_tail_tokens`
-约束尾部原样保留量；摘要不小于被压缩区域（no_shrink）或超出输出预算即压缩无效，记录诊断后
-以全量 Context 降级继续。配置缺失与结构性超限（压缩提交后仍超阈值）保持快速失败。
-`HistoryCompaction` 携带 `read_files`/`modified_files` 文件账本，由被压缩区域的内置读写工具
-调用确定性提取并合并前序压缩账本，跨压缩累积回喂；超限 tool result 只在摘要输入端截断，
-历史节点不被改写。Provider 报告上下文窗口溢出时，Runtime 识别 `context_window_exceeded`，
-强制压缩一次后回退准备阶段重建 Intent 重试；恢复不可用则按原溢出错误进入终态。
+压缩预算随 Package 冻结：`compaction_max_summary_tokens` 约束摘要输出，
+`compaction_tail_tokens` 约束 checkpoint 内原样保留消息。worker 只接收本次被替代的逻辑前缀：
+重复压缩时包含 previous summary，不包含新 retained tail。摘要为空、超预算、没有收缩、worker
+失败、CAS 冲突或压缩后仍超阈值，均直接使当前入口失败，不以全量 Context 降级继续。
+Provider 报告 `context_window_exceeded` 时按普通 Provider 失败收敛，不触发恢复压缩。自动压缩后
+重新构建候选 Context，允许 Recall 和 `before_request` Hook 再执行一次；最终 Intent 只保存第二次
+构建结果。完整细节遵循 [`HistoryCompaction 压缩设计方案`](./2026-08-30-history-compaction-design.md)。
 
 Provider Mapper 将已提交 `ModelContext` 映射为内存值对象 `PreparedModelCall`；该对象
 包含即将发送的完整 wire body，保存和发送必须复用同一个不可变值。Provider 不再通过

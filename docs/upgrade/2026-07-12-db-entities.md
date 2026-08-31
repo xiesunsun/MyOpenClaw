@@ -1,8 +1,8 @@
 # 数据库实体设计
 
 **初稿日期**：2026-07-12
-**更新日期**：2026-08-27
-**状态**：当前合同；SQLite v12 ModelCall 已实施，v11 为一次性迁移来源
+**更新日期**：2026-08-31
+**状态**：当前合同；SQLite v12 已实施，HistoryCompaction 内容升级目标为 v13
 **范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
 **不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 
@@ -135,6 +135,20 @@ ON conversation_nodes(session_id, parent_node_id);
 ```
 
 `active_node_id` 是当前选中分支终点。沿 parent 回溯使用 `node_id` PK；查询 child 分支使用上述索引。不增加 Closure Table、materialized path、Branch 或 Lane 表。
+
+`history_compaction` 的目标内容为自包含 checkpoint：
+
+```text
+summary
+retained_messages[]
+read_files[]
+modified_files[]
+```
+
+`retained_messages` 直接保存 Provider-neutral AgentMessage 值，不保存 Node 引用；
+`first_kept_node_id` 在 v13 删除。审计读取仍沿 parent 读取完整分支；正常 Context 读取使用
+`list_context_nodes(session_id, leaf_node_id)`，递归遇到最近 `history_compaction` Node 后停止并
+包含该 Node。完整语义遵循 [`HistoryCompaction 压缩设计方案`](./2026-08-30-history-compaction-design.md)。
 
 ## 5. `agent_inbox_messages`
 
@@ -504,7 +518,16 @@ in_flight → CAS 标记 incomplete，再创建新 attempt
 
 ## 15. Schema 与迁移
 
-目标 Runtime 只读写 SQLite v12，不保留 v11/v12 双读写。v11 → v12 事务迁移：
+目标 Runtime 在压缩升级完成后只读写 SQLite v13，不保留 v12/v13 双读写。v12 → v13
+只升级 `history_compaction` 的 `content_json`，不新增表或列：
+
+1. 对每个旧 checkpoint 沿同 Session parent 链验证并定位 `first_kept_node_id`；
+2. 将旧投影会原样保留的 AgentMessage 值复制为 `retained_messages`；
+3. 保留 summary 与文件账本，删除 `first_kept_node_id`；
+4. 严格解码并 round-trip 校验全部新内容后设置 schema version 13；
+5. 空、跨 Session、不可达引用或不可解码内容使整次迁移回滚并保留 v12 备份。
+
+既有 v11 → v12 事务迁移保持为历史来源：
 
 1. 创建 `model_calls` 表、CHECK、复合外键和 partial UNIQUE index；
 2. 既有历史没有可靠完整 Request/Response，不伪造 ModelCall，也不从 Trace 回填；
@@ -549,3 +572,5 @@ in_flight → CAS 标记 incomplete，再创建新 attempt
 12. ResponseContent 与 AssistantMessage 原子可见，不出现已提交回答缺少 ModelCall 响应。
 13. prepared 恢复复用同一 attempt；in_flight 恢复先收敛 incomplete 再创建新 attempt。
 14. v11 → v12 不从可丢失 Trace 伪造历史 ModelCall。
+15. v12 → v13 将有效旧 checkpoint 转换为等价自包含投影；坏引用使迁移整体回滚。
+16. checkpoint 之后的正常 Context 查询在 SQLite 递归层停止，不先读取完整旧祖先。

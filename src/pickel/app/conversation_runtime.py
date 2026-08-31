@@ -64,7 +64,11 @@ from pickel.providers.stream import (
     ToolCallArgsDelta,
 )
 from pickel.app.runtime_generation import LoadedPackageHandle
-from pickel.runtime.agent import Agent, AgentBusyError
+from pickel.runtime.agent import (
+    Agent,
+    AgentBusyError,
+    ManualHistoryCompactionResult,
+)
 from pickel.extensions_host.event_processor import EventProcessor
 from pickel.shared.conversation_mode import ConversationMode
 from pickel.shared.collaboration import CollaborationMode, CollaborationState
@@ -219,6 +223,15 @@ class ConversationRuntime:
     async def start_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
         with observation_scope(self._trace_sink):
             return await self._execute_agent_run(request)
+
+    async def compact_history(self) -> ManualHistoryCompactionResult:
+        """显式手动压缩；不创建 Operation，也不执行 Context 副作用。"""
+
+        if self._closed:
+            return ManualHistoryCompactionResult(
+                code="session_busy", message="Conversation 已关闭，不能手动压缩历史"
+            )
+        return await self._agent.compact_history()
 
     async def _execute_agent_run(self, request: AgentRunRequest) -> AgentRunResult:
         if self._closed:

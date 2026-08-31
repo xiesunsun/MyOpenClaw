@@ -48,6 +48,7 @@ from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvid
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
+from pickel.runtime.history_compaction_service import HistoryCompactionService
 from pickel.runtime.history_compaction_worker import (
     ModelBackedHistoryCompactionGenerator,
 )
@@ -346,6 +347,7 @@ class Boot:
         collaboration_state_provider: (
             Callable[[str], CollaborationState | None] | None
         ) = None,
+        history_compaction_service: HistoryCompactionService | None = None,
     ) -> Agent:
         """装配一个 Agent；持久化依赖仅通过窄 Store port 传入。"""
         conversation_store = store
@@ -380,6 +382,11 @@ class Boot:
             model_calls=model_call_service,
             send_gate=model_call_send_gate,
         )
+        if history_compaction_service is None:
+            history_compaction_service = HistoryCompactionService(
+                ConversationService(conversation_store),
+                ModelBackedHistoryCompactionGenerator(),
+            )
         operation_driver = OperationDriver(
             operation_service=operation_service,
             conversation_service=ConversationService(conversation_store),
@@ -398,7 +405,7 @@ class Boot:
             ),
             model_call_service=model_call_service,
             model_call_send_gate=model_call_send_gate,
-            history_compaction_generator=ModelBackedHistoryCompactionGenerator(),
+            history_compaction_service=history_compaction_service,
             worker_sender=worker_call_sender,
             collaboration_state_provider=collaboration_state_provider,
             release_operation_package=release_operation_package,

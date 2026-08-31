@@ -30,9 +30,20 @@ class ConversationStore(Protocol):
         expected_node_id: str | None,
     ) -> bool: ...
 
+    def append_history_compaction(
+        self,
+        *,
+        node: ConversationNode,
+        expected_node_id: str | None,
+    ) -> bool: ...
+
     def load_node(self, node_id: str) -> ConversationNode | None: ...
 
     def list_branch_nodes(
+        self, session_id: str, leaf_node_id: str | None
+    ) -> tuple[ConversationNode, ...]: ...
+
+    def list_context_nodes(
         self, session_id: str, leaf_node_id: str | None
     ) -> tuple[ConversationNode, ...]: ...
 
