@@ -649,7 +649,12 @@ class ChatLoop:
         外加从 Session 派生的真实 API usage。只读：不跑 hook、不执行 recall、
         不写 Session。
         """
-        inspection = await self._conversation.inspect_context()
+        try:
+            inspection = await self._conversation.inspect_context()
+        except Exception as exc:
+            # 诊断命令失败不能退出交互循环；具体错误仍展示给用户，便于定位。
+            self._render_error_message(f"读取 Context 失败: {exc}")
+            return
         renderable = self._context_renderer.render(
             inspection.usage,
             last_turn=inspection.last_turn,

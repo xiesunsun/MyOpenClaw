@@ -517,8 +517,14 @@ class ConversationRuntime:
         # 指针查找当前 Operation；request_ready 时直接使用已提交 Intent，
         # 不重新执行 Context、Recall 或 Hook 管道。
         self._refresh_session()
-        nodes = self._conversation_service.list_active_branch_nodes(
+        # 完整分支用于审计统计；模型 Context 必须从最近 checkpoint 开始，
+        # 否则会把 checkpoint 夹在旧消息中间，违反 Projector 的输入合同。
+        raw_nodes = self._conversation_service.list_active_branch_nodes(
             session_id=self._session.session_id
+        )
+        context_nodes = self._conversation_service.list_context_nodes(
+            session_id=self._session.session_id,
+            leaf_node_id=self._session.active_node_id,
         )
         source = "preview"
         context = None
@@ -531,7 +537,9 @@ class ConversationRuntime:
                 source = "model_request_intent"
 
         if context is None:
-            messages = ConversationProjector().project_conversation_messages(nodes)
+            messages = ConversationProjector().project_conversation_messages(
+                context_nodes
+            )
             visible = messages
             context = ModelContextBuilder().build_model_context(
                 package=self._loaded_agent_package.version,
@@ -574,7 +582,7 @@ class ConversationRuntime:
             turns=sum(1 for message in context.messages if message.role == "user"),
             tool_calls=tool_calls,
             compactions=sum(
-                1 for node in nodes if node.content_type == "history_compaction"
+                1 for node in raw_nodes if node.content_type == "history_compaction"
             ),
             tool_definitions=len(context.tools),
             source=source,

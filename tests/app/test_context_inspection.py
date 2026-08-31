@@ -8,8 +8,9 @@ from unittest.mock import patch
 from pickel.app.runtime_host import RuntimeHost
 from pickel.app.runtime_models import ConversationRequest
 from pickel.context.model_context import ModelContext, SystemContent
-from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.agent_message import AssistantMessage, UserMessage
 from pickel.conversations.content_blocks import TextBlock
+from pickel.conversations.conversation_node import HistoryCompaction
 from pickel.inbox.message import UserMessageSource
 from pickel.operations.agent_run_state import ModelRequestIntent, ModelStepState
 from pickel.operations.operation_service import OperationService
@@ -127,4 +128,49 @@ def test_context_inspection_preview_does_not_read_past_model_calls(
 
     assert inspection.source == "preview"
     list_calls.assert_not_called()
+    asyncio.run(host.shutdown())
+
+
+def test_context_inspection_projects_from_checkpoint_after_followup_messages(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PICKEL_HOME", str(tmp_path / "home"))
+    host = RuntimeHost(_boot(tmp_path))
+    conversation = host.open_conversation(
+        ConversationRequest(agent_id="Pickle", cwd=tmp_path)
+    )
+    service = conversation._conversation_service
+    session_id = conversation.session.session_id
+
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage((TextBlock("old input"),)),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage((TextBlock("old answer"),)),
+    )
+    service.append_history_compaction(
+        session_id=session_id,
+        content=HistoryCompaction(
+            summary="old conversation summary",
+            retained_messages=(UserMessage((TextBlock("retained"),)),),
+        ),
+    )
+    # 模拟压缩完成后继续对话；完整分支的首节点仍然是旧消息。
+    service.append_user_message(
+        session_id=session_id,
+        message=UserMessage((TextBlock("follow-up"),)),
+    )
+    service.append_assistant_message(
+        session_id=session_id,
+        message=AssistantMessage((TextBlock("follow-up answer"),)),
+    )
+
+    inspection = asyncio.run(conversation.inspect_context())
+
+    assert inspection.source == "preview"
+    assert inspection.compactions == 1
+    # checkpoint 展开为摘要 + retained_messages，再拼接 checkpoint 后的尾部。
+    assert inspection.turns == 3
     asyncio.run(host.shutdown())
