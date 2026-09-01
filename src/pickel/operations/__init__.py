@@ -12,6 +12,7 @@ from pickel.operations.agent_run_state import (
     ToolApprovalDecision,
     ToolCallState,
 )
+from pickel.operations.active_plan import ActivePlan, PlanItem, parse_active_plan
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.delegation_service import DelegationService
 from pickel.operations.session_operation import SessionOperation
@@ -31,6 +32,9 @@ __all__ = [
     "ApprovalService",
     "PendingToolApproval",
     "AgentRunState",
+    "ActivePlan",
+    "PlanItem",
+    "parse_active_plan",
     "AgentRunError",
     "AgentDelegation",
     "DelegationService",

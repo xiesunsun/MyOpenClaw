@@ -34,9 +34,11 @@ from pickel.operations.agent_run_state import (
     ToolApprovalDecision,
     ToolCallState,
 )
+from pickel.operations.active_plan import ActivePlan
 from pickel.operations.session_operation import SessionOperation
 from pickel.hooks.decisions import PreToolUseDecision
 from pickel.providers.stream import StreamCompleted, TextDelta
+from pickel.tools.update_plan import UPDATE_PLAN_INPUT_SCHEMA
 from pickel.model_calls.model_call import ModelCall, ModelCallError
 from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.service import AgentPreparedModelCall
@@ -1125,6 +1127,62 @@ async def test_recovery_after_compaction_node_does_not_invoke_worker_again():
 
 
 @_run_async
+async def test_checkpoint_with_new_message_is_not_treated_as_leaf_checkpoint():
+    class _CheckpointWithNewMessageConversation(_Conversation):
+        def load_conversation_session(self, session_id):
+            return SimpleNamespace(active_node_id="message-after-checkpoint")
+
+        def list_context_nodes(self, *, session_id, leaf_node_id):
+            return (
+                ConversationNode(
+                    node_id="compaction-1",
+                    session_id=session_id,
+                    parent_node_id="node-1",
+                    content_type="history_compaction",
+                    content=HistoryCompaction(
+                        summary="previous summary", retained_messages=()
+                    ),
+                    created_at=datetime.now(timezone.utc),
+                ),
+                ConversationNode(
+                    node_id=leaf_node_id,
+                    session_id=session_id,
+                    parent_node_id="compaction-1",
+                    content_type="agent_message",
+                    content=UserMessage((TextBlock("new message"),)),
+                    created_at=datetime.now(timezone.utc),
+                ),
+            )
+
+    package = _loaded_package().version
+    operations = _Operations(
+        replace(
+            _queued_state(),
+            status="running",
+            current_step=ModelStepState(
+                "step-1", 1, "preparing_request", 0, None, None, ()
+            ),
+        )
+    )
+    driver = OperationDriver(
+        operation_service=operations,
+        conversation_service=_CheckpointWithNewMessageConversation(),
+        package_loader=lambda _: package,
+        effects_resolver=lambda _: RuntimeEffects(provider=object()),
+        model_context_builder=_ContextBuilder(),
+    )
+
+    context = await driver._build_context(
+        operation=_operation(),
+        state=operations.state,
+        package=package,
+        effects=RuntimeEffects(provider=object()),
+    )
+
+    assert context.leaf_is_history_compaction is False
+
+
+@_run_async
 async def test_formal_context_keeps_complete_active_branch_without_turn_window():
     projected = tuple(
         UserMessage((TextBlock(f"message-{index}"),)) for index in range(8)
@@ -1712,6 +1770,48 @@ async def test_delegate_agent_safe_replay_uses_persisted_intent():
 
     assert result.status == "succeeded"
     assert seen == [DelegateAgentIntent(_operation().agent_package_version_id)]
+
+
+@_run_async
+async def test_update_plan_commits_active_plan_with_tool_result_atomically():
+    tool_message = AssistantMessage(
+        content=(
+            ToolCallBlock(
+                id="tool-1",
+                name="update_plan",
+                arguments={
+                    "plan": [
+                        {"step": "分析现有实现", "status": "completed"},
+                        {"step": "补充测试", "status": "in_progress"},
+                    ]
+                },
+            ),
+        )
+    )
+
+    async def execute_tool(*, operation, state, tool_call_id, host_calls):
+        del operation, state, host_calls
+        return _tool_result(tool_call_id, "update_plan", "updated")
+
+    operations = _Operations(_queued_state())
+    result = await _driver(
+        operations,
+        _Provider([tool_message, AssistantMessage(content=(TextBlock("done"),))]),
+        tool=execute_tool,
+        tool_name="update_plan",
+        input_schema=UPDATE_PLAN_INPUT_SCHEMA,
+        replay_policy="safe",
+    ).drive_operation("operation-1")
+
+    assert result.status == "succeeded"
+    assert result.state.active_plan is None
+    committed = [state for state, _ in operations.transition_calls]
+    assert any(
+        isinstance(state.active_plan, ActivePlan)
+        and state.active_plan.items[1].step == "补充测试"
+        and state.current_step is not None
+        for state in committed
+    )
 
 
 @_run_async

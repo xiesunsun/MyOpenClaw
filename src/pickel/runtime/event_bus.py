@@ -19,7 +19,11 @@ from pickel.telemetry.records import (
     SpanTimer,
     record_diagnostic,
 )
-from pickel.runtime.runtime_events import RuntimeEventBase, RuntimeEventHandler
+from pickel.runtime.runtime_events import (
+    STREAM_DELTA_EVENT_TYPES,
+    RuntimeEventBase,
+    RuntimeEventHandler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +56,13 @@ class EventBus:
         )
         self._next_event_sequence += 1
 
-        delivery_span = SpanTimer("pickel.event.delivery", stamped.envelope.identity)
+        # 流式 delta 是高基数 UI 数据。逐块 Span 会让一次模型输出产生数千条
+        # 重型 JSON 记录；Full Trace 由 Sink 汇总 delta，EventBus 只测量低基数事件。
+        delivery_span = (
+            None
+            if stamped.EVENT_TYPE in STREAM_DELTA_EVENT_TYPES
+            else SpanTimer("pickel.event.delivery", stamped.envelope.identity)
+        )
         try:
             for handler in list(self._handlers.values()):
                 try:
@@ -71,14 +81,17 @@ class EventBus:
                         )
                     )
         except asyncio.CancelledError:
-            delivery_span.finish(status="cancelled")
+            if delivery_span is not None:
+                delivery_span.finish(status="cancelled")
             raise
         except Exception as exc:
-            delivery_span.finish(
-                status="error",
-                error=ErrorInfo.from_exception(exc, kind="event_delivery"),
-            )
+            if delivery_span is not None:
+                delivery_span.finish(
+                    status="error",
+                    error=ErrorInfo.from_exception(exc, kind="event_delivery"),
+                )
             raise
         else:
-            delivery_span.finish()
+            if delivery_span is not None:
+                delivery_span.finish()
         return stamped

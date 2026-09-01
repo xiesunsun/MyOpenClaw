@@ -91,8 +91,7 @@ class _Provider(Provider):
     artifact_service = None
     request_cache_order = ("tools", "system", "messages")
 
-    def __init__(self, *, snapshot: bool = False) -> None:
-        self.snapshot_enabled = snapshot
+    def __init__(self) -> None:
         self.contexts: list[ModelContext] = []
 
     @classmethod
@@ -112,25 +111,6 @@ class _Provider(Provider):
     async def stream_prepared(self, prepared: PreparedModelCall):
         assert prepared.api_kind == "anthropic-messages"
         yield StreamCompleted(message=AssistantMessage(content=(TextBlock("ok"),)))
-
-    def request_snapshot(self, context: ModelContext) -> dict | None:
-        if not self.snapshot_enabled:
-            return None
-        return {
-            "system": context.system.as_text(),
-            "message_count": len(context.messages),
-        }
-
-
-class _Observer:
-    def __init__(self) -> None:
-        self.records = []
-
-    def wants(self, capability: str) -> bool:
-        return capability == "request_snapshot"
-
-    def record(self, record) -> None:
-        self.records.append(record)
 
 
 def _package(*, behavior: str = "Be helpful.") -> AgentPackageVersion:

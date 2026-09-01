@@ -1,8 +1,8 @@
 # Runtime 实体决策
 
 **日期**：2026-08-24  
-**更新日期**：2026-08-31
-**状态**：当前合同；HistoryCompaction 自包含 checkpoint 为待实施目标
+**更新日期**：2026-09-01
+**状态**：当前合同；ActivePlan 与 HistoryCompaction 自包含 checkpoint 已实施
 **范围**：Agent Runtime 中持久化实体、值对象、状态、快照、运行时对象和服务的抽象边界  
 **不在范围**：实施排期、数据库迁移步骤、Provider 协议字段
 
@@ -597,7 +597,7 @@ sequenceDiagram
 
 | 数据 | 生命周期 | 是否持久化 |
 | --- | --- | --- |
-| text/thinking/tool delta | EventBus 到 UI；full Trace 可选异步副本 | 不进入业务数据库 |
+| text/thinking/tool delta | EventBus 到 UI；Full Trace 每个 ModelCall 只保存汇总 | 不进入业务数据库 |
 | AssistantMessage Buffer | 当前 Provider 请求 | 否 |
 | 完整 AssistantMessage | ConversationNode | 是 |
 | Model Request Intent | ModelStepState | 是 |
@@ -610,8 +610,9 @@ sequenceDiagram
 响应完整、ResponseContent 已保存且 ToolCall Intent 已提交后执行，半个流式 ToolCall
 不得触发工具。
 
-逐 Chunk 业务持久化和客户端断线后的 Token 重放不在当前需求内。`TraceMode.full` 可以把
-Delta 异步写入可丢失诊断文件，但 ModelCall 的完整 RequestContent 和聚合
+逐 Chunk 业务持久化和客户端断线后的 Token 重放不在当前需求内。`TraceMode.full` 每个
+ModelCall 只异步写入一条可丢失的 `stream_delta_summary`，记录各类 Delta 的数量、字符数、
+UTF-8 字节数及首尾时序，不复制正文。ModelCall 的完整 RequestContent 和聚合
 ResponseContent 不依赖 Trace mode。未来若要求进程崩溃后仍保留每个原始 Chunk，再增加
 ModelCall 专属 durable chunk journal；Chunk 不写入 Conversation Tree。
 
@@ -647,6 +648,7 @@ classDiagram
         waiting_reason
         completed_step_count
         current_step
+        active_plan
         final_assistant_node_id
         error
         cancellation
@@ -672,6 +674,7 @@ agent_run_states
 - waiting_reason
 - completed_step_count
 - current_step_json
+- active_plan_json
 - final_assistant_node_id
 - error_json
 - cancellation_json
@@ -686,6 +689,7 @@ agent_run_states
 | `waiting_reason` | StateMachine 暂停执行时写入 | Host、恢复逻辑、UI | 区分等待批准和副作用协调 |
 | `completed_step_count` | ModelStep 完成时递增 | Driver、最大步数检查 | 生成下一 Step 顺序 |
 | `current_step_json` | Driver 通过 StateMachine 创建和推进 | Driver、恢复逻辑 | 保存当前唯一 ModelStep 和 ToolCalls |
+| `active_plan_json` | `update_plan` 成功后的状态转换 | Driver、恢复逻辑、ContextBuilder | 保存当前 Operation 工作记忆；终态为 NULL |
 | `final_assistant_node_id` | 最终 Assistant Node 提交成功后写入 | API、UI、Operation 查询 | 稳定引用本次 AgentRun 最终回答 |
 | `error_json` | RuntimeEffects 将异常转换为稳定错误后写入 | API、UI、恢复检查 | 保存终态失败摘要 |
 | `cancellation_json` | Agent 接受取消请求时写入 | Driver、API、UI、恢复检查 | 保存可恢复的取消意图及原因 |
@@ -888,6 +892,7 @@ class AgentRunState:
     waiting_reason: WaitingReason | None
     completed_step_count: int
     current_step: ModelStepState | None
+    active_plan: ActivePlan | None
     final_assistant_node_id: ConversationNodeId | None
     error: AgentRunError | None
     cancellation: Cancellation | None
@@ -3233,11 +3238,15 @@ operation/step/tool_call 描述“执行的是谁”；span_id/parent_span_id �
 | --- | --- |
 | `off` | 不记录 |
 | `standard` | fact、lifecycle、Span、Diagnostic |
-| `full` | standard + 可丢失 delta |
+| `full` | standard + 每个 ModelCall 一条可丢失的 `stream_delta_summary` |
 
 Trace 不进入业务数据库，不作为恢复来源，可以因容量限制丢失。Observer 错误不能进入执行路径。完整模型请求与聚合响应由第 20 节的 ModelCall 数据底座可靠保存，不再通过 `RequestSnapshotRecord` 旁路重建。
 
-`full` 模式中的 delta 可以由 TraceSink 异步追加到 JSONL 等诊断文件，并保留 `occurred_at` 与 ExecutionIdentity 以分析 TTFT 和流式中断；“记录”不提升其可靠性，丢帧或进程崩溃时不补发。企业合规审计若要求完整、可靠和可验证投递，必须另建事务性 Audit/Outbox，不能复用 Trace。
+`full` 模式不保存逐块正文，也不为逐块 delta 创建 `event.delivery` Span。TraceSink 在内存中按
+ModelCall 汇总 Delta，并异步追加一条带 ExecutionIdentity、首尾 `occurred_at`、首尾 sequence、
+分类计数和体积的 `stream_delta_summary`。该记录可用于判断流式规模和中断位置，但不能重建正文；
+“记录”不提升其可靠性，丢失或进程崩溃时不补发。企业合规审计若要求完整、可靠和可验证投递，
+必须另建事务性 Audit/Outbox，不能复用 Trace。
 
 当前不增加 observations、runtime_events、trace_spans 表，不引入 EventStore 或 Event-sourced AgentRunState。`model_calls` 是窄用途的 Provider 外部调用日志，承担调用前门禁和 attempt 恢复判断；它不是通用 Observation/Event 表，也不改变 AgentRunState、ConversationNode、InboxMessage 和 ToolCall Intent 的业务权威。
 
@@ -3683,7 +3692,7 @@ EvalCase、EvalRun、Score、FailureClassification、Trajectory 表或展示 DTO
 ModelRequestIntent              ModelCall
 ConversationNode                RequestContent
 AgentRunState                   ResponseContent
-AgentPackageVersion             可选 full Trace Delta
+AgentPackageVersion             可选 Full Trace Delta 汇总
 ```
 
 ModelCall 不是可丢失 Trace。它是窄用途持久化 Entity，也是 Provider 外部调用边界的可靠

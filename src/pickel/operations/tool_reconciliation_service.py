@@ -130,6 +130,7 @@ class ToolReconciliationService:
                     status="cancelled",
                     waiting_reason=None,
                     current_step=None,
+                    active_plan=None,
                 )
                 committed = self._operations.commit_transition(
                     state=next_state,

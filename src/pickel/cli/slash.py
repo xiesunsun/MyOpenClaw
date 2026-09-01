@@ -121,8 +121,8 @@ BUILTIN_SLASH_COMMANDS = SlashRegistry(
         ),
         SlashCommand(
             "plan",
-            "Enter read-only planning mode",
-            "/plan [off|initial plan]",
+            "Create a work plan and execute the task",
+            "/plan <task>",
             "_command_plan",
         ),
         SlashCommand(

@@ -17,6 +17,7 @@ from pickel.context.model_context_builder import (
     ContextContributions,
     ModelContextBuilder,
 )
+from pickel.operations.active_plan import ActivePlan, PlanItem
 from pickel.context.multi_agent_guidance import MULTI_AGENT_GUIDANCE
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
@@ -122,6 +123,69 @@ def test_builder_appends_contribution_messages(tmp_path) -> None:
     )
 
     assert context.messages[-1].content[0].text == "recalled"
+
+
+def test_builder_appends_active_plan_once_at_message_tail(tmp_path) -> None:
+    context = ModelContextBuilder().build_model_context(
+        package=_package(),
+        visible_messages=_visible_messages(tmp_path),
+        contributions=ContextContributions(
+            messages=(UserMessage(content=(TextBlock(text="hook"),)),)
+        ),
+        active_plan=ActivePlan(
+            items=(
+                PlanItem("done", "completed"),
+                PlanItem("now", "in_progress"),
+                PlanItem("later", "pending"),
+            )
+        ),
+    )
+
+    assert context.messages[-1].content[0].text == (
+        "<active_plan>\n\n# Work Plan\n\n"
+        "- [x] done\n- [~] now\n- [ ] later\n\n</active_plan>"
+    )
+
+
+def test_builder_adds_work_plan_guidance_only_for_update_plan_package() -> None:
+    package = _package()
+    with_update_plan = build_agent_package_version(
+        agent_id=package.agent_id,
+        format_version=package.format_version,
+        behavior_instruction=package.behavior_instruction,
+        model_policy=package.model_policy,
+        runtime_policy=package.runtime_policy,
+        workspace_policy=package.workspace_policy,
+        skills=package.skills,
+        tools=package.tools
+        + (
+            ToolVersion(
+                name="update_plan",
+                source=ToolSource.BUILTIN,
+                implementation_ref=ImplementationRef("builtin", "update_plan"),
+                version=None,
+                description="Update work plan",
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+                replay_policy="safe",
+            ),
+        ),
+        extensions=package.extensions,
+        created_at=package.created_at,
+    )
+
+    context = ModelContextBuilder().build_model_context(
+        package=with_update_plan, visible_messages=()
+    )
+    assert any(
+        section.name == "work_plan_guidance" for section in context.system.sections
+    )
+    assert not any(
+        section.name == "work_plan_guidance"
+        for section in ModelContextBuilder()
+        .build_model_context(package=package, visible_messages=())
+        .system.sections
+    )
 
 
 def test_builder_always_exposes_stable_multi_agent_lifecycle_guidance(tmp_path) -> None:

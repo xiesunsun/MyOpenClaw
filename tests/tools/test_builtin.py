@@ -33,6 +33,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 "list_agents",
                 "interrupt_agent",
                 "report",
+                "update_plan",
             },
             set(definitions),
         )
@@ -51,6 +52,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("from this Child", definitions["report"].description)
         self.assertIn("not the terminal result", definitions["report"].description)
+        self.assertIn("complete work plan", definitions["update_plan"].description)
 
         expected_defaults = {
             "ls": {"path": ".", "limit": 500},

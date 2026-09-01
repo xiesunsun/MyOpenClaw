@@ -1,8 +1,8 @@
 # Operation 持久化与恢复模型
 
 **日期**：2026-08-11  
-**更新日期**：2026-08-27
-**状态**：当前合同；v12 ModelCall 调用门禁与恢复主链已实施
+**更新日期**：2026-09-01
+**状态**：当前合同；ActivePlan 原子更新、SQLite v14 与 ModelCall 主链已实施
 **范围**：SessionOperation 接受、AgentRunState、ModelStepState、ModelCall、ToolCallState、Intent、审批、取消与崩溃恢复
 **不在范围**：Runtime 组件所有权、观测实现和 Provider wire 字段
 
@@ -17,6 +17,7 @@ ConversationSession.active_operation_id
     ├── workspace_binding_json
     ├── input_node_id
     └── AgentRunState                        当前一行，revision CAS
+        ├── active_plan?                     当前 Operation 工作记忆
         └── ModelStepState?                  current_step_json
             ├── ModelRequestIntent?
             ├── ModelCall[]                  每次真实 Provider 调用
@@ -193,8 +194,14 @@ ModelCall(prepared) 插入；退避只存在于内存，不增加 `retry_at`、�
 
 Provider 完整返回后必须先可靠保存聚合 ResponseContent，再在同一事务完成 ModelCall、
 Assistant ConversationNode 和 AgentRunState 转换。ResponseContent 保存失败时不得提交
-AssistantMessage。逐 Chunk 不进入业务数据库；full Trace 的副本不可用于恢复，也不能
-替代 ModelCall 内容。
+AssistantMessage。逐 Chunk 只进入实时 EventBus，不进入业务数据库；Full Trace 每个
+ModelCall 只保存一条不含正文的 `stream_delta_summary`。该摘要不可用于恢复，也不能替代
+ModelCall 内容。
+
+`update_plan` 是纯 Runtime Tool。成功后的 ToolResult、完成的 ToolCallState 和
+`AgentRunState.active_plan` 必须使用同一 revision CAS 提交；计划跨越 ModelStep，全部
+完成时写入 `NULL`。Operation 进入 `succeeded/failed/cancelled` 时，终态事务同时清空
+`active_plan`。
 
 ## 5. ToolCallState
 
@@ -375,6 +382,8 @@ CAS AgentRunState → succeeded / failed / cancelled
 + 若该 Session 是 delegated child：向 direct Parent 插入 pending settled steer
 + updated_at = now
 ```
+
+终态 `AgentRunState` 不得保留 `active_plan`。
 
 `succeeded` 必须引用 final_assistant_node_id；`failed` 必须保存稳定 AgentRunError；`cancelled` 必须保存 Cancellation。失败和取消不回滚已提交 ConversationNode。
 

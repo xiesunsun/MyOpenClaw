@@ -140,8 +140,9 @@ class AgentPackageBuilder:
         )
         behavior_instruction = BehaviorLoader.load(agent_config.behavior_path)
         skill_manifests = tuple(SkillRegistry.discover(skills_path))
+        active_tool_names = frozenset((*agent_config.tools, "update_plan"))
         tool_snapshot = self._tool_bus.snapshot(
-            ToolActivation(allowed=frozenset(agent_config.tools))
+            ToolActivation(allowed=active_tool_names)
         )
         return self._build_version(
             definition=definition,

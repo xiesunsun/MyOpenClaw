@@ -5,15 +5,9 @@ from pickel.context.model_context_builder import ModelContextBuilder
 from pickel.shared.collaboration import CollaborationState
 
 
-def test_plan_state_renders_read_only_instruction_and_normalizes_plan() -> None:
-    state = CollaborationState(
-        mode="plan",
-        plan=("  inspect repository  ", "", "design changes"),
-    )
-
-    assert state.plan == ("inspect repository", "design changes")
-    assert "Plan mode is active" in state.system_prompt()
-    assert "inspect repository" in state.system_prompt()
+def test_plan_mode_is_not_a_collaboration_state() -> None:
+    with pytest.raises(ValueError, match="不支持的协作模式"):
+        CollaborationState(mode="plan")
 
 
 def test_goal_state_requires_goal_and_renders_evidence_rule() -> None:
@@ -25,7 +19,7 @@ def test_goal_state_requires_goal_and_renders_evidence_rule() -> None:
     assert "可验证证据" in state.system_prompt()
 
 
-def test_context_builder_adds_collaboration_as_separate_system_section() -> None:
+def test_context_builder_keeps_goal_as_separate_system_section() -> None:
     package = type(
         "Package",
         (),
@@ -34,11 +28,11 @@ def test_context_builder_adds_collaboration_as_separate_system_section() -> None
     context = ModelContextBuilder().build_model_context(
         package=package,
         visible_messages=(),
-        collaboration=CollaborationState(mode="plan"),
+        collaboration=CollaborationState(mode="goal", goal="finish task"),
     )
 
     assert context.system.sections[-1].name == "collaboration_mode"
-    assert "只能检查和读取" in context.system.sections[-1].text
+    assert "finish task" in context.system.sections[-1].text
 
 
 def test_context_value_object_still_accepts_empty_tools() -> None:

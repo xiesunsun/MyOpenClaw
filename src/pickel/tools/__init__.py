@@ -16,6 +16,7 @@ from pickel.tools.bus import (
     bus_with,
 )
 from pickel.tools.services import ToolServices
+from pickel.tools.update_plan import update_plan
 
 __all__ = [
     "BaseTool",
@@ -32,4 +33,5 @@ __all__ = [
     "ToolSpec",
     "bus_with",
     "tool",
+    "update_plan",
 ]

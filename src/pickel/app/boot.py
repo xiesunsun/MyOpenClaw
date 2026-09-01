@@ -176,7 +176,12 @@ class Boot:
             )
         snapshot = self.tool_bus.snapshot(
             ToolActivation(
-                allowed=frozenset(self.app_config.get_agent_config(resolved_id).tools)
+                allowed=frozenset(
+                    (
+                        *self.app_config.get_agent_config(resolved_id).tools,
+                        "update_plan",
+                    )
+                )
             )
         )
         if {item.name for item in version.tools} != set(snapshot.names):
@@ -541,7 +546,7 @@ class Boot:
                 ),
             )
             try:
-                value = await entry.tool.execute(dict(call.arguments), context)
+                value = await entry.tool.execute(thaw_json(call.arguments), context)
                 validation_error = validate_tool_output(entry.tool, value)
                 if validation_error is not None:
                     return ToolResultMessage(

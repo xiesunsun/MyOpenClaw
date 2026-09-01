@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import threading
-import time
 from pathlib import Path
 
 import pickel.observe.jsonl_trace_sink as trace_module
 from pickel.config.paths import home_dir
 from pickel.telemetry.records import (
     DiagnosticRecord,
-    RequestSnapshotRecord,
     SpanRecord,
+    observation_scope,
 )
 from pickel.runtime.event_bus import EventBus
 from pickel.runtime.runtime_events import (
@@ -156,32 +153,36 @@ def test_落盘的_seq_与_bus_分配一致(tmp_path: Path):
     assert seqs == [0, 1]
 
 
-def test_delta_事件写入_jsonl_后可_json_loads_读回(tmp_path: Path):
-    """Task 4 新增的 4 个事件类型都必须能落盘成合法 JSON。"""
+def test_full_将逐块_delta汇总为单条记录(tmp_path: Path):
     path = tmp_path / "s1.jsonl"
     sink = JsonlTraceSink(path, TraceOptions(mode="full"))
     bus = EventBus()
     bus.subscribe(sink)
 
-    asyncio.run(_emit_deltas(bus))
+    with observation_scope(sink):
+        asyncio.run(_emit_deltas(bus))
     sink.close()
 
     records = [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").strip().splitlines()
     ]
-    assert [record["event_type"] for record in records] == [
-        "thinking_delta",
-        "text_delta",
-        "tool_call_args_delta",
-        "agent_run_interrupted",
+    assert [record["record_type"] for record in records] == [
+        "stream_delta_summary",
+        "runtime_event",
+        "span",
     ]
-    assert records[0]["text"] == "想"
-    assert records[1]["text"] == "你"
-    assert records[2]["tool_call_id"] == "call-1"
-    assert records[2]["partial_json"] == '{"text": "你'
-    assert records[3]["at_step"] == 1
-    assert records[3]["partial_text"] == "你"
+    summary = records[0]["payload"]
+    assert summary["delta_count"] == 3
+    assert summary["thinking"] == {"count": 1, "chars": 1, "utf8_bytes": 3}
+    assert summary["text"] == {"count": 1, "chars": 1, "utf8_bytes": 3}
+    assert summary["tool_call_args"] == {
+        "count": 1,
+        "chars": 11,
+        "utf8_bytes": 13,
+    }
+    assert records[1]["event_type"] == "agent_run_interrupted"
+    assert records[2]["payload"]["name"] == "pickel.event.delivery"
 
 
 def test_standard_不写逐块_delta(tmp_path: Path):
@@ -190,240 +191,52 @@ def test_standard_不写逐块_delta(tmp_path: Path):
     bus = EventBus()
     bus.subscribe(sink)
 
-    asyncio.run(_emit_deltas(bus))
+    with observation_scope(sink):
+        asyncio.run(_emit_deltas(bus))
     sink.close()
 
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert [record["event_type"] for record in records] == ["agent_run_interrupted"]
+    assert [record["record_type"] for record in records] == [
+        "runtime_event",
+        "span",
+    ]
+    assert records[0]["event_type"] == "agent_run_interrupted"
+    assert records[1]["payload"]["name"] == "pickel.event.delivery"
 
 
-def _delta_event(call_id: str = "call-1") -> ToolCallArgsDeltaEvent:
-    return ToolCallArgsDeltaEvent(
-        envelope=EventEnvelope(
-            identity=ExecutionIdentity(
-                session_id="s1",
-                operation_id="operation-1",
-                step_id="step-1",
-                step_sequence=1,
-                tool_call_id=call_id,
-            )
-        ),
-        partial_json="{}",
+def test_full_一万条delta仍保持常数级记录(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    sink = JsonlTraceSink(path, TraceOptions(mode="full"))
+    bus = EventBus()
+    bus.subscribe(sink)
+    envelope = EventEnvelope(
+        identity=ExecutionIdentity(
+            session_id="s1",
+            operation_id="operation-1",
+            step_id="step-1",
+            step_sequence=1,
+            model_call_id="model-call-1",
+        )
     )
 
+    async def emit_many() -> None:
+        for _ in range(10_000):
+            await bus.emit(TextDeltaEvent(envelope=envelope, text="字"))
 
-def _replace_put(sink: JsonlTraceSink, put):
-    sink._buffer.put = put
-
-
-def test_delta_queue_full只报告首个丢帧且保留身份(tmp_path: Path):
-    diagnostics = []
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=diagnostics.append,
-    )
-    _replace_put(sink, lambda _item: (False, None))
-
-    sink(_delta_event("call-1"))
-    sink(_delta_event("call-2"))
-    assert sink.flush() is True
+    with observation_scope(sink):
+        asyncio.run(emit_many())
     sink.close()
 
-    assert len(diagnostics) == 1
-    diagnostic = diagnostics[0]
-    assert diagnostic.name == "trace_delta_dropped"
-    assert diagnostic.level == "warning"
-    assert diagnostic.identity.tool_call_id == "call-1"
-    assert diagnostic.occurred_at.tzinfo is not None
-    assert diagnostic.attributes == {
-        "reason": "queue_full",
-        "event_type": "tool_call_args_delta",
-        "records_dropped": 1,
-        "delta_records_dropped": 1,
-        "queue_capacity": 1,
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["record_type"] == "stream_delta_summary"
+    assert records[0]["payload"]["delta_count"] == 10_000
+    assert records[0]["payload"]["text"] == {
+        "count": 10_000,
+        "chars": 10_000,
+        "utf8_bytes": 30_000,
     }
-
-
-def test_高优先级入队报告被淘汰_delta(tmp_path: Path):
-    diagnostics = []
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=diagnostics.append,
-    )
-    delta = _delta_event("call-1")
-    evicted = trace_module._QueuedRecord(
-        value={},
-        low_priority=True,
-        identity=delta.envelope.identity,
-        event_type="tool_call_args_delta",
-    )
-    calls = []
-
-    def put(item):
-        calls.append(item)
-        return (True, evicted) if not item.low_priority else (True, None)
-
-    _replace_put(sink, put)
-    sink(delta)
-    sink.record(DiagnosticRecord(name="important"))
-    assert sink.flush() is True
-    sink.close()
-
-    assert len(diagnostics) == 1
-    assert diagnostics[0].attributes["reason"] == "evicted_delta"
-    assert diagnostics[0].identity.tool_call_id == "call-1"
-    assert calls[-1].low_priority is False
-
-
-def test_delta成功入队后开启新的拥塞周期(tmp_path: Path):
-    diagnostics = []
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=diagnostics.append,
-    )
-
-    def reject(_item):
-        return (False, None)
-
-    def accept(item):
-        return (True, None)
-
-    _replace_put(sink, reject)
-    sink(_delta_event("call-1"))
-    assert sink.flush() is True
-    _replace_put(sink, accept)
-    sink(_delta_event("call-2"))
-    _replace_put(sink, reject)
-    sink(_delta_event("call-3"))
-    assert sink.flush() is True
-    sink.close()
-
-    assert [item.identity.tool_call_id for item in diagnostics] == [
-        "call-1",
-        "call-3",
-    ]
-
-
-def test_pending_diagnostic未发出时成功_delta不覆盖首条身份(tmp_path: Path):
-    diagnostics = []
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=diagnostics.append,
-    )
-    entered = threading.Event()
-    release = threading.Event()
-    original_emit = sink._emit_pending_diagnostic
-
-    def blocked_emit():
-        entered.set()
-        assert release.wait(1)
-        original_emit()
-
-    sink._emit_pending_diagnostic = blocked_emit
-    low_calls = 0
-
-    def put(item):
-        nonlocal low_calls
-        if not item.low_priority:
-            return True, None
-        low_calls += 1
-        return (False, None) if low_calls in {1, 3} else (True, None)
-
-    _replace_put(sink, put)
-    sink(_delta_event("call-1"))
-    assert entered.wait(1)
-    sink(_delta_event("call-2"))
-    sink(_delta_event("call-3"))
-
-    with sink._diagnostic_lock:
-        assert sink._pending_diagnostic is not None
-        assert sink._pending_diagnostic.identity.tool_call_id == "call-1"
-
-    release.set()
-    assert sink.flush() is True
-    sink.close()
-
-    assert [item.identity.tool_call_id for item in diagnostics] == ["call-1"]
-
-
-def test_diagnostic_callback重入_sink不会递归(tmp_path: Path):
-    diagnostics = []
-    callback_started = threading.Event()
-
-    def callback(diagnostic):
-        diagnostics.append(diagnostic)
-        callback_started.set()
-        sink.record(DiagnosticRecord(name="callback_record"))
-
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=callback,
-    )
-    _replace_put(sink, lambda _item: (False, None))
-    sink(_delta_event())
-    assert callback_started.wait(1)
-    sink.close()
-
-    assert len(diagnostics) == 1
-
-
-def test_close也会发出pending_diagnostic且只发一次(tmp_path: Path):
-    diagnostics = []
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=diagnostics.append,
-    )
-    _replace_put(sink, lambda _item: (False, None))
-    sink(_delta_event())
-    sink.close()
-    sink.close()
-
-    assert len(diagnostics) == 1
-
-
-def test_无callback时由writer记录一次warning(tmp_path: Path, caplog):
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-    )
-    _replace_put(sink, lambda _item: (False, None))
-    with caplog.at_level(logging.WARNING):
-        sink(_delta_event())
-        assert sink.flush() is True
-    sink.close()
-
-    assert [
-        record for record in caplog.records if "trace delta dropped" in record.message
-    ]
-
-
-def test_slow_diagnostic_callback不阻塞_enqueue(tmp_path: Path):
-    callback_started = threading.Event()
-    callback_release = threading.Event()
-
-    def callback(_diagnostic):
-        callback_started.set()
-        callback_release.wait(1)
-
-    sink = JsonlTraceSink(
-        tmp_path / "s1.jsonl",
-        TraceOptions(mode="full", queue_capacity=1),
-        diagnostic_callback=callback,
-    )
-    _replace_put(sink, lambda _item: (False, None))
-    started = time.perf_counter()
-    sink(_delta_event())
-    elapsed = time.perf_counter() - started
-    assert elapsed < 0.2
-    assert callback_started.wait(1)
-    callback_release.set()
-    sink.close()
+    assert path.stat().st_size < 2_000
 
 
 def test_observer_span_与_runtime_event_共用_trace_seq(tmp_path: Path):
@@ -476,41 +289,14 @@ def test_observation_identity_沿用旧的空_operation_id输出(tmp_path: Path)
     assert "message_id" not in record
 
 
-def test_完整请求快照只在_full_模式落盘(tmp_path: Path):
-    snapshot = RequestSnapshotRecord(
-        identity=ExecutionIdentity(session_id="s1", operation_id="t1", step_sequence=1),
-        provider="anthropic",
-        model="claude-test",
-        cache_order=("tools", "system", "messages"),
-        request={"system": "SECRET", "messages": []},
-    )
-    standard_path = tmp_path / "standard.jsonl"
-    standard = JsonlTraceSink(standard_path)
-    assert standard.wants("request_snapshot") is False
-    standard.record(snapshot)
-    standard.close()
-    assert standard_path.read_text() == ""
-
-    full_path = tmp_path / "full.jsonl"
-    full = JsonlTraceSink(full_path, TraceOptions(mode="full"))
-    assert full.wants("request_snapshot") is True
-    full.record(snapshot)
-    full.close()
-
-    record = json.loads(full_path.read_text())
-    assert record["record_type"] == "request_snapshot"
-    assert record["payload"]["cache_order"] == ["tools", "system", "messages"]
-    assert record["payload"]["request"]["system"] == "SECRET"
-
-
 def test_超过文件上限后轮转(tmp_path: Path):
     path = tmp_path / "s1.jsonl"
     sink = JsonlTraceSink(
         path,
         TraceOptions(mode="full", batch_size=1, max_file_size_mb=1),
     )
-    sink(TextDeltaEvent(text="x" * 1_100_000))
-    sink(TextDeltaEvent(text="y" * 10))
+    sink(AssistantMessageEvent(text="x" * 1_100_000))
+    sink(AssistantMessageEvent(text="y" * 10))
     sink.close()
 
     rotated = list(tmp_path.glob("s1.*.jsonl"))

@@ -1,15 +1,11 @@
-"""Agent 的 Goal/Plan 协作状态与模型行为约束。"""
+"""Agent 的 Goal 协作状态与模型行为约束。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
 
-CollaborationMode = Literal["normal", "plan", "goal"]
-
-# Plan 模式只允许检查和读取。自定义工具默认不在集合中，避免工具没有声明
-# 读写能力时被错误地当成只读工具。
-PLAN_READ_ONLY_TOOL_NAMES = frozenset({"ls", "glob", "grep", "read"})
+CollaborationMode = Literal["normal", "goal"]
 
 
 @dataclass(frozen=True)
@@ -23,33 +19,18 @@ class CollaborationState:
 
     mode: CollaborationMode = "normal"
     goal: str | None = None
-    plan: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.mode not in {"normal", "plan", "goal"}:
+        if self.mode not in {"normal", "goal"}:
             raise ValueError(f"不支持的协作模式: {self.mode!r}")
         if self.mode == "goal" and not self.goal:
             raise ValueError("Goal 模式必须提供 goal")
         if self.goal is not None and not self.goal.strip():
             raise ValueError("goal 不能是空白字符串")
-        steps = tuple(step.strip() for step in self.plan if step.strip())
-        object.__setattr__(self, "plan", steps)
 
     def system_prompt(self) -> str:
         """生成动态协作约束；真正的权限限制由 Runtime 另行执行。"""
 
-        if self.mode == "plan":
-            plan = "\n".join(
-                f"{index}. {step}" for index, step in enumerate(self.plan, 1)
-            )
-            plan_text = plan or "尚未形成计划。先理解需求，再输出可执行计划。"
-            return (
-                "Plan mode is active.\n"
-                "你当前只能检查和读取，不能修改文件、运行有副作用的命令或提交变更。\n"
-                "先完成：Initial Understanding、Design、Review；最后只输出计划，"
-                "不要开始执行计划。\n"
-                f"当前计划：\n{plan_text}"
-            )
         if self.mode == "goal":
             assert self.goal is not None
             return (
@@ -64,5 +45,4 @@ class CollaborationState:
 __all__ = [
     "CollaborationMode",
     "CollaborationState",
-    "PLAN_READ_ONLY_TOOL_NAMES",
 ]

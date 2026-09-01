@@ -15,6 +15,7 @@ from pickel.tools.send_message import send_message
 from pickel.tools.list_agents import list_agents
 from pickel.tools.report import report
 from pickel.tools.shell import BashTool
+from pickel.tools.update_plan import update_plan
 
 
 def builtin_tools() -> list[BaseTool]:
@@ -32,6 +33,7 @@ def builtin_tools() -> list[BaseTool]:
         list_agents,
         interrupt_agent,
         report,
+        update_plan,
     ]
 
 

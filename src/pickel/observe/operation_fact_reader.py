@@ -19,6 +19,7 @@ from pickel.model_calls.model_call import ModelCall
 from pickel.operations.agent_delegation import AgentDelegation
 from pickel.operations.agent_run_state import AgentRunState
 from pickel.operations.session_operation import SessionOperation
+from pickel.shared.frozen_json import thaw_json
 
 
 class FactStore(Protocol):
@@ -251,7 +252,7 @@ class OperationFactReader:
                     OperationToolFact(
                         tool_call_id=block.id,
                         name=block.name,
-                        arguments=dict(block.arguments),
+                        arguments=thaw_json(block.arguments),
                         result=(
                             agent_message_to_dict(result_message)
                             if result_message is not None

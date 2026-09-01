@@ -181,6 +181,22 @@ def test_pickel_package_uses_interrupt_tools_without_wait_or_legacy_cancel(
     assert all(tool.output_schema is not None for tool in package.tools)
 
 
+def test_builder_always_activates_update_plan_for_builtin_catalog(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    bus = _tool_bus()
+    install_builtin_tools(bus)
+
+    package = AgentPackageBuilder(
+        app_config=config, tool_bus=bus
+    ).build_agent_package_version()
+
+    assert [tool.name for tool in package.tools] == ["echo", "update_plan"]
+    assert package.tools[1].replay_policy == "safe"
+    assert package.tools[1].input_schema["required"] == ("plan",)
+
+
 def test_builder_freezes_delegation_policy_into_package_and_tool_schema(
     tmp_path: Path,
 ) -> None:

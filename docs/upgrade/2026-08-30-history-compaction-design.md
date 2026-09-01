@@ -1,10 +1,10 @@
 # HistoryCompaction 压缩设计方案
 
 **日期**：2026-08-30
-**更新日期**：2026-08-31
-**状态**：目标合同已对齐，待实施；当前代码仍是 `first_kept_node_id` 基线
+**更新日期**：2026-09-01
+**状态**：目标合同已实施；当前代码使用自包含 checkpoint 与 leaf 门禁
 **范围**：HistoryCompaction 的数据形态、读取投影、选材、摘要内容、触发、失败、手动入口、迁移与验收
-**不在范围**：Goal/Plan 重构、Provider overflow 恢复、projection 级 ToolResult 改写、map-reduce 摘要
+**不在范围**：Plan-aware 压缩、Provider overflow 恢复、projection 级 ToolResult 改写、map-reduce 摘要
 **术语**：遵循 [`Agent Runtime 重构命名约束`](./2026-08-10-agent-runtime-naming.md)；数据库升级遵循 [`数据库实体设计`](./2026-07-12-db-entities.md)
 
 本文替换本文件 2026-08-30 版本中的三项旧结论：
@@ -434,6 +434,8 @@ messages = summary_input + [最终 compaction 指令]
 因此 Recall 和 `before_request` Hook 可能各执行两次。第一次结果只用于候选 Context 和阈值判断，压缩后丢弃；第二次结果才进入 Intent。Hook 必须允许重入，非幂等外部副作用不应放在 Context Hook 中。
 
 同一 Step 最多成功提交一次 checkpoint。压缩后仍达到阈值直接以 `history_compaction_no_progress` 失败，不再次压缩。
+门禁判断当前 active leaf 是否为 checkpoint，而不是 Context 列表的第一个节点；checkpoint
+之后已有普通消息时允许下一次压缩。
 
 ### 8.2 手动压缩
 
@@ -596,7 +598,7 @@ class HistoryCompactionService:
 
 append 成功是 checkpoint 可见的唯一提交点。summary、retained messages 和 ledgers 必须作为同一个不可变 `HistoryCompaction` Node 一次提交。
 
-## 12. SQLite v13 迁移
+## 12. SQLite v13 迁移与 v14 ActivePlan 列
 
 ConversationNode 内容格式随数据库 schema 统一升级，不在 Runtime 长期兼容两种 HistoryCompaction JSON。目标增加 v12 → v13 一次性事务迁移，表结构无需新增列。
 
@@ -611,6 +613,9 @@ ConversationNode 内容格式随数据库 schema 统一升级，不在 Runtime �
 7. 完成全部 Node 后才把 schema version 更新为 13。
 
 旧 checkpoint 的 `first_kept_node_id` 为空、跨 Session、无法到达或内容不可解码时，迁移整体失败并保留 v12 备份；不得猜测、丢弃历史或把无效旧 checkpoint 静默变成有效摘要。
+
+迁移完成后，v13 → v14 只向 `agent_run_states` 增加 nullable `active_plan_json`；旧状态
+保持 NULL，ActivePlan 不进入 checkpoint 内容。
 
 迁移完成后：
 

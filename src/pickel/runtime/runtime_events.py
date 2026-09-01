@@ -18,6 +18,10 @@ from typing import Any, Awaitable, Callable, ClassVar, TypeAlias
 from pickel.runtime.agent_run_usage import AgentRunUsage
 from pickel.shared.event_envelope import EventEnvelope
 
+STREAM_DELTA_EVENT_TYPES = frozenset(
+    {"thinking_delta", "text_delta", "tool_call_args_delta"}
+)
+
 
 def _usage_to_dict(usage: AgentRunUsage) -> dict[str, Any]:
     return {

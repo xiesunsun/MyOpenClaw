@@ -174,7 +174,7 @@ class ConversationRuntime:
 
     @property
     def collaboration(self) -> CollaborationState:
-        """当前 Goal/Plan 协作状态；与 interactive/batch 输出模式分离。"""
+        """当前 Goal 协作状态；与 interactive/batch 输出模式分离。"""
 
         return self._collaboration_state
 
@@ -183,11 +183,10 @@ class ConversationRuntime:
         mode: CollaborationMode,
         *,
         goal: str | None = None,
-        plan: tuple[str, ...] = (),
     ) -> CollaborationState:
         """切换当前 Session 的协作模式，不改变 Conversation 树。"""
 
-        next_state = CollaborationState(mode=mode, goal=goal, plan=plan)
+        next_state = CollaborationState(mode=mode, goal=goal)
         self._collaboration_state = next_state
         if self._on_collaboration_state_change is not None:
             self._on_collaboration_state_change(next_state)

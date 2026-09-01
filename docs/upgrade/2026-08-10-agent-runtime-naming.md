@@ -1,8 +1,8 @@
 # Agent Runtime 重构命名约束
 
 **日期**：2026-08-10
-**更新日期**：2026-08-31
-**状态**：当前合同；HistoryCompaction 自包含 checkpoint 为待实施目标合同
+**更新日期**：2026-09-01
+**状态**：当前合同；ActivePlan、SQLite v14 与 HistoryCompaction 自包含 checkpoint 已实施
 **范围**：Agent Runtime、持久化实体、执行状态、Context、多模态、多 Agent 与生命周期组件的唯一名称
 **不在范围**：数据库列级定义、Provider wire 协议和实施排期
 
@@ -33,6 +33,7 @@
 | `Operation` | 已被 Session 接受、可恢复且具有明确终态的工作 |
 | `Step` | AgentRun 中一次模型请求、响应和工具批次 |
 | `Driver` | 重复推进一个明确状态机直到等待或终态 |
+| `ActivePlan` | 嵌入 AgentRunState、跨 ModelStep 保存的当前 Operation 工作记忆值对象 |
 
 ## 2. 执行层级
 
@@ -40,6 +41,7 @@
 ConversationSession
 └── SessionOperation                 不可变执行身份
     └── AgentRunState                当前唯一执行状态
+        ├── active_plan?             当前 Operation 工作记忆
         └── ModelStepState?          当前模型步骤
             ├── ModelRequestIntent?  已决定的 Provider-neutral 输入
             ├── ModelCall[]          每次真实 Provider 调用
@@ -126,7 +128,7 @@ flowchart LR
 | `ConversationNode` | `node_id` | 树位置与 Provider-neutral 类型化内容 |
 | `InboxMessage` | `message_id` | 持久化输入、FIFO、delivery 和 claim 结果 |
 | `SessionOperation` | `operation_id` | 不可变执行身份、Package 与 Workspace 绑定 |
-| `AgentRunState` | `operation_id` | 当前可恢复执行状态 |
+| `AgentRunState` | `operation_id` | 当前可恢复执行状态，包含可选 `ActivePlan` |
 | `ModelCall` | `model_call_id` | 一次真实 Provider 调用、重试身份和可靠内容引用 |
 | `AgentPackageVersion` | `package_version_id` | 内容寻址配置快照 |
 | `Artifact` | `artifact_id` | 内容寻址二进制元数据 |
@@ -182,9 +184,11 @@ OperationDriver 在 Intent 提交前编排。
 
 模型请求的稳定语义前缀统一为 `tools → system → messages`。Provider wire 的字段形状可以
 不同，但不得改变这三段的语义顺序；工具定义和稳定 system 内容必须先于只追加的消息历史。
-`CollaborationState` 是 Host 持有的 Session 协作状态值对象；`ModelContextBuilder` 将其投影为
-独立的 `collaboration_mode` system section，不改变稳定前缀，也不把临时 Goal/Plan 状态写入
-ConversationNode。Plan 的只读工具集合还必须由 OperationDriver 硬性收窄，不能只依赖提示词。
+`CollaborationState` 是 Host 持有的 Session 协作状态值对象；当前只承载 `normal/goal`，
+`ModelContextBuilder` 将 Goal 投影为独立的 `collaboration_mode` system section。ActivePlan
+不是 CollaborationState，也不写入 ConversationNode；包含 `update_plan` 的冻结 Package
+始终注入固定 `work_plan_guidance`，当前计划只作为最终 ModelContext 最尾部的一条临时
+UserMessage。Runtime 不因计划改变 Tool 权限。
 
 候选请求 token 优先由对应 Provider 的 `count_context_tokens()` 精确计算。Provider 必须复用与
 正式请求相同的 Mapper 语义，并在内部选择原生 count API 或匹配 tokenizer。精确计数不可用时，

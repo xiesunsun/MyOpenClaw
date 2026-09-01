@@ -24,6 +24,7 @@ from pickel.operations.agent_run_state import (
     WaitingReason,
 )
 from pickel.operations.session_operation import SessionOperation
+from pickel.shared.frozen_json import thaw_json
 from pickel.shared.storage_errors import StorageConflictError, StorageIntegrityError
 from pickel.workspaces.workspace import Workspace
 
@@ -485,7 +486,7 @@ class DelegationService:
             or call.tool_name != "wait_delegation"
             or call.status != "intent_recorded"
             or call.execution_intent is not None
-            or dict(call.arguments) != expected_arguments
+            or thaw_json(call.arguments) != expected_arguments
         ):
             raise StorageConflictError(
                 "sender ToolCall 不是当前 wait_delegation intent_recorded"

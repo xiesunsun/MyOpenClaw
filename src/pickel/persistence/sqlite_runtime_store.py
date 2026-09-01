@@ -1,4 +1,4 @@
-"""SQLite v10 Runtime Store。
+"""SQLite v14 Runtime Store。
 
 该适配器直接读写 v10 领域实体。旧库必须先显式执行一次迁移。
 """
@@ -46,7 +46,7 @@ from pickel.operations.delegation_result import (
 )
 from pickel.persistence.errors import StorageConflictError, StorageIntegrityError
 from pickel.persistence.model_call_store_mixin import SQLiteModelCallStoreMixin
-from pickel.persistence.sqlite_schema_v13 import (
+from pickel.persistence.sqlite_schema_v14 import (
     SCHEMA_VERSION,
     UnsupportedSchemaVersionError,
     create_schema,
@@ -1461,7 +1461,7 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 SET revision = ?, status = ?, waiting_reason = ?,
                     completed_step_count = ?, current_step_json = ?,
                     final_assistant_node_id = ?, error_json = ?,
-                    cancellation_json = ?, updated_at = ?
+                    cancellation_json = ?, active_plan_json = ?, updated_at = ?
                 WHERE operation_id = ? AND revision = ?
                 """,
                 (
@@ -1488,6 +1488,7 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                         if state.cancellation is not None
                         else None
                     ),
+                    _active_plan_json(state),
                     updated_at.isoformat(),
                     state.operation_id,
                     expected_revision,
@@ -1625,20 +1626,18 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                     if cursor.rowcount != 1:
                         connection.rollback()
                         return False
+                values = self._run_state_values(state, updated_at=updated_at)
                 cursor = connection.execute(
                     """
                     UPDATE agent_run_states
                     SET revision = ?, status = ?, waiting_reason = ?,
                         completed_step_count = ?, current_step_json = ?,
                         final_assistant_node_id = ?, error_json = ?,
-                        cancellation_json = ?, updated_at = ?
+                        cancellation_json = ?, active_plan_json = ?, updated_at = ?
                     WHERE operation_id = ? AND revision = ?
                     """,
-                    (
-                        *self._run_state_values(state, updated_at=updated_at)[1:],
-                        state.operation_id,
-                        expected_revision,
-                    ),
+                    values[1:9]
+                    + (values[10], values[9], state.operation_id, expected_revision),
                 )
                 if cursor.rowcount != 1:
                     connection.rollback()
@@ -2252,7 +2251,7 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 ),
             )
             connection.execute(
-                "INSERT INTO agent_run_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO agent_run_states VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 self._run_state_values(state, updated_at=operation.accepted_at),
             )
             connection.execute(
@@ -2297,6 +2296,10 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
             elif version == 12:
                 raise UnsupportedStorageSchemaError(
                     "检测到 SQLite schema version 12；请先执行一次性 v12→v13 迁移"
+                )
+            elif version == 13:
+                raise UnsupportedStorageSchemaError(
+                    "检测到 SQLite schema version 13；请先执行一次性 v13→v14 迁移"
                 )
             elif version != SCHEMA_VERSION:
                 raise UnsupportedSchemaVersionError(
@@ -2389,6 +2392,11 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
             "current_step": (
                 _object(row["current_step_json"])
                 if row["current_step_json"] is not None
+                else None
+            ),
+            "active_plan": (
+                _object(row["active_plan_json"])
+                if row["active_plan_json"] is not None
                 else None
             ),
             "final_assistant_node_id": row["final_assistant_node_id"],
@@ -2785,6 +2793,7 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 else None
             ),
             updated_at.isoformat(),
+            _active_plan_json(state),
         )
 
     @staticmethod
@@ -2855,6 +2864,10 @@ def _json(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _active_plan_json(state: AgentRunState) -> str | None:
+    return state.active_plan.to_json() if state.active_plan is not None else None
 
 
 def _object(value: Any) -> dict[str, Any]:

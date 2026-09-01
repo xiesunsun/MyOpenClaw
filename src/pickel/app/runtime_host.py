@@ -512,6 +512,7 @@ class RuntimeHost:
             status="failed",
             waiting_reason=None,
             current_step=None,
+            active_plan=None,
             error=AgentRunError(
                 code=error.code,
                 message=str(error),

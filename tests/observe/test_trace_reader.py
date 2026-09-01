@@ -295,6 +295,39 @@ def test_operation_trace_filter_applies_before_status_metrics(tmp_path):
     assert data.trace_status["status_text"] == "Standard Trace 已读取 · 未报告丢弃"
 
 
+def test_full_stream_summary_and_legacy_delta_counts_are_combined(tmp_path):
+    trace_file = tmp_path / "s.jsonl"
+    records = [
+        {
+            "record_type": "stream_delta_summary",
+            "operation_id": "op-a",
+            "mode": "full",
+            "trace_seq": 4,
+            "payload": {"delta_count": 120},
+        },
+        {
+            "record_type": "runtime_event",
+            "operation_id": "op-a",
+            "mode": "full",
+            "trace_seq": 5,
+            "event_type": "text_delta",
+        },
+    ]
+    trace_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    data = read_operation_trace(trace_file, operation_id="op-a")
+
+    assert data.stream_deltas_count == 121
+    assert data.trace_status["stream_deltas_captured"] is True
+    assert (
+        data.trace_status["status_text"]
+        == "Full Trace 已读取 · 已汇总流式 delta · 未报告丢弃"
+    )
+
+
 def test_dropped_delta_count_uses_maximum_cumulative_value(tmp_path):
     trace_file = tmp_path / "s.jsonl"
     records = [

@@ -66,15 +66,6 @@ class GeminiProvider(Provider):
         response = await self.client.aio.models.generate_content(**request)
         return self._response_to_assistant_message(response)
 
-    def request_snapshot(self, context: ModelContext) -> dict[str, Any]:
-        """返回 generate_content 实际请求的 JSON-safe 快照。"""
-        request = self._build_generate_request(context)
-        return {
-            "model": request["model"],
-            "contents": self._dump_models(request["contents"]),
-            "config": self._dump_model(request["config"]),
-        }
-
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         request_dict = self._build_count_tokens_request(context)
         for attempt in range(self.COUNT_TOKENS_MAX_ATTEMPTS):

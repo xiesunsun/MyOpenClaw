@@ -1,8 +1,8 @@
 # Pickel Agent Runtime 观测驱动评审结论
 
 **日期**：2026-08-27
-**更新日期**：2026-08-31
-**状态**：当前问题清单；HistoryCompaction 自包含 checkpoint 目标已收敛
+**更新日期**：2026-09-01
+**状态**：当前问题清单；HistoryCompaction 自包含 checkpoint 与 ActivePlan 已实施
 **样本 Session**：`7d22cffb-cfa4-4689-b4b3-f2580cb88abb`
 
 ## 1. 文档边界
@@ -319,7 +319,7 @@ ModelCall prepare transaction
 response content write
 ModelCall + ConversationNode complete transaction
 tool execute
-event delivery
+event delivery（不含高基数流式 delta）
 ```
 
 11.2 已为上述可测边界发射窄 Span。Provider connect 内部仍无独立可复用的可靠时间，
@@ -334,6 +334,24 @@ event delivery
 - Operation summary 缺少 model/tool latency aggregate；
 - Child lane 和 token 没有形成 workflow-inclusive 聚合。
 
+### 5.5 Full Trace 高基数膨胀
+
+Session `d6be0acb-2021-444b-b1ee-ec9816b0c312` 的 Trace 为 7,265,839 bytes、
+10,394 条记录，其中 10,306 条 `pickel.event.delivery` Span 占 7,174,929 bytes，约
+98.75%。业务非 delta RuntimeEvent 只有 23 条。根因不是“观测天然需要大文本”，而是同一个
+流式 Chunk 同时触发了逐块 EventBus delivery Span；旧 Full 模式还会额外复制逐块
+RuntimeEvent 及重复 envelope。
+
+当前合同收敛为：
+
+- text/thinking/tool-call-args delta 继续实时经过 EventBus，UI 与 JSONL 输出功能不变；
+- 所有 Trace 模式都不为逐块 delta 创建 `event.delivery` Span；
+- Standard 不记录 delta；Full 每个 ModelCall 只写一条不含正文的
+  `stream_delta_summary`，保留分类数量、字符数、UTF-8 字节数和首尾时序；
+- 完整请求和聚合响应由 ModelCall ContentStore 可靠保存，Trace 不再建立
+  `RequestSnapshotRecord` 写入旁路；
+- Reader 继续兼容旧逐块 delta、旧 RequestSnapshot 和旧 dropped-delta Diagnostic。
+
 ## 6. 实施顺序
 
 | 批次 | 范围 | 验收门槛 |
@@ -346,6 +364,8 @@ event delivery
 | 11.6 | 按工具类型收敛大型结果，不建立通用分页 | 小结果完整；大结果高信号且可恢复；额外 ModelCall 只在确实缺证据时发生 |
 | 11.7 | Provider timeout/retry 内部治理 | attempt 可诊断；模型不接触 HTTP 参数；重试不重复 Agent Step |
 | 11.8 | HistoryCompaction 自包含 checkpoint 升级 | 正常读取遇 checkpoint 停止；自动/手动入口统一失败合同；SQLite v13 |
+| 11.9 | ActivePlan Operation 工作记忆 | update_plan 原子 CAS、尾部临时注入、SQLite v14、无 Plan-aware 压缩 |
+| 11.10 | Full Trace 低基数瘦身 | 逐块输出保持实时；每 ModelCall 至多一条 delta 汇总；旧 Trace 可读 |
 
 11.1 状态（2026-08-28）：已完成 Observation 口径修正。Operation 同时投影
 `answer_ready_ms` 与 `operation_completed_ms`，token/cache 明确分为 agent 与
@@ -381,11 +401,19 @@ Anthropic、Gemini 与 [OpenAI Responses](https://developers.openai.com/api/refe
 它使用冻结 Package worker、保留最近消息对、以中文事实摘要压缩旧历史；Generator 只返回内容，
 OperationDriver 负责追加、重新 preflight 和无进展停止；缺少 worker 时明确失败，不静默裁剪。
 
-11.8 目标已于 2026-08-31 对齐，待实施。它把当前 `first_kept_node_id` 基线迁移为自包含
+11.8 已实施。它把当前 `first_kept_node_id` 基线迁移为自包含
 checkpoint，并新增真正 stop-at-checkpoint 的 Context 查询。尾部选材优先复用消息 token 估算；
 若暂沿用 `chars ÷ 4`，必须保留 CJK 低估事实。删除 `summary_input_tokens` 的头尾保留/中段丢弃：
 worker 必须看完整逻辑待替代前缀，超过自身有效窗口就失败。warm prefix 只作为后续请求 envelope
 优化，不改变 checkpoint 语义或 worker 摘要范围。
+
+11.9 已实施：ActivePlan 属于 AgentRunState 当前值，不写 ConversationNode 或 checkpoint；
+`update_plan` 始终存在于新 Package，计划只在最终 ModelContext 尾部临时注入，Operation
+终态和全部完成均清空计划。
+
+11.10 已实施：EventBus 不再为流式 delta 发射逐块 delivery Span；Standard 丢弃 delta，
+Full 按 ModelCall 聚合成一条无正文摘要。生产写入路径删除 RequestSnapshot 旁路，完整内容继续
+以 ModelCall ContentStore 为权威来源，Reader 保持旧格式兼容。
 
 11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
 完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有
@@ -406,7 +434,9 @@ Page/Cursor/Result Manager、图片专用 Tool 或第二份 ToolResult DTO。
 6. 小 ToolResult 一次完整返回；超大结果明确省略且具有工具特定恢复路径，不依赖通用分页；
 7. 压缩失败或压缩后没有减少 token 时停止重试并产生明确 Diagnostic；
 8. Provider 首包 timeout 后的 retry 属于同一个 ModelRequestIntent，不产生额外 Agent 决策；
-9. 页面同时展示 Parent 与 Workflow token，未知 usage、storage 和 Trace 不伪装为零。
+9. 页面同时展示 Parent 与 Workflow token，未知 usage、storage 和 Trace 不伪装为零；
+10. 单个 ModelCall 产生 10,000 个 delta 时，Full Trace 只新增一条摘要且计数准确，不产生
+    10,000 条 delivery Span；旧逐块 Trace 仍能读取。
 
 ## 8. 调研依据
 

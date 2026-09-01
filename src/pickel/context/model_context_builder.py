@@ -13,9 +13,26 @@ from pickel.context.model_context import (
     ToolDefinition,
 )
 from pickel.context.multi_agent_guidance import MULTI_AGENT_GUIDANCE
+from pickel.operations.active_plan import ActivePlan, render_active_plan
 from pickel.templates.loader import load_templates
 from pickel.conversations.agent_message import AgentMessage
+from pickel.conversations.agent_message import UserMessage
+from pickel.conversations.content_blocks import TextBlock
 from pickel.shared.collaboration import CollaborationState
+
+WORK_PLAN_GUIDANCE = """## Work plans
+
+你可以使用 `update_plan` 为复杂、模糊或多阶段任务维护工作计划。
+
+- 简单、单步任务不要创建计划。
+- 多步任务应尽早创建计划，并在执行中维护状态。
+- 每次调用必须提交完整计划，而不是局部补丁。
+- 同时最多一个步骤处于 `in_progress`；执行时应尽量保持一个。
+- 完成工作后及时把步骤设为 `completed`。
+- 范围变化时可以增删、重排、改写或重新打开步骤。
+- 计划不能代替实际工作；创建计划后继续执行任务。
+- 所有工作完成后，把全部步骤设为 `completed`。
+- 不要在普通 Assistant 文本中重复完整计划；Runtime 会展示并重新注入当前计划。"""
 
 
 @dataclass(frozen=True)
@@ -40,6 +57,7 @@ class ModelContextBuilder:
         visible_messages: Sequence[AgentMessage],
         contributions: ContextContributions = ContextContributions(),
         collaboration: CollaborationState | None = None,
+        active_plan: ActivePlan | None = None,
     ) -> ModelContext:
         return ModelContext(
             system=self._build_system(
@@ -47,7 +65,19 @@ class ModelContextBuilder:
                 contributions=contributions,
                 collaboration=collaboration,
             ),
-            messages=tuple(visible_messages) + contributions.messages,
+            messages=(
+                tuple(visible_messages)
+                + contributions.messages
+                + (
+                    (
+                        UserMessage(
+                            content=(TextBlock(text=render_active_plan(active_plan)),)
+                        ),
+                    )
+                    if active_plan is not None
+                    else ()
+                )
+            ),
             tools=tuple(
                 ToolDefinition(
                     name=tool.name,
@@ -73,6 +103,10 @@ class ModelContextBuilder:
         sections.append(
             SystemSection(name="multi_agent_guidance", text=MULTI_AGENT_GUIDANCE)
         )
+        if any(tool.name == "update_plan" for tool in version.tools):
+            sections.append(
+                SystemSection(name="work_plan_guidance", text=WORK_PLAN_GUIDANCE)
+            )
         if version.skills:
             sections.append(
                 SystemSection(

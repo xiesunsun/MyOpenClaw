@@ -1,8 +1,8 @@
 # 数据库实体设计
 
 **初稿日期**：2026-07-12
-**更新日期**：2026-08-31
-**状态**：当前合同；SQLite v12 已实施，HistoryCompaction 内容升级目标为 v13
+**更新日期**：2026-09-01
+**状态**：当前合同；SQLite v14 已实施，HistoryCompaction 自包含 checkpoint 与 ActivePlan 已迁移
 **范围**：SQLite 领域表、列级约束、索引、原子事务、归档删除和 schema 迁移
 **不在范围**：Runtime 组件拆分、Provider 协议、BlobStore 物理布局和 UI 查询模型
 
@@ -223,6 +223,7 @@ SessionOperation 创建后不可更新。不保存 `operation_type`、`status`�
 | `waiting_reason` | TEXT | NULL / `tool_approval` / `tool_reconciliation` |
 | `completed_step_count` | INTEGER | NOT NULL，DEFAULT 0 |
 | `current_step_json` | TEXT | NULL，合法 JSON object |
+| `active_plan_json` | TEXT | NULL；非终态为 canonical ActivePlan JSON，终态必须为 NULL |
 | `final_assistant_node_id` | TEXT | NULL FK → conversation_nodes |
 | `error_json` | TEXT | NULL |
 | `cancellation_json` | TEXT | NULL |
@@ -518,7 +519,7 @@ in_flight → CAS 标记 incomplete，再创建新 attempt
 
 ## 15. Schema 与迁移
 
-目标 Runtime 在压缩升级完成后只读写 SQLite v13，不保留 v12/v13 双读写。v12 → v13
+目标 Runtime 只读写 SQLite v14，不保留旧 schema 双读写。v12 → v13
 只升级 `history_compaction` 的 `content_json`，不新增表或列：
 
 1. 对每个旧 checkpoint 沿同 Session parent 链验证并定位 `first_kept_node_id`；
@@ -554,7 +555,8 @@ in_flight → CAS 标记 incomplete，再创建新 attempt
 5. 校验全部引用和状态后删除旧通用表；
 6. 任一步失败回滚，保留 v9 原库备份。
 
-不在 Runtime 请求路径保留旧 schema 兼容分支。
+不在 Runtime 请求路径保留旧 schema 兼容分支。v13 → v14 仅增加 nullable
+`agent_run_states.active_plan_json`；旧行保持 `NULL`，迁移先备份再一次性提交。
 
 ## 16. 验收
 
@@ -573,4 +575,5 @@ in_flight → CAS 标记 incomplete，再创建新 attempt
 13. prepared 恢复复用同一 attempt；in_flight 恢复先收敛 incomplete 再创建新 attempt。
 14. v11 → v12 不从可丢失 Trace 伪造历史 ModelCall。
 15. v12 → v13 将有效旧 checkpoint 转换为等价自包含投影；坏引用使迁移整体回滚。
-16. checkpoint 之后的正常 Context 查询在 SQLite 递归层停止，不先读取完整旧祖先。
+16. v13 → v14 保留历史状态并将 ActivePlan 初始化为 NULL；坏 schema 不进入请求路径。
+17. checkpoint 之后的正常 Context 查询在 SQLite 递归层停止，不先读取完整旧祖先。

@@ -31,7 +31,6 @@ from pickel.context.model_context_builder import (
 )
 from pickel.shared.collaboration import (
     CollaborationState,
-    PLAN_READ_ONLY_TOOL_NAMES,
 )
 from pickel.context.projection import ConversationProjector
 from pickel.context.token_preflight import (
@@ -61,6 +60,7 @@ from pickel.operations.agent_run_state import (
     ToolCallState,
     ToolReplayPolicy,
 )
+from pickel.operations.active_plan import parse_active_plan
 from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_service import OperationService
 from pickel.model_calls.service import (
@@ -124,7 +124,7 @@ _AUTO_USAGE_LEAF = object()
 class _BuiltContext:
     model_context: ModelContext
     leaf_node_id: str | None
-    has_history_compaction: bool
+    leaf_is_history_compaction: bool
 
 
 async def _consume_runtime_event(
@@ -280,6 +280,7 @@ class OperationDriver:
                 state,
                 status="failed",
                 current_step=None,
+                active_plan=None,
                 error=AgentRunError(
                     code=exc.code,
                     message=str(exc),
@@ -401,6 +402,7 @@ class OperationDriver:
                 state,
                 status="failed",
                 current_step=None,
+                active_plan=None,
                 error=AgentRunError(
                     code=(
                         call_error.code
@@ -459,6 +461,7 @@ class OperationDriver:
                 state,
                 status="failed",
                 current_step=None,
+                active_plan=None,
                 error=AgentRunError(
                     code=error.code,
                     message=str(error),
@@ -540,6 +543,7 @@ class OperationDriver:
                 revision=state.revision + 1,
                 status="failed",
                 current_step=None,
+                active_plan=None,
                 final_assistant_node_id=None,
                 error=AgentRunError(
                     code="model_response_processing_failed",
@@ -651,7 +655,7 @@ class OperationDriver:
         except ContextCompactionRequired:
             if (
                 compaction_step_id == step.step_id
-                or built_context.has_history_compaction
+                or built_context.leaf_is_history_compaction
             ):
                 return (
                     self._fail_preflight(
@@ -741,6 +745,7 @@ class OperationDriver:
             revision=state.revision + 1,
             status="failed",
             current_step=None,
+            active_plan=None,
             error=AgentRunError(
                 code=code,
                 message=message,
@@ -781,7 +786,9 @@ class OperationDriver:
         if not self._operations.cancellation_ready(operation.operation_id):
             return self._result(operation, state, last_assistant)
         usage_leaf = self._current_reliable_leaf(operation)
-        cancelled = replace(state, status="cancelled", current_step=None)
+        cancelled = replace(
+            state, status="cancelled", current_step=None, active_plan=None
+        )
         if not self._operations.commit_transition(
             state=replace(cancelled, revision=state.revision + 1),
             expected_revision=state.revision,
@@ -814,6 +821,7 @@ class OperationDriver:
                 replace(
                     state,
                     status="failed",
+                    active_plan=None,
                     error=AgentRunError(
                         code="max_model_steps_exceeded",
                         message="AgentRun 已达到最大模型 Step 数",
@@ -939,27 +947,6 @@ class OperationDriver:
 
         executable: ToolCallState | None = None
         if pending is not None and pending.status == "ready":
-            collaboration = (
-                self._collaboration_state_provider(operation.session_id)
-                if self._collaboration_state_provider is not None
-                else None
-            )
-            if (
-                collaboration is not None
-                and collaboration.mode == "plan"
-                and pending.tool_name not in PLAN_READ_ONLY_TOOL_NAMES
-            ):
-                return self._record_rejected_tool(
-                    state=state,
-                    step=step,
-                    call=replace(
-                        pending,
-                        status="rejected",
-                        decision_reason=(
-                            "Plan 模式只允许只读工具：ls、glob、grep、read"
-                        ),
-                    ),
-                )
             state, executable = self._record_tool_intent(
                 operation=operation,
                 state=state,
@@ -1045,6 +1032,7 @@ class OperationDriver:
                     revision=state.revision + 1,
                     current_step=None,
                     status="failed",
+                    active_plan=None,
                     final_assistant_node_id=None,
                     error=AgentRunError(
                         code="goal_verification_failed",
@@ -1075,6 +1063,7 @@ class OperationDriver:
             current_step=None,
             completed_step_count=state.completed_step_count + 1,
             status="succeeded",
+            active_plan=None,
             final_assistant_node_id=step.assistant_message_node_id,
         )
         if self._operations.commit_transition(
@@ -1322,8 +1311,17 @@ class OperationDriver:
             completed if item.tool_call_id == call.tool_call_id else item
             for item in state.current_step.tool_calls
         )
+        next_active_plan = state.active_plan
+        if call.tool_name == "update_plan" and not result.is_error:
+            next_active_plan = parse_active_plan(
+                {"items": thaw_json(call.arguments)["plan"]}
+            )
         state = self._commit(
-            replace(state, current_step=replace(state.current_step, tool_calls=calls)),
+            replace(
+                state,
+                current_step=replace(state.current_step, tool_calls=calls),
+                active_plan=next_active_plan,
+            ),
             state,
             message=result,
             node_id=result_node_id,
@@ -1368,7 +1366,7 @@ class OperationDriver:
                 calls.append(
                     _rejected_tool_call(
                         block,
-                        arguments=dict(block.arguments),
+                        arguments=thaw_json(block.arguments),
                         reason=f"工具不可用: {block.name}",
                     )
                 )
@@ -1385,7 +1383,7 @@ class OperationDriver:
                         tool_call_id=block.id,
                     ),
                     tool_name=block.name,
-                    arguments=dict(block.arguments),
+                    arguments=thaw_json(block.arguments),
                     tool_source=tool.source.value,
                     tool_origin=tool.implementation_ref.name,
                 ),
@@ -1394,16 +1392,18 @@ class OperationDriver:
                 decision = PreToolUseDecision()
             try:
                 arguments = (
-                    dict(decision.updated_arguments)
+                    thaw_json(decision.updated_arguments)
                     if decision.updated_arguments is not None
-                    else dict(block.arguments)
+                    else thaw_json(block.arguments)
                 )
+                if not isinstance(arguments, dict):
+                    raise TypeError("Tool arguments 必须是 JSON object")
                 freeze_json_object(arguments)
             except (TypeError, ValueError):
                 calls.append(
                     _rejected_tool_call(
                         block,
-                        arguments=dict(block.arguments),
+                        arguments=thaw_json(block.arguments),
                         reason="PreToolUse Hook 返回了无效参数",
                     )
                 )
@@ -1560,6 +1560,7 @@ class OperationDriver:
                 messages=tuple(recalled) + hook_contributions.messages,
             ),
             collaboration=collaboration,
+            active_plan=state.active_plan,
         )
         # report 是 child→parent 的中间通信工具。它可以保留在冻结 Package
         # 中供 delegated Session 执行，但 Root 的 ModelContext 不应暴露它。
@@ -1584,20 +1585,11 @@ class OperationDriver:
                     if tool.name in self._allowed_tool_names
                 ),
             )
-        if collaboration is not None and collaboration.mode == "plan":
-            model_context = replace(
-                model_context,
-                tools=tuple(
-                    tool
-                    for tool in model_context.tools
-                    if tool.name in PLAN_READ_ONLY_TOOL_NAMES
-                ),
-            )
         return _BuiltContext(
             model_context=model_context,
             leaf_node_id=leaf_node_id,
-            has_history_compaction=bool(
-                nodes and nodes[0].content_type == "history_compaction"
+            leaf_is_history_compaction=bool(
+                nodes and nodes[-1].content_type == "history_compaction"
             ),
         )
 

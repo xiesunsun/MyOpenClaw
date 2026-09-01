@@ -6,7 +6,11 @@ import asyncio
 
 from pickel.telemetry.records import SpanRecord, observation_scope
 from pickel.runtime.event_bus import EventBus
-from pickel.runtime.runtime_events import AssistantMessageEvent, AgentRunStarted
+from pickel.runtime.runtime_events import (
+    AgentRunStarted,
+    AssistantMessageEvent,
+    TextDeltaEvent,
+)
 from pickel.shared.event_envelope import EventEnvelope
 from pickel.shared.execution_identity import ExecutionIdentity
 
@@ -98,6 +102,21 @@ def test_emit_records_event_delivery_span():
     assert len(records) == 1
     assert records[0].name == "pickel.event.delivery"
     assert records[0].status == "ok"
+
+
+def test_stream_delta_does_not_record_per_chunk_delivery_span():
+    bus = EventBus()
+    records: list[SpanRecord] = []
+
+    class Collector:
+        def record(self, record) -> None:
+            if isinstance(record, SpanRecord):
+                records.append(record)
+
+    with observation_scope(Collector()):
+        asyncio.run(bus.emit(TextDeltaEvent(text="chunk")))
+
+    assert records == []
 
 
 def test_异步订阅者被_await():

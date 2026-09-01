@@ -161,7 +161,16 @@ def test_operation_fact_reader_cuts_operation_branch_and_pairs_tool_result(
         parent_node_id="input",
         content_type="agent_message",
         content=AssistantMessage(
-            (ToolCallBlock(id="tc_1", name="echo", arguments={"x": 1}),)
+            (
+                ToolCallBlock(
+                    id="tc_1",
+                    name="echo",
+                    arguments={
+                        "options": {"mode": "fast"},
+                        "items": [{"value": 1}],
+                    },
+                ),
+            )
         ),
         created_at=now,
     )
@@ -202,7 +211,10 @@ def test_operation_fact_reader_cuts_operation_branch_and_pairs_tool_result(
     assert len(facts.tool_calls) == 1
     tool = facts.tool_calls[0]
     assert tool.tool_call_id == "tc_1"
-    assert tool.arguments == {"x": 1}
+    assert tool.arguments == {
+        "options": {"mode": "fast"},
+        "items": [{"value": 1}],
+    }
     assert tool.result is not None and tool.result["role"] == "tool"
     assert tool.is_error is False
     assert tool.source == "conversation_node"

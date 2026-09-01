@@ -1,7 +1,7 @@
 """trace JSONL → 时序与运行指标增强（非对话真源）。
 
-对 RuntimeEvent 仍按白名单读取，禁止从 trace 重建对话；
-span、stream delta 和 diagnostic 只用于耗时、成功率、TTFT 与时序诊断。
+对 RuntimeEvent 仍按白名单读取，禁止从 trace 重建对话；span、stream summary
+和 diagnostic 只用于耗时、成功率、TTFT 与时序诊断。旧逐块 delta 继续兼容读取。
 """
 
 from __future__ import annotations
@@ -92,6 +92,12 @@ def read_trace(
             span = dict(event["payload"])
             span["_operation_id"] = event.get("operation_id")
             spans.append(span)
+            continue
+
+        if event.get("record_type") == "stream_delta_summary" and isinstance(
+            event.get("payload"), dict
+        ):
+            stream_deltas += _read_number(event["payload"].get("delta_count"))
             continue
 
         if event.get("event_type") in {
@@ -226,6 +232,10 @@ def read_operation_trace(
             span["_operation_id"] = record.get("operation_id")
             span["_step_id"] = record.get("step_id")
             spans.append(span)
+        elif record_type == "stream_delta_summary" and isinstance(
+            record.get("payload"), dict
+        ):
+            stream_deltas += _read_number(record["payload"].get("delta_count"))
         elif record_type == "diagnostic" and isinstance(record.get("payload"), dict):
             diag = dict(record["payload"])
             diagnostics.append(diag)
@@ -303,7 +313,7 @@ def _build_trace_status(
     elif resolved_mode == "standard":
         status_text = "Standard Trace 已读取 · 未报告丢弃"
     elif stream_captured:
-        status_text = "Full Trace 已读取 · 已捕获流式 delta · 未报告丢弃"
+        status_text = "Full Trace 已读取 · 已汇总流式 delta · 未报告丢弃"
     else:
         status_text = "Full Trace 已读取 · 未发现流式 delta · 未报告丢弃"
     return {

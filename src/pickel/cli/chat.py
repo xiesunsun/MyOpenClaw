@@ -230,18 +230,15 @@ class ChatLoop:
         )
         self.console.print(summary)
 
-    def _command_plan(self, arg: str | None) -> bool:
+    def _command_plan(self, arg: str | None) -> bool | str:
         argument = (arg or "").strip()
-        if argument.lower() == "off":
-            self._conversation.set_collaboration_mode("normal")
-            self._render_system_message("已退出 Plan 模式。")
+        if not argument:
+            self._render_error_message("用法：/plan <任务描述>")
             return True
-        plan = (argument,) if argument else ()
-        self._conversation.set_collaboration_mode("plan", plan=plan)
-        self._render_system_message(
-            "已进入 Plan 模式：模型只能使用 ls/glob/grep/read，完成计划后不会修改文件。"
+        return (
+            "请先调用 update_plan 创建工作计划，然后按照计划完成以下任务：\n\n"
+            f"{argument}"
         )
-        return True
 
     def _command_goal(self, arg: str | None) -> bool:
         argument = (arg or "").strip()
@@ -330,7 +327,7 @@ class ChatLoop:
         except Exception as exc:  # noqa: BLE001 — 失败保持旧快照
             self._render_error_message(f"reload 失败，保持旧配置: {exc}")
 
-    async def _handle_command(self, user_input: str) -> bool:
+    async def _handle_command(self, user_input: str) -> bool | str:
         parsed = parse_slash(user_input)
         command = self._slash_registry.get(parsed.name)
         if command is None:
@@ -340,7 +337,7 @@ class ChatLoop:
         outcome = handler(parsed.argument)
         if inspect.isawaitable(outcome):
             outcome = await outcome
-        return bool(outcome)
+        return outcome
 
     def complete(self, kind: str, argument: str) -> tuple[str, ...]:
         """SlashCompleter 的动态真源。"""
@@ -705,9 +702,13 @@ class ChatLoop:
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                if not await self._handle_command(user_input):
+                command_result = await self._handle_command(user_input)
+                if isinstance(command_result, str):
+                    user_input = command_result
+                elif not command_result:
                     break
-                continue
+                else:
+                    continue
 
             self._fallback_message_count += 1
             _bus, _event_renderer, unsubscribe_renderer = self.create_event_bus()

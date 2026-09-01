@@ -78,3 +78,24 @@ class SlashCompleterTests(unittest.TestCase):
         parsed = parse_slash("/MODEL anthropic/ClaudeCase")
         self.assertEqual("model", parsed.name)
         self.assertEqual("anthropic/ClaudeCase", parsed.argument)
+
+    def test_plan_is_a_normal_user_text_transform(self) -> None:
+        loop = object.__new__(ChatLoop)
+        result = loop._command_plan("implement login")
+
+        self.assertEqual(
+            "请先调用 update_plan 创建工作计划，然后按照计划完成以下任务：\n\n"
+            "implement login",
+            result,
+        )
+
+    def test_plan_without_task_reports_usage(self) -> None:
+        loop = object.__new__(ChatLoop)
+        loop._render_error_message = MagicMock()
+
+        self.assertTrue(loop._command_plan("  "))
+        loop._render_error_message.assert_called_once_with("用法：/plan <任务描述>")
+
+    def test_plan_off_is_not_an_exit_command(self) -> None:
+        loop = object.__new__(ChatLoop)
+        self.assertIsInstance(loop._command_plan("off"), str)

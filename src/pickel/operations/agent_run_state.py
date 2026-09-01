@@ -8,6 +8,11 @@ from datetime import datetime
 from typing import Any, Literal, Mapping
 
 from pickel.context.model_context import ModelContext, model_context_from_dict
+from pickel.operations.active_plan import (
+    ActivePlan,
+    active_plan_from_content,
+    active_plan_to_dict,
+)
 from pickel.shared.frozen_json import freeze_json_object, thaw_json
 
 AgentRunStatus = Literal[
@@ -226,6 +231,8 @@ class AgentRunState:
     final_assistant_node_id: str | None
     error: AgentRunError | None
     cancellation: Cancellation | None
+    # 放在末尾并提供默认值，兼容现有 positional 构造调用。
+    active_plan: ActivePlan | None = None
 
     def __post_init__(self) -> None:
         if not self.operation_id:
@@ -259,6 +266,11 @@ class AgentRunState:
             "终态 AgentRunState 不能保留 current_step",
         )
         _require(
+            self.status not in {"succeeded", "failed", "cancelled"}
+            or self.active_plan is None,
+            "终态 AgentRunState 不能保留 active_plan",
+        )
+        _require(
             self.status != "queued" or self.current_step is None,
             "queued AgentRunState 不能提前创建 current_step",
         )
@@ -274,6 +286,7 @@ class AgentRunState:
             "final_assistant_node_id": self.final_assistant_node_id,
             "error": _error_to_dict(self.error),
             "cancellation": _cancellation_to_dict(self.cancellation),
+            "active_plan": active_plan_to_dict(self.active_plan),
         }
 
     def content_dict(self) -> dict[str, Any]:
@@ -303,11 +316,20 @@ class AgentRunState:
 def agent_run_state_from_content(content: dict[str, Any]) -> AgentRunState:
     if not isinstance(content, dict):
         raise TypeError("AgentRunState 必须是 JSON object")
-    _require_keys(content, set(AgentRunState.__dataclass_fields__))
+    expected_keys = set(AgentRunState.__dataclass_fields__)
+    # v13 及更早的 JSON 没有活动计划字段；缺省只允许这一项，其他字段仍严格校验。
+    if "active_plan" not in content:
+        content = {**content, "active_plan": None}
+    _require_keys(content, expected_keys)
     current = content["current_step"]
     current_step = _step_from_dict(current) if current is not None else None
     error = _error_from_dict(content["error"])
     cancellation = _cancellation_from_dict(content["cancellation"])
+    active_plan = (
+        active_plan_from_content(content["active_plan"])
+        if content["active_plan"] is not None
+        else None
+    )
     return AgentRunState(
         operation_id=_string(content, "operation_id"),
         revision=_integer(content, "revision"),
@@ -320,6 +342,7 @@ def agent_run_state_from_content(content: dict[str, Any]) -> AgentRunState:
         final_assistant_node_id=_optional_string(content, "final_assistant_node_id"),
         error=error,
         cancellation=cancellation,
+        active_plan=active_plan,
     )
 
 
