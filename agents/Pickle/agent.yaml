@@ -1,0 +1,24 @@
+workspace_path: .
+tools:
+  - ls
+  - glob
+  - grep
+  - read
+  - edit
+  - write
+  - bash
+  - delegate_agent
+  - send_message
+  - list_agents
+  - interrupt_agent
+  - report
+  - mcp__tavily__*
+extensions:
+  - mcp
+  - openviking
+file_access_mode: full
+models:
+  primary:
+    provider: opencode-go
+    model: glm-5.3-flash
+remote_agent_id: ${OPENVIKING_AGENT_ID}

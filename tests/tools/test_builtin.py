@@ -1,54 +1,111 @@
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
-from myopenclaw.tools.base import ToolExecutionContext
-from myopenclaw.tools.catalog import builtin_tools
-from myopenclaw.tools.file_service import WorkspaceFileService
-from myopenclaw.tools.policy import WorkspacePathAccessPolicy
-from myopenclaw.tools.registry import ToolRegistry
+from pickel.tools.base import ToolExecutionContext
+from pickel.tools.bus import ToolActivation, ToolBus
+from pickel.tools.catalog import builtin_tools, install_builtin_tools
+from pickel.tools.file_service import WorkspaceFileService
+from pickel.tools.policy import WorkspacePathAccessPolicy
+from pickel.shared.execution_identity import ExecutionIdentity
+from pickel.tools.services import ToolServices
 
 
 class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
-    def test_builtin_tool_catalog_can_seed_registry(self) -> None:
-        registry = ToolRegistry(tools=builtin_tools())
+    def test_builtin_model_contracts_are_self_describing(self) -> None:
+        specs = {tool.spec.name: tool.spec for tool in builtin_tools()}
+        bus = ToolBus()
+        install_builtin_tools(bus)
+        snapshot = bus.snapshot(ToolActivation(allowed=frozenset(bus.list_names())))
+        definitions = {entry.name: entry.tool.spec for entry in snapshot.entries}
 
-        tools = registry.resolve_many(
-            [
-                "echo",
-                "list_directory",
-                "glob_search",
-                "grep_search",
-                "read_file",
-                "read_many_files",
-                "replace",
-                "write_file",
-                "shell_exec",
-                "shell_restart",
-                "shell_close",
-            ]
+        self.assertEqual(
+            {
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
+                "bash",
+                "delegate_agent",
+                "send_message",
+                "list_agents",
+                "interrupt_agent",
+                "report",
+                "update_plan",
+            },
+            set(definitions),
         )
+        self.assertIn("does not recurse", definitions["ls"].description)
+        self.assertIn("respects Git ignore rules", definitions["glob"].description)
+        self.assertIn("path:line:text", definitions["grep"].description)
+        self.assertIn("UTF-8", definitions["read"].description)
+        self.assertIn("without changing the file", definitions["edit"].description)
+        self.assertIn("completely overwrite", definitions["write"].description)
+        self.assertIn("non-zero exit code", definitions["bash"].description)
+        self.assertIn("return immediately", definitions["delegate_agent"].description)
+        self.assertIn("automatically", definitions["delegate_agent"].description)
+        self.assertIn("from this Parent", definitions["send_message"].description)
+        self.assertIn(
+            "must not be used to poll", definitions["list_agents"].description
+        )
+        self.assertIn("from this Child", definitions["report"].description)
+        self.assertIn("not the terminal result", definitions["report"].description)
+        self.assertIn("complete work plan", definitions["update_plan"].description)
+
+        expected_defaults = {
+            "ls": {"path": ".", "limit": 500},
+            "glob": {"path": ".", "limit": 1_000},
+            "grep": {"path": ".", "ignore_case": False, "limit": 100},
+            "read": {"offset": 1, "limit": 2_000},
+        }
+        for tool_name, defaults in expected_defaults.items():
+            properties = definitions[tool_name].input_schema["properties"]
+            self.assertEqual(
+                defaults,
+                {name: properties[name]["default"] for name in defaults},
+            )
+
+        self.assertEqual(
+            ("ready", "running", "terminated"),
+            specs["bash"].output_schema["properties"]["shell_status"]["enum"],
+        )
+
+    def test_builtin_tool_catalog_can_seed_bus(self) -> None:
+        bus = ToolBus()
+        install_builtin_tools(bus)
+
+        tools = [
+            bus.get(name).tool
+            for name in [
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
+                "bash",
+            ]
+        ]
 
         self.assertEqual(
             [
-                "echo",
-                "list_directory",
-                "glob_search",
-                "grep_search",
-                "read_file",
-                "read_many_files",
-                "replace",
-                "write_file",
-                "shell_exec",
-                "shell_restart",
-                "shell_close",
+                "ls",
+                "glob",
+                "grep",
+                "read",
+                "edit",
+                "write",
+                "bash",
             ],
             [tool.spec.name for tool in tools],
         )
 
     async def test_builtin_read_tool_reads_relative_path_from_workspace(self) -> None:
-        registry = ToolRegistry(tools=builtin_tools())
-        read_tool = registry.resolve("read_file")
+        bus = ToolBus()
+        install_builtin_tools(bus)
+        read_tool = bus.get("read").tool
 
         with TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -58,20 +115,19 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 {"path": "note.txt"},
                 ToolExecutionContext(
                     agent_id="Pickle",
-                    session_id="session-1",
+                    identity=ExecutionIdentity(session_id="session-1"),
                     workspace_path=workspace,
-                    workspace_files=WorkspaceFileService(
-                        workspace_root=workspace,
-                        access_policy=WorkspacePathAccessPolicy(),
+                    services=ToolServices(
+                        workspace_files=WorkspaceFileService(
+                            workspace_root=workspace,
+                            access_policy=WorkspacePathAccessPolicy(),
+                        )
                     ),
-                    shell_session_manager=None,
                 ),
             )
 
-        self.assertIn("File: note.txt", result.content)
-        self.assertIn("1: hello", result.content)
-        self.assertIn("2: world", result.content)
-        self.assertFalse(result.is_error)
+        self.assertIn("1: hello", result)
+        self.assertIn("2: world", result)
 
 
 if __name__ == "__main__":

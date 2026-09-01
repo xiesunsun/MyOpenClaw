@@ -1,0 +1,38 @@
+{
+  "providers": {
+    "opencode-go": {
+      "models": {
+        "glm-5.3-flash": {
+          "wire_protocol": "openai-chat-completions",
+          "context_window_tokens": 1000000,
+          "capability_profile": {
+            "name": "glm-5.3-flash",
+            "reasoning_supported": true,
+            "reasoning_levels": ["low", "high", "max"],
+            "reasoning_default": "max",
+            "thinking_enabled": true,
+            "clear_thinking": false,
+            "preserve_reasoning_after_tool_call": true,
+            "tool_call_streaming": true,
+            "tool_call_argument_deltas": true,
+            "parallel_tool_calls": false,
+            "input_modalities": ["text", "image", "video", "file"],
+            "max_context_window_tokens": 1000000,
+            "max_output_tokens": 131072
+          },
+          "max_output_tokens": 65536,
+          "provider_options": {
+            "tool_stream": true,
+            "preserve_thinking": true,
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            },
+            "reasoning_effort": "max",
+            "parallel_tool_calls": false
+          }
+        }
+      }
+    }
+  }
+}

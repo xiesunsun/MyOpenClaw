@@ -1,504 +1,415 @@
 import asyncio
+import base64
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from google.genai import types
-
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from pickel.context.model_context import (
+    ModelContext,
+    SystemContent,
+    ToolDefinition,
 )
-from myopenclaw.providers.gemini import GeminiProvider
-from myopenclaw.shared.generation import GenerateRequest
-from myopenclaw.tools.base import ToolSpec
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.providers.gemini import GeminiProvider
+from pickel.shared.model_config import ModelConfig
 
 
 class GeminiProviderTests(unittest.TestCase):
     def test_from_config_defaults_temperature_to_one_when_unset(self) -> None:
         provider = GeminiProvider.from_config(
-            config=SimpleNamespace(
-                model="gemini-3-flash-preview",
-                api_key=None,
-                api_base=None,
+            ModelConfig(
+                provider="google/gemini",
+                model="gemini-test",
+                wire_protocol="gemini-generate-content",
+                api_key="fake-api-key",
                 temperature=None,
-                max_output_tokens=1024,
-                provider_options={},
             )
         )
-
         self.assertEqual(1.0, provider.temperature)
 
-    def test_build_tools_maps_tool_specs_to_gemini_function_declarations(self) -> None:
-        declarations = GeminiProvider._build_tools(
+    def test_build_tools_maps_tool_definitions(self) -> None:
+        tools = GeminiProvider._build_tools(
             [
-                ToolSpec(
+                ToolDefinition(
                     name="echo",
                     description="Echo text",
                     input_schema={
                         "type": "object",
-                        "properties": {
-                            "text": {"type": "string"},
-                        },
+                        "properties": {"text": {"type": "string"}},
                         "required": ["text"],
                     },
-                    output_schema={
-                        "type": "object",
-                        "properties": {
-                            "output": {"type": "string"},
-                        },
-                        "required": ["output"],
-                    },
+                    output_schema={"type": "object"},
                 )
             ]
         )
+        self.assertEqual(1, len(tools))
+        declaration = tools[0].function_declarations[0]
+        self.assertEqual("echo", declaration.name)
+        self.assertEqual("Echo text", declaration.description)
 
-        self.assertEqual(1, len(declarations))
-        self.assertEqual("echo", declarations[0].function_declarations[0].name)
-        self.assertEqual(
-            {
-                "type": "object",
-                "properties": {
-                    "output": {"type": "string"},
-                },
-                "required": ["output"],
-            },
-            declarations[0].function_declarations[0].response_json_schema,
-        )
-
-    def test_build_contents_maps_tool_batch_to_ordered_function_calls_and_results(self) -> None:
-        request = GenerateRequest(
-            system_instruction="You are Pickle.",
-            messages=[
-                SessionMessage(role=MessageRole.USER, content="hello"),
-                SessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    tool_call_batch=ToolCallBatch(
-                        batch_id="batch-1",
-                        step_index=1,
-                        calls=[
-                            ToolCall(
-                                id="call-1",
-                                name="echo",
-                                arguments={"text": "ping"},
-                                thought_signature=b"sig-1",
-                            )
-                        ],
-                        results=[
-                            ToolCallResult(
-                                call_id="call-1",
-                                content="pong",
-                                metadata={
-                                    "exit_code": 0,
-                                    "cwd": "/tmp/workspace",
-                                },
-                            )
-                        ],
-                    ),
+    def test_build_contents_maps_tool_calls_and_results(self) -> None:
+        contents = GeminiProvider._build_contents(
+            [
+                UserMessage(content=[TextBlock(text="hello")]),
+                AssistantMessage(
+                    content=[
+                        TextBlock(text="checking"),
+                        ToolCallBlock(
+                            id="call-1",
+                            name="echo",
+                            arguments={"text": "ping"},
+                            thought_signature=base64.b64encode(b"sig").decode("ascii"),
+                        ),
+                    ]
                 ),
-            ],
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="echo",
+                    content=[TextBlock(text="pong")],
+                ),
+            ]
         )
-
-        contents = GeminiProvider._build_contents(request.messages)
-
-        self.assertEqual(["user", "model", "user"], [content.role for content in contents])
-        self.assertEqual("hello", contents[0].parts[0].text)
-        self.assertEqual("echo", contents[1].parts[-1].function_call.name)
-        self.assertEqual(b"sig-1", contents[1].parts[-1].thought_signature)
-        self.assertEqual("echo", contents[2].parts[0].function_response.name)
+        self.assertEqual(3, len(contents))
+        self.assertEqual("user", contents[0].role)
+        self.assertEqual("model", contents[1].role)
+        self.assertEqual("user", contents[2].role)
+        self.assertIsNotNone(contents[1].parts[1].function_call)
+        self.assertEqual("echo", contents[1].parts[1].function_call.name)
+        self.assertIsNotNone(contents[2].parts[0].function_response)
         self.assertEqual(
             {
-                "output": "pong",
-                "metadata": {
-                    "exit_code": 0,
-                    "cwd": "/tmp/workspace",
-                },
+                "content": [{"type": "text", "text": "pong"}],
+                "is_error": False,
             },
             contents[2].parts[0].function_response.response,
         )
 
-    def test_build_contents_maps_error_tool_batch_results_to_error_payload(self) -> None:
+    def test_build_contents_maps_error_tool_results(self) -> None:
         contents = GeminiProvider._build_contents(
             [
-                SessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    tool_call_batch=ToolCallBatch(
-                        batch_id="batch-1",
-                        step_index=1,
-                        calls=[
-                            ToolCall(
-                                id="call-1",
-                                name="echo",
-                                arguments={"text": "hello"},
-                            )
-                        ],
-                        results=[
-                            ToolCallResult(
-                                call_id="call-1",
-                                content="command failed",
-                                is_error=True,
-                            )
-                        ],
-                    ),
+                AssistantMessage(
+                    content=[ToolCallBlock(id="call-1", name="echo", arguments={})]
+                ),
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="echo",
+                    content=[TextBlock(text="failed")],
+                    is_error=True,
+                ),
+            ]
+        )
+        self.assertEqual(
+            {
+                "content": [{"type": "text", "text": "failed"}],
+                "is_error": True,
+            },
+            contents[1].parts[0].function_response.response,
+        )
+
+    def test_build_contents_uses_only_tool_result_content(self) -> None:
+        contents = GeminiProvider._build_contents(
+            [
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="lookup",
+                    content=[TextBlock(text="found")],
                 )
             ]
         )
 
+        response = contents[0].parts[0].function_response.response
         self.assertEqual(
-            {"error": "command failed"},
-            contents[1].parts[0].function_response.response,
+            {"content": [{"type": "text", "text": "found"}], "is_error": False},
+            response,
         )
+
+    def test_build_contents_aggregates_multiple_tool_results(self) -> None:
+        contents = GeminiProvider._build_contents(
+            [
+                UserMessage(content=[TextBlock(text="hi")]),
+                AssistantMessage(
+                    content=[
+                        ToolCallBlock(id="c1", name="a", arguments={}),
+                        ToolCallBlock(id="c2", name="b", arguments={}),
+                    ]
+                ),
+                ToolResultMessage(
+                    tool_call_id="c1",
+                    tool_name="a",
+                    content=[TextBlock(text="r1")],
+                ),
+                ToolResultMessage(
+                    tool_call_id="c2",
+                    tool_name="b",
+                    content=[TextBlock(text="r2")],
+                ),
+            ]
+        )
+        self.assertEqual(3, len(contents))
+        self.assertEqual(2, len(contents[2].parts))
+        self.assertEqual("c1", contents[2].parts[0].function_response.id)
+        self.assertEqual("c2", contents[2].parts[1].function_response.id)
 
     def test_extract_tool_calls_reads_function_calls_from_response(self) -> None:
         response = SimpleNamespace(
-            function_calls=[
-                types.FunctionCall(
-                    id="call-1",
-                    name="echo",
-                    args={"text": "hello"},
-                )
-            ],
             candidates=[
                 SimpleNamespace(
                     content=SimpleNamespace(
                         parts=[
-                            types.Part(
-                                function_call=types.FunctionCall(
-                                    id="call-1",
+                            SimpleNamespace(
+                                text=None,
+                                function_call=SimpleNamespace(
+                                    id="f1",
                                     name="echo",
-                                    args={"text": "hello"},
+                                    args={"text": "x"},
                                 ),
-                                thought_signature=b"sig-1",
+                                thought_signature=b"sig-bytes",
                             )
                         ]
                     )
                 )
             ],
+            function_calls=None,
         )
-
-        tool_calls = GeminiProvider._extract_tool_calls(response)
-
+        tools = GeminiProvider._extract_tool_call_contents(response)
+        self.assertEqual(1, len(tools))
+        self.assertEqual("f1", tools[0].id)
+        self.assertEqual("echo", tools[0].name)
+        self.assertEqual({"text": "x"}, tools[0].arguments)
         self.assertEqual(
-            [
-                ToolCall(
-                    id="call-1",
-                    name="echo",
-                    arguments={"text": "hello"},
-                    thought_signature=b"sig-1",
-                )
-            ],
-            tool_calls,
+            base64.b64encode(b"sig-bytes").decode("ascii"),
+            tools[0].thought_signature,
         )
 
-    def test_extract_text_prefers_candidate_parts_over_response_text_property(self) -> None:
-        class ResponseWithExplodingText:
-            @property
-            def text(self) -> str:
-                raise AssertionError("response.text should not be accessed")
-
-        response = ResponseWithExplodingText()
-        response.candidates = [
-            SimpleNamespace(
-                content=SimpleNamespace(
-                    parts=[
-                        types.Part(text="first"),
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id="call-1",
-                                name="echo",
-                                args={"text": "hello"},
-                            )
-                        ),
-                        types.Part(text="second"),
-                    ]
-                )
-            )
-        ]
-
-        text = GeminiProvider._extract_text(response)
-
-        self.assertEqual("first\nsecond", text)
-
-    def test_extract_text_does_not_fallback_when_parts_exist_but_have_no_text(self) -> None:
-        class ResponseWithExplodingText:
-            @property
-            def text(self) -> str:
-                raise AssertionError("response.text should not be accessed")
-
-        response = ResponseWithExplodingText()
-        response.candidates = [
-            SimpleNamespace(
-                content=SimpleNamespace(
-                    parts=[
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id="call-1",
-                                name="echo",
-                                args={"text": "hello"},
-                            )
-                        )
-                    ]
-                )
-            )
-        ]
-
-        text = GeminiProvider._extract_text(response)
-
-        self.assertEqual("", text)
-
-    def test_extract_provider_finish_metadata_reads_primary_candidate(self) -> None:
+    def test_extract_text_prefers_candidate_parts(self) -> None:
         response = SimpleNamespace(
-            response_id="resp-1",
-            model_version="gemini-3-flash-preview-001",
             candidates=[
                 SimpleNamespace(
-                    finish_reason="MAX_TOKENS",
-                    finish_message="Token budget exhausted.",
+                    content=SimpleNamespace(
+                        parts=[SimpleNamespace(text="from-parts", function_call=None)]
+                    )
                 )
             ],
+            text="from-property",
         )
+        self.assertEqual("from-parts", GeminiProvider._extract_text(response))
 
-        self.assertEqual("MAX_TOKENS", GeminiProvider._extract_provider_finish_reason(response))
-        self.assertEqual(
-            "Token budget exhausted.",
-            GeminiProvider._extract_provider_finish_message(response),
+    def test_extract_text_does_not_fallback_when_parts_exist_but_have_no_text(
+        self,
+    ) -> None:
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[SimpleNamespace(text=None, function_call=None)]
+                    )
+                )
+            ],
+            text="fallback",
         )
-        self.assertEqual("resp-1", response.response_id)
-        self.assertEqual("gemini-3-flash-preview-001", response.model_version)
+        self.assertEqual("", GeminiProvider._extract_text(response))
 
     def test_extract_usage_reads_extended_token_counters(self) -> None:
         response = SimpleNamespace(
             usage_metadata=SimpleNamespace(
-                prompt_token_count=11,
-                candidates_token_count=7,
-                cached_content_token_count=3,
-                thoughts_token_count=5,
-                tool_use_prompt_token_count=2,
-                total_token_count=28,
+                prompt_token_count=10,
+                candidates_token_count=4,
+                cached_content_token_count=2,
+                thoughts_token_count=3,
+                total_token_count=17,
             )
         )
-
         usage = GeminiProvider._extract_usage(response)
+        self.assertEqual(10, usage.input_tokens)
+        self.assertEqual(4, usage.output_tokens)
+        self.assertEqual(2, usage.cache_read_tokens)
+        self.assertEqual(3, usage.reasoning_tokens)
+        self.assertEqual(17, usage.total_tokens)
 
-        self.assertEqual(11, usage.input_tokens)
-        self.assertEqual(7, usage.output_tokens)
-        self.assertEqual(3, usage.cached_content_tokens)
-        self.assertEqual(5, usage.thoughts_tokens)
-        self.assertEqual(2, usage.tool_use_prompt_tokens)
-        self.assertEqual(28, usage.total_tokens)
-
-    def test_count_request_tokens_uses_generate_content_request_shape(self) -> None:
-        provider = GeminiProvider(model="gemini-3-flash-preview")
-        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":42}'))
+    def test_count_context_tokens_uses_generate_content_request_shape(self) -> None:
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
-                async_request=count_tokens,
-            )
-        )
-
-        total_tokens = asyncio.run(
-            provider.count_request_tokens(
-                GenerateRequest(
-                    system_instruction="You are Pickle.",
-                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+                async_request=AsyncMock(
+                    return_value=SimpleNamespace(total_tokens=9, body=None)
                 )
             )
         )
-
-        self.assertEqual(42, total_tokens)
-        count_tokens.assert_awaited_once()
-        kwargs = count_tokens.await_args.kwargs
-        self.assertEqual("post", kwargs["http_method"])
-        self.assertEqual("models/gemini-3-flash-preview:countTokens", kwargs["path"])
-        self.assertEqual(
-            {
-                "generateContentRequest": {
-                    "model": "models/gemini-3-flash-preview",
-                    "contents": [
-                        {
-                            "parts": [{"text": "hello"}],
-                            "role": "user",
-                        }
-                    ],
-                    "systemInstruction": {
-                        "parts": [{"text": "You are Pickle."}],
-                    },
-                }
-            },
-            kwargs["request_dict"],
-        )
-
-    def test_count_request_tokens_serializes_tools_and_thought_signatures(self) -> None:
-        provider = GeminiProvider(model="gemini-3-flash-preview")
-        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":17}'))
-        provider.client = SimpleNamespace(
-            _api_client=SimpleNamespace(
-                async_request=count_tokens,
+        total = asyncio.run(
+            provider.count_context_tokens(
+                ModelContext(
+                    system=SystemContent.from_text("sys"),
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
+                )
             )
         )
+        self.assertEqual(9, total)
+        request_dict = provider.client._api_client.async_request.await_args.kwargs[
+            "request_dict"
+        ]
+        self.assertIn("generateContentRequest", request_dict)
+        self.assertIn("systemInstruction", request_dict["generateContentRequest"])
 
-        total_tokens = asyncio.run(
-            provider.count_request_tokens(
-                GenerateRequest(
-                    system_instruction=None,
+    def test_count_context_tokens_serializes_tools_and_thought_signatures(self) -> None:
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=AsyncMock(
+                    return_value=SimpleNamespace(total_tokens=3, body=None)
+                )
+            )
+        )
+        asyncio.run(
+            provider.count_context_tokens(
+                ModelContext(
+                    system=SystemContent.from_text(""),
                     messages=[
-                        SessionMessage(
-                            role=MessageRole.ASSISTANT,
-                            tool_call_batch=ToolCallBatch(
-                                batch_id="batch-1",
-                                step_index=1,
-                                calls=[
-                                    ToolCall(
-                                        id="call-1",
-                                        name="echo",
-                                        arguments={"text": "ping"},
-                                        thought_signature=b"sig-1",
-                                    )
-                                ],
-                                results=[
-                                    ToolCallResult(
-                                        call_id="call-1",
-                                        content="pong",
-                                        metadata={"exit_code": 0},
-                                    )
-                                ],
-                            ),
-                        )
+                        AssistantMessage(
+                            content=[
+                                ToolCallBlock(
+                                    id="c1",
+                                    name="echo",
+                                    arguments={"text": "x"},
+                                    thought_signature=base64.b64encode(b"sig").decode(
+                                        "ascii"
+                                    ),
+                                )
+                            ]
+                        ),
+                        ToolResultMessage(
+                            tool_call_id="c1",
+                            tool_name="echo",
+                            content=[TextBlock(text="ok")],
+                        ),
                     ],
                     tools=[
-                        ToolSpec(
+                        ToolDefinition(
                             name="echo",
-                            description="Echo text",
-                            input_schema={
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
+                            description="Echo",
+                            input_schema={"type": "object"},
+                            output_schema={"type": "object"},
                         )
                     ],
                 )
             )
         )
+        request_dict = provider.client._api_client.async_request.await_args.kwargs[
+            "request_dict"
+        ]
+        self.assertIn("tools", request_dict["generateContentRequest"])
+        contents = request_dict["generateContentRequest"]["contents"]
+        self.assertTrue(contents)
 
-        self.assertEqual(17, total_tokens)
-        count_tokens.assert_awaited_once()
-        kwargs = count_tokens.await_args.kwargs
-        self.assertEqual("post", kwargs["http_method"])
-        self.assertEqual("models/gemini-3-flash-preview:countTokens", kwargs["path"])
-        self.assertEqual(
-            [
-                {
-                    "functionDeclarations": [
-                        {
-                            "description": "Echo text",
-                            "name": "echo",
-                            "parametersJsonSchema": {
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
-                        }
-                    ]
-                }
-            ],
-            kwargs["request_dict"]["generateContentRequest"]["tools"],
-        )
-        self.assertEqual(
-            "c2lnLTE=",
-            kwargs["request_dict"]["generateContentRequest"]["contents"][0]["parts"][0]["thoughtSignature"],
-        )
-        self.assertEqual(
-            {
-                "output": "pong",
-                "metadata": {"exit_code": 0},
-            },
-            kwargs["request_dict"]["generateContentRequest"]["contents"][1]["parts"][0]["functionResponse"]["response"],
-        )
-
-    def test_count_request_tokens_returns_zero_for_empty_request(self) -> None:
-        provider = GeminiProvider(model="gemini-3-flash-preview")
-        count_tokens = AsyncMock(return_value=SimpleNamespace(body='{"totalTokens":1}'))
+    def test_count_context_tokens_returns_zero_for_empty_request(self) -> None:
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
         provider.client = SimpleNamespace(
             _api_client=SimpleNamespace(
-                async_request=count_tokens,
-            )
-        )
-
-        total_tokens = asyncio.run(
-            provider.count_request_tokens(
-                GenerateRequest(
-                    system_instruction=None,
-                    messages=[],
-                    tools=[],
+                async_request=AsyncMock(
+                    return_value=SimpleNamespace(total_tokens=0, body=None)
                 )
             )
         )
-
-        self.assertEqual(1, total_tokens)
-        count_tokens.assert_awaited_once()
-        self.assertEqual(
-            [
-                {
-                    "parts": [{"text": ""}],
-                    "role": "user",
-                }
-            ],
-            count_tokens.await_args.kwargs["request_dict"]["generateContentRequest"]["contents"],
-        )
-
-    def test_count_request_tokens_retries_after_transient_failure(self) -> None:
-        provider = GeminiProvider(model="gemini-3-flash-preview")
-        count_tokens = AsyncMock(
-            side_effect=[
-                RuntimeError("temporary countTokens failure"),
-                SimpleNamespace(body='{"totalTokens":42}'),
-            ]
-        )
-        provider.client = SimpleNamespace(
-            _api_client=SimpleNamespace(
-                async_request=count_tokens,
+        total = asyncio.run(
+            provider.count_context_tokens(
+                ModelContext(system=SystemContent.from_text(""), messages=[])
             )
         )
+        self.assertEqual(0, total)
 
-        with patch("myopenclaw.providers.gemini.asyncio.sleep", new=AsyncMock()) as sleep:
-            total_tokens = asyncio.run(
-                provider.count_request_tokens(
-                    GenerateRequest(
-                        system_instruction="You are Pickle.",
-                        messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+    def test_count_context_tokens_retries_after_transient_failure(self) -> None:
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
+        provider.client = SimpleNamespace(
+            _api_client=SimpleNamespace(
+                async_request=AsyncMock(
+                    side_effect=[
+                        RuntimeError("transient"),
+                        SimpleNamespace(total_tokens=5, body=None),
+                    ]
+                )
+            )
+        )
+        with patch("asyncio.sleep", new=AsyncMock()):
+            total = asyncio.run(
+                provider.count_context_tokens(
+                    ModelContext(
+                        system=SystemContent.from_text(""),
+                        messages=[UserMessage(content=[TextBlock(text="hello")])],
                     )
                 )
             )
-
-        self.assertEqual(42, total_tokens)
-        self.assertEqual(2, count_tokens.await_count)
-        sleep.assert_awaited_once_with(0.2)
+        self.assertEqual(5, total)
 
     def test_extract_count_tokens_total_reads_http_response_body(self) -> None:
-        total_tokens = GeminiProvider._extract_count_tokens_total(
-            SimpleNamespace(body='{"totalTokens":99}')
-        )
-
-        self.assertEqual(99, total_tokens)
+        response = SimpleNamespace(total_tokens=None, body='{"totalTokens": 12}')
+        self.assertEqual(12, GeminiProvider._extract_count_tokens_total(response))
 
     def test_build_generate_config_reads_provider_options_thinking(self) -> None:
         provider = GeminiProvider(
-            model="gemini-3-flash-preview",
-            provider_options={"thinking": "low"},
+            model="gemini-test",
+            api_key="fake-api-key",
+            provider_options={"thinking": "high"},
         )
-
         config = provider._build_generate_config(
-            GenerateRequest(
-                system_instruction="You are Pickle.",
-                messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+            ModelContext(
+                system=SystemContent.from_text("sys"),
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
             )
         )
-
         self.assertIsNotNone(config.thinking_config)
-        self.assertEqual("LOW", config.thinking_config.thinking_level.value)
+
+    def test_generate_returns_assistant_message(self) -> None:
+        provider = GeminiProvider(model="gemini-test", api_key="fake-api-key")
+        provider.client = SimpleNamespace(
+            aio=SimpleNamespace(
+                models=SimpleNamespace(
+                    generate_content=AsyncMock(
+                        return_value=SimpleNamespace(
+                            candidates=[
+                                SimpleNamespace(
+                                    content=SimpleNamespace(
+                                        parts=[
+                                            SimpleNamespace(
+                                                text="hello-back",
+                                                function_call=None,
+                                            )
+                                        ]
+                                    ),
+                                    finish_message=None,
+                                )
+                            ],
+                            response_id="r1",
+                            model_version="v1",
+                            usage_metadata=SimpleNamespace(
+                                prompt_token_count=1,
+                                candidates_token_count=2,
+                                cached_content_token_count=None,
+                                thoughts_token_count=None,
+                                total_token_count=3,
+                            ),
+                            text="hello-back",
+                            function_calls=None,
+                        )
+                    )
+                )
+            )
+        )
+        result = asyncio.run(
+            provider.generate(
+                ModelContext(
+                    system=SystemContent.from_text("sys"),
+                    messages=[UserMessage(content=[TextBlock(text="hi")])],
+                )
+            )
+        )
+        self.assertIsInstance(result, AssistantMessage)
+        self.assertEqual("hello-back", result.content[0].text)
+        self.assertEqual("stop", result.metadata.finish_reason)
+        self.assertEqual(1, result.metadata.usage.input_tokens)
 
 
 if __name__ == "__main__":

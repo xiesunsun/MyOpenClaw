@@ -3,21 +3,40 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from myopenclaw.conversations.message import (
-    MessageRole,
-    SessionMessage,
-    ToolCall,
-    ToolCallBatch,
-    ToolCallResult,
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
+from pickel.context.model_context import (
+    ModelContext,
+    SystemContent,
+    ToolDefinition,
 )
-from myopenclaw.providers.anthropic import AnthropicProvider
-from myopenclaw.shared.generation import FinishReason, GenerateRequest
-from myopenclaw.tools.base import ToolSpec
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
+from pickel.conversations.content_blocks import (
+    ArtifactBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+)
+from pickel.providers.anthropic import AnthropicMessagesProvider
+from pickel.shared.frozen_json import thaw_json
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.providers.stream import accumulate
 
 
 class FakeAsyncMessageStream:
     def __init__(self, final_message) -> None:
         self.final_message = final_message
+
+    def __aiter__(self):
+        async def _no_events():
+            return
+            yield  # pragma: no cover
+
+        return _no_events()
 
     async def get_final_message(self):
         return self.final_message
@@ -34,11 +53,19 @@ class FakeAsyncMessageStreamManager:
         return None
 
 
-class AnthropicProviderTests(unittest.TestCase):
-    def test_build_tools_maps_tool_specs_to_anthropic_tools(self) -> None:
-        tools = AnthropicProvider._build_tools(
+class AnthropicMessagesProviderTests(unittest.TestCase):
+    def test_api_base_removes_sdk_owned_v1_suffix(self) -> None:
+        self.assertEqual(
+            "https://opencode.ai/zen/go",
+            AnthropicMessagesProvider._normalize_api_base(
+                "https://opencode.ai/zen/go/v1/"
+            ),
+        )
+
+    def test_build_tools_maps_tool_definitions(self) -> None:
+        tools = AnthropicMessagesProvider._build_tools(
             [
-                ToolSpec(
+                ToolDefinition(
                     name="echo",
                     description="Echo text",
                     input_schema={
@@ -46,10 +73,10 @@ class AnthropicProviderTests(unittest.TestCase):
                         "properties": {"text": {"type": "string"}},
                         "required": ["text"],
                     },
+                    output_schema={"type": "object"},
                 )
             ]
         )
-
         self.assertEqual(
             [
                 {
@@ -65,54 +92,67 @@ class AnthropicProviderTests(unittest.TestCase):
             tools,
         )
 
-    def test_build_messages_reconstructs_thinking_tool_use_and_tool_results(self) -> None:
-        messages = AnthropicProvider._build_messages(
+    def test_build_tools_keeps_mcp_json_schema_composition(self) -> None:
+        schema = {
+            "type": "object",
+            "$defs": {"query": {"type": "string"}},
+            "properties": {
+                "query": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/query"},
+                        {"type": "null"},
+                    ]
+                }
+            },
+        }
+
+        tool = AnthropicMessagesProvider._build_tools(
             [
-                SessionMessage(role=MessageRole.USER, content="hello"),
-                SessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    content="Let me check.",
-                    provider_thinking_blocks=[
-                        {
-                            "type": "thinking",
-                            "thinking": "internal",
-                            "signature": "sig-1",
-                        }
-                    ],
-                    tool_call_batch=ToolCallBatch(
-                        batch_id="batch-1",
-                        step_index=1,
-                        calls=[
-                            ToolCall(
-                                id="call-1",
-                                name="echo",
-                                arguments={"text": "ping"},
-                            )
-                        ],
-                        results=[
-                            ToolCallResult(
-                                call_id="call-1",
-                                content="pong",
-                                metadata={"exit_code": 0},
-                            )
-                        ],
-                    ),
+                ToolDefinition(
+                    name="search",
+                    description="Search",
+                    input_schema=schema,
+                    output_schema={"type": "object"},
+                )
+            ]
+        )[0]
+
+        self.assertEqual(schema, tool["input_schema"])
+        self.assertNotIn("strict", tool)
+
+    def test_build_messages_thinking_tool_use_and_results(self) -> None:
+        messages = AnthropicMessagesProvider._build_messages(
+            [
+                UserMessage(content=[TextBlock(text="hello")]),
+                AssistantMessage(
+                    content=[
+                        ThinkingBlock(text="internal", signature="sig-1"),
+                        TextBlock(text="Let me check."),
+                        ToolCallBlock(
+                            id="call-1",
+                            name="echo",
+                            arguments={"text": "ping"},
+                        ),
+                    ]
                 ),
-                SessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    content="Done.",
-                    provider_thinking_blocks=[
-                        {
-                            "type": "thinking",
-                            "thinking": "final",
-                            "signature": "sig-2",
-                        }
-                    ],
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="echo",
+                    content=[TextBlock(text="pong")],
+                ),
+                AssistantMessage(
+                    content=[
+                        ThinkingBlock(text="final", signature="sig-2"),
+                        TextBlock(text="Done."),
+                    ]
                 ),
             ]
         )
 
-        self.assertEqual(["user", "assistant", "user", "assistant"], [m["role"] for m in messages])
+        self.assertEqual(
+            ["user", "assistant", "user", "assistant"],
+            [m["role"] for m in messages],
+        )
         self.assertEqual([{"type": "text", "text": "hello"}], messages[0]["content"])
         self.assertEqual("thinking", messages[1]["content"][0]["type"])
         self.assertEqual("text", messages[1]["content"][1]["type"])
@@ -131,37 +171,118 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual("thinking", messages[3]["content"][0]["type"])
         self.assertEqual("Done.", messages[3]["content"][1]["text"])
 
-    def test_build_messages_marks_error_tool_results(self) -> None:
-        messages = AnthropicProvider._build_messages(
-            [
-                SessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    tool_call_batch=ToolCallBatch(
-                        batch_id="batch-1",
-                        step_index=1,
-                        calls=[
-                            ToolCall(
-                                id="call-1",
-                                name="echo",
-                                arguments={"text": "ping"},
-                            )
-                        ],
-                        results=[
-                            ToolCallResult(
-                                call_id="call-1",
-                                content="failed",
-                                is_error=True,
-                            )
-                        ],
-                    ),
-                )
-            ]
+    def test_tool_result_uses_only_message_content(self) -> None:
+        block = AnthropicMessagesProvider._tool_result_block(
+            ToolResultMessage(
+                tool_call_id="call-1",
+                tool_name="lookup",
+                content=[TextBlock(text="found")],
+            )
         )
 
+        self.assertEqual("found", block["content"])
+
+    def test_build_messages_marks_error_tool_results(self) -> None:
+        messages = AnthropicMessagesProvider._build_messages(
+            [
+                AssistantMessage(
+                    content=[
+                        ToolCallBlock(
+                            id="call-1", name="echo", arguments={"text": "ping"}
+                        )
+                    ]
+                ),
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="echo",
+                    content=[TextBlock(text="failed")],
+                    is_error=True,
+                ),
+            ]
+        )
         self.assertTrue(messages[1]["content"][0]["is_error"])
 
+    def test_build_messages_maps_image_tool_result(self) -> None:
+        service = ArtifactService(
+            artifact_store=InMemoryRuntimeStore(),
+            blob_store=InMemoryBlobStore(),
+        )
+        reference = service.create_artifact(data=b"hi", media_type="image/png")
+        messages = AnthropicMessagesProvider._build_messages(
+            [
+                AssistantMessage(
+                    content=[ToolCallBlock(id="call-1", name="look", arguments={})]
+                ),
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    tool_name="look",
+                    content=[
+                        TextBlock(text="截图"),
+                        ArtifactBlock(artifact=reference),
+                    ],
+                ),
+            ],
+            artifact_service=service,
+        )
+
+        content = messages[1]["content"][0]["content"]
+        self.assertEqual("text", content[0]["type"])
+        self.assertEqual("image", content[1]["type"])
+        self.assertEqual("base64", content[1]["source"]["type"])
+        self.assertEqual("image/png", content[1]["source"]["media_type"])
+
+    def test_build_messages_resolves_artifact_reference_at_mapping_boundary(
+        self,
+    ) -> None:
+        service = ArtifactService(
+            artifact_store=InMemoryRuntimeStore(),
+            blob_store=InMemoryBlobStore(),
+        )
+        reference = service.create_artifact(
+            data=b"image",
+            media_type="image/png",
+            display_name="chart.png",
+        )
+
+        messages = AnthropicMessagesProvider._build_messages(
+            [UserMessage(content=[ArtifactBlock(artifact=reference)])],
+            artifact_service=service,
+        )
+
+        block = messages[0]["content"][0]
+        self.assertEqual("image", block["type"])
+        self.assertEqual("base64", block["source"]["type"])
+        self.assertEqual("aW1hZ2U=", block["source"]["data"])
+
+    def test_build_messages_aggregates_consecutive_tool_results(self) -> None:
+        messages = AnthropicMessagesProvider._build_messages(
+            [
+                UserMessage(content=[TextBlock(text="hi")]),
+                AssistantMessage(
+                    content=[
+                        ToolCallBlock(id="c1", name="a", arguments={}),
+                        ToolCallBlock(id="c2", name="b", arguments={}),
+                    ]
+                ),
+                ToolResultMessage(
+                    tool_call_id="c1",
+                    tool_name="a",
+                    content=[TextBlock(text="r1")],
+                ),
+                ToolResultMessage(
+                    tool_call_id="c2",
+                    tool_name="b",
+                    content=[TextBlock(text="r2")],
+                ),
+            ]
+        )
+        self.assertEqual(["user", "assistant", "user"], [m["role"] for m in messages])
+        self.assertEqual(2, len(messages[2]["content"]))
+        self.assertEqual("c1", messages[2]["content"][0]["tool_use_id"])
+        self.assertEqual("c2", messages[2]["content"][1]["tool_use_id"])
+
     def test_generate_maps_response_blocks_and_metadata(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-opus-4-7",
             temperature=0.2,
             max_output_tokens=2048,
@@ -204,163 +325,222 @@ class AnthropicProviderTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            provider.generate(
-                GenerateRequest(
-                    system_instruction="You are Pickle.",
-                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
-                    tools=[
-                        ToolSpec(
-                            name="echo",
-                            description="Echo text",
-                            input_schema={
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text("You are Pickle."),
+                            messages=[UserMessage(content=[TextBlock(text="hello")])],
+                            tools=[
+                                ToolDefinition(
+                                    name="echo",
+                                    description="Echo text",
+                                    input_schema={
+                                        "type": "object",
+                                        "properties": {"text": {"type": "string"}},
+                                        "required": ["text"],
+                                    },
+                                    output_schema={"type": "object"},
+                                )
+                            ],
                         )
-                    ],
+                    )
                 )
             )
         )
 
-        self.assertEqual("I'll use a tool.", result.text)
-        self.assertEqual(
-            [ToolCall(id="tool-1", name="echo", arguments={"text": "hello"})],
-            result.tool_calls,
-        )
-        self.assertEqual(FinishReason.TOOL_CALLS, result.finish_reason)
-        self.assertEqual("tool_use", result.provider_finish_reason)
-        self.assertEqual("msg-1", result.provider_response_id)
-        self.assertEqual("claude-opus-4-7-20250421", result.provider_model_version)
-        self.assertEqual(11, result.usage.input_tokens)
-        self.assertEqual(7, result.usage.output_tokens)
-        self.assertEqual(5, result.usage.cached_content_tokens)
-        self.assertEqual(18, result.usage.total_tokens)
-        self.assertEqual(
-            [{"type": "thinking", "thinking": "internal", "signature": "sig-1"}],
-            result.provider_thinking_blocks,
-        )
+        self.assertIsInstance(result, AssistantMessage)
+        self.assertEqual("thinking", result.content[0].type)
+        self.assertEqual("internal", result.content[0].text)
+        self.assertEqual("sig-1", result.content[0].signature)
+        self.assertEqual("I'll use a tool.", result.content[1].text)
+        self.assertEqual("tool-1", result.content[2].id)
+        self.assertEqual("echo", result.content[2].name)
+        self.assertEqual({"text": "hello"}, result.content[2].arguments)
+        self.assertEqual("tool_calls", result.metadata.finish_reason)
+        self.assertEqual("msg-1", result.metadata.provider_response_id)
+        self.assertEqual(11, result.metadata.usage.input_tokens)
+        self.assertEqual(7, result.metadata.usage.output_tokens)
+        self.assertEqual(3, result.metadata.usage.cache_read_tokens)
+        self.assertEqual(2, result.metadata.usage.cache_write_tokens)
 
-        kwargs = stream.call_args.kwargs
-        self.assertEqual("claude-opus-4-7", kwargs["model"])
-        self.assertEqual(2048, kwargs["max_tokens"])
-        self.assertEqual("You are Pickle.", kwargs["system"])
-        self.assertEqual(
-            [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
-            kwargs["messages"],
-        )
-        self.assertEqual(
-            [{"name": "echo", "description": "Echo text", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}],
-            kwargs["tools"],
-        )
-        self.assertEqual(
-            {"type": "adaptive", "display": "summarized"},
-            kwargs["thinking"],
-        )
-        self.assertEqual({"effort": "xhigh"}, kwargs["output_config"])
-        self.assertNotIn("temperature", kwargs)
+        create_kwargs = stream.call_args.kwargs
+        self.assertEqual("You are Pickle.", create_kwargs["system"])
+        self.assertEqual("claude-opus-4-7", create_kwargs["model"])
+        self.assertNotIn("temperature", create_kwargs)
 
     def test_generate_sends_temperature_for_non_opus_models(self) -> None:
-        provider = AnthropicProvider(
+        provider = AnthropicMessagesProvider(
             model="claude-sonnet-4-0",
-            temperature=0.3,
+            temperature=0.4,
         )
         stream = Mock(
             return_value=FakeAsyncMessageStreamManager(
                 SimpleNamespace(
-                    id="msg-1",
-                    model="claude-sonnet-4-0",
+                    id="msg-2",
+                    model="claude-sonnet",
                     stop_reason="end_turn",
                     usage=None,
-                    content=[SimpleNamespace(type="text", text="done")],
+                    content=[SimpleNamespace(type="text", text="ok")],
                 )
             )
         )
         provider.client = SimpleNamespace(
-            messages=SimpleNamespace(
-                stream=stream,
-                count_tokens=AsyncMock(),
-            )
+            messages=SimpleNamespace(stream=stream, count_tokens=AsyncMock())
         )
-
         asyncio.run(
-            provider.generate(
-                GenerateRequest(
-                    system_instruction=None,
-                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+            accumulate(
+                provider.stream_prepared(
+                    provider.prepare(
+                        ModelContext(
+                            system=SystemContent.from_text(""),
+                            messages=[UserMessage(content=[TextBlock(text="hello")])],
+                        )
+                    )
                 )
             )
         )
+        self.assertEqual(0.4, stream.call_args.kwargs["temperature"])
 
-        self.assertEqual(0.3, stream.call_args.kwargs["temperature"])
-
-    def test_count_request_tokens_uses_matching_request_shape(self) -> None:
-        provider = AnthropicProvider(
-            model="claude-opus-4-7",
-            provider_options={"thinking": "high"},
-        )
+    def test_count_context_tokens_uses_matching_request_shape(self) -> None:
+        provider = AnthropicMessagesProvider(model="claude-test")
         count_tokens = AsyncMock(return_value=SimpleNamespace(input_tokens=42))
         provider.client = SimpleNamespace(
-            messages=SimpleNamespace(
-                create=AsyncMock(),
-                count_tokens=count_tokens,
-            )
+            messages=SimpleNamespace(count_tokens=count_tokens, stream=Mock())
         )
-
-        total_tokens = asyncio.run(
-            provider.count_request_tokens(
-                GenerateRequest(
-                    system_instruction="You are Pickle.",
-                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+        total = asyncio.run(
+            provider.count_context_tokens(
+                ModelContext(
+                    system=SystemContent.from_text("sys"),
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                     tools=[
-                        ToolSpec(
+                        ToolDefinition(
                             name="echo",
-                            description="Echo text",
-                            input_schema={
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
+                            description="Echo",
+                            input_schema={"type": "object"},
+                            output_schema={"type": "object"},
                         )
                     ],
                 )
             )
         )
-
-        self.assertEqual(42, total_tokens)
+        self.assertEqual(42, total)
         kwargs = count_tokens.await_args.kwargs
-        self.assertEqual("claude-opus-4-7", kwargs["model"])
-        self.assertEqual("You are Pickle.", kwargs["system"])
-        self.assertEqual(
-            [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
-            kwargs["messages"],
-        )
-        self.assertEqual(
-            {"type": "adaptive", "display": "summarized"},
-            kwargs["thinking"],
-        )
-        self.assertEqual({"effort": "high"}, kwargs["output_config"])
-        self.assertNotIn("max_tokens", kwargs)
+        self.assertEqual("sys", kwargs["system"])
+        self.assertEqual(1, len(kwargs["tools"]))
 
-    def test_count_request_tokens_returns_none_on_failure(self) -> None:
-        provider = AnthropicProvider(model="claude-opus-4-7")
+    def test_count_context_tokens_returns_none_on_failure(self) -> None:
+        provider = AnthropicMessagesProvider(model="claude-test")
         provider.client = SimpleNamespace(
             messages=SimpleNamespace(
-                create=AsyncMock(),
                 count_tokens=AsyncMock(side_effect=RuntimeError("boom")),
+                stream=Mock(),
             )
         )
-
-        total_tokens = asyncio.run(
-            provider.count_request_tokens(
-                GenerateRequest(
-                    system_instruction=None,
-                    messages=[SessionMessage(role=MessageRole.USER, content="hello")],
+        total = asyncio.run(
+            provider.count_context_tokens(
+                ModelContext(
+                    system=SystemContent.from_text(""),
+                    messages=[UserMessage(content=[TextBlock(text="hello")])],
                 )
             )
         )
+        self.assertIsNone(total)
 
-        self.assertIsNone(total_tokens)
+    def test_cache_control_marks_system_and_enables_automatic_caching(self) -> None:
+        provider = AnthropicMessagesProvider(
+            model="claude-test",
+            provider_options={
+                "cache_control": {
+                    "type": "ephemeral",
+                    "ttl": "5m",
+                }
+            },
+        )
+
+        params = provider._build_request_params(
+            ModelContext(
+                system=SystemContent.from_text("stable system"),
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
+                tools=[
+                    ToolDefinition(
+                        name="echo",
+                        description="Echo",
+                        input_schema={"type": "object"},
+                        output_schema={"type": "object"},
+                    )
+                ],
+            )
+        )
+
+        expected = {"type": "ephemeral", "ttl": "5m"}
+        self.assertEqual(expected, params["cache_control"])
+        self.assertEqual(
+            [
+                {
+                    "type": "text",
+                    "text": "stable system",
+                    "cache_control": expected,
+                }
+            ],
+            params["system"],
+        )
+        self.assertNotIn("cache_control", params["tools"][-1])
+
+    def test_prepare_preserves_wire_request_and_cache_order(self) -> None:
+        provider = AnthropicMessagesProvider(
+            model="claude-test",
+            max_output_tokens=2048,
+            provider_options={"cache_control": {"type": "ephemeral"}},
+        )
+        context = ModelContext(
+            system=SystemContent.from_text("stable system"),
+            messages=[UserMessage(content=[TextBlock(text="full user message")])],
+            tools=[
+                ToolDefinition(
+                    name="echo",
+                    description="Echo",
+                    input_schema={"type": "object"},
+                    output_schema={"type": "object"},
+                )
+            ],
+        )
+
+        snapshot = thaw_json(provider.prepare(context).body)
+        assert isinstance(snapshot, dict)
+        self.assertTrue(snapshot.pop("stream"))
+        self.assertEqual(("tools", "system", "messages"), provider.request_cache_order)
+        self.assertEqual(provider._build_create_params(context), snapshot)
+        self.assertEqual(
+            "full user message", snapshot["messages"][0]["content"][0]["text"]
+        )
+        self.assertEqual("stable system", snapshot["system"][0]["text"])
+        self.assertEqual("echo", snapshot["tools"][0]["name"])
+
+    def test_cache_control_is_absent_by_default(self) -> None:
+        provider = AnthropicMessagesProvider(model="claude-test")
+
+        params = provider._build_request_params(
+            ModelContext(
+                system=SystemContent.from_text("system"),
+                messages=[UserMessage(content=[TextBlock(text="hello")])],
+            )
+        )
+
+        self.assertNotIn("cache_control", params)
+        self.assertEqual("system", params["system"])
+
+    def test_cache_control_rejects_unsupported_ttl(self) -> None:
+        with self.assertRaisesRegex(ValueError, "5m.*1h"):
+            AnthropicMessagesProvider(
+                model="claude-test",
+                provider_options={
+                    "cache_control": {
+                        "type": "ephemeral",
+                        "ttl": "24h",
+                    }
+                },
+            )
 
 
 if __name__ == "__main__":

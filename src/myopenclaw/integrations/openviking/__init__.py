@@ -1,1 +1,0 @@
-"""OpenViking integration adapters."""

@@ -1,49 +1,62 @@
-import unittest
 from datetime import datetime, timezone
 
-from myopenclaw.conversations.session_preview import SessionPreview
+from pickel.conversations.agent_message import (
+    AssistantMessage,
+    ToolResultMessage,
+    UserMessage,
+)
+from pickel.conversations.content_blocks import TextBlock, ToolCallBlock
+from pickel.conversations.session_preview import (
+    SessionPreview,
+    preview_text_from_message,
+)
 
 
-class SessionPreviewTests(unittest.TestCase):
-    def test_last_message_uses_content_and_truncates(self) -> None:
-        preview = SessionPreview(
-            session_id="session-1",
-            agent_id="Pickle",
-            created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
-            status="active",
-            message_count=3,
-            last_message="x" * 60,
+def test_last_message_truncates_and_normalizes_whitespace() -> None:
+    preview = SessionPreview(
+        session_id="session-1",
+        agent_id="Pickle",
+        created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
+        status="idle",
+        message_count=1,
+        last_message="x" * 60,
+    )
+    assert preview.last_message == ("x" * 50) + "..."
+
+
+def test_preview_from_assistant_tool_calls() -> None:
+    message = AssistantMessage(
+        content=[
+            ToolCallBlock(id="c1", name="read_file", arguments={}),
+            ToolCallBlock(id="c2", name="grep_search", arguments={}),
+        ]
+    )
+    assert preview_text_from_message(message) == "[tools] read_file, grep_search"
+
+
+def test_preview_prefers_text_over_tool_names() -> None:
+    message = AssistantMessage(
+        content=[
+            TextBlock(text="working"),
+            ToolCallBlock(id="c1", name="read_file", arguments={}),
+        ]
+    )
+    assert preview_text_from_message(message) == "working"
+
+
+def test_preview_from_user_and_tool_result_text() -> None:
+    assert (
+        preview_text_from_message(UserMessage(content=[TextBlock(text="hello")]))
+        == "hello"
+    )
+    assert (
+        preview_text_from_message(
+            ToolResultMessage(
+                tool_call_id="c1",
+                tool_name="read_file",
+                content=[TextBlock(text="  file body\nline2  ")],
+            )
         )
-
-        self.assertEqual(("x" * 50) + "...", preview.last_message)
-
-    def test_last_message_normalizes_whitespace(self) -> None:
-        preview = SessionPreview(
-            session_id="session-1",
-            agent_id="Pickle",
-            created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
-            status="active",
-            message_count=1,
-            last_message="hello   \n   world",
-        )
-
-        self.assertEqual("hello world", preview.last_message)
-
-    def test_last_message_can_hold_tool_preview(self) -> None:
-        preview = SessionPreview(
-            session_id="session-1",
-            agent_id="Pickle",
-            created_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 13, 1, tzinfo=timezone.utc),
-            status="active",
-            message_count=3,
-            last_message="[tools] read_file, grep_search",
-        )
-
-        self.assertEqual("[tools] read_file, grep_search", preview.last_message)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        == "file body line2"
+    )

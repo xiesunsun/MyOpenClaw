@@ -1,0 +1,89 @@
+"""Hook 决策 DTO 与合并规则。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal
+
+
+@dataclass
+class UserPromptSubmitDecision:
+    action: Literal["continue", "block"] = "continue"
+    feedback_text: str | None = None
+    reason: str | None = None
+
+
+@dataclass
+class PreToolUseDecision:
+    action: Literal["allow", "deny", "ask"] = "allow"
+    updated_arguments: dict[str, Any] | None = None
+    reason: str | None = None
+    feedback_text: str | None = None
+
+
+@dataclass
+class PostToolUseDecision:
+    feedback_text: str | None = None
+
+
+@dataclass
+class PostToolBatchDecision:
+    feedback_text: str | None = None
+
+
+@dataclass
+class AgentRunEndDecision:
+    """观察者；无控制动作。"""
+
+    pass
+
+
+def merge_user_prompt_decisions(
+    decisions: list[UserPromptSubmitDecision],
+) -> UserPromptSubmitDecision:
+    """任一 block → 整体 block；反馈文本拼接。"""
+    if not decisions:
+        return UserPromptSubmitDecision()
+    blocked = [d for d in decisions if d.action == "block"]
+    feedbacks = [d.feedback_text for d in decisions if d.feedback_text]
+    feedback = "\n".join(feedbacks) if feedbacks else None
+    if blocked:
+        reasons = [d.reason for d in blocked if d.reason]
+        return UserPromptSubmitDecision(
+            action="block",
+            feedback_text=feedback,
+            reason=reasons[0] if reasons else "blocked",
+        )
+    return UserPromptSubmitDecision(action="continue", feedback_text=feedback)
+
+
+def merge_pre_tool_decisions(
+    decisions: list[PreToolUseDecision],
+) -> PreToolUseDecision:
+    """deny > ask > allow；updated_arguments 按顺序叠加。"""
+    if not decisions:
+        return PreToolUseDecision()
+    action: Literal["allow", "deny", "ask"] = "allow"
+    for d in decisions:
+        if d.action == "deny":
+            action = "deny"
+            break
+        if d.action == "ask" and action != "deny":
+            action = "ask"
+    args: dict[str, Any] | None = None
+    for d in decisions:
+        if d.updated_arguments is not None:
+            args = dict(d.updated_arguments)
+    reasons = [d.reason for d in decisions if d.reason]
+    feedbacks = [d.feedback_text for d in decisions if d.feedback_text]
+    return PreToolUseDecision(
+        action=action,
+        updated_arguments=args,
+        reason=reasons[0] if reasons else None,
+        feedback_text="\n".join(feedbacks) if feedbacks else None,
+    )
+
+
+def merge_feedback_texts(texts: list[str | None]) -> str | None:
+    parts = [t for t in texts if t]
+    return "\n".join(parts) if parts else None

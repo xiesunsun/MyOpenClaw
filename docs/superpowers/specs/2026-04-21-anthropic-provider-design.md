@@ -29,12 +29,12 @@ The design should follow Anthropic's native request and response semantics as cl
 
 The current codebase has a single concrete LLM provider:
 
-- `google/gemini` in [`src/myopenclaw/providers/gemini.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/gemini.py)
+- `google/gemini` in `src/myopenclaw/providers/gemini.py`
 
 The runtime interacts only with the provider abstraction:
 
-- [`BaseLLMProvider`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/base.py)
-- [`ReActStrategy`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/runs/strategy/react.py)
+- `BaseLLMProvider`
+- `ReActStrategy`
 
 Gemini request construction and response parsing both live inside the Gemini provider. The runtime does not know Gemini wire types.
 
@@ -214,7 +214,7 @@ providers:
 
 Create:
 
-- [`src/myopenclaw/providers/anthropic.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/anthropic.py)
+- `src/myopenclaw/providers/anthropic.py`
 
 Suggested public surface:
 
@@ -347,7 +347,7 @@ If token counting fails, return `None`.
 
 ### `ModelConfig`
 
-Modify [`src/myopenclaw/shared/model_config.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/shared/model_config.py):
+Modify `src/myopenclaw/shared/model_config.py`:
 
 - change `temperature: float = 1.0` to `temperature: float | None = None`
 - remove top-level `thinking_level`
@@ -357,7 +357,7 @@ The new design intentionally does not keep a compatibility shim. Config should b
 
 ### `SessionMessage`
 
-Modify [`src/myopenclaw/conversations/message.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/conversations/message.py):
+Modify `src/myopenclaw/conversations/message.py`:
 
 - add `provider_thinking_blocks: list[dict[str, Any]] | None = None`
 
@@ -365,7 +365,7 @@ This field is provider-specific continuation state. It remains opaque to the run
 
 ### `GenerateResult`
 
-Modify [`src/myopenclaw/shared/generation.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/shared/generation.py):
+Modify `src/myopenclaw/shared/generation.py`:
 
 - add `provider_thinking_blocks: list[dict[str, Any]] | None = None`
 
@@ -373,7 +373,7 @@ This lets the provider return the exact blocks that should be stored on the resu
 
 ### Session persistence
 
-Modify [`src/myopenclaw/conversations/session_storage_mapper.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/conversations/session_storage_mapper.py):
+Modify `src/myopenclaw/conversations/session_storage_mapper.py`:
 
 - serialize `provider_thinking_blocks`
 - deserialize `provider_thinking_blocks`
@@ -384,7 +384,7 @@ The existing base64 handling for Gemini `thought_signature` remains unchanged.
 
 ### ReAct persistence path
 
-Modify [`src/myopenclaw/runs/strategy/react.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/runs/strategy/react.py):
+Modify `src/myopenclaw/runs/strategy/react.py`:
 
 - when appending an assistant tool batch, persist `result.provider_thinking_blocks` on the assistant `SessionMessage`
 - when appending a final assistant message, persist `result.provider_thinking_blocks` on the assistant `SessionMessage`
@@ -393,14 +393,14 @@ The runtime still does not inspect provider thinking content.
 
 ### Session helpers
 
-Modify [`src/myopenclaw/conversations/session.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/conversations/session.py) as needed so assistant append helpers can accept `provider_thinking_blocks`.
+Modify `src/myopenclaw/conversations/session.py` as needed so assistant append helpers can accept `provider_thinking_blocks`.
 
 ## Factory and Wiring Changes
 
 Modify:
 
-- [`src/myopenclaw/providers/factory.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/factory.py)
-- [`src/myopenclaw/providers/__init__.py`](/Users/ssunxie/code/myopenclaw/src/myopenclaw/providers/__init__.py)
+- `src/myopenclaw/providers/factory.py`
+- `src/myopenclaw/providers/__init__.py`
 
 Add:
 
@@ -409,7 +409,7 @@ Add:
 
 ## Dependency Changes
 
-Modify [`pyproject.toml`](/Users/ssunxie/code/myopenclaw/pyproject.toml):
+Modify `pyproject.toml`:
 
 - add `anthropic`
 
@@ -484,7 +484,7 @@ Therefore the Anthropic provider must remain a thin protocol adapter and must no
 
 Create:
 
-- [`tests/providers/test_anthropic.py`](/Users/ssunxie/code/myopenclaw/tests/providers/test_anthropic.py)
+- `tests/providers/test_anthropic.py`
 
 Cover:
 
@@ -509,7 +509,7 @@ Cover:
 
 Update:
 
-- [`tests/conversations/test_session_storage_mapper.py`](/Users/ssunxie/code/myopenclaw/tests/conversations/test_session_storage_mapper.py)
+- `tests/conversations/test_session_storage_mapper.py`
 
 Cover:
 
@@ -520,7 +520,7 @@ Cover:
 
 Update:
 
-- [`tests/config/test_app_config.py`](/Users/ssunxie/code/myopenclaw/tests/config/test_app_config.py)
+- `tests/config/test_app_config.py`
 
 Cover:
 
@@ -532,7 +532,7 @@ Cover:
 
 Update:
 
-- [`tests/runs/test_runner.py`](/Users/ssunxie/code/myopenclaw/tests/runs/test_runner.py)
+- `tests/runs/test_runner.py`
 
 Cover:
 

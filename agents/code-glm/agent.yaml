@@ -1,0 +1,18 @@
+workspace_path: .
+tools:
+  - ls
+  - glob
+  - grep
+  - read
+  - edit
+  - write
+  - bash
+extensions: []
+file_access_mode: workspace
+models:
+  primary:
+    provider: opencode-go
+    model: glm-5.3-flash
+  worker:
+    provider: opencode-go
+    model: glm-5.3-flash

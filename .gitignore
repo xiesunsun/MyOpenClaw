@@ -88,9 +88,20 @@ Thumbs.db
 # ------------------------------
 # Project-local generated folders
 # ------------------------------
+# 旧会话库目录名（升级前）；现行数据在 ~/.pickel/，勿再使用项目旁 .myopenclaw
 .myopenclaw/
 pickle_workspace/
 
 # Keep committed agent spec/docs
 # (Do NOT ignore agents/ entirely unless you want all agent defs local-only)
 # agents/
+
+# ------------------------------
+# Claude Code worktrees
+# ------------------------------
+.claude/worktrees/
+.pickel/
+# 项目级模型能力补充不含密钥，允许随项目版本化；其余 .pickel 内容仍忽略。
+!.pickel/
+.pickel/*
+!.pickel/models.json

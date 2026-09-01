@@ -1,0 +1,71 @@
+"""请求中断当前 Agent 的 direct child。
+
+这是新的模型工具名。旧的 ``cancel_delegation`` 模块仅为迁移旧 Package 保留，
+不会由新的内置工具目录公开。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
+
+
+@tool(
+    name="interrupt_agent",
+    description=(
+        "Interrupt the current active Operation of one direct child agent. The "
+        "child Session and Inbox are preserved for later work; this does not "
+        "delete the child or its queued messages."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "child_session_id": {
+                "type": "string",
+                "description": "Target direct child Session ID whose active Operation should be cancelled.",
+            }
+        },
+        "required": ["child_session_id"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "child_session_id": {"type": "string"},
+            "operation_id": {"type": ["string", "null"]},
+            "status": {
+                "type": "string",
+                "enum": ["cancellation_requested", "no_active_operation"],
+                "description": "Whether an active child Operation was selected for cancellation.",
+            },
+        },
+        "required": ["child_session_id", "operation_id", "status"],
+        "additionalProperties": False,
+    },
+    replay_policy="safe",
+)
+async def interrupt_agent(
+    arguments: dict[str, Any], context: ToolExecutionContext
+) -> dict[str, object]:
+    control = context.services.delegation
+    if control is None:
+        raise ToolExecutionError("当前上下文没有 DelegationControl。")
+    child_session_id = str(arguments.get("child_session_id", ""))
+    if not child_session_id.strip():
+        raise ToolExecutionError("interrupt_agent 的 child_session_id 不能为空。")
+    operation_id = await control.interrupt_agent(
+        sender_operation_id=context.identity.operation_id or "",
+        sender_step_id=context.identity.step_id or "",
+        sender_tool_call_id=context.identity.tool_call_id or "",
+        target_child_session_id=child_session_id,
+    )
+    status = (
+        "cancellation_requested" if operation_id is not None else "no_active_operation"
+    )
+    payload = {
+        "child_session_id": child_session_id,
+        "operation_id": operation_id,
+        "status": status,
+    }
+    return payload

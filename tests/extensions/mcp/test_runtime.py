@@ -1,0 +1,342 @@
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock
+
+import mcp.types
+
+from pickel.artifacts.artifact_service import ArtifactService
+from pickel.artifacts.in_memory_blob_store import InMemoryBlobStore
+from pickel.extensions.mcp.proxy import McpProxyTool
+from pickel.extensions.mcp.runtime import McpServerRuntime
+from pickel.extensions.mcp.connection import McpConnectionError
+from pickel.extensions_host.host import ExtensionHost
+from pickel.extensions_host.registry import ExtensionRegistry
+from pickel.shared.execution_identity import ExecutionIdentity
+from pickel.tools.base import ToolExecutionContext, ToolExecutionError
+from pickel.tools.bus import ToolBus, ToolSource
+from pickel.tools.services import ToolServices
+from pickel.persistence.in_memory_runtime_store import InMemoryRuntimeStore
+from pickel.runtime.host_call_types import (
+    STRUCTURED_INPUT_CALL,
+    StructuredInputAnswer,
+)
+from pickel.runtime.host_calls import HostCallContext, HostCallRouter
+
+from tests.extensions.mcp.test_connection import fixture_spec
+
+
+def _host(bus: ToolBus) -> ExtensionHost:
+    return ExtensionHost(
+        name="mcp",
+        config_section=None,
+        tool_bus=bus,
+        registry=ExtensionRegistry(),
+        app_config=None,
+    )
+
+
+def _context(*, host_calls=None, artifact_service=None) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        agent_id="Pickle",
+        identity=ExecutionIdentity(
+            session_id="s",
+            operation_id="operation-1",
+            step_id="step-1",
+            step_sequence=1,
+            tool_call_id="tool-call-1",
+        ),
+        workspace_path=Path("/tmp"),
+        services=ToolServices(
+            host_calls=host_calls,
+            artifact_service=artifact_service,
+        ),
+    )
+
+
+class McpServerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_registers_proxy_tools_on_bus(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        try:
+            await runtime.start()
+            names = set(bus.list_names(source=ToolSource.MCP))
+            self.assertEqual(
+                {
+                    "mcp__fixture__echo",
+                    "mcp__fixture__boom",
+                    "mcp__fixture__die",
+                    "mcp__fixture__elicited",
+                    "mcp__fixture__elicited_multi_round",
+                },
+                names,
+            )
+        finally:
+            await runtime.close()
+        self.assertEqual([], bus.list_names(source=ToolSource.MCP))
+
+    async def test_snapshot_reports_last_known_connection_state(self) -> None:
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(ToolBus()))
+        try:
+            await runtime.start()
+            snapshot = runtime.snapshot()
+
+            self.assertEqual("connected", snapshot.status)
+            self.assertEqual(5, snapshot.discovered_tools)
+            self.assertIsNotNone(snapshot.protocol_version)
+            self.assertIsNone(snapshot.last_error)
+        finally:
+            await runtime.close()
+
+        self.assertEqual("closed", runtime.snapshot().status)
+
+    async def test_proxy_execute_converts_text_and_error(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        try:
+            await runtime.start()
+            echo = bus.get("mcp__fixture__echo").tool
+            result = await echo.execute({"text": "hi"}, _context())
+            self.assertEqual("echo:hi", result["content_blocks"][0]["text"])
+
+            boom = bus.get("mcp__fixture__boom").tool
+            with self.assertRaises(ToolExecutionError):
+                await boom.execute({}, _context())
+        finally:
+            await runtime.close()
+
+    async def test_proxy_preserves_image_and_structured_content(self) -> None:
+        async def fake_call(tool_name, arguments):
+            return mcp.types.CallToolResult(
+                content=[
+                    mcp.types.TextContent(type="text", text="hello"),
+                    mcp.types.ImageContent(
+                        type="image", data="aGk=", mime_type="image/png"
+                    ),
+                    mcp.types.AudioContent(
+                        type="audio", data="aGk=", mime_type="audio/wav"
+                    ),
+                ],
+                structured_content={"answer": 42},
+                is_error=False,
+            )
+
+        runtime = SimpleNamespace(call=fake_call, spec=SimpleNamespace(name="fake"))
+        tool = mcp.types.Tool(
+            name="t",
+            description="d",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        )
+
+        proxy = McpProxyTool(runtime, tool)
+        result = await proxy.execute(
+            {},
+            _context(
+                artifact_service=ArtifactService(
+                    artifact_store=InMemoryRuntimeStore(),
+                    blob_store=InMemoryBlobStore(),
+                )
+            ),
+        )
+
+        self.assertEqual("hello", result["content_blocks"][0]["text"])
+        self.assertEqual({"answer": 42}, result["structured"])
+        self.assertEqual(
+            {"type": "object"},
+            proxy.spec.output_schema["properties"]["structured"]["anyOf"][0],
+        )
+        rendered = proxy.render(result)
+        self.assertEqual(3, len(rendered))
+        self.assertEqual("artifact", rendered[1].type)
+        self.assertEqual("image/png", rendered[1].artifact.media_type)
+        self.assertEqual("[unsupported content: audio]", rendered[2].text)
+        self.assertEqual(["audio"], result["unsupported_content"])
+
+        structured_only = proxy.render(
+            {
+                "content_blocks": [],
+                "structured": {"answer": 42},
+                "unsupported_content": [],
+            }
+        )
+        self.assertEqual(1, len(structured_only))
+        self.assertEqual('{"answer":42}', structured_only[0].text)
+
+        empty = proxy.render(
+            {
+                "content_blocks": [],
+                "structured": None,
+                "unsupported_content": [],
+            }
+        )
+        self.assertEqual("null", empty[0].text)
+
+    def test_proxy_uses_envelope_schema_when_mcp_schema_is_missing(self) -> None:
+        runtime = SimpleNamespace(spec=SimpleNamespace(name="fake"))
+        tool = mcp.types.Tool(
+            name="no_schema",
+            description="d",
+            input_schema={"type": "object"},
+        )
+
+        proxy = McpProxyTool(runtime, tool)
+
+        properties = proxy.spec.output_schema["properties"]
+        self.assertEqual("object", proxy.spec.output_schema["type"])
+        self.assertEqual({}, properties["structured"]["anyOf"][0])
+        self.assertEqual({"type": "null"}, properties["structured"]["anyOf"][1])
+
+    async def test_connection_loss_reconnects_without_replaying_tool(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        connection = SimpleNamespace(
+            is_alive=lambda: True,
+            call_tool=AsyncMock(side_effect=McpConnectionError("lost")),
+        )
+        runtime._connection = connection
+        runtime._reconnect = AsyncMock()
+
+        with self.assertRaisesRegex(McpConnectionError, "was not retried"):
+            await runtime.call("side_effect", {"value": 1})
+
+        connection.call_tool.assert_awaited_once_with("side_effect", {"value": 1})
+        runtime._reconnect.assert_awaited_once_with()
+
+    async def test_proxy_drives_mcp2_input_required_through_host_call(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        host_calls = HostCallRouter()
+        seen = []
+
+        async def handle(request, context):
+            seen.append((request, context))
+            return StructuredInputAnswer(
+                action="accept",
+                content={"name": "Ada", "count": 2},
+            )
+
+        host_calls.register(STRUCTURED_INPUT_CALL, handle)
+        try:
+            await runtime.start()
+            tool = bus.get("mcp__fixture__elicited").tool
+            result = await tool.execute({}, _context(host_calls=host_calls.client))
+        finally:
+            await runtime.close()
+
+        self.assertEqual("elicited:Ada:2", result["content_blocks"][0]["text"])
+        self.assertEqual(1, len(seen))
+        self.assertEqual("Provide user details", seen[0][0].message)
+        self.assertEqual("operation-1", seen[0][1].identity.operation_id)
+        self.assertEqual("tool-call-1", seen[0][1].identity.tool_call_id)
+
+    async def test_proxy_drives_multiple_mcp2_input_required_rounds(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        host_calls = HostCallRouter()
+        messages = []
+
+        async def handle(request, _context):
+            messages.append(request.message)
+            if "user details" in request.message:
+                content = {"name": "Ada", "count": 2}
+            else:
+                content = {"project": "Pickel"}
+            return StructuredInputAnswer(action="accept", content=content)
+
+        host_calls.register(STRUCTURED_INPUT_CALL, handle)
+        try:
+            await runtime.start()
+            tool = bus.get("mcp__fixture__elicited_multi_round").tool
+            result = await tool.execute({}, _context(host_calls=host_calls.client))
+        finally:
+            await runtime.close()
+
+        self.assertEqual("project:Pickel", result["content_blocks"][0]["text"])
+        self.assertEqual(
+            ["Provide user details", "Provide a project for Ada"],
+            messages,
+        )
+
+    async def test_resolves_multiple_embedded_input_requests(self) -> None:
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(ToolBus()))
+        host_calls = HostCallRouter()
+
+        async def handle(request, _context):
+            field = next(iter(request.schema["properties"]))
+            return StructuredInputAnswer(
+                action="accept",
+                content={field: field.upper()},
+            )
+
+        host_calls.register(STRUCTURED_INPUT_CALL, handle)
+        requests = {
+            "first": mcp.types.ElicitRequest(
+                params=mcp.types.ElicitRequestFormParams(
+                    message="First",
+                    requested_schema={
+                        "type": "object",
+                        "properties": {"one": {"type": "string"}},
+                    },
+                )
+            ),
+            "second": mcp.types.ElicitRequest(
+                params=mcp.types.ElicitRequestFormParams(
+                    message="Second",
+                    requested_schema={
+                        "type": "object",
+                        "properties": {"two": {"type": "string"}},
+                    },
+                )
+            ),
+        }
+
+        responses = await runtime._resolve_input_requests(
+            input_requests=requests,
+            host_calls=host_calls.client,
+            call_context=HostCallContext(
+                identity=ExecutionIdentity(
+                    session_id="s",
+                    operation_id="operation-1",
+                    tool_call_id="tool-call",
+                ),
+            ),
+            tool_name="tool",
+        )
+
+        self.assertEqual({"one": "ONE"}, responses["first"].content)
+        self.assertEqual({"two": "TWO"}, responses["second"].content)
+
+    async def test_call_reconnects_after_server_death(self) -> None:
+        bus = ToolBus()
+        runtime = McpServerRuntime(spec=fixture_spec(), host=_host(bus))
+        try:
+            await runtime.start()
+            die = bus.get("mcp__fixture__die").tool
+            with self.assertRaises(ToolExecutionError):
+                await die.execute({}, _context())
+
+            echo = bus.get("mcp__fixture__echo").tool
+            second = await echo.execute({"text": "back"}, _context())
+            self.assertEqual("echo:back", second["content_blocks"][0]["text"])
+        finally:
+            await runtime.close()
+
+    async def test_reconnect_failure_unregisters_server_tools(self) -> None:
+        bus = ToolBus()
+        spec = fixture_spec()
+        runtime = McpServerRuntime(spec=spec, host=_host(bus))
+        try:
+            await runtime.start()
+            die = bus.get("mcp__fixture__die").tool
+            echo = bus.get("mcp__fixture__echo").tool
+            # 让重连必然失败：偷换 spec 为坏命令
+            runtime.spec = type(spec)(name=spec.name, command="/no/such/command-xyz")
+            with self.assertRaises(ToolExecutionError):
+                await die.execute({}, _context())
+
+            with self.assertRaises(ToolExecutionError):
+                await echo.execute({"text": "x"}, _context())
+            self.assertEqual([], bus.list_names(source=ToolSource.MCP))
+        finally:
+            await runtime.close()
