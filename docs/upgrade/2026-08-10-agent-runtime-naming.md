@@ -75,15 +75,40 @@ message_id
 
 ```mermaid
 flowchart LR
-    H[RuntimeHost] --> G[RuntimeGeneration]
-    H --> R[AgentRegistry]
-    R --> A[Agent]
-    A --> I[AgentInbox]
-    A --> D[AgentDriver]
-    D --> O[OperationDriver]
-    O --> S[AgentRunStateMachine]
-    O --> E[RuntimeEffects]
+    subgraph entry["进程入口与组合根"]
+        CLI[pickel CLI] --> APP[RuntimeApplication]
+        APP --> H[RuntimeHost]
+        H --> B[Boot]
+        B --> BUS[ToolBus]
+        B --> ST[SQLiteRuntimeStore]
+        B --> ART[ArtifactService]
+        B --> LDR[AgentPackageLoader]
+        H --> GEN[RuntimeGeneration]
+    end
+    subgraph exec["Package 与执行"]
+        LDR --> LP[LoadedAgentPackage]
+        GEN --> LP
+        H --> R[AgentRegistry]
+        H --> T[ConversationTitleService]
+        R --> A[Agent]
+        A --> I[AgentInbox]
+        A --> D[AgentDriver]
+        D --> O[OperationDriver]
+        O --> S[AgentRunStateMachine]
+        O --> E[RuntimeEffects]
+        O --> MCS[ModelCallService]
+        E --> P[Provider]
+        E --> BUS
+    end
+    subgraph pers["持久化与观测"]
+        ST --- DB[(runtime.db)]
+        ART --> FB[FilesystemBlobStore]
+        MCS --> CC[ModelCallContentStore]
+        H --> TS[TraceSink]
+    end
 ```
+
+图只表达「谁连接谁」；每个名称的唯一职责以下表为准。`pickel CLI → RuntimeApplication → RuntimeHost` 是唯一启动路径；`SQLiteRuntimeStore` 落库 `runtime.db`（SQLite v14，见[数据库实体设计](./2026-07-12-db-entities.md)）。
 
 | 名称 | 唯一职责 |
 | --- | --- |
@@ -98,6 +123,7 @@ flowchart LR
 | `OperationDriver` | 推进一个已有 Operation，直到 waiting 或终态 |
 | `AgentRunStateMachine` | 校验 AgentRunState、ModelStepState 和 ToolCallState 转换；实现归 `operations`，不反向依赖 Runtime |
 | `RuntimeEffects` | Provider、Tool、Hook、Recall、Timer 等外部作用的窄执行边界 |
+| `ConversationTitleService` | 为无标题 Session 用其冻结 Package 生成一次标题，并按「标题仍为空」CAS 提交 |
 
 删除目标态中的 `AgentRuntime` 和 `RuntimeBindings`。前者的接受/调度职责分别进入 AgentDriver 与 OperationDriver；后者的 Package 实现进入 LoadedAgentPackage，Host 级服务显式传给 RuntimeEffects。
 

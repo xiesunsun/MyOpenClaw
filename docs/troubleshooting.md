@@ -136,7 +136,41 @@ uv run pickel
 
 ---
 
-## 5. 启动命令速查
+## 5. Runtime 库（runtime.db）：启动刷「Package 解码失败」堆栈
+
+**现象**
+
+- 启动 `pickel chat` 时，逐个历史 Session 刷 `标题恢复 Package 加载失败` 或 `启动恢复 Package 不可用`
+- 堆栈落在 `decode_agent_package_content` / `_tool_from_dict`，最终包装为
+  `StorageIntegrityError: AgentPackageVersion 内容损坏`；chat 本身仍能进入
+
+**原因**
+
+- Runtime 库路径：`~/.pickel/runtime.db`（或 `PICKEL_HOME` 下），当前 schema `user_version=14`
+- `agent_package_versions` 表是**内容寻址冻结快照**：`package_version_id` = canonical 内容的 SHA-256，
+  Operation 只冻结引用精确版本
+- 代码合同收紧（例如 Tool 输出合同要求 `output_schema` 必填）后，合同生效前写入的旧行
+  在解码时被新校验拒绝——**数据本身没有损坏，是解码器比历史数据更严格**
+
+**处理**
+
+```bash
+# 只读核查：统计含历史 null output_schema 的冻结包（勿省略 ?mode=ro）
+sqlite3 "file:$HOME/.pickel/runtime.db?mode=ro" \
+  "SELECT count(*) FROM agent_package_versions
+   WHERE content_json LIKE '%\"output_schema\":null%';"
+```
+
+- 堆栈定位到 `decode_agent_package_content` / `_tool_from_dict` 时，先按「合同版本倾斜」处理，
+  不要按磁盘损坏处理
+- 历史兼容在解码层完成（读到缺失字段回填、canonical 序列化保持原形态，冻结 hash 不变）；
+  升级到含该兼容的版本即可消音
+- **不要手改 `content_json`**：内容一变哈希就变，会让该行与所有已冻结引用永久失配
+- 历史备份在同目录 `runtime.db.vN.bak`；确认无需回滚前不要清理
+
+---
+
+## 6. 启动命令速查
 
 ```bash
 uv run pickel
@@ -161,6 +195,7 @@ uv run pickel sessions delete <id>
 | 路由 / endpoint | 打到了意外主机 | `api_base` vs `ANTHROPIC_BASE_URL` |
 | API 权限 | 403 / 401 / 网关 unknown model | key、账号、模型 id、网关目录 |
 | 本地状态 | 会话/schema 异常 | `~/.pickel/sessions.db` 是否旧库 |
+| 冻结快照 | 启动恢复/标题恢复报 Package 解码错误 | `~/.pickel/runtime.db` 冻结包与代码合同是否跨版本（见第 5 节） |
 
 ---
 

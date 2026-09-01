@@ -58,7 +58,7 @@
 | --- | --- |
 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 唯一术语、组件职责、历史名称迁移 |
 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 已确认实体、值对象和跨领域关系的决策理由 |
-| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v12 ModelCall 当前结构、v11 迁移来源、字段、约束与迁移 |
+| [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | SQLite v14 当前结构、v11–v13 迁移来源、字段、约束与迁移 |
 | [`Operation 持久化与恢复模型`](docs/upgrade/2026-08-11-operation-recovery-model.md) | AgentRunState、Intent、审批、取消和恢复语义 |
 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | Pickel 配置来源、合并、SecretRef 和 Package 构建输入 |
 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 批次顺序和验收门槛 |
@@ -86,7 +86,7 @@
 
 | 任务范围 | 必读文档 | 用途 |
 | --- | --- | --- |
-| Session 树、消息持久化、Artifact、Inbox、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 SQLite v12 当前领域表、ModelCall、CAS、原子事务和迁移 |
+| Session 树、消息持久化、Artifact、Inbox、多 Agent 关系 | [`数据库实体设计`](docs/upgrade/2026-07-12-db-entities.md) | 约束 SQLite v14 当前领域表、ModelCall、CAS、原子事务和迁移 |
 | 实体是否持久化、跨领域所有权、过度抽象评审 | [`Runtime 实体决策`](docs/upgrade/2026-08-24-runtime-entity-decisions.md) | 查询已拍板理由；字段与状态以命中的窄领域合同为准 |
 | Tool Loop、Runtime/Host 边界、实体与方法命名 | [`Agent Runtime 重构命名约束`](docs/upgrade/2026-08-10-agent-runtime-naming.md) | 约束当前组件职责与唯一术语 |
 | Config、Settings、Environ、Agent Package 输入 | [`配置系统升级设计`](docs/upgrade/2026-07-25-config-system-design.md) | 约束 Pickel 设置来源、合并、SecretRef；Runtime 名称以命名合同为准 |
@@ -94,6 +94,7 @@
 | 重构批次、迁移顺序和验收范围 | [`Agent Runtime 重构实施计划`](docs/upgrade/2026-08-24-agent-runtime-refactoring-plan.md) | 只决定实施顺序，不重新定义实体 |
 | 观测指标、Context 压缩、Parent/Child 空闲与唤醒、Provider 延迟治理 | [`观测驱动 Runtime 评审结论`](docs/upgrade/2026-08-27-observation-driven-runtime-findings.md) | 约束本轮真实 Session 暴露的问题和后续开发验收 |
 | Anthropic 请求与响应映射 | [`Anthropic Provider 设计`](docs/superpowers/specs/2026-04-21-anthropic-provider-design.md) | 只参考 Anthropic 协议语义；其中旧 Strategy/Run 描述已失效 |
+| 启动报错、数据文件位置、运行期排障 | [`排障手册`](docs/troubleshooting.md) | 收录运行期踩坑与本地数据（`sessions.db` / `runtime.db`）的只读核查路径 |
 
 ### 使用要求
 

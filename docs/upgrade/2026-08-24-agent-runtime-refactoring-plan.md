@@ -1,9 +1,9 @@
 # Agent Runtime 重构实施计划
 
 **日期**：2026-08-24  
-**更新日期**：2026-08-31
-**状态**：阶段 0–10 完成；11.8 HistoryCompaction 升级待实施
-**范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期、Agent Delegation 与 Provider 调用可靠记录的分阶段重构
+**更新日期**：2026-09-01
+**状态**：阶段 0–12 已完成
+**范围**：Runtime、Context、Operation 恢复、执行身份、持久化、Extension 生命周期、Agent Delegation、Provider 调用可靠记录与运行时性能治理的分阶段重构
 **不在范围**：Lane、通用事件溯源、Workspace 聚合根、完整插件框架、新界面功能
 
 本文只规定实施顺序、批次边界和验收门槛，不重复定义领域实体。具体名称和语义遵循：
@@ -16,7 +16,7 @@
 
 逐项确认的实体边界记录在 [`Runtime 实体决策`](./2026-08-24-runtime-entity-decisions.md)。
 
-领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v12 明确领域表，v11 是 `model_calls` 迁移来源，v10 是增加 child Package 稳定绑定的历史迁移来源。当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
+领域合同已经统一到 Runtime 实体决策：当前实现为 SQLite v14 明确领域表；v11–v13 是 ModelCall、HistoryCompaction 与 ActivePlan 的迁移来源，v10 是增加 child Package 稳定绑定的历史迁移来源。当前状态继续使用 revision CAS。`ImmutableObject + NamedReference + StorageCommit` 只作为 v9 迁移来源。
 
 ## 1. 重构目标
 
@@ -88,9 +88,10 @@ OperationDriver
 | 8 | 收敛 Tool 输出与 Delegation 控制契约 | Tool 输出单一模型可见内容；child 终态结果、report 和中断语义无歧义 |
 | 9 | 收敛 Multi-Agent 消息与 Package 选择 | child 终态主动投递；模型不依赖固定顺序等待；child Agent 选择可冻结、可恢复且不扩权 |
 | 10 | 建立 ModelCall 可靠数据底座 | 已完成：请求前保存、响应聚合、调用身份与恢复边界均已接通 |
-| 11 | 观测驱动 Harness 收敛 | 11.1–11.7 已完成；11.8 自包含 HistoryCompaction 待实施 |
+| 11 | 观测驱动 Harness 收敛 | 11.1–11.10 已完成 |
+| 12 | Runtime 性能与韧性收敛 | 启动懒加载、资源退休、SQLite 热路径、GC、自动标题、Gemini 与 CI 边界完成 |
 
-### 4.1 当前进度（2026-08-31）
+### 4.1 当前进度（2026-09-01）
 
 | 批次 | 状态 | 已完成 | 尚未进入 |
 | --- | --- | --- | --- |
@@ -103,7 +104,7 @@ OperationDriver
 | 2.0 Agent Package v10 | 完成 | 内容寻址 Package ID、三层 ModelPolicy 数据结构与 `models.primary/worker/utility` 配置来源、ImplementationRef、SecretRef、Tool replay policy、严格 v10/legacy codec；三个模型角色按冻结 wire 实现装载；Extension 按模块 version + source digest + 脱敏 config 精确解析 | 具体产品功能按需显式选择角色，不做隐式 fallback |
 | 2.1–2.3 Operation 恢复核心 | 完成 | active Operation 接受事务、revision CAS、Model/Tool intent-before-effect、safe/never 恢复、Node+State 原子提交、Agent/Driver/App 接线；Package/Secret/实现不可用时持久化为 retryable failed | — |
 | 2.4 Host 控制面 | 完成 | `Agent.resume_operation(operation_id)` 精确身份恢复；cancel 持久化入口；`ApprovalService` revision CAS；精确 Package 的 PreToolUse `allow/ask/deny`；`ToolReconciliationService` 对 `completed/not_started/unknown` 做单次 revision CAS，取消中的已完成结果经可恢复的两步 CAS 收敛 | 完整交互界面和 AgentRegistry 调度不在本批次 |
-| 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic 生产路径和 Gemini Provider 直接调用测试分别复用各自唯一的 request builder，后者不表示 Boot 已支持 Gemini；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
+| 3.0 Context 唯一管道 | 完成 | 实际请求只有 `ModelContextBuilder` 一个创建入口；Anthropic、OpenAI 与 Gemini Provider 复用各自唯一 request builder；`/context` 区分已提交 Intent 与纯 preview；请求前 Hook 只能按注册顺序追加 `ContextContributions`，最终 Context 在 Provider 前冻结进 Intent；旧 `HookFeedback` 与完整 Context 覆盖路径已删除 | — |
 | 4.1 EventEnvelope 执行身份 | 完成 | 新增唯一 `ExecutionIdentity` 值对象；`EventEnvelope` 改为组合该身份，不再复制执行字段；Runtime Event、EventBus、Trace、CLI 与 Extension 调用方已迁移，扁平 JSON 增加 `tool_call_id/message_id` | Tool、Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.2 Tool execution 执行身份 | 完成 | `ToolExecutionContext` 只组合 `ExecutionIdentity`，删除五个重复执行字段；Boot 在工具执行边界一次性组装完整身份，Shell 与 MCP Proxy 调用方已迁移；`tool_call_id` 继续作为默认幂等身份 | Hook、Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
 | 4.3 Hook 执行身份 | 完成 | Hook 控制事件只组合 `ExecutionIdentity`；Pre/Post Tool Hook 的 `tool_call_id` 收敛到统一身份；Lifecycle 与 OperationDriver 调用方已迁移；仅为旧 Hook 身份存在的 `EventIdentity` 已删除 | Observation、HostCall 与 Streaming 边界按后续小批次迁移 |
@@ -112,7 +113,7 @@ OperationDriver
 | 4.6a Streaming 执行身份 | 完成 | Provider-neutral `StreamDelta` 保持无 Runtime 身份；RuntimeEffects 在已校验 Operation/Step 边界为每个 Delta 附加 `ExecutionIdentity`；ConversationRuntime 不再猜测身份；ToolCall Args Event 的重复 `tool_call_id` payload 已删除 | 4.6b Full Trace 丢帧 Diagnostic 验收 |
 | 4.6b Full Trace 丢帧 Diagnostic | 完成 | Full Trace 使用有界队列异步写入；每次连续 Delta 拥塞只在队列外报告首个 `trace_delta_dropped` Diagnostic，保留真实执行身份；慢回调不阻塞 Provider，flush/close 会排空单槽 pending diagnostic，且不参与恢复或可靠审计 | — |
 | 5.0 Persistence 收敛 | 完成 | SQLite/InMemory 统一为 v10 窄领域合同；Operation/State 只能通过原子 `accept_operation` 创建，`commit_run_transition` 是唯一 State CAS 提交入口；旧通用生产路径已删除；递归 CTE 沿 `parent_node_id → node_id` 主键回溯，1,000/10,000 Node 与 EXPLAIN 查询计划通过 | — |
-| 6.1 AgentRegistry | 完成 | `session_id → live Agent` 唯一映射；同 Session 普通 reopen 复用同一 Host/UI Adapter；幂等 wake 不丢运行期追加唤醒；Agent 锁串行前台与后台 drive；detach 按 expected Agent 注销；reload 仅在新代 attach 成功后替换 Agent，失败保留旧代 | active Operation 的 steer/inject 原子 claim 属于 6.2 |
+| 6.1 AgentRegistry | 完成 | `session_id → live Agent` 唯一映射；幂等 wake 不丢运行期追加唤醒；Agent 锁串行前台与后台 drive；detach 按 expected Agent 注销；headless Agent 无 runnable work 后退休并可由外部 wake 精确重激活；reload 仅在新代 attach 成功后替换 Agent | active Operation 的 steer/inject 原子 claim 属于 6.2 |
 | 6.2a Step 消息持久化合同 | 完成 | SQLite/InMemory 以 `claim_step_messages` 一次提交 steer/inject claim、FIFO User Node 链、Session active node 与 State revision；请求 Intent 冻结和 succeeded 提交受 pending steer/inject 事务护栏约束；OperationService 不绕过状态机 | Driver stopping check 与 idle inject 过滤属于 6.2b |
 | 6.2b Step 消息执行路径 | 完成 | idle inject 保持 pending；followup/steer 触发 wake；steer/inject 仅在 preparing_request 安全边界 claim；Intent 冻结后、waiting 与 cancelling 不改当前 Step；无工具 Assistant Node 先持久化，再由事务护栏决定继续当前 Operation 或 succeeded；空闲 cancel 不触发 wake | — |
 | 6.3a Delegation durable acceptance | 完成 | `DelegationService` 只从父 `DelegateAgentIntent` 读取冻结 child Package；校验当前 ToolCall、WorkspaceBinding 与 delegation depth；SQLite/InMemory 一次事务创建空 child Session、初始 pending followup 和 AgentDelegation，支持并发幂等且不创建 child Operation/Node | 普通 child Agent 装配、启动恢复和父 ToolCall 结果属于后续批次 |
@@ -135,14 +136,19 @@ OperationDriver
 | 9.4 Agent Package v3 | 完成 | 冻结 `AgentDelegationPolicy`、结果预算以及 `delegate_agent.agent_id` 枚举；缺省策略为仅允许自身 | — |
 | 9.5 SQLite v11 与跨 Package child | 完成 | Delegation 持久化 `child_package_version_id`；显式 v10→v11 迁移；child 按冻结 Agent Package 装载，Tool 权限沿完整祖先链取交集，Workspace 不扩权 | — |
 | 9.6 Multi-Agent 端到端验收 | 完成 | 并行 child 按实际完成顺序投递、重启恢复、report/send 方向、跨 Agent Package 和多层权限均有合同测试；Provider live smoke 通过 | — |
-| 10.1–10.4 ModelCall 可靠数据底座 | 完成 | SQLite v12、内容寻址存储、三种 Provider Mapper、发送 Gate、流式聚合、恢复与失败收敛已接通；utility/worker 基础链有双 Store 全链合同测试 | title/history-compaction 产品功能尚未启用，不属于本阶段新增范围 |
+| 10.1–10.4 ModelCall 可靠数据底座 | 完成 | SQLite v12、内容寻址存储、Provider Mapper、发送 Gate、流式聚合、恢复与失败收敛已接通；utility/worker 基础链有双 Store 全链合同测试 | — |
 | 11.2 观测时序 Span | 完成 | context、semaphore wait、ModelCall 内容写入与 prepare/complete 事务、tool execute、event delivery 均在真实边界发射窄 Span；Trace projector 暴露对应聚合 | Provider generation/first output 继续读取 ModelCall 时间事实；连接内部不可测边界不造零值 |
 | 11.7 Provider timeout/retry 内部治理 | 完成 | 共同错误分类、默认 3 次 attempt、attempt 间 20s/60s/120s 递增退避（format 4 冻结 `model_request_retry_delays_ms`）及首个输出后禁止重试；attempt 复用单一 ModelRequestIntent 并独立持久化 ModelCall | connect/首字节/流空闲由三种 wire 的底层 HTTP/SDK timeout 负责；无独立 total deadline 事实 |
-| 11.8 HistoryCompaction 自包含 checkpoint | 待实施 | 目标合同与 A–F 批次已写入压缩设计文档 | 当前代码仍使用 `first_kept_node_id`、失败降级和 overflow 恢复 |
+| 11.8 HistoryCompaction 自包含 checkpoint | 完成 | 自包含 checkpoint、stop-at-checkpoint 查询、SQLite v13 与统一失败合同已接通 | — |
+| 11.9 ActivePlan | 完成 | ActivePlan 作为 AgentRunState 当前值持久化；SQLite v14、尾部临时注入与终态清理已接通 | — |
+| 11.10 Full Trace 低基数瘦身 | 完成 | delta 按 ModelCall 聚合；旧 Trace 可读；完整请求和响应仍以 ModelCall Content 为权威 | — |
+| 12.1 启动路径 | 完成 | CLI、Application、Provider SDK 和只读命令按需导入；无效输入在加载 Runtime 前失败 | — |
+| 12.2 生命周期与 Trace | 完成 | Package、Extension、Generation 取消安全清理；headless 退休；Trace 固定尾部恢复、半行修复与全局容量保留 | — |
+| 12.3 SQLite 与内容存储热路径 | 完成 | 每线程连接复用、WAL + FULL、30 秒 busy timeout；内容 fsync 和 ModelCall 事务移出事件循环；保守 GC 支持 dry-run 和宽限期 | 跨进程 GC 仍依赖宽限期保护 |
+| 12.4 Provider 与辅助功能 | 完成 | Gemini 进入统一 PreparedModelCall 管道；自动标题使用首个 accepted Operation 冻结 utility Package、独立 lease、CAS 和重启恢复 | — |
+| 12.5 CI 验收 | 完成 | Coverage 门槛 75%；Linux 全量质量门禁；macOS import 与 Seatbelt 边界测试 | — |
 
-当前验收基线：全量测试为 `1070 passed, 4 skipped`；Ruff、Black 与 `git diff --check` 通过。阶段 4 六个边界已经统一使用 `ExecutionIdentity`，阶段 5 Persistence 已收敛，阶段 6.1 AgentRegistry、6.2 Step 消息消费与阶段 6.3 Agent Delegation 最小闭环已接通。阶段 7 已删除无生产发射路径的 `RequestDigestEvent`、`AgentRunProgress`、`ModelStepStarted` 及其专属 CLI/Trace 残影，移出无真实观测路径的 `HostCallRecorder`，删除未接入 RuntimeHost/Boot 的激活控制，隐藏尚未实现完整切换语义的 `/model`、`/thinking`，明确 Gemini Boot 未支持，删除无调用方的 Provider factory，并统一 ArtifactService 生命周期。交互式 CLI 按 Tool Intent 与 Tool Result 的持久化边界接收 `ToolCallStarted`、`ToolCallCompleted`，展示完整调用参数和有界结果预览；OpenAI reasoning summary 则只展示 Provider 明确返回的流式摘要。Provider 服务身份已与 `wire_protocol` 分离；Boot 支持 Anthropic Messages、OpenAI Responses 与 OpenAI-compatible Chat Completions，OpenCode Go 可在同一冻结 Package 中装载三种 wire 的 `primary/worker/utility`。Responses 请求固定 `store=false` 并由完整 ModelRequestIntent 重建，不把 `response_id` 作为恢复权威；真实模型用量由 Provider metadata 写入完整 AssistantMessage，再按 Operation 的确定分支区间投影到 Event 与 App/CLI 结果。阶段 10 已增加 SQLite v12 ModelCall、可靠内容存储、三种 Provider prepare/发送门禁、流式聚合和崩溃恢复，并移除受支持 Provider 的 `generate/stream` 绕过入口。生产清理统一经过 `ContributionScope.close()`；旧通用 Runtime/Persistence/Context 同义路径已删除。`ConversationRuntime` 的前台 task 与互斥锁已经删除；同一 live Agent 的驱动入口由 `Agent` 串行化，后台 task 与重复 wake 由 `AgentRegistry` 管理。Operation 级 LoadedPackageHandle 覆盖 accepted、waiting、resume 到终态；reload 后继续使用旧代 Package 与 Effects，终态和 shutdown 均释放引用。
-
-当前实现为 SQLite v12。`ModelCall + RequestContent + ResponseContent` 已接管完整请求、聚合响应与 Provider 调用恢复事实；`RequestSnapshotRecord` 不再是生产权威。
+当前验收基线：离线全量 `1229 passed, 8 skipped, 4 subtests passed`，Coverage `76.78%`；Ruff、Black 与 `git diff --check` 通过，可选真实 OpenCode Go Provider smoke 通过。当前实现为 SQLite v14；`ModelCall + RequestContent + ResponseContent` 继续作为请求、聚合响应与 Provider 调用恢复权威。阶段 12 在不增加新持久化实体或通用 Manager 的前提下，完成启动懒加载、生命周期清理、headless 退休、存储热路径、保守 GC、Gemini 统一入口与自动标题恢复闭环。
 
 ## 5. 阶段 0：回归基线
 
@@ -603,20 +609,18 @@ Prompt 优化、Benchmark 编排或新的 HTML 报告。`ModelRequestIntent` 继
 
 阶段 10 之后由真实 Session 暴露的观测口径、Parent/Child 驱动、Context 压缩与 Provider
 延迟问题，统一按 [`观测驱动 Runtime 评审结论`](./2026-08-27-observation-driven-runtime-findings.md)
-的 11.1–11.7 小批次继续实施；不恢复固定 5-turn Window，不增加 Child 等待状态。
+的 11.1–11.11 小批次继续实施；不恢复固定 5-turn Window，不增加 Child 等待状态。
 
-当前状态（2026-08-31）：11.1–11.7 已完成。11.5 只保留可注入
-`HistoryCompactionGenerator` 接缝，未内置历史选择和摘要策略；11.6 已按工具资源形态完成大型
+当前状态（2026-09-01）：11.1–11.10 已完成。11.5 保留可注入
+`HistoryCompactionGenerator` 接缝并提供默认 worker 实现；11.6 已按工具资源形态完成大型
 结果验收，`read` 图片复用已有 Artifact/多模态 Provider 链路，且未增加通用分页或图片专用
 Tool。11.7 重试退避为 attempt 间 `20s / 60s / 120s` 递增等待，由 format 4 冻结的
 `model_request_retry_delays_ms` 承载；format 2/3 冻结 Package 解码时按历史 1s/2s/4s
 指数公式合成退避表，恢复语义不变。
 
-11.8 待实施：按
-[`HistoryCompaction 压缩设计方案`](./2026-08-30-history-compaction-design.md) 将当前
-`first_kept_node_id` 基线升级为自包含 checkpoint，增加 SQLite v13 与 stop-at-checkpoint 查询，
-让自动/严格 idle 手动入口共用 `HistoryCompactionService`，统一为压缩失败即失败，并删除
-Provider overflow 恢复压缩。实施按该文档 A–F 小批次进行，不恢复全量 Context 降级路径。
+11.8–11.10 已按当前数据库与观测合同实施：HistoryCompaction 使用自包含 checkpoint，
+ActivePlan 进入 SQLite v14，Full Trace 只保留每个 ModelCall 的 delta 汇总；不恢复全量 Context
+降级路径，也不把 Trace 变成业务恢复权威。
 
 进入 11.5 前已完成一次等价架构收敛：`OperationDriver._drive_operation` 按持久化阶段
 拆分；`AgentRunStateMachine` 归 `operations`；模板加载归 `templates`；
@@ -640,7 +644,7 @@ HistoryCompaction、Tool Result 或 Provider retry 业务语义。
 
 以下内容不再作为实现中的自由选择：
 
-1. Persistence 当前使用 SQLite v12 明确领域表；v11 是 `model_calls` 的一次性迁移来源，v10 是增加 `AgentDelegation.child_package_version_id` 的历史迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
+1. Persistence 当前使用 SQLite v14 明确领域表；v11–v13 是 ModelCall、HistoryCompaction 与 ActivePlan 的一次性迁移来源，v10 是增加 `AgentDelegation.child_package_version_id` 的历史迁移来源；AgentRunState 仍是一行当前状态，不保存历史 revision。
 2. 一个 ConversationSession 同时最多一个非终态 AgentRun，以 `active_operation_id` 和接受事务保证。
 3. Extension 贡献按 RuntimeGeneration 构建，ContributionScope 统一 LIFO rollback/close。
 4. Session 使用 `archived_at`；公共 delete 默认拒绝关系图，显式 delete_session_tree 删除完整 child 子树。

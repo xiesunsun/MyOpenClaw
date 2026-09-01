@@ -366,6 +366,7 @@ RuntimeEvent 及重复 envelope。
 | 11.8 | HistoryCompaction 自包含 checkpoint 升级 | 正常读取遇 checkpoint 停止；自动/手动入口统一失败合同；SQLite v13 |
 | 11.9 | ActivePlan Operation 工作记忆 | update_plan 原子 CAS、尾部临时注入、SQLite v14、无 Plan-aware 压缩 |
 | 11.10 | Full Trace 低基数瘦身 | 逐块输出保持实时；每 ModelCall 至多一条 delta 汇总；旧 Trace 可读 |
+| 11.11 | Trace 启动与保留治理 | 固定尾部恢复 sequence；崩溃半行可修复；容量限制覆盖整个 Trace 根目录 |
 
 11.1 状态（2026-08-28）：已完成 Observation 口径修正。Operation 同时投影
 `answer_ready_ms` 与 `operation_completed_ms`，token/cache 明确分为 agent 与
@@ -415,6 +416,11 @@ worker 必须看完整逻辑待替代前缀，超过自身有效窗口就失败�
 Full 按 ModelCall 聚合成一条无正文摘要。生产写入路径删除 RequestSnapshot 旁路，完整内容继续
 以 ModelCall ContentStore 为权威来源，Reader 保持旧格式兼容。
 
+11.11 已实施：Trace Sink 启动只读取当前 Session 各 JSONL 段固定 64 KiB 尾部恢复
+`trace_seq`，不会随历史正文线性增长；崩溃留下的未换行尾部在追加前截断，但已经分配的序号
+不会复用。`max_total_size_mb` 约束整个 Trace 根目录，保留所有当前写入文件，并按稳定的
+mtime/path 顺序删除旧段。
+
 11.6 已完成逐工具验收：小结果保持完整；`read` 文本按原生 `offset/limit` 继续，字符预算只在
 完整行边界切分，单个超长行不再错误跳到下一行；`read` 图片复用既有
 `ArtifactService → ArtifactReference → ArtifactBlock → Provider` 链路，不在 ToolResult 中复制
@@ -437,6 +443,7 @@ Page/Cursor/Result Manager、图片专用 Tool 或第二份 ToolResult DTO。
 9. 页面同时展示 Parent 与 Workflow token，未知 usage、storage 和 Trace 不伪装为零；
 10. 单个 ModelCall 产生 10,000 个 delta 时，Full Trace 只新增一条摘要且计数准确，不产生
     10,000 条 delivery Span；旧逐块 Trace 仍能读取。
+11. 64 MiB 以上 Trace 段的启动恢复保持固定尾部读取；半行、rotation 和全局容量保留均有测试。
 
 ## 8. 调研依据
 
