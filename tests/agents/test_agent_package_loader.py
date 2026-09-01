@@ -23,6 +23,7 @@ from pickel.extensions_host.registry import ExtensionRegistry
 from pickel.providers.openai import OpenAIResponsesProvider
 from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.providers.anthropic import AnthropicMessagesProvider
+from pickel.shared.storage_errors import StorageIntegrityError
 from pickel.tools.bus import ToolSource, ToolActivation
 from pickel.tools.cancel_delegation import cancel_delegation
 from tests.agents.test_agent_package_builder import _EchoTool
@@ -232,6 +233,21 @@ def test_loader_rejects_tool_without_output_schema(tmp_path: Path) -> None:
     assert caught.value.code == "package_invalid"
 
 
+def test_storage_integrity_error_maps_to_stable_package_load_error() -> None:
+    """Store 端内容损坏必须转成稳定 PackageLoadError，供恢复流程隔离收敛。"""
+
+    class _CorruptStore:
+        def load_agent_package_version(self, _package_version_id):
+            raise StorageIntegrityError("AgentPackageVersion 内容损坏")
+
+    with pytest.raises(PackageLoadError) as caught:
+        AgentPackageLoader(
+            _CorruptStore(), _tool_bus(), provider_loader=lambda _model: object()
+        ).load("agentpkg_" + "0" * 64)
+
+    assert caught.value.code == "package_integrity_violation"
+
+
 def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.agents["Pickle"].extensions = []
@@ -251,25 +267,13 @@ def test_missing_package_has_stable_failure_code(tmp_path: Path) -> None:
 def test_new_package_with_unsupported_provider_has_stable_failure_code(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path)
-    config.agents["Pickle"].extensions = []
-    config.providers["google/gemini"] = type(config.providers["anthropic"])(
-        models={"gemini-test": config.providers["anthropic"].models["claude-test"]}
-    )
-    config.providers["google/gemini"].models[
-        "gemini-test"
-    ].wire_protocol = "gemini-generate-content"
-    config.agents["Pickle"].models.primary = ModelSelection(
-        provider="google/gemini", model="gemini-test"
-    )
-    boot = Boot(config, tool_bus=_tool_bus())
-
-    store = InMemoryRuntimeStore()
     with pytest.raises(PackageLoadError) as caught:
-        boot.resolve_loaded_agent_package(artifact_service=_artifact_service(store))
+        Boot._require_supported_wire_protocol(
+            "future-wire", package_version_id="agentpkg_test"
+        )
 
     assert caught.value.code == "provider_unsupported"
-    assert caught.value.package_version_id.startswith("agentpkg_")
+    assert caught.value.package_version_id == "agentpkg_test"
 
 
 def test_new_and_frozen_packages_load_openai_responses_provider(tmp_path: Path) -> None:
@@ -381,10 +385,8 @@ def test_frozen_package_with_unsupported_provider_has_stable_failure_code(
     primary = replace(
         current.model_policy.primary,
         provider="google/gemini",
-        wire_protocol="gemini-generate-content",
-        provider_implementation=ImplementationRef(
-            "provider", "gemini-generate-content"
-        ),
+        wire_protocol="future-wire",
+        provider_implementation=ImplementationRef("provider", "future-wire"),
     )
     version = build_agent_package_version(
         agent_id=current.agent_id,

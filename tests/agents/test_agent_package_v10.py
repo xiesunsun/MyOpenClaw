@@ -174,6 +174,20 @@ def test_old_package_without_context_capacity_keeps_canonical_hash() -> None:
     assert loaded.content_dict() == content
 
 
+def test_old_package_without_wire_protocol_keeps_canonical_hash() -> None:
+    """wire_protocol 引入前的旧 Package：读取推断回填，canonical 序列化省略 key。"""
+    content = _content()
+    del content["model_policy"]["primary"]["wire_protocol"]
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert loaded.model_policy.primary.wire_protocol == "anthropic-messages"
+    # 推断回填只发生在内存；canonical 序列化省略该 key，旧 Package hash 不变。
+    assert loaded.content_dict() == content
+
+
 def test_package_codec_persists_context_capacity() -> None:
     content = _content()
     content["model_policy"]["primary"]["context_window_tokens"] = 1000000
@@ -319,32 +333,62 @@ def test_delegation_policy_requires_unique_non_empty_allowlist() -> None:
         AgentDelegationPolicy("Worker", ("Pickle",))
 
 
-@pytest.mark.parametrize(
-    "schema_value",
-    [pytest.param(None, id="null"), pytest.param("missing", id="missing")],
-)
-def test_package_codec_rejects_missing_or_null_tool_output_schema(schema_value) -> None:
-    content = _content()
-    content["tools"] = [
-        {
+def _legacy_tool_content() -> dict:
+    """output_schema 必填契约生效前的冻结工具内容。"""
+    return {
+        "name": "echo",
+        "source": "builtin",
+        "implementation_ref": {
+            "kind": "builtin",
             "name": "echo",
-            "source": "builtin",
-            "implementation_ref": {
-                "kind": "builtin",
-                "name": "echo",
-                "version": None,
-                "digest": None,
-            },
             "version": None,
-            "description": "Echo",
-            "input_schema": {"type": "object"},
-            "replay_policy": "safe",
-        }
-    ]
-    if schema_value != "missing":
-        content["tools"][0]["output_schema"] = schema_value
+            "digest": None,
+        },
+        "version": None,
+        "description": "Echo",
+        "input_schema": {"type": "object"},
+        "replay_policy": "safe",
+    }
 
-    with pytest.raises((TypeError, ValueError), match="output_schema"):
+
+def test_package_codec_backfills_null_legacy_tool_output_schema() -> None:
+    """必填契约生效前的冻结工具 output_schema 记为 null；解码回填空 schema。"""
+    content = _content()
+    content["tools"] = [_legacy_tool_content()]
+    content["tools"][0]["output_schema"] = None
+
+    loaded = decode_agent_package_content(
+        package_version_id=package_version_id_for_content(content),
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    assert loaded.tools[0].output_schema == {}
+    # 回填只发生在内存；canonical 序列化保持 null，旧 Package hash 不变。
+    assert loaded.content_dict()["tools"][0]["output_schema"] is None
+
+
+def test_package_codec_rejects_missing_tool_output_schema_key() -> None:
+    """output_schema 键整体缺失属于结构不完整，仍按内容损坏拒绝。"""
+    content = _content()
+    content["tools"] = [_legacy_tool_content()]
+    content["tools"][0].pop("output_schema", None)
+
+    with pytest.raises(ValueError, match="output_schema"):
+        decode_agent_package_content(
+            package_version_id=package_version_id_for_content(content),
+            content=content,
+            created_at=datetime.now(timezone.utc),
+        )
+
+
+def test_package_codec_still_rejects_non_mapping_tool_output_schema() -> None:
+    """回填只覆盖缺失/null；output_schema 类型损坏仍按内容损坏拒绝。"""
+    content = _content()
+    content["tools"] = [_legacy_tool_content()]
+    content["tools"][0]["output_schema"] = "not-a-schema"
+
+    with pytest.raises(TypeError):
         decode_agent_package_content(
             package_version_id=package_version_id_for_content(content),
             content=content,
@@ -383,11 +427,12 @@ def test_legacy_codec_is_explicit_and_produces_target_shape() -> None:
     assert not hasattr(loaded, "schema_version")
 
     legacy["tools"] = [{"name": "echo"}]
-    with pytest.raises(ValueError, match="output_schema"):
-        decode_legacy_agent_package(
-            content=legacy,
-            created_at=datetime.now(timezone.utc),
-        )
+    legacy_loaded = decode_legacy_agent_package(
+        content=legacy,
+        created_at=datetime.now(timezone.utc),
+    )
+    assert legacy_loaded.tools[0].output_schema == {}
+    assert legacy_loaded.tools[0].replay_policy == "never"
 
 
 def test_builder_freezes_existing_app_config_without_role_fallback(

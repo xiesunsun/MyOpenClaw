@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+import logging
 import math
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +25,7 @@ if TYPE_CHECKING:
 
 _PACKAGE_ID = re.compile(r"^agentpkg_[0-9a-f]{64}$")
 ModelRole: TypeAlias = Literal["primary", "worker", "utility"]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -217,6 +221,11 @@ class ModelVersion:
     # 总会冻结解析后的值。
     effect_rate: float | None = None
     capability_profile: Mapping[str, FrozenJSON] = field(default_factory=dict)
+    # 解码侧来源标记：存储内容缺 wire_protocol key 时，_model_from_dict 按
+    # provider 推断回填并置位。canonical 序列化据此省略该 key，复现旧 Package
+    # 原 hash；显式声明 wire_protocol 的内容（含等于推断默认值的）不置位、
+    # 照常写入。不参与相等性比较与 repr。
+    wire_protocol_inferred: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -457,6 +466,11 @@ class LoadedAgentPackage:
     model_request_limiter: asyncio.Semaphore = field(
         init=False, compare=False, repr=False
     )
+    _close_lock: threading.RLock = field(init=False, compare=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(
+        init=False, default=None, compare=False, repr=False
+    )
+    _closed: bool = field(init=False, default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -469,6 +483,80 @@ class LoadedAgentPackage:
             "model_request_limiter",
             asyncio.Semaphore(self.version.runtime_policy.max_parallel_model_requests),
         )
+        object.__setattr__(self, "_close_lock", threading.RLock())
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def close(self) -> None:
+        """关闭该 Package 创建的 Provider 和扩展资源。
+
+        一个 Package 可能把同一 Provider 放在多个 model role；按对象身份去重，
+        同时隔离单个资源的关闭异常，避免共享 Generation 的其他资源泄漏。
+        """
+        with self._close_lock:
+            task = self._close_task
+            if task is None:
+                task = asyncio.create_task(self._close_resources())
+                object.__setattr__(self, "_close_task", task)
+        # Shield the independent cleanup task: cancellation of this caller must
+        # not cancel the Provider/client cleanup it started.
+        await asyncio.shield(task)
+
+    async def _close_resources(self) -> None:
+        """在独立 task 中执行清理，完成后才公布 closed。"""
+
+        resources: list[Any] = [*self.model_clients.values(), *self.lifecycle_hooks]
+        resources.extend(self.recall_sources)
+        seen: set[int] = set()
+        closed_clients: set[int] = set()
+        for resource in resources:
+            client = getattr(resource, "client", None)
+            if id(resource) in seen or (
+                client is not None and id(client) in closed_clients
+            ):
+                continue
+            seen.add(id(resource))
+            try:
+                close = getattr(resource, "close", None)
+                if close is None:
+                    close = getattr(resource, "aclose", None)
+                if close is None:
+                    close = getattr(client, "aclose", None) or getattr(
+                        client, "close", None
+                    )
+                if close is None:
+                    continue
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+                if client is not None:
+                    closed_clients.add(id(client))
+            except Exception:
+                # Package cleanup is best effort; one broken client cannot retain
+                # the remaining Provider/client or Generation scope.
+                logger.exception(
+                    "关闭 LoadedAgentPackage 资源失败: package=%s",
+                    self.version.package_version_id,
+                )
+                if client is not None and id(client) not in closed_clients:
+                    try:
+                        fallback = getattr(client, "aclose", None) or getattr(
+                            client, "close", None
+                        )
+                        if fallback is not None:
+                            result = fallback()
+                            if inspect.isawaitable(result):
+                                await result
+                        closed_clients.add(id(client))
+                    except Exception:
+                        logger.exception(
+                            "关闭 LoadedAgentPackage Provider client 失败: package=%s",
+                            self.version.package_version_id,
+                        )
+        with self._close_lock:
+            object.__setattr__(self, "_closed", True)
 
 
 def canonical_json_bytes(content: Mapping[str, Any]) -> bytes:
@@ -658,7 +746,6 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
     content = {
         "provider": model.provider,
         "model": model.model,
-        "wire_protocol": model.wire_protocol,
         "api_base": model.api_base,
         "temperature": model.temperature,
         "max_input_tokens": model.max_input_tokens,
@@ -670,6 +757,10 @@ def _model_dict(model: ModelVersion) -> dict[str, Any]:
         ],
     }
     # 缺失字段的旧 Package 必须保持原 canonical hash；只有可靠能力值才写入。
+    # wire_protocol_inferred 表示读取时按 provider 推断回填（存储内容无该 key），
+    # canonical 序列化省略之，复现旧 Package 原 hash；显式声明的值照常写入。
+    if not model.wire_protocol_inferred:
+        content["wire_protocol"] = model.wire_protocol
     if model.context_window_tokens is not None:
         content["context_window_tokens"] = model.context_window_tokens
     if model.effect_rate is not None:
@@ -766,7 +857,9 @@ def _tool_dict(tool: ToolVersion) -> dict[str, Any]:
         "version": tool.version,
         "description": tool.description,
         "input_schema": thaw_json(tool.input_schema),
-        "output_schema": thaw_json(tool.output_schema),
+        # 空 mapping 与历史 null 同义（无输出合同）；canonical 形态统一为 null，
+        # 保证 null 回填后的旧 Package content_dict 复现原 canonical hash。
+        "output_schema": thaw_json(tool.output_schema) or None,
         "replay_policy": tool.replay_policy,
     }
 
@@ -791,13 +884,16 @@ def _secret_refs(values: Any) -> tuple[SecretRef, ...]:
     return tuple(SecretRef(**dict(value)) for value in values or ())
 
 
+def _inferred_wire_protocol(provider: str) -> str:
+    """wire_protocol 缺省时的 provider 推断值；读取与 canonical 序列化共用。"""
+    return "anthropic-messages" if provider == "anthropic" else "openai-responses"
+
+
 def _model_from_dict(value: Mapping[str, Any]) -> ModelVersion:
     data = dict(value)
     if "wire_protocol" not in data:
-        provider = str(data.get("provider") or "")
-        data["wire_protocol"] = (
-            "anthropic-messages" if provider == "anthropic" else "openai-responses"
-        )
+        data["wire_protocol"] = _inferred_wire_protocol(str(data.get("provider") or ""))
+        data["wire_protocol_inferred"] = True
     data["provider_implementation"] = _ref_from_dict(data["provider_implementation"])
     data["required_secret_refs"] = _secret_refs(data.get("required_secret_refs"))
     data.setdefault("capability_profile", {})
@@ -821,8 +917,14 @@ def _skill_from_dict(value: Mapping[str, Any]) -> SkillVersion:
 
 def _tool_from_dict(value: Mapping[str, Any]) -> ToolVersion:
     data = dict(value)
-    if "output_schema" not in data or data["output_schema"] is None:
-        raise ValueError("ToolVersion.output_schema 缺失或为 null")
+    if "output_schema" not in data:
+        raise ValueError("ToolVersion.output_schema 缺失")
+    if data["output_schema"] is None:
+        # 历史兼容：output_schema 必填契约（Tool 输出合同收敛）生效前，冻结内容
+        # 记录为 null（语义：无输出合同）。内存中回填空 schema（JSON Schema
+        # 语义下放行任意输出）恢复可装载性；canonical 序列化仍写回 null，
+        # 不改变原 Package hash，也不伪造旧工具本没有的输出合同。
+        data["output_schema"] = {}
     data["implementation_ref"] = _ref_from_dict(data["implementation_ref"])
     return ToolVersion(**data)
 
@@ -861,6 +963,8 @@ def _legacy_tool(value: Mapping[str, Any]) -> dict[str, Any]:
         "version": value.get("version"),
         "description": str(value.get("description", "")),
         "input_schema": value.get("input_schema") or {},
-        "output_schema": value.get("output_schema"),
+        # 同 _tool_from_dict 的历史兼容：legacy payload 缺失/空 schema 规范化为
+        # null（无输出合同），由 _tool_from_dict 在内存中回填空 schema。
+        "output_schema": value.get("output_schema") or None,
         "replay_policy": "never",
     }

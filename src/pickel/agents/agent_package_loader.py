@@ -18,6 +18,7 @@ from pickel.agents.agent_package import (
 )
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.conversations.agent_message import agent_message_to_dict
+from pickel.shared.storage_errors import StorageIntegrityError
 from pickel.tools.bus import ToolBus, ToolEntry, ToolSnapshot
 from pickel.tools.base import ToolExecutionContext, ToolExecutionError, tool
 from pickel.tools.cancel_delegation import cancel_delegation
@@ -128,7 +129,16 @@ class AgentPackageLoader:
         *,
         expected_agent_id: str | None = None,
     ) -> LoadedAgentPackage:
-        version = self._store.load_agent_package_version(package_version_id)
+        try:
+            version = self._store.load_agent_package_version(package_version_id)
+        except StorageIntegrityError as exc:
+            # Store 端解码失败属于可定位的 Package 不可装载；转成稳定错误码后，
+            # 恢复流程按 PackageLoadError 分支隔离/跳过，而不是无限重试报错。
+            raise PackageLoadError(
+                "package_integrity_violation",
+                package_version_id,
+                f"冻结 Package 内容无法解码: {exc}",
+            ) from exc
         if version is None:
             raise PackageLoadError(
                 "package_version_missing", package_version_id, "Store 中不存在冻结版本"
