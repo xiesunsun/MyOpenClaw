@@ -113,13 +113,19 @@ class Agent:
         return self._driver.cancel(session_id=self._session_id, reason=reason)
 
     async def when_idle(
-        self, *, consume_delta=None, consume_tool_event=None, host_calls=None
+        self,
+        *,
+        consume_delta=None,
+        consume_tool_event=None,
+        consume_operation_accepted=None,
+        host_calls=None,
     ) -> AgentDriveResult:
         async with self._drive_lock:
             return await self._driver.when_idle(
                 session_id=self._session_id,
                 consume_delta=consume_delta,
                 consume_tool_event=consume_tool_event,
+                consume_operation_accepted=consume_operation_accepted,
                 host_calls=host_calls,
             )
 

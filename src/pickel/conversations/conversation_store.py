@@ -17,11 +17,23 @@ class ConversationStore(Protocol):
 
     def load_session(self, session_id: str) -> ConversationSession | None: ...
 
+    def commit_generated_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool: ...
+
+    def set_user_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool: ...
+
     def list_sessions(
         self, *, limit: int = 20, cwd: str | None = None
     ) -> tuple[ConversationSession, ...]: ...
 
     def list_runnable_session_ids(self) -> tuple[str, ...]: ...
+
+    def list_untitled_session_ids(self) -> tuple[str, ...]: ...
+
+    def load_first_accepted_operation(self, session_id: str): ...
 
     def append_node(
         self,

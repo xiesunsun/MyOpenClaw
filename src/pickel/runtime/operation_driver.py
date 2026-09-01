@@ -390,12 +390,24 @@ class OperationDriver:
         assert step is not None and step.request_intent is not None
         max_attempts = getattr(package.runtime_policy, "model_request_max_attempts", 3)
         try:
-            prepared_call = self._model_calls.prepare_or_recover_agent_call(
-                operation=operation,
-                state=state,
-                mapper=effects.provider,
-                max_attempts=max_attempts,
+            prepare_async = getattr(
+                self._model_calls, "prepare_or_recover_agent_call_async", None
             )
+            if prepare_async is not None:
+                prepared_call = await prepare_async(
+                    operation=operation,
+                    state=state,
+                    mapper=effects.provider,
+                    max_attempts=max_attempts,
+                )
+            else:
+                prepared_call = await asyncio.to_thread(
+                    self._model_calls.prepare_or_recover_agent_call,
+                    operation=operation,
+                    state=state,
+                    mapper=effects.provider,
+                    max_attempts=max_attempts,
+                )
         except ModelCallRetryExhausted as exc:
             call_error = exc.call.error if exc.call is not None else None
             failed = replace(
@@ -446,11 +458,22 @@ class OperationDriver:
             )
         except ModelCallSendFailure as exc:
             error = classify_provider_error(exc.cause)
-            failed_call = self._model_calls.record_send_failure(
-                exc.call,
-                exc.cause,
-                first_chunk_at=exc.first_chunk_at,
+            record_failure_async = getattr(
+                self._model_calls, "record_send_failure_async", None
             )
+            if record_failure_async is not None:
+                failed_call = await record_failure_async(
+                    exc.call,
+                    exc.cause,
+                    first_chunk_at=exc.first_chunk_at,
+                )
+            else:
+                failed_call = await asyncio.to_thread(
+                    self._model_calls.record_send_failure,
+                    exc.call,
+                    exc.cause,
+                    first_chunk_at=exc.first_chunk_at,
+                )
             if package.runtime_policy.should_retry_request(
                 retryable=error.retryable,
                 first_chunk_received=exc.first_chunk_at is not None,
@@ -485,9 +508,19 @@ class OperationDriver:
             self._model_calls, "save_response_content", None
         )
         if save_response_content is not None:
-            response_content_ref = save_response_content(
-                response, identity=prepared_call.model_call.identity
+            save_response_content_async = getattr(
+                self._model_calls, "save_response_content_async", None
             )
+            if save_response_content_async is not None:
+                response_content_ref = await save_response_content_async(
+                    response, identity=prepared_call.model_call.identity
+                )
+            else:
+                response_content_ref = await asyncio.to_thread(
+                    save_response_content,
+                    response,
+                    identity=prepared_call.model_call.identity,
+                )
         return await self._commit_model_response(
             operation=operation,
             state=state,
@@ -557,7 +590,17 @@ class OperationDriver:
                 retryable=False,
                 status_code=failure.status_code,
             )
-            self._model_calls.commit_agent_processing_failure(
+            commit_failure_async = getattr(
+                self._model_calls, "commit_agent_processing_failure_async", None
+            )
+            commit_failure = (
+                commit_failure_async
+                if commit_failure_async is not None
+                else lambda **kwargs: asyncio.to_thread(
+                    self._model_calls.commit_agent_processing_failure, **kwargs
+                )
+            )
+            await commit_failure(
                 call=prepared_call.model_call,
                 response=response,
                 state=failed_state,
@@ -610,7 +653,15 @@ class OperationDriver:
         }
         if response_content_ref is not None:
             commit_kwargs["response_content_ref"] = response_content_ref
-        self._model_calls.commit_agent_response(**commit_kwargs)
+        commit_response_async = getattr(
+            self._model_calls, "commit_agent_response_async", None
+        )
+        if commit_response_async is not None:
+            await commit_response_async(**commit_kwargs)
+        else:
+            await asyncio.to_thread(
+                self._model_calls.commit_agent_response, **commit_kwargs
+            )
         return next_state, response.assistant_message
 
     async def _prepare_model_request(

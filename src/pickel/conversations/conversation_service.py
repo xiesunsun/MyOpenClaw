@@ -80,6 +80,18 @@ class ConversationService:
             raise ConversationNotFoundError(f"ConversationSession 不存在: {session_id}")
         return session
 
+    def commit_generated_title(self, *, session_id: str, title: str) -> bool:
+        """以 Session 标题为空为条件提交自动标题。"""
+        return self._store.commit_generated_title(
+            session_id=session_id, title=title, updated_at=self._now()
+        )
+
+    def set_user_title(self, *, session_id: str, title: str) -> bool:
+        """保存用户标题；之后自动标题 CAS 不再生效。"""
+        return self._store.set_user_title(
+            session_id=session_id, title=title, updated_at=self._now()
+        )
+
     def list_active_branch_nodes(self, *, session_id: str) -> list[ConversationNode]:
         session = self.load_conversation_session(session_id)
         return list(

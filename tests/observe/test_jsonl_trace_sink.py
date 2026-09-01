@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from pathlib import Path
 
 import pickel.observe.jsonl_trace_sink as trace_module
@@ -119,6 +121,91 @@ def test_reopen_continues_file_trace_sequence(tmp_path: Path):
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert [record["trace_seq"] for record in records] == [0, 1, 2, 3]
+
+
+def test_sequence只读取各段尾部并忽略崩溃半行(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    rotated = tmp_path / "s1.20260101T000000.0001.jsonl"
+    rotated.write_text(
+        ("x" * 200_000) + "\n" + json.dumps({"trace_seq": 41}) + "\n",
+        encoding="utf-8",
+    )
+    path.write_text(
+        json.dumps({"trace_seq": 42}) + "\n" + '{"trace_seq":999',
+        encoding="utf-8",
+    )
+    assert rotated.stat().st_size > trace_module._TRACE_SEQUENCE_TAIL_BYTES
+
+    sink = JsonlTraceSink(path)
+    sink(AssistantMessageEvent())
+    sink.close()
+
+    records = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    # The half-written record's allocated sequence is reserved, even though
+    # its bytes are truncated before the next append.
+    assert records[-1]["trace_seq"] == 1000
+
+
+def test_sequence跨rotation继续递增且不覆盖旧段(tmp_path: Path):
+    path = tmp_path / "s1.jsonl"
+    old = tmp_path / "s1.20260101T000000.0001.jsonl"
+    old.write_text(json.dumps({"trace_seq": 77}) + "\n", encoding="utf-8")
+    path.write_text(json.dumps({"trace_seq": 78}) + "\n", encoding="utf-8")
+
+    sink = JsonlTraceSink(path, TraceOptions(max_file_size_mb=1))
+    sink(AssistantMessageEvent(text="new"))
+    sink.close()
+
+    records = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["trace_seq"] == 79
+    assert old.exists()
+
+
+def test_retention限制整个trace根目录且不删除当前写入文件(tmp_path: Path):
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    current = tmp_path / "current.jsonl"
+    first.write_bytes(b"a" * 600_000 + b"\n")
+    second.write_bytes(b"b" * 600_000 + b"\n")
+    old_time = time.time() - 10
+    os.utime(first, (old_time, old_time))
+    os.utime(second, (old_time, old_time))
+
+    sink = JsonlTraceSink(
+        current,
+        TraceOptions(max_total_size_mb=1, max_age_days=0),
+    )
+    sink.close()
+
+    assert current.exists()
+    assert not first.exists()
+    assert second.exists()
+
+
+def test_retention不会删除同进程另一个正在写入的文件(tmp_path: Path):
+    other = tmp_path / "other.jsonl"
+    old = tmp_path / "old.jsonl"
+    current = tmp_path / "current.jsonl"
+    other.write_bytes(b"o" * 700_000 + b"\n")
+    old.write_bytes(b"x" * 700_000 + b"\n")
+    timestamp = time.time() - 10
+    os.utime(other, (timestamp, timestamp))
+    os.utime(old, (timestamp - 1, timestamp - 1))
+
+    other_sink = JsonlTraceSink(other, TraceOptions(max_total_size_mb=1))
+    sink = JsonlTraceSink(
+        current,
+        TraceOptions(max_total_size_mb=1, max_age_days=0),
+    )
+    sink.close()
+    other_sink.close()
+
+    assert other.exists()
+    assert not old.exists()
 
 
 async def _emit(bus: EventBus) -> None:

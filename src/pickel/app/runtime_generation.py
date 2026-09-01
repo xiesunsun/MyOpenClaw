@@ -62,6 +62,8 @@ async def _close_resource(resource: Any) -> None:
 
     close = getattr(resource, "close", None)
     if close is None:
+        close = getattr(resource, "aclose", None)
+    if close is None:
         return
     result = close()
     if inspect.isawaitable(result):
@@ -101,7 +103,7 @@ class ExtensionInstance:
         self.extension_version = extension_version
         self.state = state
         self._close_lock = threading.RLock()
-        self._close_started = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def activate(self) -> None:
         """将已完成 setup 的实例发布为 active。"""
@@ -119,11 +121,14 @@ class ExtensionInstance:
         with self._close_lock:
             if self.state is ExtensionInstanceState.CLOSED:
                 return
-            if self._close_started:
-                return
-            self._close_started = True
-            self.state = ExtensionInstanceState.CLOSING
+            task = self._close_task
+            if task is None:
+                self.state = ExtensionInstanceState.CLOSING
+                task = asyncio.create_task(self._close_scope())
+                self._close_task = task
+        await asyncio.shield(task)
 
+    async def _close_scope(self) -> None:
         try:
             await _close_resource(self.scope)
         except Exception:
@@ -296,6 +301,7 @@ class RuntimeGeneration:
 
         if not package_version_id:
             raise ValueError("package_version_id 不能为空")
+        loser = None
         with self._lock:
             if self.state is not RuntimeGenerationState.ACTIVE:
                 raise RuntimeGenerationStateError(
@@ -304,10 +310,15 @@ class RuntimeGeneration:
                 )
             cached = self.loaded_packages.get(package_version_id)
             if cached is not None:
-                return cached
-            self.loaded_packages[package_version_id] = package
-            self._package_ref_counts[package_version_id] = 0
-            return package
+                loser = package if cached is not package else None
+                result = cached
+            else:
+                self.loaded_packages[package_version_id] = package
+                self._package_ref_counts[package_version_id] = 0
+                result = package
+        if loser is not None:
+            self._schedule_resource_close(loser)
+        return result
 
     def publish(self) -> None:
         """原子地发布完整 Generation。"""
@@ -346,6 +357,33 @@ class RuntimeGeneration:
             self.operation_ref_count += 1
         return LoadedPackageHandle(self, package_version_id, package)
 
+    def acquire_loaded_package_for_background(
+        self, package_version_id: PackageVersionId
+    ) -> LoadedPackageHandle:
+        """为短暂的后台辅助任务保留已缓存 Package。
+
+        标题任务可能在 reload 后继续使用旧 Generation 的冻结 Package；它
+        不能借用同名新包，也不能让 retired Generation 在 lease 期间关闭。
+        """
+        with self._lock:
+            if self.state not in {
+                RuntimeGenerationState.ACTIVE,
+                RuntimeGenerationState.RETIRED,
+            }:
+                raise RuntimeGenerationStateError(
+                    f"Generation '{self.generation_id}' 当前为 {self.state.value}，"
+                    "不能获取后台 Package 引用"
+                )
+            package = self.loaded_packages.get(package_version_id)
+            if package is None:
+                raise KeyError(
+                    f"Generation '{self.generation_id}' 没有 Package "
+                    f"'{package_version_id}'"
+                )
+            self._package_ref_counts[package_version_id] += 1
+            self.operation_ref_count += 1
+        return LoadedPackageHandle(self, package_version_id, package)
+
     def retire(self) -> None:
         """停止接受新引用，保留已有 Operation 直到其终态。"""
 
@@ -359,9 +397,15 @@ class RuntimeGeneration:
     async def close(self) -> None:
         """关闭无引用的 retired Generation；重复调用无副作用。"""
 
+        task = self._begin_close()
+        if task is None:
+            return
+        await asyncio.shield(task)
+
+    def _begin_close(self) -> asyncio.Task[None] | None:
         with self._lock:
             if self.state is RuntimeGenerationState.CLOSED:
-                return
+                return None
             if self.state is RuntimeGenerationState.BUILDING:
                 # 构建失败时允许直接回滚；它从未对外发布。
                 self.state = RuntimeGenerationState.RETIRED
@@ -374,9 +418,14 @@ class RuntimeGeneration:
                     f"Generation '{self.generation_id}' 仍有引用："
                     f"operations={self.operation_ref_count}"
                 )
-            self.state = RuntimeGenerationState.CLOSED
+            task = self._close_task
+            if task is None:
+                task = asyncio.create_task(self._close_resources())
+                self._close_task = task
+            return task
 
-        # state 已先切换为 closed，任何清理异常都不会阻止其余资源释放。
+    async def _close_resources(self) -> None:
+        # 独立任务完成全部清理后才发布 closed；单个资源异常不阻止后续清理。
         for instance in reversed(tuple(self.extension_instances.values())):
             await instance.close()
         for package_id, package in tuple(self.loaded_packages.items()):
@@ -392,13 +441,16 @@ class RuntimeGeneration:
             await _close_resource(self.scope)
         except Exception:
             logger.exception("关闭 RuntimeGeneration '%s' 失败", self.generation_id)
+        finally:
+            with self._lock:
+                self.state = RuntimeGenerationState.CLOSED
 
     async def wait_closed(self) -> None:
         """等待 retire 后已经安排的异步关闭，供 reload/shutdown 收口。"""
 
         task = self._close_task
         if task is not None:
-            await task
+            await asyncio.shield(task)
 
     async def _release_package(self, package_version_id: PackageVersionId) -> None:
         with self._lock:
@@ -437,11 +489,42 @@ class RuntimeGeneration:
         """retire 无引用时在当前事件循环尽快完成异步清理。"""
 
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
         if self._close_task is None:
-            self._close_task = loop.create_task(self.close())
+            try:
+                self._begin_close()
+            except RuntimeGenerationStateError:
+                logger.exception(
+                    "安排 RuntimeGeneration '%s' 关闭失败", self.generation_id
+                )
+
+    @staticmethod
+    def _schedule_resource_close(resource: Any) -> None:
+        """缓存竞争失败的临时 Package 也必须释放其 Provider client。"""
+
+        close = getattr(resource, "close", None)
+        if close is None:
+            close = getattr(resource, "aclose", None)
+        if close is None:
+            return
+        try:
+            result = close()
+        except Exception:
+            logger.exception("关闭缓存竞争失败的 Package 失败")
+            return
+        if not inspect.isawaitable(result):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # cache_loaded_package normally runs from an async Runtime path. If
+            # a synchronous caller supplies an async-only resource, close it in
+            # a short-lived loop rather than silently leaking it.
+            asyncio.run(result)
+        else:
+            loop.create_task(result)
 
 
 __all__ = [

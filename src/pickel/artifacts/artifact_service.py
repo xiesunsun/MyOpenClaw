@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from pickel.artifacts.artifact import Artifact, ArtifactReference
@@ -36,20 +37,22 @@ class ArtifactService:
     ) -> ArtifactReference:
         payload = bytes(data)
         artifact_id = f"artifact_{hashlib.sha256(payload).hexdigest()}"
-        existing = self._artifact_store.load_artifact(artifact_id)
-        if existing is not None:
-            if existing.size_bytes != len(payload):
-                raise ArtifactIntegrityError(f"Artifact 大小冲突: {artifact_id}")
-        # Blob 先于元数据写入；重复写幂等，也可修复元数据存在但 Blob 丢失。
-        self._blob_store.put_blob(artifact_id=artifact_id, data=payload)
-        if existing is None:
-            artifact = Artifact(
-                artifact_id=artifact_id,
-                size_bytes=len(payload),
-                created_at=self._now(),
-            )
-            self._artifact_store.insert_artifact(artifact)
-            existing = artifact
+        lock = getattr(self._blob_store, "garbage_collection_lock", None)
+        with lock if lock is not None else nullcontext():
+            existing = self._artifact_store.load_artifact(artifact_id)
+            if existing is not None:
+                if existing.size_bytes != len(payload):
+                    raise ArtifactIntegrityError(f"Artifact 大小冲突: {artifact_id}")
+            # Blob 先于元数据写入；重复写幂等，也可修复元数据存在但 Blob 丢失。
+            self._blob_store.put_blob(artifact_id=artifact_id, data=payload)
+            if existing is None:
+                artifact = Artifact(
+                    artifact_id=artifact_id,
+                    size_bytes=len(payload),
+                    created_at=self._now(),
+                )
+                self._artifact_store.insert_artifact(artifact)
+                existing = artifact
         return ArtifactReference(
             artifact_id=existing.artifact_id,
             media_type=media_type,

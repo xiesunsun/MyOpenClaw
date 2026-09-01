@@ -121,6 +121,7 @@ class ConversationRuntime:
         loaded_package_handle: LoadedPackageHandle | None = None,
         skill_store: Any | None = None,
         on_detach: Callable[[], None] | None = None,
+        on_operation_accepted: Callable[[Any], None] | None = None,
     ) -> None:
         self._loaded_agent_package = loaded_agent_package
         self._agent = agent
@@ -130,6 +131,7 @@ class ConversationRuntime:
         self._persistence_store = persistence_store
         self._skill_store = skill_store
         self._on_detach = on_detach
+        self._on_operation_accepted = on_operation_accepted
         self._persistence = persistence
         self._app_config = app_config
         self._mode = mode
@@ -257,7 +259,12 @@ class ConversationRuntime:
             )
             if accepted_operation_id is None and hasattr(accepted, "operation"):
                 accepted_operation_id = accepted.operation.operation_id
-            if not accepted_operation_id or timer is not None:
+            if not accepted_operation_id:
+                return
+            on_operation_accepted = getattr(self, "_on_operation_accepted", None)
+            if on_operation_accepted is not None:
+                on_operation_accepted(accepted)
+            if timer is not None:
                 return
             operation_id = str(accepted_operation_id)
             timer = SpanTimer(

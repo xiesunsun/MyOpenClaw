@@ -1,37 +1,94 @@
+from __future__ import annotations
+
 import asyncio
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from pickel.app.boot import Boot
-from pickel.app.application import RuntimeApplication
-from pickel.cli.chat import ChatLoop
-from pickel.cli.query import QuerySurface
-from pickel.cli.query_input import read_query_input
-from pickel.app.runtime_models import (
-    ConversationRequest,
-    RuntimeLaunchRequest,
-    AgentRunRequest,
-)
-from pickel.config.loader import Config
-from pickel.config.paths import runtime_db_path
-from pickel.conversations.conversation_service import (
-    ConversationNotFoundError,
-    ConversationService,
-)
-from pickel.extensions_host.loader import load_extensions
-from pickel.tools.bus import ToolBus
-from pickel.tools.catalog import install_builtin_tools
-from pickel.persistence.sqlite_runtime_store import (
-    SQLiteRuntimeStore,
-    UnsupportedStorageSchemaError,
-)
-from pickel.persistence.sqlite_schema_v12 import UnsupportedSchemaVersionError
-from pickel.persistence.errors import StorageIntegrityError
+if TYPE_CHECKING:
+    from pickel.app.boot import Boot
+    from pickel.config.loader import Config
+    from pickel.tools.bus import ToolBus
+
+
+# 只读命令的测试可以替换这些注入点；真实实现由对应命令第一次执行时加载。
+# 这样导入 pickel.cli.main 和生成 Typer help 都不会触碰 Runtime/Provider SDK。
+Boot: Any = None
+Config: Any = None
+ToolBus: Any = None
+SQLiteRuntimeStore: Any = None
+ConversationService: Any = None
+ConversationNotFoundError: Any = None
+UnsupportedStorageSchemaError: Any = None
+UnsupportedSchemaVersionError: Any = None
+StorageIntegrityError: Any = None
+runtime_db_path: Any = None
+
+
+def _load_runtime_dependencies() -> None:
+    """按需加载执行路径依赖，避免 CLI help 导入完整 Runtime。"""
+    global Boot, Config, ToolBus
+    if Config is None:
+        from pickel.config.loader import Config as config_type
+
+        Config = config_type
+    if ToolBus is None:
+        from pickel.tools.bus import ToolBus as tool_bus_type
+
+        ToolBus = tool_bus_type
+    if Boot is None:
+        from pickel.app.boot import Boot as boot_type
+
+        Boot = boot_type
+
+
+def _load_readonly_dependencies() -> None:
+    """按需加载 SQLite 只读适配器，不装载 Config、Extension 或 Provider。"""
+    global SQLiteRuntimeStore, ConversationService, ConversationNotFoundError
+    global UnsupportedStorageSchemaError, UnsupportedSchemaVersionError
+    global StorageIntegrityError, runtime_db_path
+    if SQLiteRuntimeStore is None or UnsupportedStorageSchemaError is None:
+        from pickel.persistence.sqlite_runtime_store import (
+            SQLiteRuntimeStore as store_type,
+            UnsupportedStorageSchemaError as storage_error_type,
+        )
+
+        if SQLiteRuntimeStore is None:
+            SQLiteRuntimeStore = store_type
+        if UnsupportedStorageSchemaError is None:
+            UnsupportedStorageSchemaError = storage_error_type
+    if ConversationService is None:
+        from pickel.conversations.conversation_service import (
+            ConversationService as service_type,
+        )
+
+        ConversationService = service_type
+    if ConversationNotFoundError is None:
+        from pickel.conversations.conversation_service import (
+            ConversationNotFoundError as conversation_error_type,
+        )
+
+        ConversationNotFoundError = conversation_error_type
+    if UnsupportedSchemaVersionError is None:
+        from pickel.persistence.sqlite_schema_v14 import (
+            UnsupportedSchemaVersionError as schema_error_type,
+        )
+
+        UnsupportedSchemaVersionError = schema_error_type
+    if StorageIntegrityError is None:
+        from pickel.persistence.errors import StorageIntegrityError as integrity_type
+
+        StorageIntegrityError = integrity_type
+    if runtime_db_path is None:
+        from pickel.config.paths import runtime_db_path as db_path_function
+
+        runtime_db_path = db_path_function
+
 
 app = typer.Typer(invoke_without_command=True)
 sessions_app = typer.Typer(invoke_without_command=True)
@@ -40,6 +97,9 @@ QUERY_DEFAULT_AGENT = "shell"
 
 
 def _prepare_boot() -> tuple[Config, ToolBus]:
+    _load_runtime_dependencies()
+    from pickel.tools.catalog import install_builtin_tools
+
     app_config = Config.load(cwd=Path.cwd())
     tool_bus = ToolBus()
     install_builtin_tools(tool_bus)
@@ -47,6 +107,7 @@ def _prepare_boot() -> tuple[Config, ToolBus]:
 
 
 def _finish_boot(app_config: Config, tool_bus: ToolBus, result) -> Boot:
+    _load_runtime_dependencies()
     # 装载错误只警告、不阻止启动：一个坏 extension 不该弄挂 CLI
     for error in result.errors:
         typer.secho(f"Extension load error: {error}", fg=typer.colors.YELLOW, err=True)
@@ -57,9 +118,14 @@ def _finish_boot(app_config: Config, tool_bus: ToolBus, result) -> Boot:
 
 def _boot() -> Boot:
     """同步启动路径（chat 之外的命令）：分层 Config.load + extension 装载。"""
+    from pickel.extensions_host.loader import load_extensions
+
     app_config, tool_bus = _prepare_boot()
     result = load_extensions(tool_bus=tool_bus, app_config=app_config)
     return _finish_boot(app_config, tool_bus, result)
+
+
+_DEFAULT_BOOT = _boot
 
 
 def _run_chat(
@@ -67,6 +133,11 @@ def _run_chat(
     agent: str | None,
     session_id: str | None,
 ) -> None:
+    from pickel.app.application import RuntimeApplication
+    from pickel.app.runtime_models import RuntimeLaunchRequest
+    from pickel.cli.chat import ChatLoop
+    from pickel.conversations.conversation_service import ConversationNotFoundError
+
     async def _main() -> None:
         async with RuntimeApplication.open(
             RuntimeLaunchRequest(cwd=Path.cwd())
@@ -115,11 +186,23 @@ def _run_query(
         typer.echo("--output-format 须为 text、json 或 jsonl", err=True)
         raise typer.Exit(code=2)
 
+    from pickel.cli.query_input import read_query_input
+
     try:
         user_message = read_query_input(query, sys.stdin).to_user_message()
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+
+    # 只有通过输入校验的真实执行请求才需要装载完整 Runtime/Query Surface。
+    from pickel.app.application import RuntimeApplication
+    from pickel.app.runtime_models import (
+        AgentRunRequest,
+        ConversationRequest,
+        RuntimeLaunchRequest,
+    )
+    from pickel.cli.query import QuerySurface
+    from pickel.conversations.conversation_service import ConversationNotFoundError
 
     async def _main():
         resolved_agent = agent
@@ -243,6 +326,8 @@ def observe(
     if ctx is not None and ctx.invoked_subcommand is not None:
         return
 
+    _load_readonly_dependencies()
+
     from pickel.observe.operation_report import export_operation_report
 
     try:
@@ -311,6 +396,8 @@ def observe_operation(
         typer.echo("--format 必须是 html 或 json", err=True)
         raise typer.Exit(code=2)
 
+    _load_readonly_dependencies()
+
     from pickel.observe.operation_report import export_operation_observation
 
     # 观测是只读查询，不应装载 Config、Provider、MCP 或 Extension。
@@ -346,6 +433,7 @@ def observe_serve(
 
     # 这里故意不调用 _boot()：观测服务只能打开 SQLiteRuntimeStore 与
     # ModelCallContentStore，不能装载 Config、Provider、MCP 或 Extension。
+    _load_readonly_dependencies()
     from pickel.observe.http_server import serve_observation
 
     try:
@@ -379,12 +467,18 @@ def sessions(
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    try:
-        boot = _boot()
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    service = boot.build_conversation_service(store=boot.runtime_store())
+    _load_readonly_dependencies()
+    # 保留旧测试/嵌入方替换 _boot 的兼容性；生产默认路径只读 Store。
+    if _boot is not _DEFAULT_BOOT:
+        try:
+            boot = _boot()
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        service = boot.build_conversation_service(store=boot.runtime_store())
+    else:
+        store = SQLiteRuntimeStore(runtime_db_path())
+        service = ConversationService(store)
     previews = service.list_conversation_previews(all_sessions=all_sessions)
     table = Table(title="Sessions")
     table.add_column("session id", overflow="ignore", no_wrap=True)
@@ -409,12 +503,17 @@ def sessions(
 def delete_session(
     session_id: str = typer.Argument(...),
 ) -> None:
-    try:
-        boot = _boot()
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    service = boot.build_conversation_service(store=boot.runtime_store())
+    _load_readonly_dependencies()
+    if _boot is not _DEFAULT_BOOT:
+        try:
+            boot = _boot()
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        service = boot.build_conversation_service(store=boot.runtime_store())
+    else:
+        store = SQLiteRuntimeStore(runtime_db_path())
+        service = ConversationService(store)
     try:
         service.delete_conversation_session(session_id=session_id)
     except ConversationNotFoundError as exc:

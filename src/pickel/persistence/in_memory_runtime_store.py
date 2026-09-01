@@ -139,6 +139,47 @@ class InMemoryRuntimeStore(InMemoryModelCallStoreMixin):
         with self._lock:
             return self._sessions.get(session_id)
 
+    def commit_generated_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool:
+        """只在标题仍为空时提交自动标题，作为内存适配器的 CAS 边界。"""
+        if not title:
+            raise ValueError("自动标题不能为空")
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if (
+                session is None
+                or session.archived_at is not None
+                or session.title is not None
+                or session.title_source is not None
+            ):
+                return False
+            self._sessions[session_id] = replace(
+                session,
+                title=title,
+                title_source="generated",
+                updated_at=updated_at,
+            )
+            return True
+
+    def set_user_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool:
+        """保存用户标题；用户标题可覆盖已有自动标题。"""
+        if not title:
+            raise ValueError("用户标题不能为空")
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.archived_at is not None:
+                return False
+            self._sessions[session_id] = replace(
+                session,
+                title=title,
+                title_source="user",
+                updated_at=updated_at,
+            )
+            return True
+
     def list_sessions(
         self, *, limit: int = 20, cwd: str | None = None
     ) -> tuple[ConversationSession, ...]:
@@ -262,6 +303,32 @@ class InMemoryRuntimeStore(InMemoryModelCallStoreMixin):
                 leaf = node.parent_node_id
             result.reverse()
             return tuple(result)
+
+    def list_untitled_session_ids(self) -> tuple[str, ...]:
+        """返回有已接受 Operation 但仍无标题的未归档 Session。"""
+        with self._lock:
+            operation_sessions = {item.session_id for item in self._operations.values()}
+            return tuple(
+                sorted(
+                    session.session_id
+                    for session in self._sessions.values()
+                    if session.title is None
+                    and session.archived_at is None
+                    and session.session_id in operation_sessions
+                )
+            )
+
+    def load_first_accepted_operation(self, session_id: str) -> SessionOperation | None:
+        with self._lock:
+            operations = sorted(
+                (
+                    item
+                    for item in self._operations.values()
+                    if item.session_id == session_id
+                ),
+                key=lambda item: (item.accepted_at, item.operation_id),
+            )
+            return operations[0] if operations else None
 
     def list_context_nodes(
         self, session_id: str, leaf_node_id: str | None

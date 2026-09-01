@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import replace
 import asyncio
 import logging
@@ -29,6 +30,7 @@ from pickel.config.app_config import AppConfig
 from pickel.config.loader import Config
 from pickel.config.paths import artifact_blobs_path
 from pickel.conversations.conversation_service import ConversationService
+from pickel.conversations.title_service import ConversationTitleService
 from pickel.conversations.agent_message import UserMessage
 from pickel.conversations.content_blocks import TextBlock
 from pickel.conversations.conversation_session import ConversationSession
@@ -91,23 +93,33 @@ logger = logging.getLogger(__name__)
 class _HeadlessTraceDriver:
     """Host 拥有的 headless 驱动观测适配；不污染 Agent 实体。"""
 
-    def __init__(self, agent: Agent, sink: JsonlTraceSink) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        sink: JsonlTraceSink | None,
+        on_operation_accepted: Callable[[Any], None] | None = None,
+    ) -> None:
         self._agent = agent
         self._sink = sink
+        self._on_operation_accepted = on_operation_accepted
 
     async def __call__(self):
-        with observation_scope(self._sink):
+        with observation_scope(self._sink) if self._sink is not None else nullcontext():
             result = await self._agent.when_idle(
                 consume_delta=self._consume_delta,
                 consume_tool_event=self._sink,
+                consume_operation_accepted=self._on_operation_accepted,
             )
         self._record_result(result)
         return result
 
     def close(self) -> None:
-        self._sink.close()
+        if self._sink is not None:
+            self._sink.close()
 
     def _consume_delta(self, delta, identity: ExecutionIdentity) -> None:
+        if self._sink is None:
+            return
         envelope = EventEnvelope(identity=identity)
         if isinstance(delta, TextDelta):
             self._sink(TextDeltaEvent(envelope=envelope, text=delta.text))
@@ -121,6 +133,8 @@ class _HeadlessTraceDriver:
             )
 
     def _record_result(self, result) -> None:
+        if self._sink is None:
+            return
         operation_result = result.operation_result
         if operation_result is None:
             return
@@ -416,6 +430,7 @@ class RuntimeHost:
             {}
         )
         self._settled_parent_tasks: dict[str, asyncio.Task[None]] = {}
+        self._title_tasks: dict[str, asyncio.Task[None]] = {}
         self._shutting_down = False
         self._collaboration_states: dict[str, CollaborationState] = {}
 
@@ -492,6 +507,57 @@ class RuntimeHost:
                 )
             except Exception:
                 logger.exception("启动恢复 Session 失败: session_id=%s", session_id)
+        # Operation 可能在标题任务提交前已经终态并清空了 Session 指针；
+        # 这类 Session 不会出现在 runnable 列表，但仍需按最早 accepted
+        # Operation 的冻结 Package 重试标题。
+        for session_id in getattr(store, "list_untitled_session_ids", lambda: ())():
+            session = store.load_session(session_id)
+            if session is None or session.active_operation_id is not None:
+                continue
+            operation = store.load_first_accepted_operation(session_id)
+            if operation is None:
+                continue
+            try:
+                loaded = await self._load_title_package(store, session, operation)
+            except PackageLoadError as exc:
+                logger.warning(
+                    "标题恢复 Package 不可用: session_id=%s code=%s",
+                    session_id,
+                    exc.code,
+                )
+                continue
+            except Exception:
+                logger.exception("标题恢复 Package 加载失败: session_id=%s", session_id)
+                continue
+            self._schedule_title_for_acceptance(
+                store,
+                operation,
+                loaded.package,
+                generation=self._active_generation,
+                title_handle=loaded,
+            )
+
+    async def _load_title_package(
+        self,
+        store: CompositionStore,
+        session: ConversationSession,
+        operation: SessionOperation,
+    ) -> LoadedPackageHandle:
+        """在活动 Generation 缓存并独占一个标题任务 Package lease。"""
+        generation = self._active_generation
+        boot = self._active_generation_boot()
+        artifact_service = self._artifact_service_for(store)
+        loaded = await asyncio.to_thread(
+            boot.load_agent_package,
+            operation.agent_package_version_id,
+            store=store,
+            artifact_service=artifact_service,
+            expected_agent_id=session.agent_id,
+        )
+        cached = generation.cache_loaded_package(
+            loaded.version.package_version_id, loaded
+        )
+        return generation.acquire_loaded_package(cached.version.package_version_id)
 
     @staticmethod
     def _fail_unloadable_operation(
@@ -971,20 +1037,34 @@ class RuntimeHost:
                 release_operation_package=self._release_operation_package,
             )
             trace_driver = (
-                _HeadlessTraceDriver(agent, trace_sink)
-                if trace_sink is not None and isinstance(agent, Agent)
+                _HeadlessTraceDriver(
+                    agent,
+                    trace_sink,
+                    on_operation_accepted=lambda accepted: self._schedule_title_for_acceptance(
+                        store, accepted, loaded, generation=generation
+                    ),
+                )
+                if isinstance(agent, Agent)
                 else None
             )
-            if trace_sink is not None and trace_driver is None:
-                trace_sink.close()
-                trace_sink = None
             self._agent_registry.register(
                 agent,
                 drive=trace_driver if trace_driver is not None else None,
+                headless=True,
+                can_retire=lambda: self._headless_can_retire(session_id, store),
+                on_retire=lambda: self._retire_headless_agent(session_id, agent),
+                wake_missing=lambda: self._reactivate_headless(session_id, store),
             )
             registered = True
             store.insert_agent_package_version(loaded.version)
             self._headless_agents[session_id] = (agent, handle, trace_driver)
+            if session.title is None and session.active_operation_id is not None:
+                self._schedule_title_for_acceptance(
+                    store,
+                    session.active_operation_id,
+                    loaded,
+                    generation=generation,
+                )
             self._agent_registry.wake(session_id)
             return agent
         except BaseException:
@@ -995,6 +1075,64 @@ class RuntimeHost:
                 trace_sink.close()
             await handle.close()
             raise
+
+    async def _headless_can_retire(
+        self, session_id: str, store: CompositionStore
+    ) -> bool:
+        """Headless Agent 退休前读取持久化 runnable work。"""
+        session = store.load_session(session_id)
+        if session is None or session.archived_at is not None:
+            return True
+        if session.active_operation_id is not None:
+            state = store.load_run_state(session.active_operation_id)
+            if state is None:
+                # 状态缺失属于恢复异常，保守地保留 live Agent，避免丢唤醒。
+                return False
+            if state.status in {"queued", "running", "cancelling"}:
+                return False
+        list_pending = getattr(store, "list_pending", None)
+        if list_pending is None:
+            # 测试/外部 Store 若不能检查 Inbox，必须保守地保持 live，避免
+            # 把未知 runnable work 当成空闲而丢掉后续 wake。
+            return False
+        pending = list_pending(session_id=session_id)
+        return not any(item.delivery in {"followup", "steer"} for item in pending)
+
+    async def _retire_headless_agent(self, session_id: str, agent: Agent) -> None:
+        """释放精确 headless Entry 的 Trace driver 与 Session 级 Package 引用。"""
+        headless = self._headless_agents.get(session_id)
+        if headless is None or headless[0] is not agent:
+            return
+        self._headless_agents.pop(session_id, None)
+        trace_driver = headless[2]
+        if trace_driver is not None:
+            try:
+                trace_driver.close()
+            except Exception:
+                logger.exception(
+                    "关闭 headless Trace driver 失败: session_id=%s", session_id
+                )
+        try:
+            await headless[1].close()
+        except Exception:
+            logger.exception(
+                "释放 headless LoadedPackageHandle 失败: session_id=%s", session_id
+            )
+
+    async def _reactivate_headless(
+        self, session_id: str, store: CompositionStore
+    ) -> None:
+        """waiting Agent 退休后，外部批准/协调唤醒时重建精确 live Agent。"""
+        if self._shutting_down:
+            return
+        try:
+            await self.activate_agent(session_id, store)
+            self._agent_registry.wake(session_id)
+        except Exception:
+            logger.exception(
+                "headless Agent 重激活失败，将由下次启动恢复兜底: session_id=%s",
+                session_id,
+            )
 
     def _open_headless_trace(self, session_id: str) -> JsonlTraceSink | None:
         configured = self.app_config.observability.trace
@@ -1386,6 +1524,9 @@ class RuntimeHost:
                     session.session_id,
                     agent,
                 ),
+                on_operation_accepted=lambda accepted: self._schedule_title_for_acceptance(
+                    store, accepted, loaded, generation=generation
+                ),
             )
         except BaseException:
             package_handle.close_sync()
@@ -1412,11 +1553,19 @@ class RuntimeHost:
         headless = self._headless_agents.get(session.session_id)
         if headless is not None and headless[0] is previous_agent:
             # Conversation Handle 已接管 live Agent；移除 Host 的额外常驻引用。
+            self._agent_registry.adopt(session.session_id, agent)
             self._headless_agents.pop(session.session_id, None)
             if headless[2] is not None:
                 headless[2].close()
             headless[1].close_sync()
         self._conversations.add(conversation)
+        if session.title is None and session.active_operation_id is not None:
+            self._schedule_title_for_acceptance(
+                store,
+                session.active_operation_id,
+                loaded,
+                generation=generation,
+            )
         return conversation
 
     @staticmethod
@@ -1435,8 +1584,90 @@ class RuntimeHost:
         for resolved in registry.resolve_event_processors(context):
             conversation.add_event_processor(resolved.processor, resolved.event_types)
 
+    def _schedule_title_for_acceptance(
+        self,
+        store: CompositionStore,
+        accepted: Any,
+        loaded: LoadedAgentPackage,
+        *,
+        generation: RuntimeGeneration | None = None,
+        title_handle: LoadedPackageHandle | None = None,
+    ) -> None:
+        """接受事务后安排 Session 标题；只创建后台任务，不阻塞回答。"""
+        if self._shutting_down:
+            if title_handle is not None:
+                title_handle.close_sync()
+            return
+        operation = getattr(accepted, "operation", None)
+        if operation is None:
+            operation_id = (
+                accepted
+                if isinstance(accepted, str)
+                else getattr(accepted, "operation_id", None)
+            )
+            if not operation_id:
+                return
+            try:
+                operation = store.load_operation(str(operation_id))
+            except Exception:
+                if title_handle is not None:
+                    title_handle.close_sync()
+                return
+        session_id = operation.session_id
+        task = self._title_tasks.get(session_id)
+        if task is not None and not task.done():
+            if title_handle is not None:
+                title_handle.close_sync()
+            return
+
+        # Acceptance callback 传入的 LoadedAgentPackage 已经来自当前活动
+        # Generation；这里再持有一个独立 lease，避免 Conversation detach 或
+        # Operation 终态清理在标题 Provider 使用期间关闭资源。
+        if title_handle is None:
+            if loaded.version.package_version_id != operation.agent_package_version_id:
+                return
+            try:
+                package_generation = generation or self._active_generation
+                title_handle = package_generation.acquire_loaded_package_for_background(
+                    operation.agent_package_version_id
+                )
+            except Exception:
+                return
+
+        async def run() -> None:
+            service = ConversationTitleService(store=store)
+            try:
+                await service.generate(
+                    operation=operation,
+                    loaded_agent_package=title_handle.package,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 标题属于辅助体验；失败留在空标题，后续 reload/新接受事务
+                # 可以再次安排，不影响 Operation 主链路。
+                logger.exception("自动标题任务失败: session_id=%s", session_id)
+            finally:
+                await title_handle.close()
+
+        title_task = asyncio.create_task(run())
+        self._title_tasks[session_id] = title_task
+
+        def clear(done: asyncio.Task[None]) -> None:
+            if self._title_tasks.get(session_id) is done:
+                self._title_tasks.pop(session_id, None)
+
+        title_task.add_done_callback(clear)
+
     async def shutdown(self) -> None:
         self._shutting_down = True
+        title_tasks = tuple(self._title_tasks.values())
+        for task in title_tasks:
+            if not task.done():
+                task.cancel()
+        if title_tasks:
+            await asyncio.gather(*title_tasks, return_exceptions=True)
+        self._title_tasks.clear()
         settled_tasks = tuple(self._settled_parent_tasks.values())
         for task in settled_tasks:
             if not task.done():

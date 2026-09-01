@@ -42,9 +42,6 @@ from pickel.operations.session_operation import SessionOperation
 from pickel.operations.operation_store import OperationStore
 from pickel.agents.agent_package_store import AgentPackageVersionStore
 from pickel.persistence.sqlite_runtime_store import SQLiteRuntimeStore
-from pickel.providers.anthropic import AnthropicMessagesProvider
-from pickel.providers.openai import OpenAIResponsesProvider
-from pickel.providers.openai_chat_completions import OpenAIChatCompletionsProvider
 from pickel.runtime.agent_driver import AgentDriver, build_agent_inbox
 from pickel.runtime.agent import Agent
 from pickel.runtime.operation_driver import OperationDriver
@@ -250,17 +247,29 @@ class Boot:
             config.wire_protocol, package_version_id=package_version_id
         )
         if config.wire_protocol == "anthropic-messages":
+            from pickel.providers.anthropic import AnthropicMessagesProvider
+
             return AnthropicMessagesProvider.from_config(
                 config, artifact_service=artifact_service
             )
         if config.wire_protocol == "openai-responses":
+            from pickel.providers.openai import OpenAIResponsesProvider
+
             return OpenAIResponsesProvider.from_config(
                 config, artifact_service=artifact_service
             )
         if config.wire_protocol == "openai-chat-completions":
+            from pickel.providers.openai_chat_completions import (
+                OpenAIChatCompletionsProvider,
+            )
+
             return OpenAIChatCompletionsProvider.from_config(
                 config, artifact_service=artifact_service
             )
+        if config.wire_protocol == "gemini-generate-content":
+            from pickel.providers.gemini import GeminiProvider
+
+            return GeminiProvider.from_config(config, artifact_service=artifact_service)
 
     @staticmethod
     def _require_supported_wire_protocol(
@@ -270,6 +279,7 @@ class Boot:
             "anthropic-messages",
             "openai-responses",
             "openai-chat-completions",
+            "gemini-generate-content",
         }:
             return
         raise PackageLoadError(

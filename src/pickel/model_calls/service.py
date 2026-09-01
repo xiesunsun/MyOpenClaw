@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Protocol
@@ -157,6 +158,12 @@ class ModelCallService:
             ),
         )
 
+    async def prepare_or_recover_agent_call_async(
+        self, **kwargs
+    ) -> AgentPreparedModelCall:
+        """异步驱动入口：把 RequestContent fsync 与 SQLite 门禁移出事件循环。"""
+        return await asyncio.to_thread(self.prepare_or_recover_agent_call, **kwargs)
+
     def prepare_session_call(
         self,
         *,
@@ -206,6 +213,10 @@ class ModelCallService:
         else:
             prepare_span.finish()
         return SessionPreparedModelCall(model_call=call, prepared=prepared)
+
+    async def prepare_session_call_async(self, **kwargs) -> SessionPreparedModelCall:
+        """异步 worker 入口，避免大 RequestContent 写入阻塞事件循环。"""
+        return await asyncio.to_thread(self.prepare_session_call, **kwargs)
 
     def load_prepared(self, call: ModelCall) -> PreparedModelCall:
         return self._load_prepared(None, call)
@@ -386,6 +397,25 @@ class ModelCallService:
         else:
             write_span.finish()
         return ref.to_string()
+
+    async def save_response_content_async(self, *args, **kwargs) -> str:
+        """异步保存聚合响应；文件实现的 fsync 在线程池中执行。"""
+        return await asyncio.to_thread(self.save_response_content, *args, **kwargs)
+
+    async def record_send_failure_async(self, *args, **kwargs) -> ModelCall:
+        """异步收敛发送失败，包含 partial ResponseContent 的安全写入。"""
+        return await asyncio.to_thread(self.record_send_failure, *args, **kwargs)
+
+    async def commit_agent_response_async(self, *args, **kwargs) -> ModelCall:
+        return await asyncio.to_thread(self.commit_agent_response, *args, **kwargs)
+
+    async def commit_agent_processing_failure_async(self, *args, **kwargs) -> ModelCall:
+        return await asyncio.to_thread(
+            self.commit_agent_processing_failure, *args, **kwargs
+        )
+
+    async def complete_session_response_async(self, *args, **kwargs) -> ModelCall:
+        return await asyncio.to_thread(self.complete_session_response, *args, **kwargs)
 
     def commit_agent_processing_failure(
         self,

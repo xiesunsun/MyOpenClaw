@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -100,8 +101,27 @@ _LIST_CONTEXT_NODES_SQL = """
 class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
     """Conversation、Inbox、Operation 等 v10 实体的直接 SQLite 适配器。"""
 
+    # schema 初始化是进程级的一次性动作。按规范化路径加锁可以避免同一
+    # 进程中多个 Store 实例同时看到 version=0 并竞争建表；跨进程竞争仍由
+    # SQLite 的 BEGIN IMMEDIATE/锁等待处理。
+    _schema_locks_guard = threading.Lock()
+    _schema_locks: dict[str, threading.RLock] = {}
+
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
+        self._connection_local = threading.local()
+        self._schema_ready = False
+        self._schema_ready_lock = threading.RLock()
+
+    @classmethod
+    def _schema_lock_for(cls, db_path: Path) -> threading.RLock:
+        key = str(db_path.expanduser().resolve(strict=False))
+        with cls._schema_locks_guard:
+            lock = cls._schema_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                cls._schema_locks[key] = lock
+            return lock
 
     @property
     def db_path(self) -> Path:
@@ -220,6 +240,45 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
             ).fetchone()
         return self._session_from_row(row) if row is not None else None
 
+    def commit_generated_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool:
+        """自动标题 CAS：用户标题或归档 Session 永远不会被覆盖。"""
+        if not title:
+            raise ValueError("自动标题不能为空")
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE conversation_sessions
+                   SET title = ?, title_source = 'generated', updated_at = ?
+                 WHERE session_id = ?
+                   AND title IS NULL
+                   AND title_source IS NULL
+                   AND archived_at IS NULL
+                """,
+                (title, _iso(updated_at), session_id),
+            )
+            return cursor.rowcount == 1
+
+    def set_user_title(
+        self, *, session_id: str, title: str, updated_at: datetime
+    ) -> bool:
+        """保存用户标题；它可以替换自动标题并阻止后续自动 CAS。"""
+        if not title:
+            raise ValueError("用户标题不能为空")
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE conversation_sessions
+                   SET title = ?, title_source = 'user', updated_at = ?
+                 WHERE session_id = ? AND archived_at IS NULL
+                """,
+                (title, _iso(updated_at), session_id),
+            )
+            return cursor.rowcount == 1
+
     def list_sessions(
         self, *, limit: int = 20, cwd: str | None = None
     ) -> tuple[ConversationSession, ...]:
@@ -263,6 +322,37 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
                 ORDER BY s.session_id ASC
                 """).fetchall()
         return tuple(str(row["session_id"]) for row in rows)
+
+    def list_untitled_session_ids(self) -> tuple[str, ...]:
+        """返回有已接受 Operation 但仍无标题的未归档 Session。"""
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT s.session_id
+                  FROM conversation_sessions AS s
+                 WHERE s.title IS NULL
+                   AND s.archived_at IS NULL
+                   AND EXISTS (
+                       SELECT 1 FROM session_operations AS op
+                        WHERE op.session_id = s.session_id
+                   )
+                 ORDER BY s.created_at, s.session_id
+                """).fetchall()
+        return tuple(str(row["session_id"]) for row in rows)
+
+    def load_first_accepted_operation(self, session_id: str) -> SessionOperation | None:
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_operations
+                 WHERE session_id = ?
+                 ORDER BY accepted_at, operation_id
+                 LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return self._operation_from_row(row) if row is not None else None
 
     def append_node(
         self, *, node: ConversationNode, expected_node_id: str | None
@@ -2276,42 +2366,73 @@ class SQLiteRuntimeStore(SQLiteModelCallStoreMixin):
     # -- Internal ----------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version == 0:
-                create_schema(connection)
-            elif version == 9:
-                raise UnsupportedStorageSchemaError(
-                    "检测到 SQLite schema version 9；请先执行一次性 v9→v10 迁移"
-                )
-            elif version == 10:
-                raise UnsupportedStorageSchemaError(
-                    "检测到 SQLite schema version 10；请先执行一次性 v10→v11 迁移"
-                )
-            elif version == 11:
-                raise UnsupportedStorageSchemaError(
-                    "检测到 SQLite schema version 11；请先执行一次性 v11→v12 迁移"
-                )
-            elif version == 12:
-                raise UnsupportedStorageSchemaError(
-                    "检测到 SQLite schema version 12；请先执行一次性 v12→v13 迁移"
-                )
-            elif version == 13:
-                raise UnsupportedStorageSchemaError(
-                    "检测到 SQLite schema version 13；请先执行一次性 v13→v14 迁移"
-                )
-            elif version != SCHEMA_VERSION:
-                raise UnsupportedSchemaVersionError(
-                    f"不支持的 SQLite schema version: {version}"
-                )
+        if self._schema_ready:
+            return
+        with self._schema_ready_lock, self._schema_lock_for(self._db_path):
+            if self._schema_ready:
+                return
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = self._connect()
+            try:
+                # 在读取 user_version 前取得写锁，确保多个进程不会同时按
+                # version=0 进入建表事务。创建失败时保留未 ready 状态，后续
+                # 调用可安全重试；不把半初始化数据库缓存为可用。
+                connection.execute("BEGIN IMMEDIATE")
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version == 0:
+                    create_schema(connection)
+                elif version == 9:
+                    raise UnsupportedStorageSchemaError(
+                        "检测到 SQLite schema version 9；请先执行一次性 v9→v10 迁移"
+                    )
+                elif version == 10:
+                    raise UnsupportedStorageSchemaError(
+                        "检测到 SQLite schema version 10；请先执行一次性 v10→v11 迁移"
+                    )
+                elif version == 11:
+                    raise UnsupportedStorageSchemaError(
+                        "检测到 SQLite schema version 11；请先执行一次性 v11→v12 迁移"
+                    )
+                elif version == 12:
+                    raise UnsupportedStorageSchemaError(
+                        "检测到 SQLite schema version 12；请先执行一次性 v12→v13 迁移"
+                    )
+                elif version == 13:
+                    raise UnsupportedStorageSchemaError(
+                        "检测到 SQLite schema version 13；请先执行一次性 v13→v14 迁移"
+                    )
+                elif version != SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"不支持的 SQLite schema version: {version}"
+                    )
+                connection.commit()
+                self._schema_ready = True
+            except Exception:
+                connection.rollback()
+                raise
 
     def _connect(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = getattr(self._connection_local, "connection", None)
+        if connection is not None:
+            return connection
         connection = sqlite3.connect(self._db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        # WAL 只改变读写并发模型；显式保持 FULL，确保不因连接初始化而
+        # 降低掉电耐久性。busy_timeout 与 connect(timeout) 保持同一 30 秒门槛。
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = FULL")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        self._connection_local.connection = connection
         return connection
+
+    def close(self) -> None:
+        """关闭当前线程的复用连接；不改变任何业务状态。"""
+        connection = getattr(self._connection_local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._connection_local.connection = None
 
     @staticmethod
     def _session_from_row(row: sqlite3.Row) -> ConversationSession:

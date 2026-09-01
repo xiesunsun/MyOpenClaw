@@ -12,18 +12,27 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pickel.config.paths import home_dir
-from pickel.runtime.runtime_events import STREAM_DELTA_EVENT_TYPES, RuntimeEventBase
 from pickel.shared.execution_identity import ExecutionIdentity
 from pickel.telemetry.records import ObservationRecord, SpanRecord
+
+if TYPE_CHECKING:
+    from pickel.runtime.runtime_events import RuntimeEventBase
+
+
+# 观测读取只需要这组标签；不要为路径/报告查询加载 Runtime 事件类型。
+STREAM_DELTA_EVENT_TYPES = frozenset(
+    {"thinking_delta", "text_delta", "tool_call_args_delta"}
+)
 
 logger = logging.getLogger(__name__)
 
 TRACE_ENV_VAR = "PICKEL_TRACE"
 TRACE_MODE_ENV_VAR = "PICKEL_TRACE_MODE"
 TraceMode = Literal["off", "standard", "full"]
+_TRACE_SEQUENCE_TAIL_BYTES = 64 * 1024
 
 
 def trace_mode(config_value: str | bool = "standard") -> TraceMode:
@@ -206,29 +215,67 @@ class _TraceBuffer:
 
 
 def _next_trace_sequence(path: Path) -> int:
-    """从已有 JSONL 恢复文件级入队序号。
+    """从所有 trace 段的尾部恢复文件级序号。
 
-    Trace 单文件有大小上限，初始化时线性扫描可以同时容忍崩溃
-    留下的不完整末行，不会把新 publisher 的序号重置为 0。
+    只读取每个文件固定大小的尾部，避免激活时随历史正文线性增长；JSONL
+    writer 总是在记录末尾写入 trace_seq，因此尾部足以恢复最新序号。崩溃
+    留下的半行、旧 rotation 和无法读取的段都会被安全忽略。
     """
-    if not path.exists():
-        return 0
     maximum = -1
+    candidates = {path}
     try:
-        with path.open("r", encoding="utf-8") as existing:
-            for line in existing:
-                match = re.search(r'"trace_seq"\s*:\s*(\d+)', line)
-                if match is not None:
-                    maximum = max(maximum, int(match.group(1)))
+        candidates.update(path.parent.glob(f"{path.stem}.*{path.suffix}"))
     except OSError:
-        return 0
+        pass
+    for candidate in sorted(candidates, key=lambda item: str(item)):
+        try:
+            with candidate.open("rb") as existing:
+                existing.seek(0, os.SEEK_END)
+                size = existing.tell()
+                existing.seek(max(0, size - _TRACE_SEQUENCE_TAIL_BYTES))
+                tail = existing.read(_TRACE_SEQUENCE_TAIL_BYTES)
+        except OSError:
+            continue
+        # Reserve a sequence even when its record is only partially written:
+        # reusing an already allocated sequence would make diagnostics
+        # ambiguous after recovery.
+        for match in re.finditer(rb'"trace_seq"\s*:\s*(\d+)', tail):
+            maximum = max(maximum, int(match.group(1)))
+        # Only complete JSONL records are otherwise candidates. A crash can
+        # leave a partial final line; it is discarded before the next append.
+        if not tail.endswith(b"\n"):
+            tail = tail[: tail.rfind(b"\n") + 1] if b"\n" in tail else b""
     return maximum + 1
+
+
+def _truncate_incomplete_tail(path: Path) -> None:
+    """丢弃崩溃留下的未换行尾部，避免新记录拼接到半行。"""
+    try:
+        size = path.stat().st_size
+        if size == 0:
+            return
+        with path.open("rb") as existing:
+            existing.seek(size - 1)
+            if existing.read(1) == b"\n":
+                return
+            offset = max(0, size - _TRACE_SEQUENCE_TAIL_BYTES)
+            existing.seek(offset)
+            tail = existing.read(size - offset)
+        newline = tail.rfind(b"\n")
+        with path.open("r+b") as writable:
+            writable.truncate(offset + newline + 1 if newline >= 0 else 0)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("trace 半行修复失败: %s", exc)
 
 
 class JsonlTraceSink:
     """EventBus handler + Observer；调用方只入队，文件 I/O 在后台线程。"""
 
     SCHEMA_VERSION = 1
+    _active_paths: set[Path] = set()
+    _active_paths_lock = threading.Lock()
 
     def __init__(
         self,
@@ -239,8 +286,13 @@ class JsonlTraceSink:
         self._options = options or TraceOptions()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         next_trace_seq = _next_trace_sequence(self._path)
+        _truncate_incomplete_tail(self._path)
         # 提前验证路径可写，避免后台线程才发现初始化失败。
         self._handle = self._path.open("a", encoding="utf-8")
+        self._active_path = self._path.resolve()
+        with self._active_paths_lock:
+            self._active_paths.add(self._active_path)
+        self._apply_retention()
         self._buffer = _TraceBuffer(self._options.queue_capacity)
         self._sequence_lock = threading.Lock()
         self._next_trace_seq = next_trace_seq
@@ -344,6 +396,8 @@ class JsonlTraceSink:
         if not self._handle.closed:
             self._handle.flush()
             self._handle.close()
+        with self._active_paths_lock:
+            self._active_paths.discard(self._active_path)
 
     def _record_stream_delta(
         self,
@@ -448,29 +502,75 @@ class JsonlTraceSink:
         rotated = self._path.with_name(
             f"{self._path.stem}.{stamp}.{self._rotation_index:04d}{self._path.suffix}"
         )
+        while rotated.exists():
+            self._rotation_index += 1
+            rotated = self._path.with_name(
+                f"{self._path.stem}.{stamp}.{self._rotation_index:04d}{self._path.suffix}"
+            )
         self._path.replace(rotated)
         self._handle = self._path.open("a", encoding="utf-8")
         self._apply_retention()
 
     def _apply_retention(self) -> None:
-        segments = sorted(
-            self._path.parent.glob(f"{self._path.stem}.*{self._path.suffix}"),
-            key=lambda item: item.stat().st_mtime,
-        )
+        try:
+            files = [
+                item for item in self._path.parent.glob("*.jsonl") if item.is_file()
+            ]
+        except OSError as exc:
+            logger.warning("trace retention 扫描失败: %s", exc)
+            return
+        with self._active_paths_lock:
+            active_paths = set(self._active_paths)
+
+        def is_active(segment: Path) -> bool:
+            try:
+                return segment.resolve() in active_paths
+            except (OSError, RuntimeError):
+                # retention 失败不能影响 trace 写入；未知路径按 active
+                # 处理，宁可暂时保留也不误删正在写入的文件。
+                return True
+
+        def sort_key(item: Path) -> tuple[int, str]:
+            try:
+                modified = item.stat().st_mtime_ns
+            except OSError:
+                modified = 0
+            return modified, str(item)
+
+        files.sort(key=sort_key)
         cutoff = time.time() - max(0, self._options.max_age_days) * 86400
-        for segment in list(segments):
-            if self._options.max_age_days > 0 and segment.stat().st_mtime < cutoff:
-                segment.unlink(missing_ok=True)
-                segments.remove(segment)
+        retained: list[tuple[Path, int]] = []
+        for segment in files:
+            try:
+                size = segment.stat().st_size
+                modified = segment.stat().st_mtime
+            except OSError:
+                continue
+            if (
+                not is_active(segment)
+                and self._options.max_age_days > 0
+                and modified < cutoff
+            ):
+                try:
+                    segment.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("trace 过期文件删除失败: %s", exc)
+                    retained.append((segment, size))
+                continue
+            retained.append((segment, size))
+
         max_total = max(1, self._options.max_total_size_mb) * 1024 * 1024
-        total = (
-            sum(item.stat().st_size for item in segments) + self._path.stat().st_size
-        )
-        for segment in segments:
+        total = sum(size for _, size in retained)
+        for segment, size in retained:
             if total <= max_total:
                 break
-            size = segment.stat().st_size
-            segment.unlink(missing_ok=True)
+            if is_active(segment):
+                continue
+            try:
+                segment.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("trace retention 文件删除失败: %s", exc)
+                continue
             total -= size
 
 

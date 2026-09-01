@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from threading import RLock
 from typing import Protocol
 
@@ -89,6 +91,8 @@ class ModelCallContentRef:
 class ModelCallContentStore(Protocol):
     def put(self, content: bytes) -> ModelCallContentRef: ...
 
+    async def put_async(self, content: bytes) -> ModelCallContentRef: ...
+
     def get(self, ref: ModelCallContentRef) -> bytes: ...
 
     def exists(self, ref: ModelCallContentRef) -> bool: ...
@@ -99,8 +103,21 @@ class ModelCallContentStore(Protocol):
 class FileModelCallContentStore:
     """同目录临时文件 + fsync + 原子 rename 的本地内容存储。"""
 
+    _locks_guard = threading.Lock()
+    _locks: dict[str, RLock] = {}
+
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
+
+    @property
+    def garbage_collection_lock(self) -> RLock:
+        key = str(self._root.expanduser().resolve(strict=False))
+        with self._locks_guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = RLock()
+                self._locks[key] = lock
+            return lock
 
     @property
     def root(self) -> Path:
@@ -110,28 +127,33 @@ class FileModelCallContentStore:
         value = bytes(content)
         ref = _ref_for(value)
         path = self._path(ref)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            self._verify(ref, path.read_bytes())
-            return ref
-
-        fd, temp_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(value)
-                stream.flush()
-                os.fsync(stream.fileno())
+        with self.garbage_collection_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists():
                 self._verify(ref, path.read_bytes())
-                temp_path.unlink(missing_ok=True)
                 return ref
-            os.replace(temp_path, path)
-            _fsync_directory(path.parent)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
-        return ref
+
+            fd, temp_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+            temp_path = Path(temp_name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(value)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if path.exists():
+                    self._verify(ref, path.read_bytes())
+                    temp_path.unlink(missing_ok=True)
+                    return ref
+                os.replace(temp_path, path)
+                _fsync_directory(path.parent)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+            return ref
+
+    async def put_async(self, content: bytes) -> ModelCallContentRef:
+        """将带 fsync 的大文件写入移出 asyncio 事件循环。"""
+        return await asyncio.to_thread(self.put, content)
 
     def get(self, ref: ModelCallContentRef) -> bytes:
         path = self._path(ref)
@@ -155,7 +177,46 @@ class FileModelCallContentStore:
         return True
 
     def delete(self, ref: ModelCallContentRef) -> None:
-        self._path(ref).unlink(missing_ok=True)
+        with self.garbage_collection_lock:
+            self._path(ref).unlink(missing_ok=True)
+
+    def list_refs(self) -> tuple[ModelCallContentRef, ...]:
+        """列出可供 GC 检查的完整内容文件；临时文件不纳入候选。"""
+        root = self._root / "sha256"
+        if not root.is_dir():
+            return ()
+        refs: list[ModelCallContentRef] = []
+        with self.garbage_collection_lock:
+            for prefix in root.iterdir():
+                if not prefix.is_dir() or len(prefix.name) != 2:
+                    continue
+                for path in prefix.iterdir():
+                    if path.name.startswith(".tmp-") or not path.is_file():
+                        continue
+                    digest = prefix.name + path.name
+                    if len(digest) != 64 or any(
+                        char not in "0123456789abcdef" for char in digest
+                    ):
+                        continue
+                    try:
+                        size = path.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    refs.append(
+                        ModelCallContentRef(
+                            sha256=digest,
+                            media_type=MEDIA_TYPE,
+                            encoding=ENCODING,
+                            size_bytes=size,
+                        )
+                    )
+        return tuple(refs)
+
+    def mtime(self, ref: ModelCallContentRef) -> float | None:
+        try:
+            return self._path(ref).stat().st_mtime
+        except FileNotFoundError:
+            return None
 
     def _path(self, ref: ModelCallContentRef) -> Path:
         return self._root / "sha256" / ref.sha256[:2] / ref.sha256[2:]
@@ -187,6 +248,11 @@ class InMemoryModelCallContentStore:
             self._contents[ref.sha256] = value
         return ref
 
+    async def put_async(self, content: bytes) -> ModelCallContentRef:
+        # 保持与文件实现相同的窄 async 接口；内存写入很快，但 offload 让
+        # 调用方无需按实现类型分支，也方便测试替身模拟慢写入。
+        return await asyncio.to_thread(self.put, content)
+
     def get(self, ref: ModelCallContentRef) -> bytes:
         with self._lock:
             value = self._contents.get(ref.sha256)
@@ -208,6 +274,22 @@ class InMemoryModelCallContentStore:
     def delete(self, ref: ModelCallContentRef) -> None:
         with self._lock:
             self._contents.pop(ref.sha256, None)
+
+    def list_refs(self) -> tuple[ModelCallContentRef, ...]:
+        with self._lock:
+            return tuple(
+                ModelCallContentRef(
+                    sha256=digest,
+                    media_type=MEDIA_TYPE,
+                    encoding=ENCODING,
+                    size_bytes=len(content),
+                )
+                for digest, content in self._contents.items()
+            )
+
+    def mtime(self, ref: ModelCallContentRef) -> float | None:
+        del ref
+        return None
 
 
 def _ref_for(content: bytes) -> ModelCallContentRef:

@@ -15,8 +15,16 @@ from pickel.model_calls.content_store import (
     ModelCallContentStore,
 )
 from pickel.model_calls.model_call import ModelCall, ModelCallError
-from pickel.providers.prepared import PreparedModelCall
 from pickel.model_calls.store import ModelCallStore
+
+
+def __getattr__(name: str):
+    if name == "PreparedModelCall":
+        from pickel.providers.prepared import PreparedModelCall
+
+        return PreparedModelCall
+    raise AttributeError(name)
+
 
 __all__ = [
     "FileModelCallContentStore",

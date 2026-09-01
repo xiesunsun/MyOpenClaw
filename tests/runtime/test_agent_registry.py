@@ -117,3 +117,117 @@ def test_running_agent_can_unregister_itself_at_terminal_boundary() -> None:
         assert agent.session_id not in registry._tasks
 
     asyncio.run(scenario())
+
+
+def test_headless_agent_retires_after_idle_check_and_runs_cleanup() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        agent = _Agent("session-1")
+        agent.release.set()
+        retired = asyncio.Event()
+
+        async def can_retire() -> bool:
+            return True
+
+        async def on_retire() -> None:
+            retired.set()
+
+        registry.register(
+            agent,
+            headless=True,
+            can_retire=can_retire,
+            on_retire=on_retire,
+        )
+        registry.wake(agent.session_id)
+        await retired.wait()
+
+        assert registry.get(agent.session_id) is None
+        await registry.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_headless_retirement_race_preserves_followup_wake() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        agent = _Agent("session-1")
+        agent.release.set()
+        checking = asyncio.Event()
+        release = asyncio.Event()
+        retired = asyncio.Event()
+        checks = 0
+
+        async def can_retire() -> bool:
+            nonlocal checks
+            checks += 1
+            if checks == 1:
+                checking.set()
+                await release.wait()
+            return True
+
+        async def on_retire() -> None:
+            retired.set()
+
+        registry.register(
+            agent,
+            headless=True,
+            can_retire=can_retire,
+            on_retire=on_retire,
+        )
+        registry.wake(agent.session_id)
+        await checking.wait()
+        registry.wake(agent.session_id)
+        release.set()
+        await retired.wait()
+
+        assert agent.calls == 2
+        assert checks == 2
+        assert registry.get(agent.session_id) is None
+        await registry.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_retired_headless_agent_reactivates_on_external_wake() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        first = _Agent("session-1")
+        first.release.set()
+        second = _Agent("session-1")
+        second.release.set()
+        retired = asyncio.Event()
+        reactivated = asyncio.Event()
+
+        async def can_retire() -> bool:
+            return True
+
+        async def on_retire() -> None:
+            retired.set()
+
+        async def wake_missing() -> None:
+            registry.register(
+                second,
+                headless=True,
+                can_retire=can_retire,
+                on_retire=on_retire,
+            )
+            reactivated.set()
+
+        registry.register(
+            first,
+            headless=True,
+            can_retire=can_retire,
+            on_retire=on_retire,
+            wake_missing=wake_missing,
+        )
+        registry.wake(first.session_id)
+        await retired.wait()
+        registry.wake(first.session_id)
+        await reactivated.wait()
+        registry.wake(second.session_id)
+        await asyncio.sleep(0)
+
+        assert registry.get(first.session_id) is second
+        await registry.shutdown()
+
+    asyncio.run(scenario())

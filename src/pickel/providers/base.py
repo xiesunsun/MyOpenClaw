@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -39,3 +40,15 @@ class Provider(ABC):
     async def count_context_tokens(self, context: ModelContext) -> int | None:
         """统计上下文 token；不是生成调用，不创建 ModelCall。"""
         return None
+
+    async def close(self) -> None:
+        """关闭 Provider 持有的 HTTP client；重复调用由 client 保证幂等。"""
+        client = getattr(self, "client", None)
+        if client is None:
+            return
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result

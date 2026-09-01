@@ -10,6 +10,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from pickel.artifacts.artifact_service import ArtifactService
 from pickel.context.model_context import ModelContext, ToolDefinition
 from pickel.conversations.agent_message import (
     AgentMessage,
@@ -20,12 +21,16 @@ from pickel.conversations.agent_message import (
     UserMessage,
 )
 from pickel.conversations.content_blocks import (
+    ArtifactBlock,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     thaw_json,
 )
 from pickel.providers.base import Provider
+from pickel.providers.prepared import PreparedModelCall
+from pickel.providers.response_json import provider_response_json
+from pickel.providers.stream import StreamCompleted
 from pickel.shared.model_config import ModelConfig
 
 
@@ -41,6 +46,7 @@ class GeminiProvider(Provider):
         temperature: float | None = None,
         max_output_tokens: int = 65536,
         provider_options: dict[str, Any] | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -48,10 +54,16 @@ class GeminiProvider(Provider):
         self.temperature = 1.0 if temperature is None else temperature
         self.max_output_tokens = max_output_tokens
         self.provider_options = provider_options or {}
+        self.artifact_service = artifact_service
         self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     @classmethod
-    def from_config(cls, config: ModelConfig) -> "GeminiProvider":
+    def from_config(
+        cls,
+        config: ModelConfig,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> "GeminiProvider":
         return cls(
             model=config.model,
             api_key=config.api_key,
@@ -59,6 +71,35 @@ class GeminiProvider(Provider):
             temperature=config.temperature,
             max_output_tokens=config.max_output_tokens,
             provider_options=dict(config.provider_options),
+            artifact_service=artifact_service,
+        )
+
+    def prepare(self, context: ModelContext) -> PreparedModelCall:
+        """把唯一 ModelContext 冻结为 Gemini generateContent 请求。"""
+        request = self._build_generate_request(context)
+        return PreparedModelCall(
+            provider="google/gemini",
+            api_kind="gemini-generate-content",
+            endpoint="generateContent",
+            requested_model=self.model,
+            body={
+                "model": request["model"],
+                "contents": self._dump_models(request["contents"]),
+                "config": self._dump_model(request["config"]),
+            },
+        )
+
+    async def stream_prepared(self, prepared: PreparedModelCall) -> Any:
+        """通过统一 PreparedModelCall 管道发送非流式 Gemini wire 请求。"""
+        if prepared.api_kind != "gemini-generate-content":
+            raise ValueError("PreparedModelCall 不是 Gemini generateContent 请求")
+        request = thaw_json(prepared.body)
+        if not isinstance(request, dict):
+            raise ValueError("Gemini PreparedModelCall body 必须是 JSON object")
+        response = await self.client.aio.models.generate_content(**request)
+        yield StreamCompleted(
+            message=self._response_to_assistant_message(response),
+            provider_response=provider_response_json(response),
         )
 
     async def generate(self, context: ModelContext) -> AssistantMessage:
@@ -96,7 +137,9 @@ class GeminiProvider(Provider):
         """构造 generate_content 使用的唯一请求参数。"""
         return {
             "model": self.model,
-            "contents": self._build_contents(context.messages),
+            "contents": self._build_contents(
+                context.messages, artifact_service=self.artifact_service
+            ),
             "config": self._build_generate_config(context),
         }
 
@@ -130,7 +173,9 @@ class GeminiProvider(Provider):
         generate_content_request = payload["generateContentRequest"]
 
         generate_content_request["contents"] = self._dump_models(
-            self._count_tokens_contents(context.messages)
+            self._count_tokens_contents(
+                context.messages, artifact_service=self.artifact_service
+            )
         )
 
         system_text = context.system.as_text()
@@ -176,7 +221,11 @@ class GeminiProvider(Provider):
         return [cls._dump_model(model) for model in models]
 
     @staticmethod
-    def _build_contents(messages: list[AgentMessage]) -> list[types.Content]:
+    def _build_contents(
+        messages: list[AgentMessage],
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> list[types.Content]:
         """AgentMessage → Gemini Content 列表。
 
         Assistant 含 tool_call 后，连续 ToolResult 合成一条 user function_response。
@@ -186,11 +235,12 @@ class GeminiProvider(Provider):
         while index < len(messages):
             message = messages[index]
             if isinstance(message, UserMessage):
-                text = GeminiProvider._text_from_blocks(message.content)
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[types.Part.from_text(text=text)],
+                        parts=GeminiProvider._message_parts(
+                            message.content, artifact_service=artifact_service
+                        ),
                     )
                 )
                 index += 1
@@ -207,15 +257,9 @@ class GeminiProvider(Provider):
                 ):
                     tool_msg = messages[index]
                     assert isinstance(tool_msg, ToolResultMessage)
-                    response_parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                id=tool_msg.tool_call_id,
-                                name=tool_msg.tool_name,
-                                response=GeminiProvider._function_response_payload(
-                                    tool_msg
-                                ),
-                            )
+                    response_parts.extend(
+                        GeminiProvider._tool_result_parts(
+                            tool_msg, artifact_service=artifact_service
                         )
                     )
                     index += 1
@@ -227,17 +271,9 @@ class GeminiProvider(Provider):
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[
-                            types.Part(
-                                function_response=types.FunctionResponse(
-                                    id=message.tool_call_id,
-                                    name=message.tool_name,
-                                    response=GeminiProvider._function_response_payload(
-                                        message
-                                    ),
-                                )
-                            )
-                        ],
+                        parts=GeminiProvider._tool_result_parts(
+                            message, artifact_service=artifact_service
+                        ),
                     )
                 )
                 index += 1
@@ -250,8 +286,10 @@ class GeminiProvider(Provider):
     def _count_tokens_contents(
         cls,
         messages: list[AgentMessage],
+        *,
+        artifact_service: ArtifactService | None = None,
     ) -> list[types.Content]:
-        contents = cls._build_contents(messages)
+        contents = cls._build_contents(messages, artifact_service=artifact_service)
         if contents:
             return contents
         # Gemini countTokens 需要 contents 字段
@@ -299,6 +337,65 @@ class GeminiProvider(Provider):
             if isinstance(block, TextBlock) and block.text
         ]
         return "\n".join(parts)
+
+    @staticmethod
+    def _message_parts(
+        blocks: list[Any],
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> list[types.Part]:
+        parts: list[types.Part] = []
+        for block in blocks:
+            if isinstance(block, TextBlock):
+                parts.append(types.Part.from_text(text=block.text))
+            elif isinstance(block, ArtifactBlock):
+                parts.append(
+                    GeminiProvider._artifact_part(
+                        block, artifact_service=artifact_service
+                    )
+                )
+        return parts or [types.Part.from_text(text="")]
+
+    @staticmethod
+    def _tool_result_parts(
+        message: ToolResultMessage,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> list[types.Part]:
+        parts = [
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id=message.tool_call_id,
+                    name=message.tool_name,
+                    response=GeminiProvider._function_response_payload(message),
+                )
+            )
+        ]
+        for block in message.content:
+            if isinstance(block, ArtifactBlock):
+                parts.append(
+                    GeminiProvider._artifact_part(
+                        block, artifact_service=artifact_service
+                    )
+                )
+        return parts
+
+    @staticmethod
+    def _artifact_part(
+        block: ArtifactBlock,
+        *,
+        artifact_service: ArtifactService | None = None,
+    ) -> types.Part:
+        reference = block.artifact
+        if artifact_service is None:
+            raise ValueError("Gemini ArtifactBlock 需要 ArtifactService")
+        if not reference.media_type.startswith("image/"):
+            label = block.alt_text or reference.display_name or reference.artifact_id
+            return types.Part.from_text(text=f"[不支持的 Artifact: {label}]")
+        return types.Part.from_bytes(
+            data=artifact_service.load_artifact_bytes(reference),
+            mime_type=reference.media_type,
+        )
 
     @staticmethod
     def _function_response_payload(message: ToolResultMessage) -> dict[str, Any]:

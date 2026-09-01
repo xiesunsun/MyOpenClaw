@@ -68,14 +68,28 @@ class WorkerCallSender:
             raise WorkerCallSendError("worker 模型调用需要配置 worker model")
         attempt = 1
         while True:
-            prepared_call = self._model_calls.prepare_session_call(
-                session_id=session_id,
-                context=context,
-                mapper=worker_provider,
-                request_attempt=attempt,
-                model_role="worker",
-                purpose=purpose,
+            prepare_async = getattr(
+                self._model_calls, "prepare_session_call_async", None
             )
+            if prepare_async is not None:
+                prepared_call = await prepare_async(
+                    session_id=session_id,
+                    context=context,
+                    mapper=worker_provider,
+                    request_attempt=attempt,
+                    model_role="worker",
+                    purpose=purpose,
+                )
+            else:
+                prepared_call = await asyncio.to_thread(
+                    self._model_calls.prepare_session_call,
+                    session_id=session_id,
+                    context=context,
+                    mapper=worker_provider,
+                    request_attempt=attempt,
+                    model_role="worker",
+                    purpose=purpose,
+                )
             effects = RuntimeEffects(
                 provider=worker_provider,
                 provider_name=prepared_call.prepared.provider,
@@ -90,11 +104,22 @@ class WorkerCallSender:
                 )
             except ModelCallSendFailure as exc:
                 error = classify_provider_error(exc.cause)
-                failed_call = self._model_calls.record_send_failure(
-                    exc.call,
-                    exc.cause,
-                    first_chunk_at=exc.first_chunk_at,
+                record_failure_async = getattr(
+                    self._model_calls, "record_send_failure_async", None
                 )
+                if record_failure_async is not None:
+                    failed_call = await record_failure_async(
+                        exc.call,
+                        exc.cause,
+                        first_chunk_at=exc.first_chunk_at,
+                    )
+                else:
+                    failed_call = await asyncio.to_thread(
+                        self._model_calls.record_send_failure,
+                        exc.call,
+                        exc.cause,
+                        first_chunk_at=exc.first_chunk_at,
+                    )
                 if not runtime_policy.should_retry_worker_request(
                     retryable=error.retryable,
                     first_chunk_received=exc.first_chunk_at is not None,
@@ -109,8 +134,18 @@ class WorkerCallSender:
                     / 1000
                 )
                 continue
-            self._model_calls.complete_session_response(
-                call=prepared_call.model_call,
-                response=response,
+            complete_async = getattr(
+                self._model_calls, "complete_session_response_async", None
             )
+            if complete_async is not None:
+                await complete_async(
+                    call=prepared_call.model_call,
+                    response=response,
+                )
+            else:
+                await asyncio.to_thread(
+                    self._model_calls.complete_session_response,
+                    call=prepared_call.model_call,
+                    response=response,
+                )
             return response.assistant_message
